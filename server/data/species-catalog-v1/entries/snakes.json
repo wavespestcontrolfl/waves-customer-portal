@@ -1,0 +1,1236 @@
+[
+  {
+    "slug": "southern-black-racer",
+    "kind": "organism",
+    "common_name": "Southern Black Racer",
+    "aka": [
+      "Black Snake"
+    ],
+    "aliases": [
+      "southern black racer",
+      "black racer",
+      "black snake",
+      "coluber constrictor"
+    ],
+    "scientific_name": "Coluber constrictor priapus",
+    "rank": "subspecies",
+    "group": "snakes",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Adults are uniformly satiny black on top with a white or light gray chin and belly",
+      "Juveniles are gray with dark blotches down the back, not solid black yet",
+      "Moves in fast, jerky bursts and often lifts its head up off the ground to look around",
+      "Active by day, often seen crossing patios, driveways and gardens in full sun"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-cottonmouth",
+        "difference": "Racer is slim with a narrow head and moves fast in the open; cottonmouth is thick-bodied with a blocky head, stays near water, and may gape its white mouth",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "dusky-pygmy-rattlesnake",
+        "difference": "Juvenile racers are gray-blotched, round-pupiled and darken to solid black with age; pygmy rattlesnake keeps rounded spots for life and has a tiny tail rattle.",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "lanai-patio",
+      "garage-storage"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It bites hard and thrashes if grabbed, but it isn't venomous; easiest to just leave it be and let it move along.",
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "One of the most common snakes seen in Florida yards, and a genuine ally that eats rodents, insects and other pests. It's harmless to people unless picked up, so the best move with a black racer is usually just to let it pass through.",
+      "fact": "It sometimes vibrates its tail against dry leaves, which can briefly sound like a rattlesnake even though it has no rattle at all."
+    },
+    "tech_notes": "Confirm slim build and narrow head vs. cottonmouth's thick body/blocky head before reassuring; no removal typically needed for a harmless sighting.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Coluber_constrictor"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "e66b1a33dc57b95f31695b2e618b369e041da2db711b3e4ea110844afd45d4ab"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "eastern-rat-snake",
+    "kind": "organism",
+    "common_name": "Eastern Rat Snake (yellow rat snake)",
+    "aka": [
+      "Yellow Rat Snake"
+    ],
+    "aliases": [
+      "eastern rat snake",
+      "yellow rat snake",
+      "pantherophis alleghaniensis"
+    ],
+    "scientific_name": "Pantherophis alleghaniensis",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Adults in Florida are typically bright yellow to olive with four dark stripes running the length of the body",
+      "Slightly flattened, loaf-shaped body when viewed head-on, with faintly ridged scales",
+      "Excellent climber, often found high in trees, barns, or attics hunting birds, eggs and rodents",
+      "Vibrates its tail and may strike if cornered, but has no venom"
+    ],
+    "look_alikes": [
+      {
+        "slug": "corn-snake",
+        "difference": "Rat snake is yellow to olive with four long stripes; corn snake is orange to tan with large reddish-brown blotches outlined in black",
+        "next_photo": "From a safe distance, photograph the whole body checking for long stripes versus large outlined blotches.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "attic-walls",
+      "trees-shrubs",
+      "garage-storage"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It may strike or musk if cornered, but it isn't venomous and is a real ally against rats and mice.",
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A skilled climber that helps keep rodent and bird-egg-raiding populations in check. A yard sighting is nothing to worry about; one that has settled into an attic can be relocated by a wildlife professional if it's unwanted there.",
+      "fact": "It's one of Florida's best natural rat controls, since it can follow rodents into spaces most other predators can't reach, including attics and wall voids."
+    },
+    "tech_notes": "Confirm yellow color with four stripes and keeled scales; distinguish from corn snake by pattern. Offer wildlife referral only if it has taken up residence somewhere unwanted (e.g., attic).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Pantherophis_alleghaniensis",
+      "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/eastern-ratsnake/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Color-form claim confirmed directly: the Florida Museum of Natural History (University of Florida) species-ID page states adults in the Florida peninsula \"can be yellow, orange, tan, or gray with four dark longitudinal stripes\" and lists 'Yellow Ratsnake' and 'Everglades Ratsnake' among the accepted common names, matching this entry's traits/aka. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "1a4d5242bd23f6568a8ac7a8c7aa311f27cb78ae67de479a08a051f785a315c9"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "corn-snake",
+    "kind": "organism",
+    "common_name": "Corn Snake",
+    "aka": [],
+    "aliases": [
+      "corn snake",
+      "red rat snake",
+      "pantherophis guttatus"
+    ],
+    "scientific_name": "Pantherophis guttatus",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender body with large, reddish-brown blotches outlined in black on an orange to tan background",
+      "Black-and-white checkerboard pattern on the belly, like rows of corn kernels",
+      "Round pupils and a narrow head, with no heat-sensing pits near the nostrils",
+      "Found in palmetto flatwoods, brush piles, garages and under debris"
+    ],
+    "look_alikes": [
+      {
+        "slug": "eastern-rat-snake",
+        "difference": "Corn snake is orange to tan with large outlined blotches; rat snake is yellow to olive with four long stripes",
+        "next_photo": "From a safe distance, photograph the whole body checking for large outlined blotches versus long stripes.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "dusky-pygmy-rattlesnake",
+        "difference": "Corn snake has large reddish-brown blotches outlined in black and no rattle; pygmy rattlesnake has rounded gray spots and a tiny tail rattle.",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "garage-storage",
+      "attic-walls"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It may strike if startled, but it has no venom; peninsular Florida has no copperheads, the venomous snake people sometimes confuse it with.",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A docile snake, not venomous and not considered dangerous, that's often mistaken for something dangerous purely because of its bright color. It can bite if handled, but there's nothing to treat here; it's genuinely helpful to have around as a rodent-hunter.",
+      "fact": "Its checkerboard belly pattern is where the name comes from, since early observers thought it resembled rows of colorful corn kernels."
+    },
+    "tech_notes": "No treatment indicated; reassure it is not venomous and note peninsular Florida has no copperheads.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Corn_snake"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "afe6c09018535ee5883baf038041f67b42abfb868944fa55e85cc63b4ef8b568"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "ring-necked-snake",
+    "kind": "organism",
+    "common_name": "Ring-necked Snake",
+    "aka": [],
+    "aliases": [
+      "ring-necked snake",
+      "ring neck snake",
+      "diadophis punctatus"
+    ],
+    "scientific_name": "Diadophis punctatus",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (10 to 15 inches), slim and smooth, dark gray to black on top with a distinct yellow-orange ring around the neck",
+      "Belly is bright yellow-orange with small black crescent-shaped spots",
+      "Extremely secretive; usually found hiding under logs, bark, leaf litter or stones, not out in the open",
+      "Curls its tail into a tight coil and flashes its bright belly instead of biting when threatened"
+    ],
+    "look_alikes": [
+      {
+        "slug": "brahminy-blind-snake",
+        "difference": "Ring-necked snake has a neck ring and orange-yellow belly; blind snake is uniform dark gray/purple with no ring, like a shiny earthworm",
+        "next_photo": "From a safe distance, zoom in on the neck (is there a ring?) and belly color versus a uniform worm-like body.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It can bite if handled, though it rarely does and it isn't dangerous; it usually just flashes its bright belly and musks instead.",
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tiny, not-dangerous snake that spends almost all its time hidden under logs, bark or leaf litter. Finding one while moving yard debris is nothing to worry about; it poses no real risk to people or pets.",
+      "fact": "Instead of biting when threatened, it usually flips over and flashes its bright orange-red belly, a bluff meant to startle predators."
+    },
+    "tech_notes": "Not dangerous, but per BRIEF Revision 3 rule 5, bites is true as a capability flag since it can bite if handled, even though it strongly prefers to bluff/musk instead. Safe to relocate by hand if found somewhere inconvenient.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Ring-necked_snake"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (rule 5: capability, not danger) since it can bite if handled, even though it strongly prefers to flip and flash its belly instead; risk changed from low to defensive to match, consistent with other harmless-but-technically-can-bite snakes in this file. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c4d5ffefb04b2e698abed02bdecf0959b062fdb68aa7f964106ca6d0eb3a5ff2"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "brahminy-blind-snake",
+    "kind": "organism",
+    "common_name": "Brahminy Blind Snake",
+    "aka": [
+      "Flowerpot Snake"
+    ],
+    "aliases": [
+      "brahminy blind snake",
+      "flowerpot snake",
+      "flower pot snake",
+      "indotyphlops braminus"
+    ],
+    "scientific_name": "Indotyphlops braminus",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny (2 to 4 inches, rarely to 6), thin, uniformly dark gray to purplish-brown with glossy, smooth skin",
+      "Eyes are just two tiny dark dots under the skin, essentially non-functional for real vision",
+      "Blunt, rounded head and tail that look almost identical at a glance, unlike a true snake's more obviously distinct head",
+      "Found in potted plants, mulch and loose soil, moving like a fast, shiny earthworm"
+    ],
+    "look_alikes": [
+      {
+        "slug": "earthworm",
+        "difference": "Blind snake has smooth, glossy skin and flicks a tiny forked tongue from its head; earthworm has ring-like segments and no head or tongue",
+        "next_photo": "A close-up along the body checking for segment rings versus smooth glossy skin, and whether either end flicks a tongue",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden",
+      "lanai-patio",
+      "garage-storage"
+    ],
+    "looks": [
+      "snake",
+      "snail-slug-worm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Despite the word 'snake' in its name, this is a tiny, blind, harmless burrower that feeds on ant and termite eggs and larvae underground. Finding one in a potted plant or mulch bed is nothing to worry about, not a snake problem.",
+      "fact": "It arrived in Florida and much of the world by hitchhiking in the soil of potted plants, which is how it earned the nickname 'flowerpot snake.'"
+    },
+    "tech_notes": "No treatment or removal needed; a nonnative but harmless species. Confirm smooth glossy skin and non-functional eye dots to distinguish from an earthworm if a customer is unsure.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Indotyphlops_braminus"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 41: role changed from beneficial to harmless_visitor and verdict from ally to harmless. This is a nonnative, parthenogenetic species; 'genuinely good news'/'genuinely beneficial' framing overstated it as an ecological ally rather than simply a harmless nonnative burrower. Also reconciled traits[2] with the earthworm look-alike difference, which had implied contradictory things about whether it has a distinct head.",
+      "approval_hash": "20cfd9bf15f7d814642988751be5aaa09e4b904ef21298f62e230b4b3e7b0298"
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "southern-water-snake",
+    "kind": "organism",
+    "common_name": "Southern Water Snake",
+    "aka": [
+      "Banded Water Snake"
+    ],
+    "aliases": [
+      "southern water snake",
+      "banded water snake",
+      "nerodia fasciata"
+    ],
+    "scientific_name": "Nerodia fasciata",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Heavy-bodied, gray, greenish-gray, or brown with dark crossbands, though some individuals look almost patternless and dark",
+      "Flat-topped head about the same width as the neck, with a dark stripe from the eye to the jaw",
+      "Found basking on logs or swimming in ponds, ditches and canals, active day and night",
+      "Dives underwater and swims away when startled, rather than standing its ground",
+      "Round pupils and eyes visible from directly above, unlike a cottonmouth's hidden eyes and vertical pupil"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-cottonmouth",
+        "difference": "Cottonmouth has a vertical pupil, hidden eyes from above and a facial pit; water snake has round, visible eyes. Head shape alone is not reliable.",
+        "next_photo": "From a safe distance (never approach): zoom on the eye area. If pupil/eye can't be seen clearly, treat it as a cottonmouth and keep away.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "pool-water"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It bites hard and smells bad if grabbed, but is not venomous. Easy to confuse with a cottonmouth — when in doubt, treat any water snake as a cottonmouth and keep your distance.",
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Florida's most common water snake, often mistaken for a cottonmouth. Not venomous and not medically dangerous, but head shape alone doesn't reliably separate the two (both flatten the head defensively) — keep back from any snake at the water's edge and treat it as a cottonmouth until confirmed otherwise.",
+      "fact": "When threatened, it can flatten its whole body to look bigger and more intimidating, a bluff rather than a real escalation."
+    },
+    "tech_notes": "UF/IFAS UW229: water snakes are often mistaken for cottonmouths and bite readily if handled; leave all water snakes alone rather than trying to sort them by head shape, which both species can flatten/widen defensively. FWC-documented reliable cues: round, visible-from-above pupil and no facial pit (cottonmouth has a vertical pupil, hidden eyes from above, and a facial pit) — but confirm from a safe distance only, and treat an uncertain sighting as a cottonmouth.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Nerodia_fasciata",
+      "https://ask.ifas.ufl.edu/publication/UW229",
+      "https://myfwc.com/wildlifehabitats/profiles/reptiles/snakes/cottonmouth/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 18: head shape alone is not a reliable cottonmouth tell (water snakes flatten/widen the head defensively) — UF/IFAS UW229 confirms harmless water snakes are often mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually. Added FWC-confirmed pupil/facial-pit/eye-visibility cues (myfwc.com cottonmouth profile, loaded this session) as the more reliable tell, but look_alikes.photo_can_confirm set to false since getting a safe, clear photo of pupil/eye detail on a snake at the water's edge isn't realistic for a homeowner; the copy tells them to treat an uncertain sighting as a cottonmouth rather than try to confirm from a distance photo. Returned to draft after removing the generic 'water snake' alias, which cannot identify this one species; owner re-approval is required. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "4548a842311f64fe06239d7f5391d84c8ebf9be1f6b59e1c3800eb7ce4d2ec56"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "scarlet-kingsnake",
+    "kind": "organism",
+    "common_name": "Scarlet Kingsnake",
+    "aka": [],
+    "aliases": [
+      "scarlet kingsnake",
+      "scarlet king snake",
+      "lampropeltis elapsoides"
+    ],
+    "scientific_name": "Lampropeltis elapsoides",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender, brightly banded in red, black and yellow rings, with red bands bordered by black, never touching yellow",
+      "Red, pointed snout, unlike the blunt black snout of the venomous coral snake it mimics",
+      "Small (usually 16 to 20 inches), smooth and shiny-looking",
+      "Secretive; usually found under logs, bark or leaf litter rather than out in the open"
+    ],
+    "look_alikes": [
+      {
+        "slug": "eastern-coral-snake",
+        "difference": "Kingsnake has a red, pointed snout and red bands bordered by black, never yellow; coral snake has a blunt black snout and red bands touching yellow bands",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Harmless, but it closely copies the venomous coral snake and band colors are easy to misjudge. Treat any red, yellow and black banded snake as venomous and keep your distance.",
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless snake that copies the coral snake's warning colors for its own protection, without any of the venom. There's nothing to treat here, just a photo worth taking a close look at before assuming the worst.",
+      "fact": "Its color mimicry is so effective that even some predators that would normally eat a snake avoid it out of caution."
+    },
+    "tech_notes": "Confirm a red, pointed snout and red-touches-black band order (never yellow) before reassuring; when unsure from a photo, treat it as the venomous coral snake until confirmed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Lampropeltis_elapsoides",
+      "https://ask.ifas.ufl.edu/publication/UW229",
+      "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/scarlet-kingsnake/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Corrected a dangerous band-pattern inversion: an earlier draft had this kingsnake's red bands touching yellow and the coral snake's touching black, backwards from UF/IFAS EDIS UW229 (\"in the two non-venomous species, the red bands touch only black bands, but in coral snakes the red bands only touch yellow bands\"; coral snake has a blunt black snout followed by yellow, this kingsnake has a pointed red snout). Traits, look_alikes, safety_line and tech_notes now correctly say red touches black here, red touches yellow on the coral snake. Range 'occasional' confirmed directly: the Florida Museum of Natural History Snake ID guide states scarlet kingsnakes \"can be locally abundant\" but \"are not commonly seen due to their secretive nature,\" matching a statewide-common-but-rarely-encountered profile rather than a species you'd expect to spot often; no SWFL-county-specific sighting count exists, but this settles the qualitative claim. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c9cfebf6a5ca8a2cd439c78afc7122ca56f392ff9570163c6ebd0edde3939826"
+    },
+    "role": "wildlife",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "eastern-diamondback-rattlesnake",
+    "kind": "organism",
+    "common_name": "Eastern Diamondback Rattlesnake",
+    "aka": [],
+    "aliases": [
+      "eastern diamondback rattlesnake",
+      "diamondback rattlesnake",
+      "diamondback",
+      "crotalus adamanteus"
+    ],
+    "scientific_name": "Crotalus adamanteus",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": "venomous-snakes",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "The largest venomous snake in North America, often 4 to 6 feet or more, heavy-bodied",
+      "Bold, dark diamond-shaped blotches outlined in cream or yellowish scales down the back",
+      "Broad, triangular head clearly wider than the neck, with a rattle at the tip of the tail",
+      "May coil and rattle loudly as a warning, but can stay silent or move away; silence doesn't rule it out"
+    ],
+    "look_alikes": [
+      {
+        "slug": "dusky-pygmy-rattlesnake",
+        "difference": "Diamondback is much larger (4+ feet) with bold diamonds and a loud rattle; pygmy rattlesnake is under 2 feet with round spots and a barely audible rattle",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "This is a large, venomous snake; keep well back, keep kids and pets away, and get medical help right away if anyone is bitten.",
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Venomous Snake Removal",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Florida's largest venomous snake, usually found in dry, open habitat like scrub and pine flatwoods rather than manicured yards, but it does turn up on undeveloped lots and edges of neighborhoods. Keep well back and let a wildlife professional handle it.",
+      "fact": "Its population has declined sharply from historic numbers, which is part of why conservation groups now encourage leaving one alone and calling for removal rather than killing it on sight."
+    },
+    "tech_notes": "Confirm large size and bold diamond pattern; note declining regional population when discussing removal vs. relocation preferences with the customer. Not currently state- or federally-listed, though its federal ESA petition remains open/pending (see sources).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Eastern_diamondback_rattlesnake",
+      "https://www.law.cornell.edu/regulations/florida/Fla-Admin-Code-Ann-R-68A-27-003",
+      "https://www.federalregister.gov/documents/2025/10/31/2025-19732/endangered-and-threatened-wildlife-and-plants-review-of-species-that-are-candidates-for-listing-as"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Range set to 'occasional' given documented steep population decline (source cites ~3% of historical numbers) and its preference for scrub/flatwoods over developed yards. Protected-status confirmed this session with two live, current, authoritative sources: (1) Florida Administrative Code 68A-27.003, the state's current Endangered and Threatened Species List (effective 2026), does not include Crotalus adamanteus among its listed reptiles — confirming no state threatened/endangered designation. (2) The Federal Register's Oct 31, 2025 FWS candidate-species notice (2025-19732) lists 'Eastern diamondback rattlesnake' with pending action '12-month finding' — i.e. its 2012 ESA petition is still open/under review with no final listing decision as of this notice, so it is not currently federally listed either. safety.protected: false is correct; tech_notes updated to reflect the confirmed (not just assumed) status. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "44a2ead97e4224f31cf2fbb5519f2cbcf6ca32e012b93bf45513c9fa299e617b"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "dusky-pygmy-rattlesnake",
+    "kind": "organism",
+    "common_name": "Dusky Pygmy Rattlesnake",
+    "aka": [
+      "Pygmy Rattlesnake",
+      "Ground Rattler"
+    ],
+    "aliases": [
+      "dusky pygmy rattlesnake",
+      "pygmy rattlesnake",
+      "ground rattler",
+      "sistrurus miliarius"
+    ],
+    "scientific_name": "Sistrurus miliarius barbouri",
+    "rank": "subspecies",
+    "group": "snakes",
+    "subgroup": "venomous-snakes",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (16 to 24 inches), the smallest rattlesnake species, gray to reddish-gray with rows of dark, rounded spots",
+      "Often has a faint orange-brown stripe running down the center of the back",
+      "Tail ends in a tiny rattle that buzzes so quietly it's often heard only from a few feet away",
+      "Found in leaf litter, pine flatwoods, or near ponds and canals, easy to overlook because of its small size"
+    ],
+    "look_alikes": [
+      {
+        "slug": "corn-snake",
+        "difference": "Pygmy rattlesnake has a tiny tail rattle and rounded gray spots; corn snake has no rattle and large reddish-brown blotches outlined in black",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "eastern-diamondback-rattlesnake",
+        "difference": "Pygmy rattlesnake is under 2 feet with round spots and a barely audible rattle; diamondback is much larger with bold diamonds and a loud rattle",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "southern-black-racer",
+        "difference": "Pygmy rattlesnake keeps rounded spots, a vertical pupil and tiny tail rattle for life; young racers are gray-blotched and darken to solid black.",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "This is a venomous snake; even though it's small, keep your distance, keep kids and pets away, and get medical help right away if anyone is bitten.",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Venomous Snake Removal",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Its small size and quiet rattle make this one of the venomous snakes most likely to go unnoticed in a Florida yard until someone is close by. Any small spotted snake in mulch or leaf litter is worth a cautious look before assuming it's harmless.",
+      "fact": "Its rattle is so small that it's sometimes called a 'ground rattler' because the buzzing sound barely carries beyond a few feet."
+    },
+    "tech_notes": "Small size and quiet rattle make this species easy to misidentify as harmless; confirm rounded spots and rattle segment before ruling out. Common in yard/garden edges statewide.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Sistrurus_miliarius"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "8ef7dddd2b7edff25fa22a00f939a79f1627882a2cd510c36c3115e18eccfc13"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "florida-cottonmouth",
+    "kind": "organism",
+    "common_name": "Florida Cottonmouth",
+    "aka": [
+      "Water Moccasin"
+    ],
+    "aliases": [
+      "florida cottonmouth",
+      "water moccasin",
+      "cottonmouth",
+      "agkistrodon conanti"
+    ],
+    "scientific_name": "Agkistrodon conanti",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": "venomous-snakes",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Heavy-bodied, olive-brown to black with 10 to 17 dark crossbands, often looking almost solid black with age",
+      "Blocky head clearly wider than the neck, with dark vertical stripes at the tip of the snout and a dark cheek stripe",
+      "May gape to show a pale white mouth when threatened, but not every one does; a closed mouth doesn't rule it out",
+      "Found at the water's edge, on logs, or in shallow water in ponds, ditches, canals and wetlands",
+      "Vertical, cat-like pupils and eyes hidden from above by a heavy brow ridge; a deep pit between eye and nostril"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southern-water-snake",
+        "difference": "Water snake has round, visible eyes; cottonmouth has a vertical pupil, hidden eyes from above and a facial pit. Head shape alone is not reliable.",
+        "next_photo": "From a safe distance (never approach): zoom on the eye area. If pupil/eye can't be seen clearly, treat it as a cottonmouth and keep away.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "pool-water"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "This is a venomous snake; keep your distance, keep kids and pets away, and get medical help right away if anyone is bitten.",
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Venomous Snake Removal",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A venomous snake commonly found around Florida ponds, ditches and canals, and one of the species most often confused with the harmless water snake. Keep well back and let a wildlife professional confirm and handle it rather than approaching or trying to move it yourself.",
+      "fact": "Its name comes from the pale, cotton-white color inside its mouth, which it shows off as a warning before it ever considers biting."
+    },
+    "tech_notes": "Head width/shape vs. Nerodia is not a reliable field tell (both species flatten/widen the head defensively per UF/IFAS UW229); confirm instead with a vertical pupil, hidden eyes from directly above, and a facial pit (FWC), or a collected/photographed close-up if safe. Treat any uncertain water-edge snake report near people/pets as this species until ruled out.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Agkistrodon_conanti",
+      "https://ask.ifas.ufl.edu/publication/UW229",
+      "https://myfwc.com/wildlifehabitats/profiles/reptiles/snakes/cottonmouth/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 18: removed head-shape-alone as the confirming tell (UF/IFAS UW229 notes water snakes are commonly mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually, since both flatten/widen the head defensively). Added FWC-confirmed cues (myfwc.com cottonmouth profile, loaded this session): vertical pupil, eyes hidden from directly above by the brow ridge, and a facial pit that water snakes lack. look_alikes.photo_can_confirm set to false since a homeowner cannot safely get close enough for a clear pupil/facial-pit photo; next_photo instead tells them to keep distance and treat an uncertain sighting as this species. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "53a5a9467400c6f51d929abc8f20adbb455d82d1eeb534124b4e27515bef4f51"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "eastern-coral-snake",
+    "kind": "organism",
+    "common_name": "Eastern Coral Snake",
+    "aka": [],
+    "aliases": [
+      "eastern coral snake",
+      "coral snake",
+      "micrurus fulvius"
+    ],
+    "scientific_name": "Micrurus fulvius",
+    "rank": "species",
+    "group": "snakes",
+    "subgroup": "venomous-snakes",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender snake with wide red and black rings separated by narrow yellow rings, red always touching yellow",
+      "Black snout from the tip to just behind the eyes, unlike the red snout of its harmless mimic",
+      "Usually under 30 inches, smooth and glossy, with a rounded head not much wider than the neck",
+      "Secretive and slow-moving; often found in leaf litter or mulch, especially after heavy rain"
+    ],
+    "look_alikes": [
+      {
+        "slug": "scarlet-kingsnake",
+        "difference": "Coral snake has a blunt black snout and red bands touching yellow bands; scarlet kingsnake has a pointed red snout and red bands bordered by black, never yellow",
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "snake"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "This is a venomous snake with a strong nerve toxin; keep your distance, keep kids and pets away, and get medical help right away if anyone is bitten, even if it seems minor at first.",
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Venomous Snake Removal",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A secretive venomous snake best identified by its black snout and the classic 'red touches yellow' band pattern. It's rarely aggressive and mostly stays hidden, but any suspected sighting is worth keeping distance from and having a professional confirm.",
+      "fact": "The old rhyme 'red touches yellow, kill a fellow' describes Florida coral snakes, but band colors are easy to misjudge in a photo or at a glance. Never use it to decide a snake is safe; keep your distance."
+    },
+    "tech_notes": "Confirm black snout and red-touches-yellow band order; bites are rare but medically significant, so err toward treating an uncertain report as this species until ruled out.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Eastern_coral_snake",
+      "https://ask.ifas.ufl.edu/publication/UW229",
+      "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/harlequin-coralsnake/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Corrected an inverted look_alikes.difference that contradicted this entry's own traits/fact: it had said this coral snake's red touches black and the scarlet kingsnake's red touches yellow, backwards. Confirmed against UF/IFAS EDIS UW229: coral snake has a blunt black snout with red bands touching yellow; the kingsnake has a pointed red snout with red bordered by black. Range 'occasional' and the 'rarely aggressive/mostly stays hidden' copy are now confirmed directly by the Florida Museum of Natural History Snake ID guide: \"Harlequin Coralsnakes are extremely secretive and rarely seen\" and \"Bites from this species are extremely rare,\" occurring almost only when the snake is deliberately handled — matching this entry's low encounter/bite framing. No SWFL-county-specific sighting count exists, but the qualitative claim is settled. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "59554b73aeaab6875791aaed292462019c8be4bdfc0db176c5ccc279db1fc997"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": []
+  }
+]

@@ -72,7 +72,77 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // Feeds the deterministic callback_number_needed triage flag
 // (call-triage-flags.js) when no spoken callback number also covers it.
 // Optional/nullable: older payloads still validate.
-const SCHEMA_VERSION = '1.14.0';
+// 1.16.0: additive — scheduling.caller_accepted_slot (boolean|null) and
+// scheduling.moved_appointment_date (date|null), each evidence-pinned. Owner
+// decision 2026-09-27: the extraction judges a reschedule's agreement (the
+// caller accepting the final slot, over the whole call) and names the
+// existing appointment being moved; the reschedule applier only verifies the
+// pinned quotes verbatim and that they name the agreed time
+// (call-reschedule-apply.js). Optional/nullable: older payloads still
+// validate.
+// 1.15.0: additive enum widening — caller.relationship_to_property gains
+// home_buyer (owner ruling 2026-09-26: a buyer under contract ordering their
+// own WDO inspection is authorized like a lender or realtor). Buyers used to
+// land on "other", which also covers strangers, so no rule could single them
+// out. Feeds isAuthorizedWdoArrangerBooking (call-triage-flags.js). Older
+// payloads still validate.
+// 1.17.0: additive — scheduling.agreed_slot_words (object|null: day/hour/
+// period, each verbatim words from the transcript) and
+// scheduling.moved_appointment_words (string|null). Owner decision
+// 2026-09-27: the extraction now records the agreed time and the moved
+// appointment's date as VERBATIM WORDS pinned to the existing
+// confirmed_start_at / moved_appointment_date evidence quotes, so the
+// reschedule applier only checks the quote is real and contains those words
+// instead of parsing speech itself (call-reschedule-agreement.js). Nothing
+// consumes them yet outside that gated consumer. Optional/nullable: older
+// payloads still validate.
+// 1.18.0: additive enum widening — caller.relationship_to_property gains
+// family_member (owner ruling 2026-09-28: a relative of the homeowner or
+// resident — grandchild, child, parent, sibling, in-law — arranging service
+// at THAT relative's home, e.g. "my grandfather's house", is authorized when
+// staff confirmed a time on the call). Live miss (call f5a54dbd, 2026-09-28):
+// the caller booked a paper-wasp knockdown at "my grandfather's house",
+// confirmed Sun Oct 4 11am, and was blocked on caller_not_authorized because "other"
+// covers both family and strangers alike. A spouse/partner still uses
+// spouse_partner, not this value. Feeds isAuthorizedFamilyMemberBooking
+// (call-triage-flags.js). Older payloads still validate.
+// 1.19.0: additive — consent.sms_declined (boolean|null). Codex P1 on
+// #5292: the dry-run removal of the sms_consent_given===false staging check
+// (owner ruling — that field is true only on an explicit yes, so false
+// means "never asked", not "refused", and blocked 151/159 real new-lead
+// calls) also stopped catching an explicit "no" to "may I text you?",
+// which the model recorded the SAME way (sms_consent_given=false).
+// sms_declined is the dedicated field: true ONLY on an explicit decline,
+// judged separately from sms_consent_given. Optional/nullable in BOTH
+// schemas (AGENTS.md: extraction schema changes never add to `required`) —
+// a pre-1.19 row, which never has the field at all, still validates. The
+// booking-link staging check (call-booking-link-text.js) fails CLOSED
+// whenever the field is absent or not a boolean: 'sms_refusal_unrecorded'.
+// 1.20.0: additive — scheduling.definite_commitment,
+// scheduling.relative_date_used and
+// scheduling.moved_appointment_relative_date_used (each boolean|null,
+// optional in both schemas, never `required`). Owner direction 2026-09-30
+// ("best outcome") after word-list review rounds on #5201 did not converge:
+// the extraction judges the LANGUAGE of a reschedule promise — whether the
+// agent definitely committed (not could/might/probably/upon X/once Y/if Z)
+// and whether the agreed or moved day was said relatively (next week, the
+// following Thursday, eight days away) — and resolves relative dates to the
+// absolute date it already writes in confirmed_start_at /
+// moved_appointment_date. call-reschedule-agreement.js only verifies the
+// flags, the quotes and the resolved date's weekday; a missing flag fails
+// closed there.
+// 1.21.0: additive — service_request.price_offered_by_staff,
+// service_request.price_accepted_by_caller, service_request.price_is_final,
+// scheduling.staff_accepted_proposed_slot (booleans) and
+// scheduling.selected_day_words (string), each nullable and optional in both
+// schemas, never `required`. Owner direction 2026-09-30 (codex #5377 r2: hand-
+// written word grammars for "the caller accepted the price", "staff offered
+// it", "staff accepted the caller's proposal" and "the caller selected this
+// day" never converge): the extraction JUDGES that language and pins the
+// quote for each; services/call-commercial-dictated-booking.js only verifies
+// the judgements, that each quote is word for word in a turn of its required
+// speaker, and their order. A missing judgement fails closed there.
+const SCHEMA_VERSION = '1.21.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

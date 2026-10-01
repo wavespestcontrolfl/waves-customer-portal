@@ -31,6 +31,7 @@ const { invoiceAmountDue } = require('../invoice-helpers');
 const { etParts } = require('../../utils/datetime-et');
 const ConsentProvenance = require('./consent-provenance');
 const { anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, dueDayOf } = require('./account-anchor');
+const DunningSpacing = require('./dunning-spacing');
 
 const CHANNELS = new Set(['sms', 'email', 'push', 'voice', 'manual_call']);
 
@@ -134,6 +135,40 @@ function isSupervisedApprover(approvedBy) {
 const RND_STALENESS_DAYS = 90;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// GATE_DUNNING_SPACING_SHADOW, read at call time (strict 'true'), same
+// convention as invoice-followups.js's GATE_DUNNING_LADDER_90 reader. Gate
+// off: dunningSpacingShadowLog is never called — byte-identical to before
+// this lane.
+function dunningSpacingShadowLive() {
+  return process.env.GATE_DUNNING_SPACING_SHADOW === 'true';
+}
+
+// SHADOW ONLY (dunning-unification PR 1, re-sequenced narrow): logs what
+// the seven-day overdue-reminder spacing rule would have held, without
+// changing `result` in any way. Never throws into the caller — a shadow
+// read failing must never turn an allow into policy_evaluation_error.
+async function dunningSpacingShadowLog(customerId, {
+  channel, purpose, now, excludeLedgerIds, database, result, source = null, spacingExcludeKey = null, spacingExcludeEventKey = null,
+}) {
+  if (!dunningSpacingShadowLive() || !DunningSpacing.OVERDUE_PURPOSES.has(purpose)) return;
+  // Observed only for a caller that names one of the designated reminder
+  // rails (Codex #5189 r3/r4): the in-call pay link, the voice dial and
+  // answer checks and the shadow sweep evaluate with an overdue purpose
+  // but are not reminder attempts, and pass no source (or an exempt one).
+  if (!source || !DunningSpacing.OVERDUE_SOURCES.has(source)) return;
+  try {
+    const holding = await DunningSpacing.lastOverdueReminderWithin7d(customerId, {
+      now, excludeLedgerIds, database, excludeIdempotencyKey: spacingExcludeKey, excludeEventKey: spacingExcludeEventKey,
+    });
+    if (!holding) return;
+    const hoursSince = (now.getTime() - new Date(holding.occurred_at).getTime()) / (60 * 60 * 1000);
+    const verdict = result.allowed ? 'allowed' : `denied:${result.denialReasons.join(',')}`;
+    logger.info(`[contact-policy] dunning_within_7d SHADOW would hold customer=${customerId} channel=${channel} purpose=${purpose} prevSource=${holding.source} hoursSince=${hoursSince.toFixed(1)} verdict=${verdict}`);
+  } catch (err) {
+    logger.warn(`[contact-policy] dunning_within_7d SHADOW check failed for customer ${customerId}: ${err.message}`);
+  }
+}
 
 function isVoiceLike(channel) {
   return channel === 'voice' || channel === 'manual_call';
@@ -241,13 +276,14 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null, database 
   return eligible;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db, source = null, spacingExcludeKey = null, spacingExcludeEventKey = null, ignoreDisputeHold = false } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
     eligibleInvoiceIds: [],
     eligibleBalanceCents: 0,
     eligibleInvoiceCents: {}, // per-invoice remainder, keyed by id
+    balanceIncomplete: null,
     eligibleAccountTier: null, // dunning tier of the OLDEST-due eligible invoice (the register)
     eligibleAnchorDueDate: null, // its ET due day
     nextEligibleAt: null,
@@ -257,6 +293,9 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
   };
   const deny = (reason) => {
     if (!result.denialReasons.includes(reason)) result.denialReasons.push(reason);
+  };
+  const markBalanceIncomplete = (reason) => {
+    if (!result.balanceIncomplete) result.balanceIncomplete = reason;
   };
   const proposeNextEligible = (at) => {
     if (!at) return;
@@ -301,10 +340,9 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // 'processing', which the loader above already excludes (it admits only
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
-    let balanceIncomplete = null;
     const eligible = await loadEligibleInvoices(customerId, {
       database,
-      onIncomplete: (reason) => { balanceIncomplete = reason; },
+      onIncomplete: markBalanceIncomplete,
     });
     // (loader: open-balance + legacy 'unpaid' + stopped-sequence filter —
     // extracted so dial-time disclosure shares the SAME authority, codex
@@ -345,6 +383,15 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       .select('*');
     result.activeHolds = flags;
     for (const row of flags) {
+      // A trusted hold exemption (rail-guard holdExempt 'customer' / 'operator': a link the
+      // customer asked for, the office "send now") sets ignoreDisputeHold: ONLY an active DISPUTE
+      // collection_hold row is skipped. A dispute row that still carries an embedded fallback
+      // hold (wrong-number / wrong-party, the "[earlier hold: ...]" trailer) keeps blocking, as do
+      // every other flag and every fallback hold.
+      if (ignoreDisputeHold && row.flag === 'collection_hold') {
+        const collectionHold = require('./collection-hold');
+        if (collectionHold.isDisputeHoldReason(row.reason) && !collectionHold.priorHoldReasonOf(row.reason)) continue;
+      }
       const blocked = FLAG_BLOCKED_CHANNELS[row.flag];
       // Unknown flag string = fail closed on every channel.
       if (!blocked || blocked.includes(channel)) {
@@ -512,7 +559,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
         // An account read that dropped an unprovable row or hit the bound is
         // not "the total" — the call would disclose a partial balance as the
         // whole. Fail closed (gh r1).
-        if (balanceIncomplete) deny('balance_read_incomplete');
+        if (result.balanceIncomplete) deny('balance_read_incomplete');
         // ACCOUNT-LEVEL (owner ruling 2026-08-28): every open self-pay invoice
         // is collected as ONE balance; the clock is the OLDEST unpaid
         // invoice's due date. (The single-invoice pilot rule is gone.)
@@ -590,10 +637,19 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     }
 
     result.allowed = result.denialReasons.length === 0;
+
+    // SHADOW ONLY: observes what the seven-day overdue-reminder spacing
+    // rule would have held, logs it, and returns `result` UNCHANGED — see
+    // dunning-spacing.js's module header.
+    await dunningSpacingShadowLog(customerId, {
+      channel, purpose, now, excludeLedgerIds, database, result, source, spacingExcludeKey, spacingExcludeEventKey,
+    });
+
     return result;
   } catch (err) {
     logger.error(`[contact-policy] evaluation failed for customer ${customerId}: ${err.message}`);
     // FAIL CLOSED — an error is never "allowed".
+    markBalanceIncomplete('policy evaluation failed');
     result.allowed = false;
     deny('policy_evaluation_error');
     return result;

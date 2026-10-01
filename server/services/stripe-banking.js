@@ -934,6 +934,163 @@ async function createStandardPayout(amountDollars, opts = {}) {
 
 
 // ═══════════════════════════════════════════════════════════════
+// LIST PENDING PAYOUTS / CANCEL A PENDING PAYOUT
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * List payouts still `pending` in Stripe — read live, not from the local
+ * `stripe_payouts` sync table, because only a payout Stripe still considers
+ * pending AT CANCEL TIME can be cancelled and the local row can lag.
+ *
+ * Instant payouts are left out: `cancelPayout` refuses them unconditionally
+ * (they settle within minutes), so listing one here would advertise a
+ * candidate the companion action can never act on (Codex r1 P2 on #5184).
+ */
+async function listPendingPayouts(limit = 20) {
+  const stripe = getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+
+  try {
+    const capped = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+    const result = await stripe.payouts.list({ status: 'pending', limit: capped });
+    // Automatic payouts (Stripe's own schedule) cannot be cancelled either —
+    // Stripe refuses them — so they are not candidates (Codex r2 P2).
+    const payouts = (result.data || []).filter((p) => p.method !== 'instant' && p.automatic !== true).map((p) => ({
+      id: p.id,
+      amount: p.amount / 100,
+      currency: p.currency,
+      arrival_date: p.arrival_date ? new Date(p.arrival_date * 1000).toISOString() : null,
+      method: p.method,
+      status: p.status,
+    }));
+    return {
+      payouts,
+      total: payouts.length,
+      has_more: !!result.has_more,
+    };
+  } catch (err) {
+    logger.error('[stripe-banking] listPendingPayouts failed:', err.message);
+    throw err;
+  }
+}
+
+function payoutCancelError(message, status = 409) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+// Best-effort local mirror of a payout's Stripe status — never blocks or
+// fails the caller; the periodic sync repairs anything this misses.
+async function mirrorPayoutStatus(stripePayoutId, status) {
+  try {
+    await db('stripe_payouts').where('stripe_payout_id', stripePayoutId).update({
+      status,
+      synced_at: new Date().toISOString(),
+    });
+  } catch (dbErr) {
+    logger.warn(`[stripe-banking] Local status update after cancel failed for ${stripePayoutId}:`, dbErr.message);
+  }
+}
+
+/**
+ * Cancel a Stripe payout — allowed only while Stripe still reports it
+ * `pending`. `in_transit` / `paid` / `failed` / `canceled` payouts, and
+ * every INSTANT payout (settles in minutes; Stripe never leaves it
+ * cancellable long enough to act on), are refused with a clear reason
+ * instead of ever reaching `stripe.payouts.cancel`.
+ *
+ * Idempotent on retry: the live status is read fresh on every call, so a
+ * retry that lands after this same cancel already succeeded finds the
+ * payout already `canceled` and returns it as an already-completed success
+ * (`already_canceled: true`) — never a second call to Stripe, and never a
+ * failure reported for a state that was reached (Codex r1 P2 on #5184).
+ * The other terminal statuses (`in_transit`, `paid`, `failed`) are refused.
+ * A genuinely NEW cancel of a genuinely pending payout is the only path
+ * that reaches Stripe.
+ * @param {string} payoutId — Stripe payout ID (po_xxx)
+ * @param {object} opts
+ * @param {string} [opts.idempotencyKey] — forwarded to Stripe's cancel call
+ * @param {string} [opts.requestedBy] — actor id for the log line only
+ */
+async function cancelPayout(payoutId, opts = {}) {
+  const stripe = getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+
+  const id = String(payoutId || '').trim();
+  if (!id) throw payoutCancelError('A Stripe payout id is required.', 400);
+
+  let payout;
+  try {
+    payout = await stripe.payouts.retrieve(id);
+  } catch (err) {
+    logger.error(`[stripe-banking] cancelPayout retrieve failed for ${id}:`, err.message);
+    if (err && err.status == null && Number.isFinite(err.statusCode)) err.status = err.statusCode;
+    throw err;
+  }
+
+  if (payout.method === 'instant') {
+    throw payoutCancelError('Instant payouts settle within minutes and cannot be cancelled.');
+  }
+  if (payout.automatic === true) {
+    throw payoutCancelError('This is an automatic payout on Stripe\'s own schedule; Stripe does not allow cancelling automatic payouts.');
+  }
+  if (payout.status === 'canceled') {
+    // The requested state is already reached (a retry after a lost response,
+    // or a cancel from another surface). Report success without a second
+    // Stripe call rather than a failure the operator would act on. Mirror
+    // the status locally the same best-effort way the live cancel does, so
+    // banking history does not stay `pending` when the first response was
+    // lost before the local update ran (Codex r2 P2).
+    await mirrorPayoutStatus(id, payout.status);
+    return {
+      payout_id: payout.id,
+      status: payout.status,
+      amount: payout.amount / 100,
+      currency: payout.currency,
+      arrival_date: payout.arrival_date ? new Date(payout.arrival_date * 1000).toISOString() : null,
+      method: payout.method,
+      already_canceled: true,
+    };
+  }
+  if (payout.status !== 'pending') {
+    throw payoutCancelError(
+      `This payout is already ${String(payout.status).replace(/_/g, ' ')} and can no longer be cancelled — only a payout still pending can be cancelled.`,
+    );
+  }
+
+  const providedIdempotencyKey = opts.idempotencyKey && /^[a-zA-Z0-9._:-]{8,120}$/.test(String(opts.idempotencyKey))
+    ? String(opts.idempotencyKey)
+    : null;
+
+  try {
+    const canceled = providedIdempotencyKey
+      ? await stripe.payouts.cancel(id, {}, { idempotencyKey: providedIdempotencyKey })
+      : await stripe.payouts.cancel(id);
+
+    // Best-effort local mirror — never block the caller's result on it.
+    await mirrorPayoutStatus(id, canceled.status);
+
+    const actorId = nonPiiActorId(opts.requestedBy);
+    logger.info(`[stripe-banking] Payout ${id} cancelled, requestedBy=${actorId || 'unknown'}`);
+
+    return {
+      payout_id: canceled.id,
+      status: canceled.status,
+      amount: canceled.amount / 100,
+      currency: canceled.currency,
+      arrival_date: canceled.arrival_date ? new Date(canceled.arrival_date * 1000).toISOString() : null,
+      method: canceled.method,
+    };
+  } catch (err) {
+    logger.error(`[stripe-banking] cancelPayout failed for ${id}:`, err.message);
+    if (err && err.status == null && Number.isFinite(err.statusCode)) err.status = err.statusCode;
+    throw err;
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
 // GET CASH FLOW
 // ═══════════════════════════════════════════════════════════════
 
@@ -1325,6 +1482,8 @@ module.exports = {
   createPayout,
   createInstantPayout,
   createStandardPayout,
+  listPendingPayouts,
+  cancelPayout,
   getCashFlow,
   reconcilePayout,
   generateExport,

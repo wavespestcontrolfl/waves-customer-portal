@@ -16,9 +16,12 @@
  *   send side (this module), in order:
  *   1. GATE_DROPPED_CALL_SMS — customer-facing auto-send, fails CLOSED in
  *      every environment until the owner enables it.
- *   2. Quiet hours — sends only 8am–8pm ET; outside the window the one-shot
- *      is NOT consumed (the triage card still tells the office to call
- *      back).
+ *   2. Quiet hours — INBOUND drops text at any hour (owner ruling
+ *      2026-09-30: a reply to the customer's own contact is never held to
+ *      8 AM; the send carries customerInitiated). OUTBOUND return /
+ *      auto-bridge legs are our contact and keep the 8am–8pm fence; outside
+ *      the window the one-shot is NOT consumed (the triage card still tells
+ *      the office to call back).
  *   3. One text per phone number EVER — DB-atomic claim on
  *      dropped_call_sms_claims (phone PRIMARY KEY, INSERT ... ON CONFLICT
  *      DO NOTHING), belt-and-suspenders sms_log history check, plus an
@@ -30,20 +33,24 @@
  *      closed, audit log.
  *   6. Template kill switch — dropped_call_address_request is admin-editable
  *      and is_active-toggleable like every automated template.
+ *   7. Never to a number whose caller said no to texts on any call (owner
+ *      2026-09-30 — the same "no texts" the booking-link text and the
+ *      missed-call / voicemail texts honour). A call-back is still fine.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isWithinSendWindowET } = require('./messaging/send-window');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
-const { isWithinSendWindowET } = require('./messaging/send-window');
 // sent:true is necessary but not sufficient — upstream suppressions (gate
 // off, template disabled, owner kill switch) report sent:true with a
 // sentinel providerMessageId and no SMS leaves the system.
 const { isRealProviderSend } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { saidNoTextsOnAnyCall } = require('./messaging/auto-text-holds');
 
 const MESSAGE_TYPE = 'dropped_call_address_request';
 const MIN_CALL_SECONDS = 120;
@@ -112,12 +119,17 @@ function detectDroppedMidIntake({ durationSeconds, transcription, extracted = {}
  * Whether the caller is a prospect the automatic text may go to. A customer
  * record CREATED FROM THIS CALL is still a new prospect (Step 3 mints one
  * for any named live caller, address or not) — only a PRE-EXISTING linked
- * customer is excluded. Inbound only: the transactional consent basis is
- * "they called us", and on outbound legs to_phone is the prospect's own
- * number. call_nature must be POSITIVELY 'new_lead' (fail closed).
+ * customer is excluded. Inbound only by default: the transactional consent
+ * basis is "they called us", and on outbound legs to_phone is the
+ * prospect's own number. `outboundEligible` (owner ruling 2026-09-26,
+ * GATE_CALL_OUTBOUND_RETURN_MESSAGES) lets an OUTBOUND return call through
+ * on the SAME terms once the processor has confirmed prior contact — the
+ * caller passes it as false whenever the gate is off, so this stays exactly
+ * `isOutbound !== true` off-gate. call_nature must be POSITIVELY 'new_lead'
+ * (fail closed).
  */
-function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, v2Status, callNature, doNotContactRequested } = {}) {
-  return isOutbound !== true
+function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, outboundEligible = false, v2Status, callNature, doNotContactRequested } = {}) {
+  return (isOutbound !== true || outboundEligible === true)
     && (!customerId || createdCustomerFromCall === true)
     && v2Status === 'valid'
     && callNature === 'new_lead'
@@ -190,13 +202,40 @@ function callbackClause(dialedLine) {
   return ` at (${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
 }
 
-// Boundary source is the shared customer-SMS window module — this fence
-// predates GATE_SMS_SEND_WINDOW and stays live regardless of the gate (the
-// gate check lives in the canonical-path validator, not in the bounds), but
-// the 8/20 ET hours themselves must have exactly one owner so a future
-// hours change can't update one fence and leave the other stale.
-function withinSendWindowET(now = new Date()) {
-  return isWithinSendWindowET(now);
+// The Waves-managed line the customer actually SAW ring on an OUTBOUND call
+// (codex pre-push r1 P1 on PR #5012): call.to_phone on an outbound call is
+// the customer's OWN number (never the number to tell them to call back on),
+// and on a lead-webhook-auto-bridge call it's the STAFF cell the bridge
+// dialed first — never a number to expose to the customer either. The
+// caller ID the customer saw is call.from_phone on an ordinary outbound
+// call (the line WE dialed from), or the bridge's own recorded
+// `metadata.bridgeCallerId` (server/routes/lead-webhook.js — the SAME main
+// line the customer-facing lead leg actually dials) for the bridge source.
+// Validated against the number registry — a real managed line, never a
+// tech line, a staff-forward cell, or the AI-assistant toll-free line
+// (findByNumber reports it as a location, the SAME exclusion the fromNumber
+// selection below already applies — codex pre-push r2 P1: this predicate
+// had omitted it, so callback_clause could still point the customer at the
+// AI line even though fromNumber would have refused it) — so a
+// malformed/unregistered/toll-free candidate (or an inbound call, where
+// this is never called) returns null: the caller then omits the clause /
+// skips the fromNumber override rather than expose or invent a number.
+function isOutboundLeg(call = {}) {
+  return String(call?.direction || '').toLowerCase().startsWith('outbound');
+}
+
+function outboundWavesCallerId(call = {}) {
+  let metadata = call?.metadata;
+  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
+  const candidate = call?.source === 'lead-webhook-auto-bridge'
+    ? (metadata && typeof metadata === 'object' ? metadata.bridgeCallerId : null)
+    : (call?.from_phone || null);
+  return (candidate
+    && candidate !== TWILIO_NUMBERS.tollFree?.number
+    && !!TWILIO_NUMBERS.findByNumber(candidate)
+    && !TWILIO_NUMBERS.isTechLine(candidate)
+    && !TWILIO_NUMBERS.isStaffForwardNumber(candidate))
+    ? candidate : null;
 }
 
 async function stampStatus(leadId, status) {
@@ -299,12 +338,28 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
     return { sent: false, skipped: 'call_too_old' };
   }
 
-  // Quiet hours BEFORE any claim: an evening drop still gets its triage card
-  // ("call them back"); the one-shot stays available in case a later
-  // scheduler rail wants to pick it up.
-  if (!withinSendWindowET()) {
-    logger.info(`[dropped-call-sms] Outside 8am-8pm ET window — text skipped for lead ${leadId}`);
+  // Quiet hours for OUTBOUND legs only, BEFORE any claim: an evening
+  // outbound drop still gets its triage card ("call them back") and the
+  // one-shot stays available. Inbound drops are the caller reaching us
+  // (owner ruling 2026-09-30) and go straight through — sendClaimed marks
+  // them customerInitiated so the shared validator lets them out at night.
+  if (isOutboundLeg(call) && !isWithinSendWindowET()) {
+    logger.info(`[dropped-call-sms] Outbound-leg drop outside 8am-8pm ET window — text skipped for lead ${leadId}`);
     return { sent: false, skipped: 'quiet_hours' };
+  }
+
+  // "No texts" said on an earlier call with this number (or on this one,
+  // once saved — the processor checks this call's own extraction before it
+  // gets here). BEFORE any claim: the one-shot is not consumed, the card
+  // still opens and reads "call them back". Fail closed on a read error.
+  try {
+    if (await saidNoTextsOnAnyCall(phone, { originCallId: call.id || null })) {
+      logger.info(`[dropped-call-sms] Caller said no to texts — text skipped for lead ${leadId}`);
+      return { sent: false, skipped: 'said_no_texts' };
+    }
+  } catch (e) {
+    logger.warn(`[dropped-call-sms] no-texts read failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
+    return { sent: false, skipped: 'said_no_texts_read_failed' };
   }
 
   // Belt-and-suspenders history check; the ATOMIC gate is the claim insert.
@@ -429,9 +484,18 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     logger.warn(`[dropped-call-sms] line-type pre-check failed (continuing): ${e.code || e.name || 'lookup_error'}`);
   }
 
+  // The Waves-managed line the CUSTOMER saw ring (codex pre-push r1 P1 on
+  // PR #5012): on an outbound return call, call.to_phone is the customer's
+  // OWN number (or, on a lead-webhook-auto-bridge call, the staff cell the
+  // bridge dialed first) — outboundWavesCallerId resolves the real managed
+  // line instead. Inbound is unaffected (call.to_phone is the dialed office
+  // line, exactly as before).
+  const isOutbound = isOutboundLeg(call);
+  const wavesCallerId = isOutbound ? outboundWavesCallerId(call) : call.to_phone;
+
   const body = await renderSmsTemplate(MESSAGE_TYPE, {
     first_name: capitalizeName(extracted.first_name) || 'there',
-    callback_clause: callbackClause(call.to_phone),
+    callback_clause: callbackClause(wavesCallerId),
   }, {
     workflow: MESSAGE_TYPE,
     entity_type: 'lead',
@@ -471,20 +535,25 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     identityTrustLevel: 'phone_provided_unverified',
     consentBasis: { status: 'transactional_allowed', source: 'dropped_call_text_back' },
     entryPoint: 'dropped_call_sms',
+    // Inbound only (owner ruling 2026-09-30): the caller just dialed us, so
+    // the reply is theirs to receive at any hour. Outbound legs never carry
+    // it — the pre-claim fence above already held them at night.
+    ...(isOutbound ? {} : { customerInitiated: true }),
     metadata: {
       original_message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,
-      // Reply from the line the prospect just dialed (matches the
-      // {callback_clause} in the body); only when it's one of OUR managed
+      // Reply from the SAME line the prospect saw ring (matches the
+      // {callback_clause} in the body — wavesCallerId above, never
+      // call.to_phone on outbound); only when it's one of OUR managed
       // numbers AND not the AI-assistant toll-free line — a reply to that
       // line enters the AI chat flow instead of the human comms inbox
       // (codex P1), and never a per-tech line — automated texts stay on the
       // location lines (#4053). Otherwise the location-aware default applies.
-      ...(call.to_phone
-        && call.to_phone !== TWILIO_NUMBERS.tollFree?.number
-        && !TWILIO_NUMBERS.isTechLine(call.to_phone)
-        && TWILIO_NUMBERS.findByNumber(call.to_phone)
-        ? { fromNumber: call.to_phone } : {}),
+      ...(wavesCallerId
+        && wavesCallerId !== TWILIO_NUMBERS.tollFree?.number
+        && !TWILIO_NUMBERS.isTechLine(wavesCallerId)
+        && TWILIO_NUMBERS.findByNumber(wavesCallerId)
+        ? { fromNumber: wavesCallerId } : {}),
     },
   });
 
@@ -812,5 +881,5 @@ module.exports = {
   detectDroppedMidIntake,
   eligibleNewProspect,
   MIN_CALL_SECONDS,
-  _private: { callbackClause, withinSendWindowET, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
+  _private: { callbackClause, outboundWavesCallerId, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
 };

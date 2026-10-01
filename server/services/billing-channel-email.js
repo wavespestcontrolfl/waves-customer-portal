@@ -6,7 +6,10 @@ const {
   billingEmailTemplateKey,
   blocked,
 } = require('./billing-channel-email-authority');
-const { buildBillingReplayContext } = require('./billing-email-replay-context');
+const { buildBillingReplayContext, isBillingReplaySource } = require('./billing-email-replay-context');
+const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
+const BillingEmailDetails = require('./billing-email-details');
+const logger = require('./logger');
 
 function clean(value) {
   return String(value || '').trim();
@@ -16,14 +19,44 @@ function emailNotificationBody(value) {
   return clean(value).replace(/\s*Reply STOP to opt out\.?\s*$/i, '').trim();
 }
 
+// GATE_BILLING_EMAIL_DETAILS (dark): the routed billing.notice / billing.receipt_notice
+// emails only ever carried the SMS body. When the notice is about ONE invoice
+// the template's detail rows can now name the property, the service, the
+// service date and (receipts only) the tender behind the payment. Every value
+// is '' when the data does not exist, which the renderer drops; with the gate
+// off nothing is added.
+async function invoiceDetailPayload(context) {
+  if (!BillingEmailDetails.billingEmailDetailsLive() || !context.invoice) return {};
+  const { invoice, customer } = context;
+  const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
+  const payload = {
+    service_label: service.label,
+    service_date: service.date,
+    property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
+  };
+  if (context.category === 'payment_receipt') {
+    payload.payment_method = BillingEmailDetails.receiptTenderLabel({
+      payment: await BillingEmailDetails.paidPaymentForInvoice(invoice),
+      invoice,
+    });
+  }
+  return payload;
+}
+
 function acceptedResult(result) {
+  const storedTime = storedEmailAcceptedAt(result.message);
   return {
     sent: true,
     provider: 'email',
     providerMessageId: result.message?.provider_message_id || null,
     deliveryOutcome: 'accepted',
     blocked: false,
-    ...(result.deduped ? { deduped: true } : {}),
+    ...(result.deduped ? {
+      deduped: true,
+      // The invoice finalizer may be repairing a lost acknowledgement. Keep
+      // its stamp tied to the stored Email, never to this retry's clock.
+      sentAt: storedTime,
+    } : {}),
   };
 }
 
@@ -112,6 +145,10 @@ function providerFailure(err, handoffStarted) {
     code: err.code || 'EMAIL_PROVIDER_ERROR',
     reason: EmailTemplateLibrary.redactEmailAddresses(err.message),
     retryable: definitelyNotSent || err.retryable === true,
+    // Marks the synchronous rejection for the preparation hold below: only a
+    // SendGrid webhook schedules the provider retry rail, and none follows a
+    // request SendGrid refused outright.
+    ...(definitelyNotSent ? { providerRejected: true } : {}),
   };
 }
 
@@ -119,13 +156,22 @@ function providerFailure(err, handoffStarted) {
 // provider attempt for the email retry rail to recover. Producers of one-shot
 // notices persist only schedulable holds, so return it as one: the replay
 // re-fans-out under the same notificationEventKey (Codex pre-push P1 on #4843).
+// A definite SendGrid rejection after the handoff is the same case: nothing
+// was accepted, and the email retry rail never schedules a synchronous
+// rejection, so an Email-only notice would otherwise be lost (#4843 gate
+// checklist). Its email_messages row is settled as a definitely-unsent
+// failure, so the replay's send reclaims that row instead of being held.
 const PREPARATION_RETRY_MS = 5 * 60 * 1000;
 
 function preparationHold(result) {
   // A held outcome belongs to the attempt or retry rail that owns its key.
-  if (!(result.blocked && result.retryable && result.deliveryOutcome === 'not_sent') || result.held) return result;
+  if (result.held || !result.retryable || result.deliveryOutcome !== 'not_sent') return result;
+  if (!result.blocked && result.providerRejected !== true) return result;
+  // Blocked, like every hold: sendCustomerMessage keeps a blocked outcome's
+  // code, but reports any other unsent outcome as PROVIDER_FAILURE, which no
+  // producer replays.
   return {
-    ...result, code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: result.code, deferred: true,
+    ...result, blocked: true, code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: result.code, deferred: true,
     nextAllowedAt: new Date(Date.now() + PREPARATION_RETRY_MS).toISOString(),
   };
 }
@@ -151,6 +197,14 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
   if (context.error) return context.error;
 
   const { recipientEmail } = context;
+  let detailPayload = {};
+  try {
+    detailPayload = await invoiceDetailPayload(context);
+  } catch (err) {
+    // Details are additive: a lookup that fails sends the notice without them.
+    detailPayload = {};
+    logger.warn(`[billing-channel-email] invoice detail lookup failed for invoice ${context.invoice?.id || 'unknown'}: ${err.message}`);
+  }
   const replayContext = buildBillingReplayContext(input, context, notificationEventKey);
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   try {
@@ -162,6 +216,7 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
         category_label: context.categoryLabel,
         notification_body: body,
         billing_url: `${publicPortalUrl()}/?tab=billing`,
+        ...detailPayload,
       },
       recipientType: 'customer',
       recipientId: context.customer.id,
@@ -171,6 +226,7 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
       suppressionGroupKey: 'transactional_required',
       suppressProviderErrorLog: true,
       ...(replayContext ? { billingReplayContext: replayContext } : {}),
+      billingReplayDeclared: Boolean(replayContext) || isBillingReplaySource(input),
       withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
         input, recipientEmail, preSendCheck, dispatch, state,
       }),

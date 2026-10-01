@@ -69,6 +69,16 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx knex migrate:latest --knexfile server/knexfile.js
+      # Right after the migration, on purpose: the reconcile reads the WHOLE
+      # customer/subscriber tables (its counts assume only migration seeds)
+      # and its write-mode cases would import or link any row another suite
+      # left behind, so it cannot join the shared DB-gated step. It leaves the
+      # database exactly as it found it.
+      - name: Newsletter list reconcile transaction tests
+        working-directory: server
+        env:
+          RECONCILE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/newsletter-list-reconcile-postgres.test.js
       - name: Customer 360 SMS read and bell transaction tests
         run: |
           node <<'JS'
@@ -94,7 +104,12 @@ jobs:
                   'tests/customer360-workspace-postgres.test.js', 'tests/admin-billing-recovery-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, C360_TEST_DATABASE_URL: `${base}${name}` } });
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
-                  'tests/customer-geocode-review-postgres.test.js'],
+                  'tests/customer-geocode-review-postgres.test.js',
+                  'tests/customer-geocode-review-visits-postgres.test.js',
+                  'tests/customer-geocode-review-actions-postgres.test.js',
+                  'tests/customer-geocode-review-enrichment-race-postgres.test.js',
+                  'tests/customer-geocode-review-visit-lock-order-postgres.test.js',
+                  'tests/geocoder-service-locations-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, SERVICE_GEOCODE_TEST_DATABASE_URL: `${base}${name}` } });
               } finally { await client.query(`DROP DATABASE "${name}" WITH (FORCE)`); }
             } finally { await client.end(); }
@@ -105,6 +120,21 @@ jobs:
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/estimate-deposit-late-reconciliation.pg.test.js tests/estimate-converter-deposit-lock.pg.test.js tests/invoice-send-open-visit-copy-postgres.test.js
+      - name: Property lookup refresh claim tests
+        working-directory: server
+        env:
+          LOOKUP_REFRESH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/property-lookup-refresh-claim-postgres.test.js
+      - name: Same-stop regroup sweep tests
+        working-directory: server
+        env:
+          REGROUP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/visit-regroup-postgres.test.js
+      - name: Operator receipt claim transaction tests
+        working-directory: server
+        env:
+          RECEIPT_CLAIM_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/receipt-operator-claim-postgres.test.js
       - name: SMS operational transaction tests
         working-directory: server
         env:
@@ -115,6 +145,17 @@ jobs:
         env:
           RESCHEDULE_LINK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/reschedule-link-promises-postgres.test.js
+      - name: Call booking-link text transaction tests
+        working-directory: server
+        env:
+          CALL_BOOKING_LINK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/call-booking-link-text-postgres.test.js
+      - name: First-application sibling-divergence sweep tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          SIBLING_RESPLIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/first-application-sibling-split.postgres.test.js tests/priced-covered-sibling-charge.postgres.test.js tests/billing-recovery-sibling-coverage.postgres.test.js tests/estimate-invoice-mode-accept-stamp.postgres.test.js tests/estimate-accept-new-customer-billing-mode.postgres.test.js
       - name: SMS copy migration transaction tests
         working-directory: server
         env:
@@ -125,6 +166,11 @@ jobs:
         env:
           RECEIPT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/receipt-sms-delivery-postgres.test.js
+      - name: Plaid bank sync transaction tests
+        working-directory: server
+        env:
+          PLAID_SYNC_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/plaid-sync.pg.test.js
       - name: Request App receipt transaction tests
         working-directory: server
         env:
@@ -162,11 +208,31 @@ jobs:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
         run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
-      - name: Billing Email provider connection tests
+      - name: Billing Email provider connection and reminder ledger tests
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/billing-email-provider-connection-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/billing-email-provider-connection-postgres.test.js tests/billing-email-ownership-lock-postgres.test.js tests/billing-reminder-ledger-postgres.test.js
+      - name: Invoice follow-up held-touch retime tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --forceExit tests/invoice-followups-hold-retime-postgres.test.js
+      - name: Customer dunning schedule and reconciliation fence PostgreSQL tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js
+      - name: Booking capacity commit transaction tests
+        working-directory: server
+        env:
+          BOOK_CAPACITY_COMMIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/booking-capacity-commit-db.test.js tests/multi-tech-confirm-db.test.js tests/booking-account-ownership-postgres.test.js
+      - name: Previsit Text provider authority tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/previsit-balance-authority-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
@@ -177,16 +243,26 @@ jobs:
         # above still runs every server test; this step adds the coverage gate.
         working-directory: server
         run: npm run test:customer-coverage
-      - name: Customer App preference and delivery transaction tests
+      - name: Customer App preference, delivery, and billing connection tests
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/customer-app-notifications-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/customer-app-notifications-postgres.test.js tests/billing-app-provider-connection-postgres.test.js
       - name: Billing email replay eligibility query tests
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/billing-email-replay-eligibility-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/billing-email-replay-eligibility-postgres.test.js tests/billing-email-invoice-replay-eligibility-postgres.test.js
+      - name: Billing Text-leg dedupe tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/billing-text-leg-dedupe-postgres.test.js tests/invoice-text-leg-single-handoff-postgres.test.js
+      - name: Queued invoice replay lock tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/invoice-deferred-replay-lock-postgres.test.js
       - name: Transactional email provider send-phase tests
         working-directory: server
         env:
@@ -251,7 +327,7 @@ jobs:
         working-directory: server
         env:
           BLOG_QUEUE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/blog-queue-ownership-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/blog-queue-ownership-postgres.test.js tests/aeo-question-claim-fence-postgres.test.js
       - name: Intelligence Bar operational transaction tests
         working-directory: server
         env:

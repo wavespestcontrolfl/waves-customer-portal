@@ -41,10 +41,26 @@ const PAGE_REDIRECT_TARGET = 'https://www.wavespestcontrol.com/blog/new-slug/';
 const HERO = 'https://www.wavespestcontrol.com/images/blog/lizard-faeces-southwest-florida/hero.webp';
 const MEDIA_IMG = 'https://www.wavespestcontrol.com/images/blog/chinch-bugs/hero.webp';
 const REDIRECTED_HERO = 'https://www.wavespestcontrol.com/images/blog/new-slug/hero.webp';
+const EXPANDED_OG_PAGE = 'https://www.wavespestcontrol.com/blog/post-7/';
+const EXPANDED_OG_HERO = 'https://www.wavespestcontrol.com/images/blog/post-7/og-hero.webp';
+const EXPANDED_FEED_ITEMS = Array.from({ length: 18 }, (_, index) => {
+  const number = index + 7;
+  const feedImage = number === 7
+    ? ''
+    : `<media:content url="https://www.wavespestcontrol.com/images/blog/post-${number}/hero.webp" medium="image" />`;
+  return `
+    <item>
+      <title>Blog Post ${number}</title>
+      <link>https://www.wavespestcontrol.com/blog/post-${number}/</link>
+      <pubDate>Mon, 29 Jun 2026 08:00:00 GMT</pubDate>
+      <description>Expanded Learn article ${number}.</description>
+      ${feedImage}
+    </item>`;
+}).join('');
 
 // Mirrors the Astro hub feed shape: title/link/pubDate/description only —
-// no media:*, no enclosure, no inline <img> — except the last item, which
-// carries media:content to prove feed-native images short-circuit the fetch.
+// no media:*, no enclosure, no inline <img> — except selected items, which
+// carry media:content to prove feed-native images short-circuit the fetch.
 const FEED_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
   <channel>
@@ -86,6 +102,7 @@ const FEED_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <pubDate>Tue, 30 Jun 2026 08:00:00 GMT</pubDate>
       <description>Trusted link that redirects to another trusted page.</description>
     </item>
+    ${EXPANDED_FEED_ITEMS}
   </channel>
 </rss>`;
 
@@ -152,6 +169,7 @@ const EXTERNAL_ROUTES = {
   [PAGE_REDIRECT_EVIL]: { status: 302, location: EVIL_REDIRECT_TARGET },
   [PAGE_REDIRECT_OK]: { status: 301, location: PAGE_REDIRECT_TARGET },
   [PAGE_REDIRECT_TARGET]: { text: `<html><head><meta property="og:image" content="${REDIRECTED_HERO}"></head></html>` },
+  [EXPANDED_OG_PAGE]: { text: `<html><head><meta property="og:image" content="${EXPANDED_OG_HERO}"></head></html>` },
   [IFAS_SARASOTA_FEED]: { text: IFAS_SARASOTA_XML },
   [IFAS_MANATEE_FEED]: { text: IFAS_MANATEE_XML },
   [SUNCOAST_FEED]: { text: SUNCOAST_XML },
@@ -225,6 +243,42 @@ test('blog posts missing feed images get the live page og:image; misses and untr
     source: 'blog',
     sourceName: 'Waves Blog',
   });
+});
+
+test('blog defaults to six and limit=24 stays independent on a warmed feed cache', async () => {
+  // The default request in the preceding blog contract test must not hydrate
+  // an expanded-only article page just because the cached RSS contains it.
+  expect(externalCalls).not.toContain(EXPANDED_OG_PAGE);
+
+  const expandedRes = await fetch(`${base}/api/feed/blog?limit=24`);
+  expect(expandedRes.status).toBe(200);
+  const expanded = await expandedRes.json();
+  expect(expanded.posts).toHaveLength(24);
+  expect(expanded.posts[6].image).toBe(EXPANDED_OG_HERO);
+  expect(externalCalls).toContain(EXPANDED_OG_PAGE);
+  expect(expanded.posts[23]).toMatchObject({
+    title: 'Blog Post 24',
+    link: 'https://www.wavespestcontrol.com/blog/post-24/',
+    source: 'blog',
+    sourceName: 'Waves Blog',
+  });
+
+  const defaultRes = await fetch(`${base}/api/feed/blog`);
+  expect(defaultRes.status).toBe(200);
+  const compact = await defaultRes.json();
+  expect(compact.posts).toHaveLength(6);
+  expect(compact).toMatchObject({
+    posts: expect.arrayContaining([
+      expect.objectContaining({ title: 'Lizard Faeces in Southwest Florida' }),
+    ]),
+  });
+
+  const unsupportedRes = await fetch(`${base}/api/feed/blog?limit=999`);
+  expect((await unsupportedRes.json()).posts).toHaveLength(6);
+
+  // All response sizes share one cached full feed; request order cannot
+  // truncate the expanded response or make the default response grow.
+  expect(externalCalls.filter((url) => url === FEED_URL)).toHaveLength(1);
 });
 
 test('/experts gets the same og:image fallback; feed-native content:encoded images still win without a page fetch', async () => {

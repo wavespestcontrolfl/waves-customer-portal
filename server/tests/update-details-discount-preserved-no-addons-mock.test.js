@@ -91,9 +91,21 @@ const STORED = {
 const captured = [];
 class Sentinel extends Error {}
 
+// Two shapes share `.raw()`: plain embedded column expressions (synchronous
+// use as a query-builder argument — 'raw' is enough) and the secure-prepay
+// coverage rail's per-customer advisory try-lock
+// (securePendingPrepayCoverageReasons, admin-schedule.js), which is AWAITED
+// and needs the real `{ rows: [{ locked: … }] }` shape advisoryTryLockAcquired
+// reads. None of these tests are about that rail, so it always answers
+// "acquired".
+function rawImpl(sql) {
+  if (/AS locked/.test(String(sql))) return Promise.resolve({ rows: [{ locked: true }] });
+  return 'raw';
+}
+
 function chain(table) {
   const c = {};
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'andWhere', 'orWhere', 'select', 'orderBy', 'limit', 'forUpdate', 'forNoKeyUpdate', 'forShare', 'leftJoin', 'join', 'groupBy', 'distinct', 'clone', 'transacting', 'skipLocked']) {
+  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'andWhere', 'orWhere', 'select', 'orderBy', 'limit', 'forUpdate', 'forNoKeyUpdate', 'forShare', 'leftJoin', 'join', 'groupBy', 'distinct', 'clone', 'transacting', 'skipLocked']) {
     c[m] = jest.fn().mockReturnThis();
   }
   c.first = jest.fn(async () => (table === 'scheduled_services' ? { ...STORED } : null));
@@ -165,8 +177,13 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   captured.length = 0;
   db.mockImplementation((table) => chain(table));
-  db.raw = jest.fn(() => 'raw');
+  db.raw = jest.fn(rawImpl);
   db.fn = { now: jest.fn(() => 'now()') };
+  // The repricing guard's findBillingCoveredVisits (owner ruling
+  // 2026-09-28) probes conn.schema.hasTable for every optional money table
+  // it reads — "present, empty" here so a genuine price-change save in this
+  // suite reaches its normal write instead of throwing on a missing mock.
+  db.schema = { hasTable: jest.fn(async () => true), hasColumn: jest.fn(async () => true) };
   db.transaction = jest.fn(async (fn) => {
     // GitHub Codex round 22 P1 (#4657, :11627): the route's under-lock
     // financial recheck now reads through `trx` for the no-add-on path
@@ -179,8 +196,9 @@ beforeEach(() => {
     // manufacturing a false financial-drift 409 that never reaches the
     // write this suite asserts on.
     const trx = jest.fn((table) => db(table));
-    trx.raw = jest.fn(() => 'raw');
+    trx.raw = jest.fn(rawImpl);
     trx.fn = { now: jest.fn(() => 'now()') };
+    trx.schema = db.schema;
     trx.commit = jest.fn();
     trx.rollback = jest.fn();
     return fn(trx);

@@ -208,6 +208,12 @@ const CLEAN_LLM_JSON = {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_PREVISIT_BRIEF = 'true';
+  // The LLM rewrite is its own dark gate (GATE_PREVISIT_BRIEF_LLM, default
+  // off in prod) — on here so the large existing LLM-path suite below
+  // keeps exercising real dispatch behavior unchanged; the dedicated
+  // 'LLM rewrite dark gate' describe block below sets it explicitly per
+  // test.
+  process.env.GATE_PREVISIT_BRIEF_LLM = 'true';
   process.env.ANTHROPIC_API_KEY = 'test-key';
   global.__dispatch = jest.fn(async () => ({ ok: true, json: { ...CLEAN_LLM_JSON } }));
   // Persistent defaults (never ...Once): generateVisitBrief re-reads the
@@ -230,6 +236,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.GATE_PREVISIT_BRIEF;
+  delete process.env.GATE_PREVISIT_BRIEF_LLM;
   delete process.env.ANTHROPIC_API_KEY;
 });
 
@@ -256,6 +263,186 @@ describe('gate off = bit-for-bit no-op', () => {
     const out = await PrevisitBrief.runSweep();
     expect(out).toEqual({ skipped: true, reason: 'gate_off' });
     expect(Object.keys(state.calls)).toHaveLength(0);
+  });
+});
+
+describe('LLM rewrite dark gate (GATE_PREVISIT_BRIEF_LLM)', () => {
+  test('gate off: template body stored, NO provider call, missKind gate_off', async () => {
+    delete process.env.GATE_PREVISIT_BRIEF_LLM;
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    expect(out.via).toBe('template');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    const { brief } = storedBrief(state);
+    expect(brief.generated_via).toBe('template');
+    expect(brief.llm_miss_kind).toBe('gate_off');
+    expect(brief.llm_attempts).toBe(0);
+  });
+
+  test('gate off + unchanged grounding: the backstop sweep does NOT re-derive or re-write the template (stable, not a miss)', async () => {
+    delete process.env.GATE_PREVISIT_BRIEF_LLM;
+    const state1 = useDb(baseResponses());
+    const first = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(first.generated).toBe(true);
+    const stored = storedBrief(state1).patch;
+
+    const state2 = useDb(baseResponses({
+      scheduled_services: [{
+        ...SVC,
+        pre_service_brief: stored.pre_service_brief,
+        pre_service_brief_type: stored.pre_service_brief_type,
+      }],
+    }));
+    global.__dispatch.mockClear();
+    const second = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(second.skipped).toBe(true);
+    expect(second.reason).toBe('unchanged');
+    // Stable: no write, no provider call — a repeat :19/:49 tick is a
+    // true no-op, not a re-processed miss.
+    expect(state2.updates.scheduled_services).toBeUndefined();
+    expect(global.__dispatch).not.toHaveBeenCalled();
+  });
+
+  test('gate off does not advance the validator-rejection attempt cap', async () => {
+    delete process.env.GATE_PREVISIT_BRIEF_LLM;
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(storedBrief(state).brief.llm_attempts).toBe(0);
+    expect(out.via).toBe('template');
+  });
+
+  // codex #5044 r1 P2-1: a brief already generated via a real LLM pass
+  // (before the gate went dark, or from a prior gate-on window) must NOT
+  // keep serving once GATE_PREVISIT_BRIEF_LLM is off — the owner's
+  // "template for every brief" rule beats the cache.
+  test('gate off REPLACES an already-cached LLM brief with a template on the next regeneration', async () => {
+    const state1 = useDb(baseResponses());
+    const first = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(first.via).toBe('llm');
+    const stored = storedBrief(state1).patch;
+    expect(JSON.parse(stored.pre_service_brief).generated_via).toBe('llm');
+
+    delete process.env.GATE_PREVISIT_BRIEF_LLM;
+    const state2 = useDb(baseResponses({
+      scheduled_services: [{
+        ...SVC,
+        pre_service_brief: stored.pre_service_brief,
+        pre_service_brief_type: stored.pre_service_brief_type,
+      }],
+    }));
+    global.__dispatch.mockClear();
+    const second = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(second.generated).toBe(true);
+    expect(second.via).toBe('template');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    const b2 = storedBrief(state2).brief;
+    expect(b2.generated_via).toBe('template');
+    expect(b2.llm_miss_kind).toBe('gate_off');
+  });
+
+  // codex #5044 r1 P2-2: a template already stuck at the validator
+  // attempt cap must not stay frozen there once the gate is off (no
+  // provider call is made either way) — and, critically, must NOT still
+  // read as 'validator'/capped once the gate is set back to 'true'.
+  test('gate off restamps an already-validator_capped template as gate_off (no dispatch); re-enabling then earns a genuine first attempt', async () => {
+    const badJson = { priorities: ['Treat for zebra mussels'], watch_items: [], mentioned_terms: ['zebra mussel'] };
+    const validatorMiss = async (_policy, _payload, opts) => {
+      const reason = opts.validate({ json: badJson });
+      return {
+        ok: false,
+        reason: 'all_providers_failed',
+        failures: [
+          { provider: 'anthropic', model: 'a', reason },
+          { provider: 'openai', model: 'o', reason },
+        ],
+      };
+    };
+    global.__dispatch = jest.fn(validatorMiss);
+    const state1 = useDb(baseResponses());
+    const first = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(first.via).toBe('template');
+    expect(storedBrief(state1).brief.llm_attempts).toBe(1);
+
+    const rerunWith = (stored) => useDb(baseResponses({
+      scheduled_services: [{
+        ...SVC,
+        pre_service_brief: stored.pre_service_brief,
+        pre_service_brief_type: stored.pre_service_brief_type,
+      }],
+    }));
+
+    const state2 = rerunWith(storedBrief(state1).patch);
+    const second = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(second.generated).toBe(true);
+    expect(storedBrief(state2).brief.llm_attempts).toBe(2);
+
+    const state3 = rerunWith(storedBrief(state2).patch);
+    global.__dispatch.mockClear();
+    const third = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(third.skipped).toBe(true);
+    expect(third.reason).toBe('validator_capped');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    expect(state3.updates.scheduled_services).toBeUndefined();
+    const cappedStored = storedBrief(state2).patch; // the last actually-written brief
+
+    // Now the gate goes dark: the capped template must be restamped
+    // gate_off, with NO provider call (there was none to make anyway).
+    delete process.env.GATE_PREVISIT_BRIEF_LLM;
+    const state4 = rerunWith(cappedStored);
+    global.__dispatch.mockClear();
+    const fourth = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(fourth.generated).toBe(true);
+    expect(fourth.via).toBe('template');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    const b4 = storedBrief(state4).brief;
+    expect(b4.llm_miss_kind).toBe('gate_off');
+    expect(b4.llm_attempts).toBe(0);
+
+    // Rollback: re-enable the gate. The cap must NOT still apply — this
+    // is a genuine first attempt, not an immediate re-cap.
+    global.__dispatch = jest.fn(validatorMiss);
+    process.env.GATE_PREVISIT_BRIEF_LLM = 'true';
+    const state5 = rerunWith(storedBrief(state4).patch);
+    const fifth = await PrevisitBrief.generateVisitBrief('svc-1');
+    // Not validator_capped: a real attempt ran (dispatch called) and
+    // wrote a fresh attempt count of 1 — well under the cap of 2 — rather
+    // than skipping straight to { skipped: true, reason: 'validator_capped' }.
+    expect(fifth.skipped).toBeUndefined();
+    expect(fifth.generated).toBe(true);
+    expect(global.__dispatch).toHaveBeenCalled();
+    expect(storedBrief(state5).brief.llm_attempts).toBe(1);
+  });
+
+  test('flipping the gate back on earns a fresh LLM attempt on the same (unchanged) grounding', async () => {
+    delete process.env.GATE_PREVISIT_BRIEF_LLM;
+    const state1 = useDb(baseResponses());
+    const first = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(first.via).toBe('template');
+    const stored = storedBrief(state1).patch;
+
+    process.env.GATE_PREVISIT_BRIEF_LLM = 'true';
+    const state2 = useDb(baseResponses({
+      scheduled_services: [{
+        ...SVC,
+        pre_service_brief: stored.pre_service_brief,
+        pre_service_brief_type: stored.pre_service_brief_type,
+      }],
+    }));
+    const second = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(second.generated).toBe(true);
+    expect(second.via).toBe('llm');
+    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(storedBrief(state2).brief.generated_via).toBe('llm');
+  });
+
+  test('gate on (default in this suite): existing LLM behavior is unchanged — dispatch is called', async () => {
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    expect(out.via).toBe('llm');
+    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(storedBrief(state).brief.generated_via).toBe('llm');
   });
 });
 

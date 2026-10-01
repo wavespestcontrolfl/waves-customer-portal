@@ -122,6 +122,19 @@ describe('propagateCustomerNameChange', () => {
     expect(JSON.parse(runSync.payload)).toEqual({ first_name: 'Cathy', customer_name: 'Cathy Nunes Furao', service: 'pest' });
   });
 
+  test('caps the synced estimate name by whole code points (an emoji at the 100 boundary stays intact)', async () => {
+    const first = 'A'.repeat(50);
+    const last = `${'B'.repeat(48)}\u{1F600}C`;
+    const conn = makeConn({
+      estimates: { rowsQueue: [[{ id: 'est-1', customer_name: 'Kathy Nunez', estimate_data: {} }], []] },
+    });
+    await propagateCustomerNameChange({ before: NAME_BEFORE, after: { id: 'cust-1', first_name: first, last_name: last } }, conn);
+    const synced = conn.__updates('estimates')[0].arg.customer_name;
+    expect(Array.from(synced)).toHaveLength(100);
+    expect(synced.endsWith('\u{1F600}')).toBe(true);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(synced)).toBe(false);
+  });
+
   test('matches copies by the OLD name only (case-insensitive keys)', async () => {
     const conn = makeConn();
     await propagateCustomerNameChange({ before: NAME_BEFORE, after: NAME_AFTER }, conn);

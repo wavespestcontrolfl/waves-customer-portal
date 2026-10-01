@@ -26,9 +26,10 @@ const mockResolveCommsCustomer = jest.fn();
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
-// The create_appointment billing verdict (ADMIN-BUG-R12): null = the booking
-// bills, so these proposals reach their card; the refusal cases set their own.
-const mockIbBookingBillingRefusalFor = jest.fn(async () => null);
+// The create_appointment price + billing verdict (ADMIN-BUG-R12, owner
+// 2026-09-27): unpriced and billable by default, so these proposals reach
+// their card; the priced and refusal cases set their own.
+const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, serviceId: null, serviceName: null }));
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -63,7 +64,7 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
-  ibBookingBillingRefusalFor: (...args) => mockIbBookingBillingRefusalFor(...args),
+  ibBookingProposal: (...args) => mockIbBookingProposal(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -954,30 +955,30 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
-  test('create_appointment for a customer whose billing needs a visit price: no card, the refusal goes back to the model (ADMIN-BUG-R12)', async () => {
+  test('create_appointment for a customer whose billing needs a visit price: no card, the ask goes back to the model (ADMIN-BUG-R12)', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
-    mockIbBookingBillingRefusalFor.mockResolvedValueOnce('This visit would complete with no invoice: the Intelligence Bar books without a price, and this customer\'s billing needs one on the visit. Book it from the Schedule screen with a visit price. Nothing was booked.');
+    mockIbBookingProposal.mockResolvedValueOnce({ error: 'This visit needs a price: "Termite Liquid Treatment Service" has no catalog price, and nothing in this customer\'s billing would invoice it. Ask the user for the visit price and propose the booking again with price. Nothing was booked.' });
     scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service' } }],
-      [{ type: 'text', text: 'Book it from the Schedule screen.' }],
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Termite Liquid Treatment Service' } }],
+      [{ type: 'text', text: 'What price should I use?' }],
     ]);
 
     await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit', context: 'schedule' });
-      expect(mockIbBookingBillingRefusalFor).toHaveBeenCalledWith('c1', 'One-Time Pest Control Service');
+      const { body } = await postQuery(baseUrl, { prompt: 'book a termite liquid treatment', context: 'schedule' });
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined);
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(body.pendingActions).toEqual([]);
 
       const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
-      expect(toolResult.error).toMatch(/complete with no invoice/);
-      expect(toolResult.error).toMatch(/Schedule screen/);
+      expect(toolResult.error).toMatch(/needs a price/);
+      expect(toolResult.error).not.toMatch(/Schedule screen/);
     });
   });
 
-  test('create_appointment whose billing cannot be read: the proposal fails closed, no card', async () => {
+  test('create_appointment whose price or billing cannot be read: the proposal fails closed, no card', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
-    mockIbBookingBillingRefusalFor.mockRejectedValueOnce(new Error('connection terminated'));
+    mockIbBookingProposal.mockRejectedValueOnce(new Error('connection terminated'));
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service' } }],
       [{ type: 'text', text: 'Could not verify.' }],
@@ -990,7 +991,104 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
       const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
-      expect(toolResult.error).toMatch(/Could not verify how this customer is billed/);
+      expect(toolResult.error).toMatch(/Could not work out this visit's price/);
+    });
+  });
+
+  test('create_appointment with a catalog price: the price and catalog link are pinned server-side and the card shows the price (owner 2026-09-27)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: 250, source: 'catalog', serviceId: 'svc-otp', serviceName: 'One-Time Pest Control Service' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_price).toBe(250);
+      expect(stored.params._booking_service_id).toBe('svc-otp');
+
+      expect(body.pendingActions).toHaveLength(1);
+      expect(body.pendingActions[0].params.price).toBe('$250.00 (catalog price, One-Time Pest Control Service) — invoiced when the visit is completed');
+      // The summary is built from the same curated display params.
+      expect(stored.summary).toContain('$250.00');
+      // The pins are execution guards, never disclosures: the card payload,
+      // the summary and the contract all drop `_`-prefixed keys.
+      expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
+      expect(stored.summary).not.toMatch(/_booking|svc-otp/);
+      expect(JSON.stringify(body.pendingActions[0].contract)).not.toMatch(/_booking|svc-otp/);
+    });
+  });
+
+  test('create_appointment with a stated price: the price reaches the pricing check, shows as stated, and a model-supplied pin never survives', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: 180, source: 'stated', serviceId: null, serviceName: null });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Flea Control Service', price: 180, _booking_price: 1, _booking_service_id: 'svc-forged' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book flea control for $180', context: 'schedule' });
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180);
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_price).toBe(180);
+      expect(stored.params._booking_service_id).toBeNull();
+
+      expect(body.pendingActions).toHaveLength(1);
+      expect(body.pendingActions[0].params.price).toBe('$180.00 (as stated) — invoiced when the visit is completed');
+    });
+  });
+
+  test('create_appointment for a member\'s one-off: the card names the member discount and the list price it came off (owner 2026-09-27)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({
+      price: 212.5, source: 'catalog', serviceId: 'svc-otp', serviceName: 'One-Time Pest Control Service',
+      listPrice: 250, discountName: 'WaveGuard Member Discount', discountPercent: 15,
+      discountId: 'disc-member', discountType: 'percentage', discountAmount: 15,
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service', time_window: '9:00 AM' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit at 9', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_price).toBe(212.5);
+      // The discount's own identity/terms are pinned alongside the net
+      // price (Codex r2 on #5093, P1) — the executor compares these at
+      // commit, refusing on drift the same way it already does for price.
+      expect(stored.params._booking_list_price).toBe(250);
+      expect(stored.params._booking_discount_id).toBe('disc-member');
+      // The discount's NAME rides the pin too (Codex r3 on #5093, P2): id/
+      // type/amount alone miss a preset renamed between this proposal and
+      // the commit — the executor's fingerprint compares the name as well.
+      expect(stored.params._booking_discount_name).toBe('WaveGuard Member Discount');
+      expect(stored.params._booking_discount_type).toBe('percentage');
+      expect(stored.params._booking_discount_amount).toBe(15);
+      expect(body.pendingActions[0].params.price).toBe('$212.50 (catalog price $250.00 less 15% WaveGuard Member Discount) — invoiced when the visit is completed');
+      // The pins are execution guards, never disclosures.
+      expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
+      // A timed booking texts its confirmation — the contract says so.
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both/));
+    });
+  });
+
+  test('create_appointment with no price for a dues-billed member: the card says so', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book their quarterly visit', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_price).toBeNull();
+      expect(body.pendingActions[0].params.price).toMatch(/^none on the visit/);
     });
   });
 

@@ -658,6 +658,19 @@ function ownershipKeysForRow(row = {}) {
 // non-member with recurring rodent still owns rodent service). streetScope
 // behaves exactly as in loadExistingQualifyingServiceKeys.
 async function loadOwnedRecurringServiceKeys(database, customerId, { streetScope = null } = {}) {
+  const joined = await loadLiveRecurringObligationRows(database, customerId);
+  const scoped = await filterRowsToStreet(database, joined, streetScope);
+  const keys = new Set();
+  for (const row of scoped) ownershipKeysForRow(row).forEach((key) => keys.add(key));
+  return [...keys];
+}
+
+// The customer's live recurring obligations: active recurring rows, joined
+// to the catalog, through the ownership lifecycle below. A row counts here
+// even when it maps to no ownership family (palm injection, a termite bond):
+// "does this customer have a live recurring plan?" is this set being
+// non-empty, never the owned-keys set.
+async function loadLiveRecurringObligationRows(database, customerId) {
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   // Same catalog join as the qualifying loader: a generic service_type
   // ("Pest Control") whose catalog identity is rodent must classify as
@@ -683,19 +696,16 @@ async function loadOwnedRecurringServiceKeys(database, customerId, { streetScope
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   const LIVE_IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
   const today = etDateString();
-  joined = joined.filter((r) => (
+  return joined.filter((r) => (
     LIVE_IN_PROGRESS_STATUSES.has(String(r.status || '').toLowerCase())
       ? (!isCallbackRow(r) && !isOneTimeBookingSource(r.source))
       : rowPassesGatedPricingEvidence(r, today)
   ));
-  const scoped = await filterRowsToStreet(database, joined, streetScope);
-  const keys = new Set();
-  for (const row of scoped) ownershipKeysForRow(row).forEach((key) => keys.add(key));
-  return [...keys];
 }
 
 module.exports = {
   TERMINAL_STATUSES,
+  loadLiveRecurringObligationRows,
   toQualifyingKey,
   toQualifyingKeys,
   filterRowsToStreet,

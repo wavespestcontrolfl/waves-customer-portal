@@ -50,7 +50,7 @@ beforeEach(() => {
   api.getServiceStats.mockResolvedValue({});
   api.getBalance.mockResolvedValue({ currentBalance: 0 });
   api.getServices.mockResolvedValue({ services: [] });
-  api.getPendingSatisfaction.mockResolvedValue({ pending: null });
+  api.getGoogleReviewCard.mockResolvedValue({ card: null });
   api.getReferrals.mockResolvedValue({ stats: null });
   api.getBlogPosts.mockResolvedValue({ posts: [] });
   api.getNewsletterPosts.mockResolvedValue({ posts: [] });
@@ -67,7 +67,7 @@ afterEach(() => {
 });
 
 describe('reminder settings rows', () => {
-  it('keeps an accessible switch for every alert after the overflow restructure', async () => {
+  it('keeps accessible switches for legacy appointment alerts after the overflow restructure', async () => {
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
     const switchNames = [
@@ -76,7 +76,6 @@ describe('reminder settings rows', () => {
       'Day-before reminder',
       'On the way',
       'Technician arrival',
-      'Weather & property alerts',
     ];
     for (const name of switchNames) {
       expect(await screen.findByRole('switch', { name })).toBeInTheDocument();
@@ -101,18 +100,18 @@ describe('reminder settings rows', () => {
     for (const name of channelNames) {
       expect(screen.getByRole('combobox', { name: `Delivery method for ${name}` })).toBeInTheDocument();
     }
-    // App-only advisories deliberately never grew a select.
-    expect(screen.queryByRole('combobox', { name: /Weather & property alerts/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Delivery method for Weather & property alerts' })).toBeInTheDocument();
   });
 
-  it('stacks the channel select and switch on a compact phone width', async () => {
+  it('uses a single accessible Service reports select at compact widths', async () => {
     window.innerWidth = 360;
+    api.getNotificationPrefs.mockResolvedValue({ appPreferencesAvailable: true });
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
-    await screen.findByRole('switch', { name: 'Appointment updates' });
-    const row = document.querySelector('[data-reminder-row]');
-    expect(row.lastElementChild.style.flex).toContain('1 0 100%');
-    expect(row.firstElementChild.style.flex).toContain('1 1 160px');
+    const channel = await screen.findByRole('combobox', { name: 'Delivery method for Service reports' });
+    expect(screen.queryByRole('switch', { name: 'Service reports' })).not.toBeInTheDocument();
+    expect(channel.style.fontSize).toBe('16px');
+    expect(channel.style.minHeight).toBe('44px');
   });
 });
 

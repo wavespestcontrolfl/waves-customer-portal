@@ -37,16 +37,17 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const commitments = require('./call-commitments');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf, etParts } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const {
+  STAFF_APPROVED_SMS_TYPES, STAFF_CALL_SOURCES, operatorReply, personCallBack, smsDelivered,
+  operatorSentSql, smsContactSelects, callContactSelects,
+} = require('./staff-contact');
 
 // Same trigger as the overdue watchdog: registered tech-visible, so the
 // bell reaches the staff who work the Owed tab.
 const TRIGGER_KEY = 'call_commitment_overdue';
 const SLA_KINDS = Object.freeze(['callback', 'send_estimate', 'schedule_visit']);
-// Human-authored texts, as the callback proof counts them: typed by staff,
-// or an AI draft staff approved or revised before it went out.
-const HUMAN_TEXT_TYPES = Object.freeze(['manual', 'ai_approved', 'ai_revised']);
 const SLA_MINUTES = 60;
 const DAY_OPEN = '08:00';
 const DAY_CLOSE = '20:00';
@@ -135,9 +136,10 @@ function selectMissed(rows, { now = new Date(), calendar = OPEN_CALENDAR } = {})
 }
 
 // Customer activity after the promise that the fulfillment proof does not
-// model: a visit booked, a call that reached the customer (on any SLA kind,
-// not only callbacks), or a staff-typed text that was sent. Automated
-// texts (reminders, confirmations) never count as a follow-up.
+// model: a visit booked, a person's call that reached the customer (on any
+// SLA kind, not only callbacks), or a person's text that was delivered.
+// Automated calls and texts (collections, reminders, confirmations) never
+// count as a follow-up.
 // The caller's number on the promise's call: the dialed number on an
 // outbound call, the caller ID on an inbound one.
 // The call-commitments digits rule (phoneDigits / phoneWhere), so the pager
@@ -168,15 +170,101 @@ function evidenceFrom(r) {
   return stated && !Number.isNaN(stated.getTime()) && (!at || stated > at) ? stated : at;
 }
 
-async function followedUpIds(conn, rows) {
+// A WAVES promise staff RE-OPENED or edited moves the evidence boundary
+// forward to that renewal (call-commitments' own resolveFulfillment rule):
+// the record that kept the promise before is not proof it was kept again.
+// This pager's own candidates never carry a human_state (isPagerScope
+// excludes them — reviewed work stays with the Owed queue), so this stays
+// a no-op for every row the pager itself passes in regardless of kind; it
+// matters for another caller (the promise-chaser bell) that reuses this
+// evidence check on a promise staff have since touched — including a
+// send_estimate / schedule_visit promise, not only a callback (Codex #5019
+// r12 P1: a lead texted BEFORE a reopen, then calling back AFTER it, was
+// wrongly read as already kept by that stale pre-renewal text, since this
+// function skipped the renewal check entirely for those kinds even though
+// obligationRenewedAt itself already supports them). No kind filter here
+// at all now — obligationRenewedAt is the single source of truth for which
+// kinds/party/human_state combinations it renews, so this never duplicates
+// (or drifts from) that decision.
+// A lookup failure here PROPAGATES rather than reading as "no renewal" —
+// every caller of followedUpIds already wraps it in its own fail-closed
+// .catch (unproven evidence must never count as fulfillment, here specifically:
+// old evidence from BEFORE a reopen must never count as kept AFTER it). Both
+// existing callers already treat a thrown followedUpIds as "unverified, hold
+// for retry" (runFollowUpSlaWatcher's own .catch, promise-chaser-bell's).
+async function renewedFloors(conn, rows) {
+  const floors = new Map();
+  for (const r of rows || []) {
+    const renewed = await commitments.obligationRenewedAt(conn, r);
+    if (renewed) floors.set(String(r.id), renewed);
+  }
+  return floors;
+}
+
+// The stated time of a scheduling promise is usually the appointment itself
+// ("I'll put you on the schedule for around 3"), and its booking always
+// comes before it: a visit booked after the call FOR exactly that slot — the
+// stated ET day, arriving at the stated minute — is the promised appointment
+// and keeps the promise early. Every other early booking waits for the
+// stated time: an unrelated visit ("schedule it after the 2 PM inspection"),
+// or any booking on another kind of promise (booking Thursday's inspection
+// does not send the quote promised after it). A booking linked to the call
+// itself is the fulfillment proof's to close (visit_booked_from_this_call).
+// The stated slot ({ day, minute } in ET), or null when there is none to wait for.
+function appointmentSlot(r) {
+  if (r.kind !== 'schedule_visit') return null;
+  const since = evidenceFrom(r);
+  const at = promisedAt(r);
+  if (!since || !at || since.getTime() <= at.getTime()) return null;
+  const { hour, minute } = etParts(since);
+  return { day: etDateString(since), minute: hour * 60 + minute };
+}
+
+// A TIME column's HH:MM[:SS] as minutes past midnight (NaN when unreadable).
+function minuteOfDay(time) {
+  const [h, m] = String(time).split(':').map(Number);
+  return h * 60 + m;
+}
+
+// `renewed`: a caller that already loaded every row's renewal time (a
+// Map of id -> Date, promise-chaser-bell) passes it to skip a second
+// serial lookup per row.
+async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
+  const renewed = preloaded || await renewedFloors(conn, rows);
   // A caller with no customer record is matched by a USABLE number only —
   // an 'anonymous' or client: caller ID normalizes to nothing and gives the
   // row no contact to match on (never a match between two unusable values).
-  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
-    .filter((x) => x.since && (x.r.customer_id || x.phone));
+  // A renewal floor (below) now applies to every alertable SLA kind, not
+  // only callbacks (Codex #5019 r11/r12 P2/P1) — including schedule_visit,
+  // which also carries its own appointment slot. The two matching paths
+  // (`since`, and the exact-slot booking check below) each carry the
+  // renewal forward in their own terms — `since` directly, `slotFloor`
+  // below — so a schedule_visit reopened after an earlier matching-slot
+  // booking is never read as already kept by that stale booking (Codex
+  // #5019 r13 P1: the exact-slot path used to ignore the renewal floor
+  // entirely, checking only against the ORIGINAL promisedAt).
+  const scoped = (rows || []).map((r) => {
+    const base = evidenceFrom(r);
+    const floor = renewed.get(String(r.id));
+    const since = floor && (!base || floor.getTime() > base.getTime()) ? floor : base;
+    const promised = promisedAt(r);
+    // The exact-slot booking match counts from the call's end — or a
+    // renewal, whichever is LATER — never from evidenceFrom's own
+    // separately-stated floor ("send it after the inspection"): booking
+    // the promised slot IS the fulfillment, regardless of any other
+    // stated floor time, but a booking from before staff reopened the
+    // promise is not fulfillment for the reopened one. appointmentSlot
+    // itself never returns non-null without a valid promisedAt, so
+    // `slot` implies `promised` is set whenever this value is read.
+    const slotFloor = floor && promised && floor.getTime() > promised.getTime() ? floor : promised;
+    return { r, since, slotFloor, slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) };
+  }).filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
   const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
+  // A booking for a scheduling promise's own slot counts from the call's
+  // end, or its renewal (slotFloor, above), whichever is later.
+  const bookedFloor = new Date(Math.min(...scoped.map((x) => (x.slot ? x.slotFloor : x.since).getTime())));
   const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
   // Numbers match however they were written (9415550123, +19415550123,
   // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
@@ -201,14 +289,16 @@ async function followedUpIds(conn, rows) {
   // (the nightly series top-up, a booking's seeded follow-ups) and never one
   // later cancelled (the proof's own rule).
   const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
-    .where('created_at', '>', floor).whereNull('recurring_parent_id').whereNull('parent_service_id')
-    .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at') : [];
-  // A call that reached the customer — the proof's bar for a returned
-  // callback (completed customer leg of 60 s or more, affirmatively not
-  // voicemail), applied to every SLA kind; never a voice-relay sandbox call.
-  const calls = await byContact(conn('call_log'))
+    .where('created_at', '>', bookedFloor).whereNull('recurring_parent_id').whereNull('parent_service_id')
+    .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at', 'scheduled_date', 'window_start') : [];
+  // A call a person placed that reached the customer: the proof's bar for a
+  // returned callback (staff-contact.js personCallBack: a staff-bridge
+  // source, a live conversation in the reviewed extraction, a card call's
+  // customer leg completed at 60 s or more), applied to every SLA kind;
+  // never an automated outbound call, never a voice-relay sandbox call.
+  const calls = (await byContact(conn('call_log'))
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-    .whereRaw("direction LIKE 'outbound%'").where('created_at', '>', floor)
+    .whereRaw("direction LIKE 'outbound%'").whereIn('source', STAFF_CALL_SOURCES).where('created_at', '>', floor)
     // The proof's two connected-call arms: a callback-card bridge whose
     // customer leg completed (>= 60 s, affirmatively not voicemail), or an
     // ordinary outbound call — no card link — whose own duration is >= 60 s.
@@ -223,15 +313,20 @@ async function followedUpIds(conn, rows) {
           .whereRaw('COALESCE(duration_seconds, 0) >= 60');
       });
     })
-    .select('id', 'customer_id', 'to_phone', 'created_at');
-  // A text a person typed that actually went out: the staff send paths stamp
-  // BOTH message_type 'manual' and admin_user_id (either alone admits
-  // automated texts), and only queued/sent/delivered rows reached anyone.
-  const texts = await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
+    .select('id', 'customer_id', 'to_phone', 'created_at', ...callContactSelects(conn))).filter(personCallBack);
+  // A text a person sent that reached the customer: the proof's rule
+  // (staff-contact.js operatorReply + smsDelivered: the composer's stamp,
+  // the sending admin or a staff-approved draft, and a delivered text). A
+  // bare 'manual' type is reused by automated senders, and a queued text
+  // reached no one yet.
+  const texts = (await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
     .whereRaw("direction LIKE 'out%'").where('created_at', '>', floor)
-    .whereIn('message_type', HUMAN_TEXT_TYPES).whereNotNull('admin_user_id')
-    .whereIn('status', ['queued', 'sent', 'delivered'])
-    .select('customer_id', 'to_phone', 'created_at');
+    .where(function personSent() {
+      this.whereRaw(operatorSentSql('sms_log')).orWhereIn('message_type', STAFF_APPROVED_SMS_TYPES);
+    })
+    .whereIn('status', ['sent', 'delivered'])
+    .select('customer_id', 'to_phone', 'created_at', 'status', 'message_type', 'from_phone', ...smsContactSelects(conn)))
+    .filter((t) => operatorReply(t) && smsDelivered(t));
   // A quote delivered to the customer rather than linked to this call: the
   // canonical proof records it as an association hint on the promise
   // (fulfillment kind estimate_sent, status still open) — its ownership rules
@@ -246,13 +341,36 @@ async function followedUpIds(conn, rows) {
     const matched = new Date(f?.matched_at || 0).getTime();
     if (f?.kind === 'estimate_sent' && matched > (sinceById.get(String(h.id))?.getTime() ?? Infinity)) done.add(h.id);
   }
+  // A quote promise staff confirmed, edited or typed has a human verdict,
+  // which refreshFulfillment never rewrites — so its stored hint above is
+  // never populated, and a quote sent after the review would read as still
+  // owed. Look the delivery up live for those rows, read-only (the verdict
+  // stays the office's). A lookup that throws propagates: every caller
+  // already treats that as unverified, never as kept.
+  const reviewedQuotes = scoped.filter((x) => x.r.kind === 'send_estimate' && x.r.human_state && !done.has(x.r.id) && x.r.call_log_id);
+  if (reviewedQuotes.length) {
+    const quoteCalls = await conn('call_log').whereIn('id', [...new Set(reviewedQuotes.map((x) => x.r.call_log_id))])
+      .select('id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'created_at', 'bridged_at', 'duration_seconds', 'metadata');
+    const callById = new Map(quoteCalls.map((c) => [String(c.id), c]));
+    for (const x of reviewedQuotes) {
+      const call = callById.get(String(x.r.call_log_id));
+      if (!call) continue;
+      const live = await conn('call_commitments').where({ id: x.r.id }).first();
+      if (!live) continue;
+      const proof = await commitments.resolveFulfillment(conn, live, call);
+      if (proof?.kind === 'estimate_sent' && new Date(proof.matched_at || 0).getTime() > x.since.getTime()) done.add(x.r.id);
+    }
+  }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
     : phoneKey(rec.to_phone) === x.phone);
   const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
     : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
+  const booked = (v, x) => after(v, x.since)
+    || (!!x.slot && !!v.scheduled_date && !!v.window_start && after(v, x.slotFloor)
+      && etCalendarDayOf(v.scheduled_date) === x.slot.day && minuteOfDay(v.window_start) === x.slot.minute);
   for (const x of scoped) {
-    if (visits.some((v) => visitFor(v, x) && after(v, x.since))
+    if (visits.some((v) => visitFor(v, x) && booked(v, x))
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
       || texts.some((t) => mine(t, x) && after(t, x.since))) done.add(x.r.id);
   }
@@ -360,10 +478,10 @@ async function runFollowUpSlaWatcher({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('followupSlaAlerts') || !isEnabled('callCommitments')) {
     // Switched off: no standing list may outlive the pager that kept it true.
-    await db('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+    await NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }), 'followup-sla')
       .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
       // Flagged emptied too, so a re-enabled pager posts its list fresh.
-      .update({ read_at: now, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"emptied\":true}'::jsonb") })
+      .update({ ...NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'The follow-up pager was switched off', at: now, keepExisting: true, conn: db }), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"emptied\":true}'::jsonb") })
       .catch((err) => logger.warn(`[followup-sla] retiring the list while gated off failed: ${err.message}`));
     return { skipped: true, reason: 'gated_off' };
   }
@@ -428,7 +546,7 @@ async function runInner({ now = new Date() } = {}) {
   let changed = 0;
   const latest = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body');
+    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body', 'detail', 'link');
   const meta = (latest && (typeof latest.metadata === 'string' ? JSON.parse(latest.metadata) : latest.metadata)) || {};
   const shown = latest && !meta.emptied ? (meta.missed_commitment_ids || []).map(String) : [];
   // A promise held over this way still drops off when later activity
@@ -465,16 +583,21 @@ async function runInner({ now = new Date() } = {}) {
     const { stripEmoji } = require('../utils/strip-emoji');
     const title = stripEmoji(`${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`);
     const body = stripEmoji(`Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${onList.map((r) => `• ${describe(r)}`).join('\n')}`);
+    // One miss opens its call; several open the Owed list.
+    const link = onList.length === 1 && onList[0].call_log_id
+      ? `/admin/communications#tab=calls&call=${encodeURIComponent(onList[0].call_log_id)}`
+      : '/admin/communications#tab=owed';
     if (fresh.length) {
       const key = `${ROLLING_KEY}:${now.toISOString()}`;
       const notif = await NotificationService.notifyAdmin('alert', title, body, {
-        link: '/admin/communications#tab=owed', dedupeKey: key, bell: true, trx,
+        link, dedupeKey: key, bell: true, trx,
         metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
       });
       if (!notif?.id || notif.suppressed) return;
-      await trx('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+      await NotificationService._private.openToCloser(trx('notifications').where({ recipient_type: 'admin' }), 'followup-sla')
         .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-        .whereRaw("metadata->>'dedupeKey' <> ?", [key]).update({ read_at: now });
+        .whereRaw("metadata->>'dedupeKey' <> ?", [key])
+        .update(NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'Replaced by a newer missed-follow-up list', at: now, keepExisting: true, conn: trx }));
       alerted = fresh.length;
       return;
     }
@@ -482,12 +605,20 @@ async function runInner({ now = new Date() } = {}) {
     // emptied → read and flagged (a returning miss posts fresh); fewer
     // items or changed details → rewritten in place, read state kept.
     if (!shown.length) return;
+    // The brevity guard's form of this text (one-sentence body, full list in
+    // `detail`), exactly as the fresh post above is stored.
+    const next = NotificationService.normalizeAdminText({ category: 'alert', title, body });
     const patch = ids.length
-      ? { title, body, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
-      : { read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) };
-    // Same items, same words: nothing to write (an emptied patch carries no
-    // title, so it never matches).
-    if (patch.title === latest.title && patch.body === latest.body && ids.length === shown.length) return;
+      ? { title: next.title, body: next.body, detail: next.detail, link, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
+      : {
+        ...NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'Every listed promise was followed up', at: now, keepExisting: true, conn: trx }),
+        metadata: JSON.stringify({ ...meta, emptied: true }),
+      };
+    // Same items, same words, same link: nothing to write (an emptied patch
+    // carries no title, so it never matches). A post from before the link
+    // followed the list size is rewritten here, quietly.
+    if (patch.title === latest.title && patch.body === latest.body && (patch.detail ?? null) === (latest.detail ?? null) && ids.length === shown.length
+      && patch.link === latest.link) return;
     await trx('notifications').where({ id: latest.id }).update(patch);
   });
   return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: onList.length, alerted, changed, unverified: unverified.size };
@@ -507,4 +638,5 @@ module.exports = {
   followedUpIds,
   SLA_KINDS,
   ROLLING_KEY,
+  WHAT,
 };

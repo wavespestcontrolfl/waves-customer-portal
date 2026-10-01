@@ -98,7 +98,13 @@ async function runInner({ now = new Date() } = {}) {
   // A call whose refresh FAILED — the call threw, or any of its lookups did
   // (`failed` in the summary) — is not verified either way. Carry forward
   // its existing reminder version while independently verified work proceeds.
-  const callIds = [...new Set(rows.map((r) => r.call_log_id))];
+  // Calls holding a promise kept by a booking for its promised slot whose
+  // proof has lapsed (visit cancelled, skipped or moved, call relinked) are
+  // judged again too — nothing open on the call would bring them here.
+  // …and so are calls holding a promise the evidence close shut on a visit
+  // since cancelled or a customer no longer churned (PROMISE_EVIDENCE_CLOSE).
+  const callIds = [...new Set([...rows.map((r) => r.call_log_id), ...await commitments.listSlotKeptCallIds(db),
+    ...await commitments.listLapsedEvidenceClosedCallIds(db)])];
   const unverifiedCalls = new Set();
   let refreshed = 0;
   for (const id of callIds) {
@@ -111,7 +117,7 @@ async function runInner({ now = new Date() } = {}) {
       logger.warn(`[call-commitments-watchdog] ${r.failed} fulfillment lookup(s) failed for call ${id} — retaining prior reminder evidence`);
       unverifiedCalls.add(id);
     }
-    refreshed += r.fulfilled || 0;
+    refreshed += (r.fulfilled || 0) + (r.reopened || 0);
   }
   if (refreshed > 0) rows = await listAllOpenWaves(now);
   let candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
@@ -151,6 +157,15 @@ async function runInner({ now = new Date() } = {}) {
     const current = live.map((r) => ({ ...candidates.find((c) => c.id === r.id), ...r }))
       .sort((a, b) => rank.get(a.id) - rank.get(b.id));
     const noticeRows = () => trx('notifications').where({ recipient_type: 'admin' });
+    // The closing UPDATE's selection: not done, or done by a person (the
+    // watchdog takes the row over once; see openToCloser).
+    const openToCloser = (q) => NotificationService._private.openToCloser(q, 'call-commitments-watchdog');
+    // A system retire closes the row as done (read is not done): a person's
+    // earlier read and first done_at stand (doneColumns COALESCEs), done_by is
+    // the watchdog's, the bell drops it.
+    const closeDone = (resolution) => NotificationService._private.doneColumns({
+      by: 'call-commitments-watchdog', resolution, at: now, keepExisting: true, conn: trx,
+    });
     const priorAggregate = await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
       .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at');
     const aggregateMeta = typeof priorAggregate?.metadata === 'string' ? JSON.parse(priorAggregate.metadata) : priorAggregate?.metadata;
@@ -183,11 +198,11 @@ async function runInner({ now = new Date() } = {}) {
         .whereRaw("cc.id::text = n.metadata->>'commitment_id'").where({ 'cc.status': 'open', 'cc.party': 'waves' })
         .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`)
         .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} < ?`, [now]))
-      .update({ read_at: now, metadata: trx.raw("metadata || '{\"dedupeVersion\":\"retired\"}'::jsonb") });
+      .update({ ...closeDone('The promise is no longer overdue'), metadata: trx.raw("metadata || '{\"dedupeVersion\":\"retired\"}'::jsonb") });
     if (!overdue.length) {
       await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
         .whereRaw("metadata->>'dedupeVersion' IS DISTINCT FROM 'empty'")
-        .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true,\"dedupeVersion\":\"empty\"}'::jsonb") });
+        .update({ ...closeDone('No promises to callers are overdue now'), metadata: trx.raw("metadata || '{\"retired\":true,\"dedupeVersion\":\"empty\"}'::jsonb") });
       return result;
     }
     const openSince = (r) => r.source === 'human' ? r.created_at : (r.call_started_at || r.created_at);
@@ -202,12 +217,20 @@ async function runInner({ now = new Date() } = {}) {
           metadata: { triggerKey: TRIGGER_KEY, overdue_count: overdue.length, overdue_commitment_ids: ids, overdue_versions: versions, retired: false },
         });
       if (!persisted(notif)) return { ...result, unannounced: overdue.length, aggregate: true };
-      await noticeRows().whereNull('read_at').whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
+      // Rows are picked by done_at, not read_at: a reminder someone only
+      // opened is still open work, and the batch now carries it. A reminder a
+      // person marked Done is absorbed too (openToCloser), so it can't be
+      // reopened beside the summary; if it later comes back out of the batch,
+      // the un-batch re-arms it as live work.
+      await require('./notification-service')._private.openToCloser(noticeRows(), 'call-commitments-watchdog')
+        .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
         .whereIn(trx.raw("metadata->>'commitment_id'"), ids)
-        .update({ read_at: now, metadata: trx.raw("metadata || jsonb_build_object('batchedBy', ?::text)", [notif.id]) });
-      await noticeRows().whereNull('read_at').whereNot('id', notif.id)
+        // batchedUnread: whether the absorb found it unread (SET reads the old
+        // row), so the un-batch undoes only the read this close added.
+        .update({ ...closeDone('Included in the overdue promises summary'), metadata: trx.raw("metadata || jsonb_build_object('batchedBy', ?::text, 'batchedUnread', read_at IS NULL)", [notif.id]) });
+      await openToCloser(noticeRows()).whereNot('id', notif.id)
         .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
-        .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
+        .update({ ...closeDone('Replaced by a newer overdue promises summary'), metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
       return { ...result, alerted: 1, aggregate: true };
     }
     let unannounced = 0;
@@ -225,16 +248,34 @@ async function runInner({ now = new Date() } = {}) {
       const acknowledged = priorAggregate?.read_at && !aggregateMeta?.retired && aggregateMeta?.dedupeKey === `call-commitments-overdue:${today}`
         && aggregateMeta?.overdue_versions?.[r.id] === versions[r.id];
       if (acknowledged || meta?.batchedBy) {
-        await noticeRows().where({ id: notif.id }).update({ read_at: acknowledged ? priorAggregate.read_at : null,
-          metadata: trx.raw("metadata - 'batchedBy'") });
+        // Un-read (a reminder back out of the batch) re-arms it: a Done on the
+        // batched row must not keep a still-overdue promise out of the bell.
+        // A batch-absorbed row was closed done by this watchdog (or, absorbed
+        // before the done state existed, by the done backfill); taking it back
+        // out of the batch reopens it. A person's own done is never undone.
+        // Back out of the batch, the read the absorb added is undone; a staff
+        // member's own earlier read (an acknowledgment) stands. A row absorbed
+        // before batchedUnread existed keeps the old behaviour (unread).
+        await noticeRows().where({ id: notif.id }).update({
+          read_at: acknowledged ? priorAggregate.read_at
+            : trx.raw("CASE WHEN metadata->>'batchedUnread' = 'false' THEN read_at ELSE NULL END"),
+          ...(acknowledged
+            ? (meta?.batchedBy ? {
+              done_at: trx.raw("CASE WHEN done_by IN ('call-commitments-watchdog', 'backfill') THEN NULL ELSE done_at END"),
+              done_by: trx.raw("CASE WHEN done_by IN ('call-commitments-watchdog', 'backfill') THEN NULL ELSE done_by END"),
+              resolution: trx.raw("CASE WHEN done_by IN ('call-commitments-watchdog', 'backfill') THEN NULL ELSE resolution END"),
+            } : {})
+            : { done_at: null, done_by: null, resolution: null }),
+          metadata: trx.raw("metadata - 'batchedBy' - 'batchedUnread'"),
+        });
       }
       if (!acknowledged) result.alerted += 1;
-      await noticeRows().whereNull('read_at').whereNot('id', notif.id)
+      await openToCloser(noticeRows()).whereNot('id', notif.id)
         .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
-        .whereRaw("metadata->>'commitment_id' = ?", [r.id]).update({ read_at: now });
+        .whereRaw("metadata->>'commitment_id' = ?", [r.id]).update(closeDone('Replaced by a newer reminder for this promise'));
     }
     if (!unannounced) await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
-      .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true,\"dedupeVersion\":\"individuals\"}'::jsonb") });
+      .update({ ...closeDone('The overdue promises are listed one by one now'), metadata: trx.raw("metadata || '{\"retired\":true,\"dedupeVersion\":\"individuals\"}'::jsonb") });
     return { ...result, unannounced };
   });
 }

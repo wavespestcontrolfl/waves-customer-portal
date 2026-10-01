@@ -338,7 +338,7 @@ export default function LoginPage() {
           color: #fff;
         }
         .portal-login-submit:not(:disabled):hover {
-          background: #14234C;
+          background: var(--brand-hover);
         }
         .portal-login-submit:disabled {
           cursor: not-allowed;

@@ -17,7 +17,9 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
+const db = require('../models/db');
 const logger = require('../services/logger');
+const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const {
   loadSecureCardPageData,
   completeSecureCardCapture,
@@ -53,12 +55,37 @@ router.use(rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
+// The page payload carries no ids, so the view's subject is resolved with a
+// small follow-up read, off the response path, never throwing. A standalone
+// Auto Pay setup row (kind='customer') has no visit; its subject is the
+// request itself.
+async function recordSecureCardView(req, token) {
+  try {
+    const request = await db('appointment_card_requests').where({ token })
+      .first('id', 'customer_id', 'scheduled_service_id', 'kind');
+    if (!request) return;
+    const visitScoped = request.kind !== 'customer' && request.scheduled_service_id;
+    await recordPageView({
+      req,
+      page: 'secure-card',
+      customerId: request.customer_id,
+      subjectType: visitScoped ? 'scheduled_service' : 'appointment_card_request',
+      subjectId: visitScoped ? request.scheduled_service_id : request.id,
+    });
+  } catch (err) {
+    // Knex error messages carry the SQL + bound values, i.e. the bearer
+    // token: log the page, subject type and error code only.
+    logViewFailure('lookup', 'secure-card', 'appointment_card_request', err);
+  }
+}
+
 router.get('/:token', async (req, res) => {
   const token = String(req.params.token || '');
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
   try {
     const data = await loadSecureCardPageData(token);
     if (!data) return res.status(404).json({ error: 'Not found' });
+    void recordSecureCardView(req, token);
     if (data.state === 'ready' || data.state === 'prepay_selected') {
       // The public page has no other authenticated key source — same
       // bootstrap shape as the estimate card-capture endpoints.

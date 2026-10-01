@@ -1,0 +1,1341 @@
+[
+  {
+    "slug": "large-patch",
+    "kind": "disease",
+    "common_name": "Large Patch",
+    "aka": [
+      "brown patch"
+    ],
+    "aliases": [
+      "large patch",
+      "brown patch",
+      "rhizoctonia"
+    ],
+    "scientific_name": "Rhizoctonia solani",
+    "rank": "species",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Circular to irregular patches with a yellow-to-orange outer ring",
+      "Basal leaf sheaths dark, soft and rotted; pull free with a gentle tug",
+      "Patches expand in cool, wet weather"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      11,
+      12,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "peak_months": [
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A close-up showing the orange ring and rotted, soft sheaths at the base suggests large patch. It does not rule out other causes; a technician checks the roots and the sheaths to confirm before recommending a next step.",
+      "fact": "Large patch attacks the leaf sheaths near the soil line, which is why the base of the blade pulls free with a gentle tug."
+    },
+    "tech_notes": "Confirm rotted basal sheaths vs take-all's rotted roots before recommending a follow-up visit.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh044",
+      "https://gardeningsolutions.ifas.ufl.edu/lawns/problems-and-solutions/large-patch/"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "4a3a4e6fdb768ca21fd2b3019694f158b15c740de7ae4be5500274da462fda57"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Circular to irregular patches with a yellow-to-orange outer ring",
+        "Basal leaf sheaths dark, soft and rotted; pull free with a gentle tug"
+      ],
+      "symptoms": [
+        "Patches expand in cool, wet weather"
+      ],
+      "required_signature": {
+        "text": "A close-up of the patch margin showing the orange ring and rotted sheaths that pull free at the base.",
+        "elements": [
+          "Circular to irregular patches with a yellow-to-orange outer ring",
+          "Basal leaf sheaths dark, soft and rotted; pull free with a gentle tug"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [
+        {
+          "name": "Tug test",
+          "who": "customer",
+          "how": "Grab a handful of blades at the patch edge and pull gently.",
+          "reads_as": "Blades that slide out with dark, soft bases point to large patch; blades that hold point elsewhere."
+        }
+      ],
+      "differentials": [
+        {
+          "slug": "take-all-root-rot",
+          "difference": "Take-all rots the roots (short, black) and yellows irregular areas without a ring; large patch rots the leaf bases inside a ringed patch.",
+          "next_observation": "A photo of a pulled plug showing the roots next to a coin.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "drought-irrigation-stress",
+          "difference": "Drought stress is uniform and blue-gray and greens up within days of watering; large patch keeps a rotted, dark ring at the base even after watering.",
+          "next_observation": "Water the dry-looking edge for a few days and recheck for green-up, or a technician checks the leaf bases.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "pythium-root-rot",
+          "difference": "Pythium root rot causes general yellow-brown thinning with no ringed patch or rotted sheaths; large patch shows a distinct ring with rotted leaf bases.",
+          "next_observation": "A close-up of the patch margin checking for a ring and rotted sheaths.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage stays in hot, sunny spots and does not green up with water; large patch expands in cool, wet weather with rotted leaf bases at the ring.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs climbing up in a few minutes, or a technician checks.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "cool_wet",
+        "frequent_irrigation",
+        "poor_drainage"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Spread often slows within days; browned turf regrows over weeks to months as conditions improve."
+    }
+  },
+  {
+    "slug": "gray-leaf-spot",
+    "kind": "disease",
+    "common_name": "Gray Leaf Spot",
+    "aka": [],
+    "aliases": [
+      "gray leaf spot",
+      "grey leaf spot",
+      "pyricularia grisea"
+    ],
+    "scientific_name": "Pyricularia grisea",
+    "rank": "species",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, diamond to elongated tan or gray lesions on the blade with a dark border",
+      "Lesions can join to blight large areas of turf in hot, humid weather",
+      "Blighted turf looks scorched or gray from a distance"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A photo showing diamond-shaped gray lesions on the blades suggests gray leaf spot. It does not prove it by itself; a technician confirms the pattern and checks conditions before recommending a next step.",
+      "fact": "Gray leaf spot favors hot, humid weather and shows up most on St. Augustinegrass under heavy nitrogen."
+    },
+    "tech_notes": "Confirm diamond-shaped lesions with dark border vs melting-out's more rounded lesions before recommending a follow-up visit. Lesions can join to blight large turf areas during hot, humid weather.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/pp126"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "53116243a00f0913ae4989619abce7a8aa92ef43a49d165a8986c8397b8b7d4a"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Small, diamond to elongated tan or gray lesions on the blade with a dark border"
+      ],
+      "symptoms": [
+        "Blighted turf looks scorched or gray from a distance in warm, wet weather"
+      ],
+      "required_signature": {
+        "text": "A close-up of individual blades showing the diamond-shaped, dark-bordered lesions.",
+        "elements": [
+          "Small, diamond to elongated tan or gray lesions on the blade with a dark border"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "leaf-spot-melting-out",
+          "difference": "Gray leaf spot lesions are diamond-shaped with a dark border in hot, humid weather; melting-out lesions are rounder with a tan center in cooler weather.",
+          "next_observation": "A close-up of individual blade lesions.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "dull-blade-shredding",
+          "difference": "Gray leaf spot shows dark-bordered lesions on the blade; dull-blade shredding leaves ragged, frayed, whitish-brown tips with no lesions.",
+          "next_observation": "A close-up of the blade tips versus the lesion pattern.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage starts as expanding yellow-to-brown patches in hot, sunny areas without diamond-shaped leaf lesions.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs climbing up in a few minutes, or a technician checks.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "warm_wet",
+        "high_n"
+      ],
+      "outcome": "treatable",
+      "recovery_note": "Color and density typically improve over the following weeks once conditions dry out."
+    }
+  },
+  {
+    "slug": "take-all-root-rot",
+    "kind": "disease",
+    "common_name": "Take-all Root Rot",
+    "aka": [],
+    "aliases": [
+      "take all root rot",
+      "take-all patch",
+      "gaeumannomyces"
+    ],
+    "scientific_name": "Gaeumannomyces graminis",
+    "rank": "species",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Irregular yellow to brown patches that do not recover from the center",
+      "Roots short, dark brown to black and easily pulled from the soil",
+      "Often follows stress from drought, compaction or herbicide injury"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Short, black, rotted roots pulled from an irregular yellow patch can suggest take-all root rot, but the same look occurs with Pythium root rot, sting nematode or waterlogged soil. A photo cannot tell them apart; a technician checks the roots and the site conditions before recommending a next step.",
+      "fact": "Take-all root rot damages the roots rather than the leaf blades, so the patch often does not recover from the center the way large patch can."
+    },
+    "tech_notes": "Short, black roots vs large patch's rotted leaf sheaths separate the two before recommending a follow-up visit. Roots are infected two to three weeks before leaves show it, so fall decline often started in summer. Often follows stress from drought, compaction or herbicide injury.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/LH079"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "11a0e7ef6d26798d287622869de9f2a9539721c383381f9c2cea34f65f1e5e5c"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Roots short, dark brown to black and easily pulled from the soil"
+      ],
+      "symptoms": [
+        "Irregular yellow to brown patches that do not recover from the center"
+      ],
+      "required_signature": {
+        "text": "A photo cannot confirm this; a technician compares the pulled roots against Pythium root rot, sting nematode and waterlogging before naming take-all root rot.",
+        "elements": [
+          "Roots short, dark brown to black and easily pulled from the soil"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [
+        {
+          "name": "Plug pull",
+          "who": "customer",
+          "how": "Use a trowel or bulb planter to lift a small plug from the yellowing area.",
+          "reads_as": "Roots that are short, dark and pull away easily point to a root rot; healthy white roots point elsewhere."
+        }
+      ],
+      "differentials": [
+        {
+          "slug": "large-patch",
+          "difference": "Take-all rots the roots (short, black) and yellows irregular areas without a ring; large patch rots the leaf bases inside a ringed patch.",
+          "next_observation": "A photo of a pulled plug showing the roots next to a coin.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "drought-irrigation-stress",
+          "difference": "Drought stress greens back up within days of watering; take-all root rot roots stay short, black and rotted regardless of water.",
+          "next_observation": "Water the area for a few days and recheck, or pull a plug to check the roots.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "sting-nematode",
+          "difference": "Sting nematode roots are short and stubby but not black or rotted; take-all root rot roots are short, black and decayed.",
+          "next_observation": "A technician compares a root sample, or a soil sample confirms sting nematode.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage is confined to hot, sunny turf with insects present; take-all root rot shows blackened, rotted roots with no insects present.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs climbing up in a few minutes, or a technician checks, alongside a pulled root sample.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "compaction",
+        "recent_herbicide"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Recovery is often slow, over months, as new roots regrow."
+    }
+  },
+  {
+    "slug": "fairy-ring",
+    "kind": "disease",
+    "common_name": "Fairy Ring",
+    "aka": [],
+    "aliases": [
+      "fairy ring",
+      "fairy rings",
+      "lawn mushrooms"
+    ],
+    "scientific_name": "Basidiomycota",
+    "rank": "group",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Mushrooms or puffballs appear in a ring or arc, especially after rain",
+      "A band of dark green turf, sometimes with a dead zone just inside it",
+      "Rings start small and slowly widen year after year"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "mushroom-conk",
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false
+    },
+    "safety_line": "Some of the mushrooms that appear are poisonous; keep kids and pets from eating them and remove them if you are concerned.",
+    "range": "common",
+    "active_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Mushrooms in a ring, or a dark green band with a thin dead zone, suggest fairy ring from fungi feeding on buried organic matter. It is usually cosmetic. Raking out mushrooms and reducing thatch over time are the realistic options; a technician can advise further if the dead zone is spreading.",
+      "fact": "Fairy rings form around old buried wood, stumps or roots, which is why the ring often marks exactly where something organic was buried years ago."
+    },
+    "tech_notes": "Three visual types: dead zone with dark green band (I), dark green band only (II), or just a ring of mushrooms (III); severity and response differ by type.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/LH046"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "41017f74d8cf1d12c9d1dec0aa23340d38c41794adb06b32b2b9bb7b438073cd"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Mushrooms or a dark green band arranged in a ring or arc",
+        "A dead zone sometimes appears just inside the dark green band"
+      ],
+      "symptoms": [
+        "Grass inside the dead zone thins or browns while grass just outside stays dark green"
+      ],
+      "required_signature": {
+        "text": "A photo of the ring or arc showing mushrooms or a dark green band, and whether a dead zone sits inside it.",
+        "elements": [
+          "Mushrooms or a dark green band arranged in a ring or arc"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "overwatering",
+          "difference": "Overwatering causes a dull, thin, waterlogged lawn overall without mushrooms in a ring; fairy ring shows mushrooms or a dark green band in a circle or arc.",
+          "next_observation": "A photo of the ring pattern, or an irrigation can test checking how much water the zone gets.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "dog-urine-spots",
+          "difference": "Dog urine spots are small, roughly circular dead patches with a dark green rim and no mushrooms; fairy ring often shows mushrooms and can span several feet.",
+          "next_observation": "A wider photo showing the full ring size and whether mushrooms are present.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "slime-mold",
+          "difference": "Slime mold coats blades with a crust that wipes off with a finger; fairy ring shows mushrooms or a green band rooted in the soil, not a surface coating.",
+          "next_observation": "A close-up touching the affected area to see if the coating wipes off.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "warm_wet",
+        "new_sod"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Aerating and reducing thatch can slow new rings over months; existing dead zones regrow slowly as roots recover."
+    }
+  },
+  {
+    "slug": "pythium-root-rot",
+    "kind": "disease",
+    "common_name": "Pythium Root Rot",
+    "aka": [],
+    "aliases": [
+      "pythium root rot",
+      "pythium"
+    ],
+    "scientific_name": "Pythium spp.",
+    "rank": "genus",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "General yellow, light green or brown thinning without a distinct patch shape",
+      "Turf stays weak and thin in low, poorly drained or overwatered spots",
+      "Symptoms track wet soil rather than a single season"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "General thinning and yellowing in a wet, low-lying spot can suggest a root rot, but no distinct patch forms with this one and a photo cannot confirm it. A technician checks the roots and the drainage before recommending a next step.",
+      "fact": "Unlike large patch or take-all root rot, this disease rarely kills turf outright and does not leave a clearly shaped patch, so it is easy to mistake for ordinary wet-soil stress."
+    },
+    "tech_notes": "No distinct patch forms. Thin, discolored roots with few root hairs in wet or poorly drained turf are consistent with Pythium (not the black, rotted roots of take-all); microscopic examination of affected roots confirms it.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/LH050"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "06bbe60e0bd016d97c4276e1c0e68d1759cc736e018eac9cfbc7e111bbfd1c55"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "General yellow, light green or brown thinning without a distinct patch shape",
+        "Turf stays weak and thin in low, poorly drained or overwatered spots"
+      ],
+      "required_signature": {
+        "text": "A photo cannot confirm this; a technician checks the roots and the wet soil conditions, since no distinct patch forms.",
+        "elements": [
+          "General yellow, light green or brown thinning without a distinct patch shape"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "large-patch",
+          "difference": "Large patch forms a ringed patch with rotted leaf sheaths; pythium root rot causes general thinning with no distinct patch.",
+          "next_observation": "A close-up of the margin checking for a ring, or a technician checks the roots.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "overwatering",
+          "difference": "Overwatering alone recovers once watering is corrected; pythium root rot needs a technician to check the roots for rot even after watering is fixed.",
+          "next_observation": "An irrigation can test to check watering, alongside a root check by a technician.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "poor_drainage",
+        "frequent_irrigation",
+        "warm_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Improving drainage often helps within a few weeks; full recovery can take longer in low spots."
+    }
+  },
+  {
+    "slug": "turf-rust",
+    "kind": "disease",
+    "common_name": "Rust",
+    "aka": [
+      "turf rust"
+    ],
+    "aliases": [
+      "rust",
+      "turf rust",
+      "lawn rust",
+      "puccinia"
+    ],
+    "scientific_name": "Puccinia spp.",
+    "rank": "genus",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Yellow-orange, powdery pustules on the blade that rub off orange on a finger",
+      "Leaves take on a yellow to orange cast, most visible in shaded or stressed turf",
+      "Most noticeable during cool weather when growth slows"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "leaf-spots",
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      10,
+      11,
+      12,
+      1,
+      2,
+      3
+    ],
+    "peak_months": [
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Orange, powdery pustules that rub off on your finger suggest rust, usually on turf that is slow-growing, shaded or short on nitrogen. It rarely causes lasting harm. A technician can check your mowing, light and fertility routine if it keeps returning.",
+      "fact": "Rust pustules are actually masses of fungal spores; brushing your shoe across an infected lawn can leave an orange dust on your shoe."
+    },
+    "tech_notes": "Distinguish from nitrogen deficiency by rubbing a blade for orange spore residue; balanced, slow-release fertility and better light reduce recurrence.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/LH051"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "af987bfcf9e57c05ce8903a9736067f3e380c3d43899d22d7976d5d1de7517a9"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Yellow-orange, powdery pustules on the blade that rub off orange on a finger"
+      ],
+      "symptoms": [
+        "Leaves take on a yellow to orange cast, most visible in shaded or stressed turf"
+      ],
+      "required_signature": {
+        "text": "A close-up of blades showing the orange, powdery pustules that rub off on a finger.",
+        "elements": [
+          "Yellow-orange, powdery pustules on the blade that rub off orange on a finger"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "nitrogen-deficiency-turf",
+          "difference": "Nitrogen deficiency shows a uniform pale yellow-green across older blades with no powdery pustules; rust shows orange pustules that rub off on a finger.",
+          "next_observation": "A close-up of your fingertip after rubbing a blade: orange powder that rubs off points to rust.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "shade-thinning",
+          "difference": "Shade thinning shows stretched, thin blades and bare spots under canopy with no pustules; rust shows orange, powdery pustules on the blade.",
+          "next_observation": "A close-up of the blade surface checking for pustules.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "shade",
+        "cool_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Color often improves within a few weeks once the turf resumes active growth."
+    }
+  },
+  {
+    "slug": "leaf-spot-melting-out",
+    "kind": "disease",
+    "common_name": "Leaf Spot / Melting Out",
+    "aka": [
+      "helminthosporium leaf spot"
+    ],
+    "aliases": [
+      "leaf spot",
+      "melting out",
+      "bipolaris",
+      "helminthosporium"
+    ],
+    "scientific_name": "Bipolaris spp.",
+    "rank": "genus",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, pinhead to oval lesions on the blade, brown to purple, sometimes bleached tan in the center",
+      "Leaves turn purplish to reddish-brown before thinning",
+      "Most common in mild, wet weather during fall and winter"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      10,
+      11,
+      12,
+      1,
+      2,
+      3
+    ],
+    "peak_months": [
+      11,
+      12,
+      1
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Small brown to purple lesions on the blades, sometimes with a bleached tan center, suggest leaf spot. It does not confirm the exact fungus involved; a technician checks the lesion pattern and turf density before recommending a next step.",
+      "fact": "This disease is most serious on bermudagrass, where heavy lesion activity can 'melt out' large areas of turf in mild, wet weather."
+    },
+    "tech_notes": "Most serious on bermudagrass; distinguish from gray leaf spot's diamond-shaped, dark-bordered lesions and from mechanical blade damage.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh048"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "fb7bc856ed22244ed8204bde9b072a0e796676984c655d5d6815ebd62a09ba69"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Small, pinhead to oval lesions on the blade, brown to purple, sometimes bleached tan in the center"
+      ],
+      "symptoms": [
+        "Leaves turn purplish to reddish-brown before thinning"
+      ],
+      "required_signature": {
+        "text": "A close-up of individual blades showing the small brown to purple lesions, some with bleached centers.",
+        "elements": [
+          "Small, pinhead to oval lesions on the blade, brown to purple, sometimes bleached tan in the center"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "gray-leaf-spot",
+          "difference": "Melting-out lesions are rounded with a tan center in cooler, wet weather; gray leaf spot lesions are diamond-shaped with a dark border in hot, humid weather.",
+          "next_observation": "A close-up of individual blade lesions.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "dull-blade-shredding",
+          "difference": "Melting-out shows distinct brown to purple lesions on the blade; dull-blade shredding leaves ragged, torn, whitish-brown tips with no lesions.",
+          "next_observation": "A close-up of the blade tips versus the lesion pattern.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "cool_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Density often improves over several weeks once conditions dry and mowing height is raised."
+    }
+  },
+  {
+    "slug": "slime-mold",
+    "kind": "disease",
+    "common_name": "Slime Mold",
+    "aka": [],
+    "aliases": [
+      "slime mold",
+      "slime molds",
+      "physarum"
+    ],
+    "scientific_name": "Physarum spp.",
+    "rank": "genus",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "A gray, black or white crusty coating on the grass blades that wipes off with a finger",
+      "Coating appears suddenly after warm, humid, rainy weather",
+      "Grass underneath the coating is unharmed"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "peak_months": [
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A gray, black or white crust on the grass blades that wipes off with a finger is the recognized field confirmation of slime mold. It feeds on organic matter on the leaf surface, not on the grass itself, and is not considered harmful to the lawn.",
+      "fact": "Slime mold is not actually a fungus; it is a soil organism that only climbs onto grass blades to release spores during warm, humid weather."
+    },
+    "tech_notes": "Cosmetic only; a hard rain, mowing or brushing usually removes it. No lasting harm to the turf underneath.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/topics/slime_molds"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "03665e1487076648315ad8aa3720884f85f112c7f7a70540bfd533f341e4b160"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "A gray, black or white crusty coating on the grass blades that wipes off with a finger"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A close-up of the coated blades showing the crust wiping off on a finger, with healthy grass underneath.",
+        "elements": [
+          "A gray, black or white crusty coating on the grass blades that wipes off with a finger"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "fairy-ring",
+          "difference": "Slime mold coats blades with a crust that wipes off, leaving healthy grass; fairy ring shows mushrooms or a green band rooted in the soil, not a coating.",
+          "next_observation": "A close-up touching the coating to see if it wipes off.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "warm_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "The coating usually disappears on its own within days to a couple of weeks as conditions dry."
+    }
+  },
+  {
+    "slug": "dollar-spot",
+    "kind": "disease",
+    "common_name": "Dollar Spot",
+    "aka": [],
+    "aliases": [
+      "dollar spot",
+      "clarireedia"
+    ],
+    "scientific_name": "Clarireedia jacksonii",
+    "rank": "species",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, round, straw-colored patches about the size of a silver dollar",
+      "Patches can merge into larger, irregular straw-colored areas",
+      "Tan, hourglass-shaped lesions with a darker border on individual blades"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage",
+      "leaf-spots"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "unverified",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      10,
+      11
+    ],
+    "peak_months": [
+      4,
+      5
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Small, round, straw-colored patches about the size of a silver dollar suggest dollar spot, often on turf that is short on nitrogen. A photo alone does not confirm it; a technician checks the blade lesions and the lawn's fertility history before recommending a next step.",
+      "fact": "Despite its small size, dollar spot patches can merge into large, irregular dead areas when many patches form close together."
+    },
+    "tech_notes": "Favored by low nitrogen and prolonged leaf wetness; check hourglass-shaped blade lesions to separate from dog urine and fertilizer patterns.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/topics/dollar_spot",
+      "https://ask.ifas.ufl.edu/publication/lh064"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Active/peak months are an estimate based on moderate-temperature transitional periods; UF/IFAS describes dollar spot generally without a Florida-specific seasonal calendar, so season_basis is set to unverified.",
+      "approval_hash": "f71c196350bdf629c3a4a7f478f9b957995dfa52dcb1d8298ad03a3309b222a8"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Small, round, straw-colored patches about the size of a silver dollar, sometimes merging into larger areas",
+        "Tan, hourglass-shaped lesions with a darker border on individual blades"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A close-up showing the small, straw-colored, silver-dollar-sized patches and the hourglass lesions on individual blades.",
+        "elements": [
+          "Small, round, straw-colored patches about the size of a silver dollar, sometimes merging into larger areas",
+          "Tan, hourglass-shaped lesions with a darker border on individual blades"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "dog-urine-spots",
+          "difference": "Dog urine spots are dead circles with a dark green rim clustered near a dog's favorite spot; dollar spot scatters many small patches across the lawn.",
+          "next_observation": "A wider photo showing whether the spots are scattered or clustered near a dog's favorite spot.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "fertilizer-burn",
+          "difference": "Fertilizer burn follows a straight or striped spreader path; dollar spot forms small, round, scattered patches with hourglass-shaped blade lesions.",
+          "next_observation": "A wider photo showing whether the pattern is a straight stripe or scattered circles.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "frequent_irrigation",
+        "low_mowing"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Density often recovers over a few weeks once nutrition and watering are corrected."
+    }
+  },
+  {
+    "slug": "sugarcane-mosaic-virus-lvn",
+    "kind": "disease",
+    "common_name": "Sugarcane Mosaic Virus (lethal viral necrosis)",
+    "aka": [
+      "Lethal Viral Necrosis",
+      "LVN"
+    ],
+    "aliases": [
+      "sugarcane mosaic virus",
+      "lethal viral necrosis",
+      "st augustine mosaic",
+      "st augustinegrass mosaic virus"
+    ],
+    "scientific_name": "Sugarcane mosaic virus",
+    "rank": "species",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Broken yellow and light-green streaks running between the veins of the blades",
+      "Blotchy, mosaic-looking patterns in the lawn, most obvious in fall and winter",
+      "Streaked turf can turn to dying patches on susceptible St. Augustinegrass such as Floratam"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage",
+      "yellowing"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      9,
+      10,
+      11,
+      12,
+      1,
+      2,
+      3,
+      4
+    ],
+    "peak_months": [
+      10,
+      11,
+      12,
+      1
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "extension_office"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Broken yellow and light-green streaks, then dying patches, in St. Augustinegrass can suggest sugarcane mosaic virus (lethal viral necrosis). No product stops the virus itself. A technician suspects it, photographs it and sends a sample to a lab for confirmation.",
+      "fact": "UF/IFAS reports the most severe damage on Floratam and Provista St. Augustinegrass, and mowers moved between yards can spread it if they are not cleaned."
+    },
+    "tech_notes": "Suspect, photograph and send a sample to the UF/IFAS Plant Diagnostic Center for confirmation. Fungicides and pesticides do not control this virus. Sanitation matters: let mowers and tools dry or clean them before moving between properties.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/pp313"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). outcome no_cure: pesticides do not control the virus (PP313), so the entry routes to a specialist referral for lab confirmation rather than the lawn line. PP313 supports the fall/winter symptom cycle and Floratam susceptibility."
+    },
+    "verification": [],
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Broken yellow and light-green streaks running between the veins of the blades",
+        "Blotchy, mosaic-looking patterns that build in fall and winter",
+        "Streaked patches that dry out and die back on susceptible St. Augustinegrass"
+      ],
+      "required_signature": {
+        "text": "A photo of broken yellow streaks can raise concern, but only a lab test confirms sugarcane mosaic virus; a technician collects and sends the sample.",
+        "elements": [
+          "Broken yellow and light-green streaks running between the veins of the blades"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage is confined to hot, sunny turf with insects present; mosaic streaking shows as yellow-green streaks on the blades with no insects.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs, or a technician checks.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "cool_wet"
+      ],
+      "outcome": "no_cure",
+      "recovery_note": "Mild streaking often persists year-round, and some recovery is possible in spring, but there is no recovery from the virus itself."
+    }
+  }
+]

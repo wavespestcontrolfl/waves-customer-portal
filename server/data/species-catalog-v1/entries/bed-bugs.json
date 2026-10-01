@@ -17,7 +17,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "0d811bb0f584f64fc7d6586c432c75db1080bd420400fe0a6ad9bb582d92d9fc"
     },
     "slug": "bed-bug",
     "common_name": "Bed Bug",
@@ -42,7 +43,7 @@
       {
         "slug": "bat-bug",
         "difference": "Bed bugs and bat bugs look nearly identical; bat bug infestations trace back to a bat roost (attic, soffit) rather than bedrooms.",
-        "next_photo": "A wide shot of where you found it (bedroom vs. attic/soffit near a bat roost) — a technician confirms the species itself from a collected sample if it matters.",
+        "next_photo": "From a safe distance, get a wide shot of where you found it (bedroom vs. attic/soffit near a bat roost) — a technician confirms the species from a sample if it matters.",
         "photo_can_confirm": false
       }
     ],
@@ -103,6 +104,238 @@
     "links": {
       "site_page": "/pest-identifier/bed-bug/",
       "guides": []
+    }
+  },
+  {
+    "slug": "bat-bug",
+    "kind": "organism",
+    "common_name": "Bat Bug",
+    "role": "health_pest",
+    "risk": "defensive",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "bat bug",
+      "bat bugs",
+      "cimex adjunctus"
+    ],
+    "scientific_name": "Cimex adjunctus",
+    "rank": "species",
+    "group": "bed-bugs",
+    "subgroup": null,
+    "site_category": "Biting",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Flat, oval, reddish-brown body almost identical to a bed bug at a glance",
+      "Longer fringe hairs on the top of the segment behind the head than a bed bug has",
+      "Usually found near an attic, chimney or wall gap where bats have roosted, not around a bed",
+      "Bites people only when its usual bat hosts are gone or greatly reduced in number"
+    ],
+    "look_alikes": [
+      {
+        "slug": "bed-bug",
+        "difference": "Bat bug has longer hairs on the segment behind the head under magnification and is found near roosts, not beds; bed bug's hairs there are shorter",
+        "next_photo": "Keep a safe distance from any roost; a technician confirms this from a collected sample — location (near a roost vs. near a bed) is a strong clue but not certain alone.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites can itch and welt like a bed bug's; see a doctor if you have a strong allergic reaction.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": null,
+      "label": "Bed Bug Inspection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A close bed bug relative that normally feeds on bats and only bites people when a bat roost nearby has been closed off or has moved on. Confirming a bat roost (current or former) in an attic, chimney or wall gap is the key next step, since that's usually where the approach starts.",
+      "fact": "It looks so much like a bed bug that telling the two apart usually takes a magnified look at the hairs on the segment just behind the head."
+    },
+    "tech_notes": "Look for magnitude of hair fringe on pronotum under magnification to separate from C. lectularius. Locate current/former bat roost (attic, chimney, soffit gap) as the source; exclusion plus treatment per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Cimex_adjunctus",
+      "https://pmc.ncbi.nlm.nih.gov/articles/PMC10146278/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a peer-reviewed source this session: \"Cimicids of Medical and Veterinary Importance\" (Insects, 2023, PMC10146278), a peer-reviewed review of the family Cimicidae. It confirms C. adjunctus as \"a widespread ectoparasite of different species of bats in North America, especially in the eastern United States\" (consistent with occurring in Florida); describes the distinguishing trait as \"long and thin pronotal bristles (0.2mm)\" versus bed bugs' shorter hairs, matching this entry's look-alike distinction; and confirms it \"occasionally feed[s] on human blood when their preferred bat host is not available\" and \"is known to move to occupied rooms and bite people during the night\" -- matching this entry's traits and framing exactly. It also notes a novel Bartonella detected in wild C. adjunctus but no evidence of human disease transmission, supporting disease_vector staying false. Still no dedicated UF/IFAS Featured Creatures page exists for this species (checked against the full 771-title collection list), and IN297 covers only C. lectularius/C. hemipterus, but the traits/range claim is now resolved via peer-reviewed literature. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "fdc3e53e3713e13d43dd3347a3ffc431d7b055d40c76a7cd8a4df15660688a3f"
+    }
+  },
+  {
+    "slug": "bed-bug-signs",
+    "kind": "sign",
+    "common_name": "Bed Bug or Bat Bug Signs",
+    "role": "health_pest",
+    "risk": "defensive",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "bed bug evidence"
+    ],
+    "aliases": [
+      "bed bug signs",
+      "bed bug evidence",
+      "bed bug stains"
+    ],
+    "scientific_name": "Cimex lectularius (sign)",
+    "rank": "group",
+    "group": "bed-bugs",
+    "subgroup": null,
+    "site_category": "Biting",
+    "stages": [
+      "sign"
+    ],
+    "sign_of": [
+      "bed-bug",
+      "bat-bug"
+    ],
+    "traits": [
+      "Small rusty or dark red-brown spots on mattress seams, sheets or the bed frame, from crushed bugs or droppings",
+      "Tiny, pale, translucent shed skins caught in seams, piping or the box spring",
+      "Clusters of tiny white eggs, about the size of a pinhead, tucked into seams and crevices",
+      "A faint sweet, musty smell in a heavily infested room"
+    ],
+    "look_alikes": [
+      {
+        "slug": "roach-droppings-egg-cases",
+        "difference": "Bed bug signs cluster on the mattress seam, piping and bed frame; roach droppings and egg cases turn up in kitchens, bathrooms and cabinets, not on bedding",
+        "next_photo": "From a safe distance, zoom in on the kitchen or bathroom cabinet area instead of the mattress and bed frame.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "bedroom",
+      "living-areas"
+    ],
+    "looks": [
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites can cause itchy welts, sometimes in a line or cluster; see a doctor if you have a strong allergic reaction.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "pest",
+      "key": null,
+      "label": "Bed Bug Inspection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "These marks point to bed bugs or their close relative the bat bug, whether or not you've seen a live bug yet. Both hide well, so an inspection is what tells which one it is and how far it's spread, rather than treating off a photo alone.",
+      "fact": "A single fed female can lay a few eggs a day, which is how a couple of stray marks on a mattress seam can turn into a room-wide problem within weeks if left alone."
+    },
+    "tech_notes": "Photo signs are suggestive only; full inspection of mattress seams, box spring, frame, headboard and adjacent furniture needed to confirm live activity and scope before treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Cimex_lectularius"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "35fd4231f58459c667ce312122fb18d537fa51a2143e66f891152a204e568a5c"
     }
   }
 ]

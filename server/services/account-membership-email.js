@@ -3,9 +3,12 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { isTrackTokenLive } = require('./track-token-expiry');
-const { getPrimaryContact, getInvoiceEmailRecipients } = require('./customer-contact');
+const { getPrimaryContact } = require('./customer-contact');
+const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
+const { billingEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure } = require('./billing-email-sender');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
+const { propertyDisplayLabel } = require('../utils/property-display');
 const { currency } = require('./email-template');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
@@ -102,11 +105,9 @@ async function loadCustomer(customerId) {
     .first();
 }
 
+// Street address first; profile_label is only a nickname ("Primary").
 function propertyLabel(customer = {}) {
-  const label = clean(customer.profile_label);
-  if (label) return label;
-  const address = [customer.address_line1, customer.city].filter(Boolean).join(', ');
-  return address || 'Service property';
+  return propertyDisplayLabel(customer);
 }
 
 async function logLifecycleEmailAttempt({
@@ -155,6 +156,7 @@ async function sendTemplate({
   triggerEventId,
   metadata = {},
   contactOverride = null,
+  billingAuthorityInput = null,
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
@@ -181,8 +183,12 @@ async function sendTemplate({
   // suppressionGroupKey below is TRANSACTIONAL_GROUP, which bypasses
   // SendGrid-side suppression groups by design). A lookup failure is treated
   // the same as opted-out: it must not read as "no opt-out" on a DB blip.
+  // A billing email (billingAuthorityInput set) leaves the switch, the billing
+  // choice and the recipient to the shared billing email authority (owner
+  // ruling 2026-09-27): read by the caller, and again at the provider handoff
+  // below.
   let emailOptedOut = false;
-  try {
+  if (!billingAuthorityInput) try {
     const prefs = await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
     emailOptedOut = prefs ? prefs.email_enabled === false : false;
   } catch (err) {
@@ -233,6 +239,12 @@ async function sendTemplate({
     ...payload,
   };
 
+  // A billing email's refusals and thrown sends map and log like every other
+  // billing sender's (billing-email-sender.js).
+  const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+  const billingLog = (fields) => logLifecycleEmailAttempt({
+    customerId: recipientCustomer.id, templateKey, eventType, metadata, ...fields,
+  });
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -248,7 +260,14 @@ async function sendTemplate({
         ...categories,
       ],
       suppressionGroupKey: TRANSACTIONAL_GROUP,
+      ...(billingAuthorityInput ? {
+        withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
+          input: billingAuthorityInput, recipientEmail: contact.email, templateKey, dispatch, state,
+        }),
+      } : {}),
     });
+
+    if (state.boundaryBlock) return await billingEmailSendOutcome(result, state, billingLog);
 
     if (result.deduped) {
       return {
@@ -280,6 +299,11 @@ async function sendTemplate({
       ? { ok: true, messageId: result.message?.provider_message_id || null, sentAt: result.message?.sent_at || null }
       : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
   } catch (err) {
+    if (billingAuthorityInput) {
+      return billingEmailSendFailure(err, state.handoffStarted, billingLog, {
+        logTag: 'account-membership-email', label: `${eventType} for ${recipientCustomer.id}`,
+      });
+    }
     await logLifecycleEmailAttempt({
       customerId: recipientCustomer.id,
       templateKey,
@@ -520,9 +544,10 @@ async function sendCancellationReceived({
 // just renders and sends.
 // A BILLING email follows the billing recipient and the billing prefs, not
 // the primary contact (Codex r10 P1): notification_prefs.billing_email
-// routes AR mail to the payer's bookkeeper and email_enabled=false kills
-// the channel. (billing_reminder is RETIRED — owner ruling 2026-08-01:
-// billing notices carry no per-purpose opt-out.) The SMS leg's prefs are enforced inside send-customer-message —
+// routes AR mail to the payer's bookkeeper. (billing_reminder is RETIRED —
+// owner ruling 2026-08-01: billing notices carry no per-purpose opt-out; and
+// owner ruling 2026-09-26: the portal-wide email switch does not stop them
+// either.) The SMS leg's prefs are enforced inside send-customer-message —
 // this is the email leg's equivalent, shared with the sweep so hasEmailLeg
 // is only declared when the email can actually send.
 /**
@@ -548,17 +573,15 @@ async function sendResolutionAccepted({ customerId, caseId, reference, summary, 
   });
 }
 
+function previsitAuthorityInput(customerId) {
+  return { customerId, channel: 'email', metadata: { billingDeliveryCategory: 'billing' } };
+}
+
 async function resolvePrevisitBalanceEmailRecipient(customerId) {
-  const customer = await loadCustomer(customerId);
-  if (!customer) return { recipient: null, reason: 'customer_not_found' };
-  let prefs = {};
-  try {
-    prefs = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
-  } catch { prefs = {}; }
-  if (prefs.email_enabled === false) return { recipient: null, reason: 'email_disabled' };
-  const [recipient] = getInvoiceEmailRecipients(customer, prefs).filter((r) => isEmailLike(r.email));
-  if (!recipient?.email) return { recipient: null, reason: 'missing_email' };
-  return { recipient, reason: null };
+  const { recipient, to, refusal } = await billingEmailRecipient(
+    previsitAuthorityInput(customerId), 'account-membership-email');
+  if (refusal) return { recipient: null, reason: refusal.reason, refusal };
+  return { recipient: { ...recipient, email: to }, reason: null };
 }
 
 async function sendPrevisitBalanceReminder({
@@ -569,8 +592,8 @@ async function sendPrevisitBalanceReminder({
   billingUrl,
   idempotencyKey,
 } = {}) {
-  const { recipient, reason } = await resolvePrevisitBalanceEmailRecipient(customerId);
-  if (!recipient) return { ok: false, skipped: true, reason };
+  const { recipient, refusal } = await resolvePrevisitBalanceEmailRecipient(customerId);
+  if (!recipient) return refusal;
   return sendTemplate({
     contactOverride: recipient,
     customerId,
@@ -585,6 +608,7 @@ async function sendPrevisitBalanceReminder({
     idempotencyKey,
     categories: ['previsit_balance_reminder'],
     metadata: { amount: clean(amount), visit_date: clean(visitDate) },
+    billingAuthorityInput: previsitAuthorityInput(customerId),
   });
 }
 
@@ -651,29 +675,19 @@ function membershipPayload(customer = {}, extra = {}) {
   };
 }
 
-async function sendMembershipStarted({
-  customerId,
-  effectiveDate = new Date(),
-  sourceId = null,
+// The membership.started lane gate + payload, shared by sendMembershipStarted and
+// the one-signup-email lane (estimate-accepted-email.js embeds the same
+// "Your plan" values — GATE_SIGNUP_SINGLE_EMAIL) so the two can never drift.
+// Returns { suppressed:'one_time_lane', lane } or { lane, payload }.
+function membershipStartedPayloadFor(customer, {
   membershipTier,
   monthlyRate,
   billingCadence,
   includedServices,
-  // Lane gate (#3140 resolution): only a monthly_membership lane is billed
-  // the stored monthly_rate — per-application/prepaid customers were being
-  // welcomed with a monthly figure they are never charged ("$30.33 /
-  // quarter" for a real $91-per-application plan). The estimate converter
-  // passes the lane EXPLICITLY because this send is fire-and-forget and can
-  // race the still-uncommitted accept transaction — loadCustomer reads
-  // through the global pool and may see the PRE-accept row, so resolving
-  // from the row alone would gate on stale state. Callers that fire after
-  // commit may omit both and ride the resolveBillingLane fallback.
+  effectiveDate = new Date(),
   billingLane = null,
   perApplicationAmount,
-  idempotencyKey,
 } = {}) {
-  const customer = await loadCustomer(customerId);
-  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
   const { BILLING_MODES, resolveBillingLane } = require('./billing-lane');
   const lane = (billingLane && BILLING_MODES.includes(billingLane))
     ? billingLane
@@ -686,17 +700,7 @@ async function sendMembershipStarted({
   // callers already flow through, so the create route, the profile editor,
   // and any future caller inherit one decision. per_visit deliberately still
   // sends: a real tier + invoice-on-complete billing IS an ongoing plan.
-  if (lane === 'one_time') {
-    await logLifecycleEmailAttempt({
-      customerId: customer.id,
-      templateKey: 'membership.started',
-      eventType: 'membership.started',
-      status: 'skipped',
-      failureReason: 'one_time_lane',
-      metadata: { source_id: sourceId, billing_lane: lane },
-    });
-    return { ok: false, skipped: true, reason: 'one_time_lane' };
-  }
+  if (lane === 'one_time') return { suppressed: 'one_time_lane', lane };
   const payload = membershipPayload(customer, {
     membershipTier,
     monthlyRate,
@@ -734,6 +738,47 @@ async function sendMembershipStarted({
     payload.monthly_rate = '';
     payload.billing_cadence = 'billed after each service';
   }
+  return { lane, payload };
+}
+
+async function sendMembershipStarted({
+  customerId,
+  effectiveDate = new Date(),
+  sourceId = null,
+  membershipTier,
+  monthlyRate,
+  billingCadence,
+  includedServices,
+  // Lane gate (#3140 resolution): only a monthly_membership lane is billed
+  // the stored monthly_rate — per-application/prepaid customers were being
+  // welcomed with a monthly figure they are never charged ("$30.33 /
+  // quarter" for a real $91-per-application plan). The estimate converter
+  // passes the lane EXPLICITLY because this send is fire-and-forget and can
+  // race the still-uncommitted accept transaction — loadCustomer reads
+  // through the global pool and may see the PRE-accept row, so resolving
+  // from the row alone would gate on stale state. Callers that fire after
+  // commit may omit both and ride the resolveBillingLane fallback.
+  billingLane = null,
+  perApplicationAmount,
+  idempotencyKey,
+} = {}) {
+  const customer = await loadCustomer(customerId);
+  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  const built = membershipStartedPayloadFor(customer, {
+    membershipTier, monthlyRate, billingCadence, includedServices, effectiveDate, billingLane, perApplicationAmount,
+  });
+  const { lane, payload } = built;
+  if (built.suppressed) {
+    await logLifecycleEmailAttempt({
+      customerId: customer.id,
+      templateKey: 'membership.started',
+      eventType: 'membership.started',
+      status: 'skipped',
+      failureReason: 'one_time_lane',
+      metadata: { source_id: sourceId, billing_lane: lane },
+    });
+    return { ok: false, skipped: true, reason: 'one_time_lane' };
+  }
   return sendTemplate({
     customerId,
     templateKey: 'membership.started',
@@ -743,6 +788,49 @@ async function sendMembershipStarted({
     categories: ['membership_started'],
     metadata: { source_id: sourceId, billing_lane: lane },
   });
+}
+
+// The "Your plan" section of the one-signup-email (GATE_SIGNUP_SINGLE_EMAIL):
+// the values sendMembershipStarted would have put in its own email, built by
+// the SAME lane gate + payload (membershipStartedPayloadFor), shaped as the
+// combined template's variables. null whenever sendMembershipStarted would
+// not have sent — customer missing, a one_time lane, or the portal-wide
+// "Email Messages" kill switch (a lookup failure reads as opted out, the same
+// fail-closed posture as sendTemplate) — so the caller keeps sending the
+// separate email under its own rules and nothing is folded into an email the
+// customer opted out of.
+async function buildMembershipStartedSection({ customerId, recipientEmail, ...args } = {}) {
+  const customer = await loadCustomer(customerId);
+  if (!customer) return null;
+  // Plan details go only where membership.started itself would send them: the
+  // customer's own primary email. The onboarding email can fall back to the
+  // estimate's contact (a tenant, or someone else the estimate was addressed
+  // to), and that person must not receive the account holder's plan and rate
+  // (GH Codex r6 P1). No match → no section; membership.started then goes out
+  // separately under its own rules (and skips when the customer has no email).
+  const own = String(getPrimaryContact(customer).email || '').trim().toLowerCase();
+  if (!own || own !== String(recipientEmail || '').trim().toLowerCase()) return null;
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+    if (prefs && prefs.email_enabled === false) return null;
+  } catch (err) {
+    logger.warn(`[account-membership-email] plan section skipped for ${customer.id}: notification_prefs lookup failed: ${err.message}`);
+    return null;
+  }
+  const built = membershipStartedPayloadFor(customer, args);
+  if (built.suppressed) return null;
+  const p = built.payload;
+  return {
+    planName: p.membership_name,
+    variables: {
+      plan_heading: 'Your plan',
+      plan_name: p.membership_name,
+      plan_effective_date: p.effective_date,
+      plan_rate: p.monthly_rate,
+      plan_billing: p.billing_cadence,
+      plan_services: p.included_services,
+    },
+  };
 }
 
 // One-time "introducing the Waves app" onboarding email. The idempotency key is
@@ -1064,6 +1152,7 @@ module.exports = {
   sendResolutionAccepted,
   sendRequestUpdated,
   sendMembershipStarted,
+  buildMembershipStartedSection,
   sendAppIntro,
   sendMembershipUpdated,
   sendMembershipRenewalReminder,
@@ -1078,6 +1167,7 @@ module.exports = {
     hashValue,
     itemSummary,
     membershipPayload,
+    propertyLabel,
     sendTemplate,
     stableEventKey,
   },

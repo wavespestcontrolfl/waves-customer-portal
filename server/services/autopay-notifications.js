@@ -1,6 +1,7 @@
+const { billingLegDeliveryState, billingLegContactTime } = require('./messaging/billing-channel-routing');
 const db = require('../models/db');
 const logger = require('./logger');
-const { logAutopay, eventExistsRecently } = require('./autopay-log');
+const { logAutopay, eventExistsRecently, latestExpiredCardProgress } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -27,6 +28,34 @@ const { billingChannelAllowed } = require('./billing-delivery-channels');
 // still sends on a later run instead of being retired by the accepted one.
 const NO_PHONE_LEGS = ['push', 'email'];
 
+// All three autopay progress writers use original time when the canonical
+// sender supplies it, retaining legacy progress behavior without a witness.
+function autopayProgressStamp(result, deduped, freshFields = {}) {
+  if (!deduped) return freshFields;
+  const createdAt = billingLegContactTime(result);
+  return createdAt ? { createdAt } : freshFields;
+}
+
+// An expired card's next notice is anchored to the latest completed progress
+// row. A missing row keeps the first key stable after a lost log insert.
+async function cardExpiryEpisode(row, expYear, stage, eventType, now) {
+  const baseKey = `payment-expiry:${row.payment_method_id}:${row.exp_month}:${expYear}:${stage}`;
+  const cooldownDays = stage === '7_day' ? 7 : 30;
+  if (stage !== 'expired') return {
+    already: await eventExistsRecently(row.customer_id, eventType, cooldownDays,
+      row.payment_method_id, { reminder_stage: stage }),
+    eventKey: baseKey,
+  };
+  const progress = await latestExpiredCardProgress(row.customer_id, row.payment_method_id, row.exp_month, expYear);
+  const time = progress?.created_at == null ? null : new Date(progress.created_at).getTime();
+  return {
+    // A null/invalid durable time cannot prove that the 30 days elapsed.
+    already: !!progress && (time === null || !Number.isFinite(time)
+      || time >= now.getTime() - cooldownDays * 86400000),
+    eventKey: progress ? `${baseKey}:after:${progress.id}` : baseKey,
+  };
+}
+
 // Selected legs that have not yet been accepted for this billing cycle.
 async function pendingPreChargeLegs(customerId) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
@@ -43,6 +72,7 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
   const chargeDate = etDateString(target);
   const eventKey = `autopay-pre-charge:${customer.id}:${chargeDate}`;
   let delivered = 0;
+  let settled = 0;
   let code = null;
   for (const channel of legs) {
     let result;
@@ -67,19 +97,22 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
       // stamped as progress.
       result = err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: err.message };
     }
-    if (result.code === 'lane_changed') return { laneChanged: true, reason: result.reason };
-    if (result.deliveryOutcome === 'accepted') {
+    if (result.code === 'lane_changed') return { code: 'lane_changed', reason: result.reason };
+    const delivery = billingLegDeliveryState(channel, result);
+    if (delivery) {
+      const stamp = autopayProgressStamp(result, delivery === 'deduped', { amountCents });
       await logAutopay(customer.id, 'pre_charge_reminder_sent', {
-        amountCents,
+        ...stamp,
         details: { charge_date: chargeDate, channel },
       });
-      delivered++;
+      settled++;
+      if (delivery === 'delivered') delivered++;
     } else {
       code = result.code || result.reason || 'unknown';
       logger.warn(`[autopay-notifications] pre-charge ${channel} leg not delivered for ${customer.id}: ${code}`);
     }
   }
-  return { delivered, code };
+  return { sent: settled > 0, deduped: delivered === 0, code };
 }
 
 async function sendPreChargeReminders() {
@@ -204,29 +237,32 @@ async function sendPreChargeReminders() {
         },
       };
       const amountCents = Math.round(parseFloat(c.monthly_rate) * 100);
-      if (pendingLegs) {
-        const outcome = await sendPreChargeLegs({ customer: c, target, legs: pendingLegs, sendInput, amountCents });
-        if (outcome.laneChanged) {
-          logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${outcome.reason}`);
-          skipped++; continue;
-        }
-        if (!outcome.delivered) throw new Error(`autopay reminder blocked: ${outcome.code || 'unknown'}`);
-        sent++; continue;
-      }
-      const sendResult = await sendCustomerMessage({ to: c.phone, channel: 'sms', ...sendInput });
-      if (sendResult.code === 'lane_changed') {
-        logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${sendResult.reason}`);
+      const outcome = pendingLegs
+        ? await sendPreChargeLegs({ customer: c, target, legs: pendingLegs, sendInput, amountCents })
+        : await sendCustomerMessage({ to: c.phone, channel: 'sms', ...sendInput });
+      if (outcome.code === 'lane_changed') {
+        logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${outcome.reason}`);
         skipped++; continue;
       }
-      if (sendResult.blocked || sendResult.sent === false) {
-        throw new Error(`autopay reminder SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+      if (require('./collections/collection-hold').isHoldSuppression(outcome)) {
+        // Dispute hold: a wait, not a failure. Nothing is stamped, so the next pass re-tries.
+        skipped++; continue;
+      }
+      if (outcome.blocked || outcome.sent === false) {
+        throw new Error(`autopay reminder blocked: ${outcome.code || outcome.reason || 'unknown'}`);
       }
 
-      await logAutopay(c.id, 'pre_charge_reminder_sent', {
-        amountCents,
-        details: { charge_date: etDateString(target) },
-      });
-      sent++;
+      // No-phone legs already stamped their individual cooldowns. A phone
+      // send owns the customer-wide progress, using the original App time
+      // only when the guarded provider path supplies that earlier witness.
+      if (!pendingLegs) {
+        const stamp = autopayProgressStamp(outcome, outcome.deduped, { amountCents });
+        await logAutopay(c.id, 'pre_charge_reminder_sent', {
+          ...stamp,
+          details: { charge_date: etDateString(target) },
+        });
+      }
+      if (outcome.deduped) skipped++; else sent++;
     } catch (err) {
       logger.error(`[autopay-notifications] reminder failed for ${c.id}: ${err.message}`);
     }
@@ -381,8 +417,7 @@ async function sendCardExpiryWarnings() {
       // Keep each escalation reachable: the cooldown is keyed by stage, so a
       // 60-day notice cannot delay the 30-day pass and a 30-day notice
       // cannot suppress the distinct 7-day stage roughly three weeks later.
-      const cooldownDays = reminderStage === '7_day' ? 7 : 30;
-      const already = await eventExistsRecently(r.customer_id, eventType, cooldownDays, r.payment_method_id, { reminder_stage: reminderStage });
+      const { already, eventKey } = await cardExpiryEpisode(r, expYear, reminderStage, eventType, now);
       if (already) { await emailPromise; skipped++; continue; }
 
       const expStr = `${String(r.exp_month).padStart(2, '0')}/${String(r.exp_year).slice(-2)}`;
@@ -414,7 +449,7 @@ async function sendCardExpiryWarnings() {
         metadata: {
           original_message_type: 'payment_expiry',
           billingDeliveryCategory: 'billing',
-          notificationEventKey: `payment-expiry:${r.payment_method_id}:${r.exp_month}:${expYear}:${reminderStage}`,
+          notificationEventKey: eventKey,
           billing_mode_at_send: r.billing_mode_at_send,
           payment_method_id: r.payment_method_id,
           expiry_month: String(r.exp_month),
@@ -423,16 +458,25 @@ async function sendCardExpiryWarnings() {
         },
         hasEmailLeg: reminderStage !== '60_day',
       });
+      if (require('./collections/collection-hold').isHoldSuppression(sendResult)) {
+        // Dispute hold: the notice waits (nothing stamped, retried next sweep); the email leg is
+        // gated at its own lifecycle boundary.
+        await emailPromise;
+        skipped++; continue;
+      }
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`card expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
       }
 
+      const stamp = autopayProgressStamp(sendResult, sendResult.deduped);
       await logAutopay(r.customer_id, eventType, {
         paymentMethodId: r.payment_method_id,
-        details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4, reminder_stage: reminderStage },
+        ...stamp,
+        details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4,
+          reminder_stage: reminderStage, notification_event_key: eventKey },
       });
       await emailPromise;
-      sent++;
+      if (sendResult.deduped) skipped++; else sent++;
     } catch (err) {
       logger.error(`[autopay-notifications] expiry warning failed for ${r.customer_id}: ${err.message}`);
     }

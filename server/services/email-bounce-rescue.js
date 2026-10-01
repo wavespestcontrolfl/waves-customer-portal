@@ -450,7 +450,7 @@ async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, own
   if (!EMAIL_RE.test(email)) return { ok: false, reason: 'syntax' };
   if (email === normalizeEmail(bouncedEmail)) return { ok: false, reason: 'same_as_bounced' };
   const suppressed = await db('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [email]).where({ status: 'active' }).first();
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email)).where({ status: 'active' }).first();
   if (suppressed) return { ok: false, reason: 'candidate_suppressed' };
   const triedBefore = await db('email_bounce_rescues')
     .whereRaw('LOWER(candidate_email) = ?', [email])
@@ -558,6 +558,16 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
   return counts;
 }
 
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy —
+// no customer name in the headline (keeps it short and generic); the full
+// customer-named report still lands in `detail`.
+function bounceSuggestionHeadlineAndSummary(candidate) {
+  return {
+    headline: 'Email — bounce needs a fix',
+    summary: candidate ? `Best guess is ${candidate}. Confirm and apply it.` : 'No good replacement found. Ask for a new address.',
+  };
+}
+
 async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier, evidence, owner, reason }) {
   const email = require('./email');
   const name = owner.customer
@@ -575,10 +585,21 @@ async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier,
       : 'Ask the customer for a working address at the next touchpoint.',
   ].filter(Boolean).join('\n');
   const subject = `ACT: bounced email fix ${candidate ? 'suggested' : 'needs a human'} — ${name || bouncedEmail}`;
+  const { headline, summary } = bounceSuggestionHeadlineAndSummary(candidate);
   const result = await deliverOpsDigest({
     key: 'email-bounce-rescue',
     subject,
     text: body,
+    headline,
+    summary,
+    // One row per address; a repeat bounce of the SAME address is already
+    // deduped upstream (email-rescue:${bouncedEmail} on the auto-corrected
+    // bell above) before this path ever runs for it. Every call here is
+    // therefore a DIFFERENT customer's bounce needing a human — count alone
+    // (1, always equal to the prior row's count) would go quiet after the
+    // first; newCount:1 says every one of them is new news, so it rings.
+    count: 1,
+    newCount: 1,
     link: '/admin/customers',
     sendEmail: () => email.send({
       to: suggestionRecipient(),
@@ -881,4 +902,6 @@ module.exports = {
   extractSpelledContexts,
   consensusCandidates,
   validateCandidate,
+  bounceSuggestionHeadlineAndSummary,
+  sendSuggestionEmail,
 };

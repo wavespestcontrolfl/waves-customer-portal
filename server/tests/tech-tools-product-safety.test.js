@@ -98,3 +98,34 @@ describe('get_product_info safety block', () => {
     expect(result.safety).toBeUndefined();
   });
 });
+
+// The label rate itself: nothing a tech reads is in mL (owner ruling). For a
+// technician's request (a tech context with techId) a rate the catalog keeps
+// in mL is left out, so the tech is sent to the label; any other rate, and
+// every rate for an admin workflow such as Agent Estimate (an empty context),
+// reads as stored.
+describe('get_product_info label rate', () => {
+  const asTech = () => executeTechTool('get_product_info', { product_name: 'x' }, { techId: 'tech-1', techName: null });
+
+  test('for a technician, an mL label rate is left out, and nothing in the answer reads mL', async () => {
+    mockRow = { name: 'Sample SC', default_rate: '5-10', default_unit: 'ml/gal' };
+    const result = await asTech();
+    expect(result.default_rate).toBeNull();
+    expect(result.default_unit).toBeNull();
+    expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
+  });
+
+  test('for a technician, any other label rate reads exactly as the catalog states it', async () => {
+    mockRow = { name: 'Sample CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' };
+    const result = await asTech();
+    expect(result.default_rate).toBe('0.2-0.8');
+    expect(result.default_unit).toBe('fl_oz/gal');
+  });
+
+  test('an admin workflow keeps the exact catalog label rate, mL included', async () => {
+    mockRow = { name: 'Sample SC', default_rate: '5-10', default_unit: 'ml/gal' };
+    const result = await productInfo();
+    expect(result.default_rate).toBe('5-10');
+    expect(result.default_unit).toBe('ml/gal');
+  });
+});

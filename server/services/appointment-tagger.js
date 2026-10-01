@@ -6,7 +6,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
 const { sendNewRecurringWelcome, isNewRecurringSignupCandidate, queueOneTimeWelcomeEmail } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
@@ -654,7 +654,14 @@ class AppointmentTagger {
   async triggerPrepEmailGuide(service, pestType) {
     const automationKey = PREP_AUTOMATION_BY_PEST_TYPE[pestType] || null;
     if (!automationKey) return { queued: false, reason: 'no_automation' };
-    if (!isEnabled('emailTemplateAutomations')) return { queued: false, reason: 'gate_off' };
+    // Shadow must never change a LIVE send: this function's caller
+    // (triggerPestPrep) reads queued:true as "the email side is handled,
+    // send the companion SMS that references it" — in shadow the queued
+    // run finalizes 'shadow' (the guide email never actually goes out), so
+    // treating shadow as queueable here would leave the SMS promising an
+    // email that never arrives. Only 'live' queues; shadow behaves exactly
+    // like off (codex/coordinator finding on #5154).
+    if (emailTemplateAutomationsMode() !== 'live') return { queued: false, reason: 'gate_off' };
 
     // Upcoming open visits only: regenerate-brief re-runs onServiceScheduled
     // for past/closed appointments too, and "prepare for your treatment"

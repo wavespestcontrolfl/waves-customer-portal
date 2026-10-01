@@ -380,8 +380,8 @@ describe('Generate tree/shrub reviewed-photo payload contract', () => {
   test('lets a valid photo-only review open Generate but sends no photo fact into deterministic completed work', () => {
     const start = scheduleSource.indexOf("router.post('/generate-report'");
     const block = scheduleSource.slice(start, start + 60000);
-    expect(block).toMatch(/const hasReportInput =[^;]+\|\| suppliedTreeShrubReview;/s);
-    expect(block).toContain('|| Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0;');
+    expect(block).toMatch(/const hasReportInput =[^;]+\|\| suppliedTreeShrubReview[^;]*\|\| cappedPhotoCaptions\.length > 0;/s);
+    expect(block).toContain('|| Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0\n      || cappedPhotoCaptions.length > 0;');
     expect(block).toContain('treeShrubReviewGrounding,');
     expect(block).not.toMatch(/buildDeterministicReportCopy\(\{[^}]*treeShrubReview/s);
   });
@@ -399,7 +399,6 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const block = buildTypedFindingsPromptBlock({
       findingsType: 'termite_treatment',
       values: { treatment_method: 'Spot treatment', products_used: 'Termidor HE', areas_treated: 'Garage slab' },
-      nextStepChips: [],
       companionFindings: [],
       allowedCompanionTypes: [],
     });
@@ -439,7 +438,6 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const block = buildTypedFindingsPromptBlock({
       findingsType: 'rodent_bait_station',
       values: { stations_checked: '6' },
-      nextStepChips: [],
       companionFindings: [],
       allowedCompanionTypes: [],
       activityScore: 4,
@@ -458,7 +456,6 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const block = buildTypedFindingsPromptBlock({
       findingsType: 'termite_inspection',
       values: { treatment_recommendation: 'Recommend liquid perimeter treatment' },
-      nextStepChips: [],
       companionFindings: [],
       allowedCompanionTypes: [],
     });
@@ -806,7 +803,6 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const block = buildTypedFindingsPromptBlock({
       findingsType: 'mosquito_event',
       values: { customer_reported: 'Bites on the lanai at dusk' },
-      nextStepChips: [],
       companionFindings: [],
       allowedCompanionTypes: [],
     });
@@ -1008,32 +1004,33 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(customerFacingCompanionTypes(null)).toEqual([]);
   });
 
-  test('renders labeled lines, valid chips, and the provenance framing', () => {
+  // Owner ruling 2026-09-27: the "Next steps" chip picker was retired —
+  // Recommendations is the single tech-advice field now, so the prompt
+  // block never prints a "Next steps selected" line for any request.
+  test('renders labeled lines and the provenance framing, with no next-steps line', () => {
     const block = buildTypedFindingsPromptBlock({
       findingsType: 'termite_bait_station',
       values: { total_stations: '12', stations_checked: '11', stations_with_activity: '1' },
-      nextStepChips: ['Continue scheduled monitoring'],
       companionFindings: [],
     });
     expect(block).toContain('STRUCTURED SERVICE FINDINGS (Termite Bait Station Inspection form');
     expect(block).toContain('[OBSERVED BY TECHNICIAN]');
     expect(block).toContain('[FUTURE ADVICE — not completed work]');
     expect(block).toMatch(/Total stations.*12/i);
-    expect(block).toContain('Next steps selected: Continue scheduled monitoring');
+    expect(block).not.toContain('Next steps selected');
   });
 
-  test('drops empty values, invalid chips, and internal fields', () => {
+  test('drops empty values and internal fields', () => {
     const block = buildTypedFindingsPromptBlock({
       findingsType: 'rodent_trapping',
       // trap_visit_type is `internal` — tech-facing data that must never
       // reach a customer-facing prompt (the retired recap draft enforced the same rule)
       values: { trap_visit_type: 'setup', traps_checked: '4', traps_set: '' },
-      nextStepChips: ['Not a real chip for this type'],
       companionFindings: [],
     });
     expect(block).not.toContain('setup');
     expect(block).not.toContain('trap_visit_type');
-    expect(block).toContain('Next steps selected: None');
+    expect(block).not.toContain('Next steps selected');
     expect(block).toMatch(/4/);
   });
 
@@ -1041,7 +1038,6 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const withCompanion = buildTypedFindingsPromptBlock({
       findingsType: 'termite_bait_station',
       values: { total_stations: '8' },
-      nextStepChips: [],
       companionFindings: [
         { type: 'cockroach', values: { species: 'German cockroach' } },
         { type: 'not_a_type', values: { species: 'ignored' } },
@@ -1058,23 +1054,20 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(buildTypedFindingsPromptBlock({
       findingsType: 'termite_bait_station',
       values: { total_stations: '' },
-      nextStepChips: ['bogus'],
       companionFindings: [],
       allowedCompanionTypes: [],
     })).toBe('');
   });
 
-  test('companion-only profiles (findingsType null) still render companion facts, chips, and score', () => {
+  test('companion-only profiles (findingsType null) still render companion facts and score', () => {
     const block = buildTypedFindingsPromptBlock({
       findingsType: null,
       values: null,
-      nextStepChips: [],
       companionFindings: [{
         type: 'tree_shrub',
         // observed_conditions is companionOnly — the companion schema
         // variant must serve it (primary slice filters it out)
         values: { observed_conditions: 'Yellowing / chlorosis, Leaf spot' },
-        nextStepChips: ['Continue Tree & Shrub program'],
         activityScore: 2,
       }],
       allowedCompanionTypes: ['tree_shrub'],
@@ -1083,14 +1076,13 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(block).toContain('Yellowing / chlorosis');
     expect(block).toContain('Leaf spot');
     expect(block).toContain(': 2/5 (low)');
-    expect(block).toContain('Next steps selected (future advice): Continue Tree & Shrub program');
+    expect(block).not.toContain('Next steps selected');
   });
 
   test('comma-joined chips/multi_select values map each option through the customer label registry', () => {
     const block = buildTypedFindingsPromptBlock({
       findingsType: 'palm_injection',
       values: { deficiency_signs: 'None observed today, Iron chlorosis' },
-      nextStepChips: [],
       companionFindings: [],
       allowedCompanionTypes: [],
     });
@@ -1099,5 +1091,31 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(block).toContain("No nutrient deficiency signs were observed at today's service");
     expect(block).toContain('Iron chlorosis');
     expect(block).not.toContain('None observed today,');
+  });
+});
+
+describe('copyActivityScore — report copy follows the completion score rule (#5037 Codex r3)', () => {
+  const { copyActivityScore } = require('../routes/admin-schedule')._test;
+
+  test('a derive-mapped type ignores a submitted pin and scores from its findings field', () => {
+    // cockroach activity_level Low derives 1; a pre-deploy tab pins 5.
+    expect(copyActivityScore('cockroach', { activity_level: 'Low' }, 5)).toBe(1);
+    expect(copyActivityScore('termite_bait_station', { termite_activity: 'None observed' }, 4)).toBe(0);
+  });
+
+  test('a derive-mapped type with an empty findings field has no score, whatever was submitted', () => {
+    expect(copyActivityScore('cockroach', {}, 3)).toBeNull();
+    expect(copyActivityScore('flea', null, 2)).toBeNull();
+  });
+
+  test('a tech-set-only type keeps a valid submitted score and rejects an invalid one', () => {
+    expect(copyActivityScore('rodent_trapping', {}, 3)).toBe(3);
+    expect(copyActivityScore('rodent_trapping', {}, 9)).toBeNull();
+    expect(copyActivityScore('rodent_trapping', {}, '3')).toBeNull();
+  });
+
+  test('an unknown type falls back to the submitted-score validation', () => {
+    expect(copyActivityScore('not_a_type', {}, 2)).toBe(2);
+    expect(copyActivityScore(null, null, null)).toBeNull();
   });
 });

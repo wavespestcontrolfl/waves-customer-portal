@@ -76,6 +76,71 @@ describe('enqueueRefresh — recognising its own queue row', () => {
   });
 });
 
+describe('operator refresh — citability kill-switch reservations', () => {
+  const queueInternals = require('../services/content/opportunity-queue')._internals;
+  let gateSpy;
+
+  afterEach(() => gateSpy?.mockRestore());
+
+  function inflightDb(row) {
+    let excludeCitability = false;
+    db.mockImplementation(() => {
+      const q = {
+        whereIn: () => q,
+        where: (value, operator, expected) => {
+          if (typeof value === 'function') value.call(q);
+          if (value === 'bucket' && operator === '<>' && expected === 'citability_backfill') excludeCitability = true;
+          return q;
+        },
+        orWhere: () => q,
+        orWhereRaw: () => q,
+        whereRaw: () => q,
+        whereNot: (column, value) => {
+          if (column === 'bucket' && value === 'citability_backfill') excludeCitability = true;
+          return q;
+        },
+        first: async () => (excludeCitability && row.bucket === 'citability_backfill' ? null : row),
+      };
+      return q;
+    });
+  }
+
+  test('the shared path predicate strips fragments as well as query strings', () => {
+    const sql = RefreshAudit._identity.canonPathSql('page_url');
+    expect(sql).toContain('chr(63)');
+    expect(sql).toContain('chr(35)');
+  });
+
+  test.each(['pending', 'claimed', 'pending_review'])(
+    'gate on: an existing %s citability edit reserves the operator page',
+    async (status) => {
+      gateSpy = jest.spyOn(queueInternals, 'citabilityBackfillLaneOpen').mockReturnValue(true);
+      const row = { bucket: 'citability_backfill', status, attempt_count: 0, dedupe_key: `citability:${status}` };
+      inflightDb(row);
+
+      await expect(RefreshAudit.findInflightPageEdit(db, {
+        path: '/bed-bugs-bradenton', targetDomain: 'wavespestcontrol.com',
+      })).resolves.toBe(row);
+    },
+  );
+
+  test.each(['pending', 'claimed', 'pending_review'])(
+    'gate off: an existing %s citability edit releases the operator page',
+    async (status) => {
+      gateSpy = jest.spyOn(queueInternals, 'citabilityBackfillLaneOpen').mockReturnValue(false);
+      inflightDb({
+        bucket: 'citability_backfill', status, attempt_count: 0, dedupe_key: `citability:${status}`,
+      });
+
+      const found = await RefreshAudit.findInflightPageEdit(db, {
+        path: '/bed-bugs-bradenton', targetDomain: 'wavespestcontrol.com',
+      });
+      expect(gateSpy).toHaveBeenCalled();
+      expect(found).toBeNull();
+    },
+  );
+});
+
 describe('resolvePostByUrl', () => {
   test('returns the single published post whose LIVE URL matches path + domain', async () => {
     const calls = scriptDb([[{ id: 7, slug: 'bed-bugs-bradenton' }]]);

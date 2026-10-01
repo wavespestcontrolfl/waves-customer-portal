@@ -21,9 +21,12 @@ const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
-const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes } = require('./policy');
+const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
+const { zoneRouteDaysLive } = require('../../config/feature-gates');
+const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
-const { travelGapEnabled, violatesTravelGap } = require('./travel-gap');
+const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
+const { bookGapAdmits, delayWithinGrace } = require('./book-arrival-grace');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
@@ -241,7 +244,17 @@ async function findCapacitySlots(opts) {
   // return_time, detour_cap, ...), so a thin week explains itself.
   const rejections = {};
   const reject = (reason) => { rejections[reason] = (rejections[reason] || 0) + 1; };
-  const maxDetour = opts.customerFacing ? customerMaxDetourMinutes() : Infinity;
+  // Zone route days (GATE_ZONE_ROUTE_DAYS): a customer-facing caller that
+  // resolved the request's zone (opts.zoneSlug — /book and the estimate
+  // picker) gets a per-candidate cap, lifted on that zone's route weekday
+  // (scheduling/zone-route-days.js). Config is read once per request, and
+  // only when the gate is on and a zone was passed — otherwise the cap below
+  // is the same flat value as before.
+  const zoneRouteDays = opts.customerFacing && opts.zoneSlug && zoneRouteDaysLive()
+    ? await readZoneRouteDays(db) : null;
+  const capFor = (date, technicianId) => (opts.customerFacing
+    ? customerMaxDetourMinutes(zoneRouteDays ? { date, technicianId, zoneSlug: opts.zoneSlug, zoneRouteDays } : undefined)
+    : Infinity);
   for (const candidate of candidates) {
     const { context, date, tech, start, options } = candidate;
     const fit = evaluateArrivalPlacement(context, options);
@@ -251,7 +264,7 @@ async function findCapacitySlots(opts) {
       reject('conservative_travel');
       continue;
     }
-    if (fit.detourMinutes > maxDetour) { reject('detour_cap'); continue; }
+    if (fit.detourMinutes > capFor(date, tech.id)) { reject('detour_cap'); continue; }
     const index = fit.routeOrder.indexOf(context.target.id);
     const byId = new Map(context.rows.map(row => [row.id, row]));
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
@@ -262,6 +275,11 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      // The simulation's own arrival delay past THIS slot's start (same field
+      // findArrivalWindowSlots already exposes) — packCapacityEnds' self-serve
+      // arrival grace (owner ruling 2026-09-28) reads it to decide whether a
+      // strict-travel-gap-rejected packed end is still within the leniency.
+      arrival_delay_minutes: fit.arrivalDelayMinutes,
       return_time: minutesToTime(Math.ceil(fit.finishMinute)),
       route_mode: 'arrival_windows', travel_source: fit.travelSource, travel_reasons: fit.travelReasons,
       stops_that_day: fit.arrivals.length - 1, latest_start_min: start,
@@ -273,6 +291,16 @@ async function findCapacitySlots(opts) {
   }
   const packed = opts.packEnds === true ? packCapacityEnds(slots, {
     lat: opts.lat, lng: opts.lng, durationMinutes, expectedMinutes: opts.expectedMinutes,
+    // Self-serve arrival grace opt-in (owner ruling 2026-09-28) — ONLY
+    // estimate-slot-availability.js ever passes this; see packCapacityEnds'
+    // own header for why /book and every other packEnds:true caller must not.
+    arrivalGrace: opts.arrivalGrace === true,
+    // /book's online-booking grace (GATE_BOOK_ARRIVAL_GRACE, owner-approved
+    // 2026-09-29) — a DIFFERENT opt-in from arrivalGrace above: it packs
+    // against BOTH route neighbours with the exact rule /book's offer mirror
+    // and commit probe use (book-arrival-grace.js). Only routes/booking.js's
+    // buildBookingAvailability ever passes it, and only with the gate live.
+    bookArrivalGrace: opts.bookArrivalGrace === true,
   }) : slots;
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
@@ -304,11 +332,25 @@ async function findCapacitySlots(opts) {
 // end and dropped the real 11:00 one, then buildBookingAvailability's own
 // (already-expanded) commit-side mirror rejected the kept 10:00 as still
 // occupied — no offer at all, though 11:00 was genuinely valid.
-function capacityGapNeighbours(context, fit, startMin) {
-  const creditResolver = stopCreditResolver(context.rows);
-  const expanded = occupiedRows(context.rows).map((row) => ({
+// Version-2 combined-allocation expansion (occupiedRows) + the SAME
+// expected-minutes credit resolver (stopCreditResolver) every other reader
+// of a day's rows shares — the one place raw scheduled_services rows become
+// the {startMin, endMin, expectedMinutes} shape capacityNeighbourEntity and
+// every travel-gap probe in this module read. Pulled out of
+// capacityGapNeighbours (Codex r4 on #5314) so a caller outside this
+// module's own per-candidate loop — slot-reservation.js's reserve-time rival-
+// hold check — can build the exact same neighbour shape instead of
+// hand-rolling the expansion. Requires the sync expected-minutes catalog to
+// already be warm (ensureCatalogLoaded) exactly like every other caller.
+function expandRowsWithCredit(rows) {
+  const creditResolver = stopCreditResolver(rows);
+  return occupiedRows(rows).map((row) => ({
     ...row, expectedMinutes: creditResolver(row, row.endMin - row.startMin),
   }));
+}
+
+function capacityGapNeighbours(context, fit, startMin) {
+  const expanded = expandRowsWithCredit(context.rows);
   const expandedById = new Map(expanded.map((row) => [row.id, row]));
   const anchors = [
     ...fit.routeOrder
@@ -329,10 +371,28 @@ function capacityGapNeighbours(context, fit, startMin) {
   // facing travel-gap predicate before picking a group's packed endpoint.
   // Resolved from the SAME expanded map as the anchors above (Codex r8 P1)
   // — never the raw context.rows member.
+  //
+  // Every live hold on this tech/date (Codex r2 P1, #5314): prevId/nextId
+  // above keep only the SINGLE nearest anchor per side (latest-starting
+  // before, earliest-starting after) — the right approximation for a real
+  // committed route, where the latest-starting earlier stop is also the
+  // latest-ENDING one. A hold's stored window is a PROMISE, not a fixed
+  // slot, so an earlier-starting hold can still end later than a
+  // later-starting committed stop that the anchor scan picked instead,
+  // leaving that hold's own buffer requirement against the candidate
+  // completely unchecked. packCapacityEnds' grace only ever waives the ONE
+  // neighbour it was asked about — never a hold — so it must check every
+  // live hold explicitly before granting.
   return {
     prevId, nextId,
     prevRow: prevId != null ? expandedById.get(prevId) : null,
     nextRow: nextId != null ? expandedById.get(nextId) : null,
+    holdRows: expanded.filter((row) => isHoldStop(row)),
+    // Every stop on the day (allocation-expanded, credit attached) —
+    // packCapacityEnds' /book mode (GATE_BOOK_ARRIVAL_GRACE) judges a
+    // candidate against the SAME whole-day stop set /book's own offer mirror
+    // reads, not just the one nearest anchor per side.
+    dayRows: expanded,
   };
 }
 
@@ -352,6 +412,18 @@ function capacityNeighbourEntity(row) {
     lat: row.lat ?? null, lng: row.lng ?? null, windowMinutes,
     expectedMinutes: Number.isFinite(row.expectedMinutes) ? row.expectedMinutes : windowMinutes,
   };
+}
+
+// capacityNeighbourEntity plus the two facts book-arrival-grace.js's waiver
+// reads: whether the stop is a live hold and which technician it is assigned
+// to. The identical shape routes/booking.js's mirror rows carry.
+function capacityStopEntity(row) {
+  const entity = capacityNeighbourEntity(row);
+  return entity ? { ...entity, hold: isHoldStop(row), technician_id: row.technician_id ?? null } : null;
+}
+
+function sameAssignedTech(row, slot) {
+  return row?.technician_id != null && String(row.technician_id) === String(slot?.technician?.id);
 }
 
 // Packed-ends for capacity results (Codex r2 P1): findCapacitySlots
@@ -375,39 +447,190 @@ function capacityNeighbourEntity(row) {
 // one the commit gate would also accept; a group with no survivors on a
 // side offers nothing from that side, same as every other packed-ends rule
 // in this codebase — never a synthesized fallback.
-function packCapacityEnds(slots, caller = {}) {
+//
+// Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
+// lenient than strict" — Parrish live miss): a customer-picked time names an
+// ARRIVAL window, so a candidate that fails the strict travel-gap buffer is
+// still offered when the day's own route simulation already proves the
+// technician arrives within selfServeArrivalGraceMinutes of THIS slot's
+// start (slot.arrival_delay_minutes — only ever set on a slot that already
+// passed evaluateArrivalPlacement's feasibility check, so "the simulation
+// found it feasible" is a precondition of the slot existing at all here).
+//
+// SCOPED TO THE ESTIMATE PICKER ONLY (Codex r1 P1, #5314 — /book later got its
+// OWN opt-in, `bookArrivalGrace`, and its own both-neighbour pick below,
+// packCapacityEndsForBook, once its commit could honor a grace-kept slot;
+// GATE_BOOK_ARRIVAL_GRACE, owner-approved 2026-09-29): packCapacityEnds
+// itself runs for every packEnds:true caller (booking.js's
+// buildBookingAvailability too — /book, voice, re-service, inspection, every
+// public reschedule), but that builder's own commit path (createSelfBooking,
+// the rebooker) runs a STRICT pre-verify travel probe the estimate picker's
+// commit does not, so a grace-kept slot there would 409 SLOT_TAKEN before
+// ever reaching verifyArrivalCapacity. `caller.arrivalGrace === true` is the
+// ONLY signal that opts a call into grace — passed by
+// estimate-slot-availability.js alone (guard-tested); every other caller,
+// including booking.js's own packEnds:true call, is byte-identical to
+// before this whole lane regardless of the env value.
+// A live estimate hold neighbour NEVER gives grace — it may evaporate before
+// this slot is ever committed, unlike a real committed stop the simulation
+// already routed around. Grace may only waive the travel BUFFER against the
+// PREVIOUS stop (the candidate itself arriving late, inside its own arrival
+// window) — never a real overlap, never a live hold, and never the next
+// stop's side, since the next customer's promised start is not this
+// customer's to spend.
+function graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbour) {
+  // Only a previous stop the simulation actually routed THIS technician
+  // through: an unassigned blocker is a fixed overlap to the simulator, with
+  // no drive modelled to or from it (Codex r3 P1 on #5314).
+  if (!arrivalGraceOptIn || isHoldStop(row) || !sameAssignedTech(row, slot)) return false;
+  const grace = selfServeArrivalGraceMinutes({ date: slot.date });
+  if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return false;
+  if (slot.arrival_delay_minutes > grace) return false;
+  // Every live hold is checked separately, for EVERY graced slot, in
+  // withinArrivalGrace (Codex r5 P1 on #5314).
+  return travelGapConflicts(candidate, [neighbour]).every((c) => c.reason === 'travel_gap');
+}
+
+// The candidate entity travel-gap.js reads, from a capacity slot + caller.
+function capacityCandidateEntity(slot, caller) {
+  const startMin = timeToMinutes(slot.start_time);
+  const endMin = timeToMinutes(slot.end_time);
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return null;
+  const ownWindow = Number.isFinite(caller.durationMinutes) ? caller.durationMinutes : (endMin - startMin);
+  return {
+    startMin, endMin, lat: caller.lat ?? null, lng: caller.lng ?? null, windowMinutes: ownWindow,
+    expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
+  };
+}
+
+// No live hold on this technician's route (or unassigned) may sit inside the
+// strict buffer of a graced slot. capacityGapNeighbours keeps only the
+// nearest anchor per side, and an earlier-starting hold can end later than a
+// later-starting committed stop (Codex r2 P1), so every hold is checked —
+// and for EVERY graced slot, not just ones whose anchor needed a waiver:
+// reserveSlot re-checks rival holds for every graced offer, so the offer
+// must too or it dead-ends in a 409 (Codex r5 P1). Another technician's
+// hold is on a different route (Codex r3 P2).
+function liveHoldsClear(slot, candidate) {
+  if (!travelGapEnabled() || !candidate) return true;
+  const holdRows = (slot._gap?.holdRows || []).filter((holdRow) => holdRow.technician_id == null || sameAssignedTech(holdRow, slot));
+  return holdRows.every((holdRow) => {
+    const holdNeighbour = capacityNeighbourEntity(holdRow);
+    return !holdNeighbour || !violatesTravelGap(candidate, [holdNeighbour]);
+  });
+}
+
+// Offer/commit parity: with grace opted in and on for the slot's date,
+// commit (verifyArrivalCapacity) refuses any fit delayed past grace, so the
+// offer must drop those slots too — including ones that pass the strict
+// buffer outright. Applied BEFORE a group picks its packed endpoint (Codex
+// r1 P2), not as a final pass after — a later, still-valid candidate on the
+// same side must not be lost because an earlier one failed only on grace.
+function withinArrivalGrace(arrivalGraceOptIn, slot, caller) {
+  if (!arrivalGraceOptIn) return true;
+  const grace = selfServeArrivalGraceMinutes({ date: slot.date });
+  if (!(grace > 0)) return true;
+  if (Number.isFinite(slot.arrival_delay_minutes) && slot.arrival_delay_minutes > grace) return false;
+  return liveHoldsClear(slot, capacityCandidateEntity(slot, caller));
+}
+
+// /book mode (caller.bookArrivalGrace === true, GATE_BOOK_ARRIVAL_GRACE): the
+// SAME per-candidate admission /book's offer mirror applies in
+// routes/booking.js (book-arrival-grace.js bookGapAdmits over the day's
+// stops), so a packed pick is exactly one the mirror keeps.
+//
+// Why this exists (owner-approved 2026-09-29; Fable read-only prod runs: this
+// finder saw 8 bookable Parrish days at cap 30 while /book showed 3): the
+// default pick above tests each group's prev-side candidate against the
+// PREVIOUS stop only and its next-side candidate against the NEXT stop only.
+// A candidate that clears its own neighbour can still crowd the OTHER one; it
+// survived here and was then dropped by the mirror's both-neighbour check,
+// often emptying 4-7-stop days. Here every candidate is checked against every
+// neighbour (and overlap and live hold) BEFORE a group's endpoint is chosen,
+// so a later candidate that clears both is never lost to an earlier one that
+// crowds the far side. Graced waivers follow bookGapAdmits exactly: previous
+// assigned committed stop only, simulation delay within grace, holds clear.
+function packCapacityEndsForBook(slots, caller) {
+  const admitted = new Map();
+  const admits = (slot) => {
+    if (!admitted.has(slot)) {
+      const candidate = capacityCandidateEntity(slot, caller);
+      const grace = selfServeArrivalGraceMinutes({ date: slot.date });
+      const stops = (slot._gap?.dayRows || [])
+        .filter((row) => row.technician_id == null || sameAssignedTech(row, slot))
+        .map(capacityStopEntity).filter(Boolean);
+      admitted.set(slot, delayWithinGrace(slot.arrival_delay_minutes, grace)
+        && (!candidate || !travelGapEnabled()
+          || bookGapAdmits(candidate, stops, {
+            technicianId: slot.technician?.id, grace, arrivalDelayMinutes: slot.arrival_delay_minutes,
+          })));
+    }
+    return admitted.get(slot);
+  };
   const groups = new Map();
   for (const slot of slots) {
     const key = `${slot.date}|${slot.technician.id}|${slot._gap?.prevId ?? ''}|${slot._gap?.nextId ?? ''}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(slot);
   }
-  const clearsTravelGap = (slot, row) => {
+  const keep = new Set();
+  for (const group of groups.values()) {
+    const prevReal = group[0]._gap?.prevId != null;
+    const nextReal = group[0]._gap?.nextId != null;
+    const survivors = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time)).filter(admits);
+    if (!survivors.length) continue;
+    if (!prevReal && !nextReal) { for (const s of survivors) keep.add(s); continue; }
+    if (prevReal) keep.add(survivors[0]);
+    if (nextReal) keep.add(survivors[survivors.length - 1]);
+  }
+  return slots.filter((s) => keep.has(s));
+}
+
+function packCapacityEnds(slots, caller = {}) {
+  if (caller.bookArrivalGrace === true) {
+    // /book mode applies only to a date whose grace is positive: a zero-grace
+    // date (same-day pick, env 0) keeps the OLD packing byte for byte — the
+    // same per-date rule routes/booking.js signs its policy tag under.
+    // Groups key on date, so packing the two subsets separately is exact.
+    const graced = slots.filter((s) => selfServeArrivalGraceMinutes({ date: s.date }) > 0);
+    if (graced.length === slots.length) return packCapacityEndsForBook(slots, caller);
+    const plain = packCapacityEnds(slots.filter((s) => !graced.includes(s)), { ...caller, bookArrivalGrace: false });
+    const kept = new Set([...packCapacityEndsForBook(graced, caller), ...plain]);
+    return slots.filter((s) => kept.has(s));
+  }
+  const arrivalGraceOptIn = caller.arrivalGrace === true;
+  const groups = new Map();
+  for (const slot of slots) {
+    const key = `${slot.date}|${slot.technician.id}|${slot._gap?.prevId ?? ''}|${slot._gap?.nextId ?? ''}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  }
+  const clearsTravelGap = (slot, row, side) => {
     if (!travelGapEnabled()) return true;
     const neighbour = capacityNeighbourEntity(row);
     if (!neighbour) return true;
-    const startMin = timeToMinutes(slot.start_time);
-    const endMin = timeToMinutes(slot.end_time);
-    if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return true;
-    const ownWindow = Number.isFinite(caller.durationMinutes) ? caller.durationMinutes : (endMin - startMin);
-    const candidate = {
-      startMin, endMin, lat: caller.lat ?? null, lng: caller.lng ?? null, windowMinutes: ownWindow,
-      expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
-    };
-    return !violatesTravelGap(candidate, [neighbour]);
+    const candidate = capacityCandidateEntity(slot, caller);
+    if (!candidate) return true;
+    if (!violatesTravelGap(candidate, [neighbour])) return true;
+    return side === 'prev' && graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbour);
   };
   const keep = new Set();
   for (const group of groups.values()) {
     const prevReal = group[0]._gap?.prevId != null;
     const nextReal = group[0]._gap?.nextId != null;
-    if (!prevReal && !nextReal) { for (const s of group) keep.add(s); continue; }
+    if (!prevReal && !nextReal) {
+      for (const s of group) if (withinArrivalGrace(arrivalGraceOptIn, s, caller)) keep.add(s);
+      continue;
+    }
     const byStart = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
     if (prevReal) {
-      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow));
+      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow, 'prev')
+        && withinArrivalGrace(arrivalGraceOptIn, s, caller));
       if (survivors.length) keep.add(survivors[0]);
     }
     if (nextReal) {
-      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow));
+      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow, 'next')
+        && withinArrivalGrace(arrivalGraceOptIn, s, caller));
       if (survivors.length) keep.add(survivors[survivors.length - 1]);
     }
   }
@@ -1008,5 +1231,10 @@ module.exports = {
     packCapacityEnds,
     capacityGapNeighbours,
     buildDayStops,
+    // Shared travel-gap neighbour shape (Codex r4 on #5314) — reused by
+    // slot-reservation.js's reserve-time rival-hold check so it builds the
+    // EXACT same entity shape the offer side does, never a hand-rolled one.
+    expandRowsWithCredit,
+    capacityNeighbourEntity,
   },
 };

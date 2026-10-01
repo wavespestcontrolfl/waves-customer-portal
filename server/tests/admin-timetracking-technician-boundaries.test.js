@@ -434,6 +434,223 @@ describe('admin timetracking technician data/auth boundaries', () => {
     expect(collision.update).not.toHaveBeenCalled();
   });
 
+  // Owner-only access model (owner ruling 2026-09-28): technicians.email is
+  // the authorization key ibFullAccess() checks — assigning an
+  // IB_FULL_ACCESS_EMAILS address to ANY row (create or update) must itself
+  // require full access, or any admin could grant themselves (or another
+  // technician) the owner's scope through this endpoint.
+  describe('owner-only access model (full-access email assignment)', () => {
+    afterEach(() => {
+      delete process.env.IB_FULL_ACCESS_EMAILS;
+    });
+
+    test('create refuses a non-owner admin assigning the full-access email', async () => {
+      const tx = installTransaction([]);
+
+      const result = await invoke(createTechnician, {
+        body: { name: 'Impostor', email: 'contact@wavespestcontrol.com' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toEqual({ error: 'Only the owner account can change this email address.' });
+      expect(tx.remaining()).toHaveLength(0);
+    });
+
+    // Pre-push audit P1: normalizeTechnicianEmail/canonicalStaffEmail already
+    // trim+lowercase before this guard sees the value, but the guard also
+    // re-normalizes defensively — this proves a mixed-case/whitespace
+    // variant of the owner's email is caught either way, never slipping
+    // through on a raw-case comparison.
+    test('create refuses a mixed-case/whitespace variant of the full-access email', async () => {
+      const tx = installTransaction([]);
+
+      const result = await invoke(createTechnician, {
+        body: { name: 'Impostor', email: '  Contact@WavesPestControl.COM  ' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toEqual({ error: 'Only the owner account can change this email address.' });
+      expect(tx.remaining()).toHaveLength(0);
+    });
+
+    test('create allows the full-access owner to assign the full-access email', async () => {
+      const noConflict = makeChain({ first: undefined });
+      const insert = makeChain({ returning: [{
+        ...rawTechnician,
+        id: 'tech-owner-2',
+        email: 'contact@wavespestcontrol.com',
+      }] });
+      installTransaction([noConflict, insert]);
+
+      const result = await invoke(createTechnician, {
+        body: { name: 'Second Owner Row', email: 'contact@wavespestcontrol.com' },
+        technician: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        email: 'contact@wavespestcontrol.com',
+      }));
+    });
+
+    test('update refuses a non-owner admin reassigning any row’s email to the full-access address', async () => {
+      const target = makeChain({ first: rawTechnician });
+      const noConflict = makeChain({ first: undefined });
+      const tx = installTransaction([target, noConflict]);
+
+      const result = await invoke(updateTechnician, {
+        params: { id: 'tech-1' },
+        body: { email: 'contact@wavespestcontrol.com' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-2',
+      });
+
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toEqual({ error: 'Only the owner account can change this email address.' });
+      expect(tx.remaining()).toHaveLength(0);
+      expect(target.update).not.toHaveBeenCalled();
+    });
+
+    test('IB_FULL_ACCESS_EMAILS override protects the NEW email and stops protecting the old default', async () => {
+      process.env.IB_FULL_ACCESS_EMAILS = 'owner@example.test';
+
+      // The override replaces the allow-list — the OLD default
+      // (contact@wavespestcontrol.com) is now just an ordinary address, so
+      // a non-owner admin CAN assign it without tripping the guard.
+      const target1 = makeChain({ first: rawTechnician });
+      const noConflict1 = makeChain({ first: undefined });
+      const write1 = makeChain();
+      const reread1 = makeChain({ first: { ...rawTechnician, email: 'contact@wavespestcontrol.com', auth_token_version: 9 } });
+      installTransaction([target1, noConflict1, write1, reread1]);
+      const allowed = await invoke(updateTechnician, {
+        params: { id: 'tech-1' },
+        body: { email: 'contact@wavespestcontrol.com' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-2',
+      });
+      expect(allowed.statusCode).toBe(200);
+
+      // The NEW allow-listed email is what a non-owner admin is refused now.
+      const target2 = makeChain({ first: rawTechnician });
+      const noConflict2 = makeChain({ first: undefined });
+      const tx2 = installTransaction([target2, noConflict2]);
+      const refused = await invoke(updateTechnician, {
+        params: { id: 'tech-1' },
+        body: { email: 'owner@example.test' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-2',
+      });
+      expect(refused.statusCode).toBe(403);
+      expect(tx2.remaining()).toHaveLength(0);
+    });
+
+    test('update allows the full-access owner to reassign the full-access email to another row', async () => {
+      const target = makeChain({ first: rawTechnician });
+      const noConflict = makeChain({ first: undefined });
+      const write = makeChain();
+      const reread = makeChain({ first: { ...rawTechnician, email: 'contact@wavespestcontrol.com', auth_token_version: 9 } });
+      installTransaction([target, noConflict, write, reread]);
+
+      const result = await invoke(updateTechnician, {
+        params: { id: 'tech-1' },
+        body: { email: 'contact@wavespestcontrol.com' },
+        technician: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-1',
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
+        email: 'contact@wavespestcontrol.com',
+      }));
+    });
+
+    // P2 (stripping direction): a non-owner admin must not be able to move
+    // a row's CURRENT full-access email to anything else either — that
+    // would permanently strip the owner's own access with no in-product
+    // way to reassign it back (unset technicians.email is a dead end; the
+    // only writer of that column that a non-owner can still reach after
+    // this PR is this same guarded endpoint).
+    test('a non-owner admin cannot move the owner row’s CURRENT full-access email to an ordinary address', async () => {
+      const ownerRow = { ...rawTechnician, id: 'owner-row', email: 'contact@wavespestcontrol.com' };
+      const target = makeChain({ first: ownerRow });
+      const noConflict = makeChain({ first: undefined });
+      const tx = installTransaction([target, noConflict]);
+
+      const result = await invoke(updateTechnician, {
+        params: { id: 'owner-row' },
+        body: { email: 'someone-else@example.test' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-2',
+      });
+
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toEqual({ error: 'Only the owner account can change this email address.' });
+      expect(tx.remaining()).toHaveLength(0);
+      expect(target.update).not.toHaveBeenCalled();
+      expect(PushService.deactivateStaffUser).not.toHaveBeenCalled();
+      expect(disconnectStaffSockets).not.toHaveBeenCalled();
+    });
+
+    test('the full-access owner CAN move their own row’s email to an ordinary address', async () => {
+      const ownerRow = { ...rawTechnician, id: 'owner-row', email: 'contact@wavespestcontrol.com' };
+      const target = makeChain({ first: ownerRow });
+      const noConflict = makeChain({ first: undefined });
+      const write = makeChain();
+      const reread = makeChain({ first: { ...ownerRow, email: 'newcontact@example.test', auth_token_version: 9 } });
+      installTransaction([target, noConflict, write, reread]);
+
+      const result = await invoke(updateTechnician, {
+        params: { id: 'owner-row' },
+        body: { email: 'newcontact@example.test' },
+        technician: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-1',
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
+        email: 'newcontact@example.test',
+        auth_token_version: 9,
+      }));
+    });
+
+    test('an edit that resends the row’s existing, unchanged full-access email is never blocked', async () => {
+      // A non-owner admin editing an unrelated field (phone) on the OWNER's
+      // own profile row: the client sends the whole form back, including
+      // the owner's existing, unchanged email. This must succeed — the
+      // guard is keyed on an actual CHANGE, never on the field's presence.
+      const ownerRow = { ...rawTechnician, id: 'owner-row', email: 'contact@wavespestcontrol.com' };
+      const target = makeChain({ first: ownerRow });
+      const noConflict = makeChain({ first: undefined });
+      const write = makeChain();
+      const reread = makeChain({ first: { ...ownerRow, phone: '+19415550100' } });
+      installTransaction([target, noConflict, write, reread]);
+
+      const result = await invoke(updateTechnician, {
+        params: { id: 'owner-row' },
+        body: { email: 'contact@wavespestcontrol.com', phone: '+19415550100' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-2',
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(write.update).toHaveBeenCalledWith(expect.objectContaining({ phone: '+19415550100' }));
+      // No credential rotation either — the email did not actually change.
+      expect(write.update.mock.calls[0][0]).not.toHaveProperty('auth_token_version');
+    });
+  });
+
   test('PUT refuses self-deactivation before writing', async () => {
     const target = makeChain({ first: {
       ...rawTechnician,

@@ -1,9 +1,10 @@
-import { Fragment, useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
+import usePortalActivity from '../hooks/usePortalActivity';
 import api from '../utils/api';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
@@ -16,6 +17,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
 import { showCustomerAlert, showCustomerConfirm } from '../components/brand/CustomerDialogHost';
 import { cardBrandLabel } from '../lib/cardBrand';
+import { microdepositSavedPhrases } from '../lib/microdeposit';
 import AutopayCard from '../components/billing/AutopayCard';
 import { annualPrepayRenewalLine } from '../lib/annualPrepayRenewal';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
@@ -23,8 +25,10 @@ import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
+import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
+import YardMonthCard, { useYardMonth } from '../components/portal/YardMonthCard';
 import { etDateString, formatETDateTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
@@ -42,6 +46,8 @@ import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcas
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
+import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
+import useSheetViewport from '../hooks/useSheetViewport';
 import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
@@ -306,10 +312,13 @@ function WavesAiBar({ tab, onAsk }) {
     // The shared sheet owns the card's margin (a top-only shorthand), so the
     // gap to the tab content below lives on this wrapper.
     <div style={{ marginBottom: 16 }}>
-    <section className="waves-ask-card" data-glass="card" aria-label="Ask Waves AI" style={PORTAL_CARD_STYLE}>
-      <div className="waves-ask-eyebrow" data-gt="eyebrow" style={{ color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-        Waves AI
-      </div>
+    <section className="waves-ask-card" data-portal-ask="" data-glass="card" aria-label="Ask Waves AI" style={PORTAL_CARD_STYLE}>
+      <details key={tab}>
+      <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', color: PORTAL_SHELL.text, fontSize: 16, fontWeight: 700 }}>
+        <Icon name="chat" size={18} />
+        <span style={{ flex: 1 }}>Ask Waves AI</span>
+        <Icon name="chevronDown" size={16} />
+      </summary>
       <form className="waves-ask-form" onSubmit={(e) => { e.preventDefault(); submit(); }}>
         <input
           type="text"
@@ -333,6 +342,7 @@ function WavesAiBar({ tab, onAsk }) {
           </div>
         ))}
       </div>
+      </details>
     </section>
     </div>
   );
@@ -2660,6 +2670,25 @@ function SavedVisitDetails({ visits }) {
   </ul>;
 }
 
+// The Google review card stops showing once the customer taps it or dismisses
+// it. A tracked click also ends it server-side (review_requests.redirected_at);
+// this remembers the untracked bare-link tap and dismissals per completed visit
+// in the browser only — no new table.
+const REVIEW_CARD_DONE_KEY = 'waves.googleReviewCardDone';
+// Keyed by the scheduled visit, which every service record of that visit
+// shares; an unlinked legacy record falls back to its own id.
+const reviewCardKey = (c) => c.scheduledServiceId || c.serviceRecordId;
+function reviewCardDone(serviceRecordId) {
+  try { return JSON.parse(localStorage.getItem(REVIEW_CARD_DONE_KEY) || '[]').includes(serviceRecordId); } catch { return false; }
+}
+function rememberReviewCardDone(serviceRecordId) {
+  if (!serviceRecordId) return; // no visit id to remember: the dismissal lasts this session only
+  try {
+    const ids = JSON.parse(localStorage.getItem(REVIEW_CARD_DONE_KEY) || '[]').filter((id) => id !== serviceRecordId);
+    localStorage.setItem(REVIEW_CARD_DONE_KEY, JSON.stringify([...ids, serviceRecordId].slice(-20)));
+  } catch { /* storage unavailable — the card just shows again next visit to Home */ }
+}
+
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
@@ -2709,6 +2738,23 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   }, [nextService, calendarWindowTick]);
   const nextServiceStatus = nextRead.error ? 'error' : nextRead.data ? 'ready' : 'loading';
   const [confirmingVisit, setConfirmingVisit] = useState(false);
+  // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): the sheet mounts
+  // as a separate component (VisitPrepPhotoSheet) rather than growing this
+  // file further — see its own header. The button only shows while the
+  // server's own eligibility says so (nextService.prepPhotos.eligible),
+  // never inferred client-side.
+  // The visit id the sheet was opened for, not a bare boolean: the sheet is
+  // open only while the card still shows THAT visit, so a refresh that
+  // drops it (A → none → B) can never reopen the sheet for B on its own
+  // (Codex #5306 r3 P2).
+  const [visitPrepSheetFor, setVisitPrepSheetFor] = useState(null);
+  // Forget it as soon as the card shows anything else, so even the same
+  // visit coming back after a gap does not reopen the sheet by itself.
+  useEffect(() => {
+    if (visitPrepSheetFor != null && String(nextService?.id ?? '') !== String(visitPrepSheetFor)) {
+      setVisitPrepSheetFor(null);
+    }
+  }, [nextService?.id, visitPrepSheetFor]);
   const [stats, setStats] = useState(null);
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
@@ -2723,8 +2769,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
   const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
-  const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
-  const [pendingSatisfactionStatus, setPendingSatisfactionStatus] = useState('loading');
+  const [reviewCard, setReviewCard] = useState(null);
+  const [reviewCardStatus, setReviewCardStatus] = useState('loading');
   const [referralStats, setReferralStats] = useState(null);
   const [referralStatsStatus, setReferralStatsStatus] = useState('loading');
   // Authoritative billing mode from the autopay response — /auth/me still
@@ -2746,15 +2792,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       setBillingModeStatus('ready');
     }).catch(() => setBillingModeStatus('error'));
   }, []);
-  const [satRating, setSatRating] = useState(0);
-  const [satHover, setSatHover] = useState(0);
-  const [satPhase, setSatPhase] = useState('rate');
-  const [satFeedback, setSatFeedback] = useState('');
-  const [satReviewLink, setSatReviewLink] = useState('');
-  const [satOfficeName, setSatOfficeName] = useState('');
-  const [satSubmitting, setSatSubmitting] = useState(false);
-  const [satError, setSatError] = useState('');
-  const [satDismissed, setSatDismissed] = useState(false);
+  const [reviewCardDismissed, setReviewCardDismissed] = useState(false);
   // Home-page content rows (owner 2026-07-09) — Facebook and Instagram
   // (same public feed the wavespestcontrol.com Social Hub renders), the
   // Waves blog, and the newsletter. Best-effort: an empty/failed feed just
@@ -2810,20 +2848,20 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
         console.error(err);
         setBalanceStatus('error');
       });
-    api.getPendingSatisfaction().then(d => {
-      // A prompt served under another house than Home shows (the echo
+    api.getGoogleReviewCard().then(d => {
+      // A card served under another house than Home shows (the echo
       // disagrees with the entry) is not asked — the selection is re-read
       // instead (GitHub codex r11 P2). Same rule as the next/last reads.
       const { entry, saved, named, refresh } = pendingScopeRef.current;
       if (scopeEchoMismatch(d.propertyScope, entry, saved, named)) {
         if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
-      } else if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
-      setPendingSatisfactionStatus('ready');
+      } else if (d.card && !reviewCardDone(reviewCardKey(d.card))) setReviewCard(d.card);
+      setReviewCardStatus('ready');
     }).catch(err => {
-      // No error UI: the feedback card only exists when a pending item is
-      // known, so a failed load safely renders nothing.
+      // No error UI: the review card only exists when the server offers one,
+      // so a failed load safely renders nothing.
       console.error(err);
-      setPendingSatisfactionStatus('error');
+      setReviewCardStatus('error');
     });
     api.getReferrals().then(d => {
       if (d?.stats) setReferralStats({
@@ -2858,68 +2896,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       .then((d) => setNewsletterPosts((d?.posts || []).filter((p) => p.link).slice(0, 6)))
       .catch(() => {});
   }, []);
-
-  const handleSatRating = async (rating) => {
-    setSatRating(rating);
-    setSatError('');
-    setSatSubmitting(true);
-    try {
-      const result = await api.submitSatisfaction({
-        serviceRecordId: pendingSatisfaction.id,
-        rating,
-      });
-      if (result.action === 'review') {
-        setSatReviewLink(result.reviewLink);
-        setSatOfficeName(result.officeName);
-        setSatPhase('review');
-      } else {
-        setSatPhase('feedback');
-      }
-    } catch (err) {
-      // The write failed — an optimistically lit rating with no phase change
-      // read as "recorded" while nothing was saved. Clear it and say so.
-      console.error(err);
-      setSatRating(0);
-      setSatError('We could not record your rating. Please try again.');
-    }
-    setSatSubmitting(false);
-  };
-
-  const handleSatFeedback = async () => {
-    const note = satFeedback.trim();
-    if (!note) {
-      // Nothing to save — the rating from the previous step already went
-      // through, and an empty POST would only draw the duplicate 409.
-      setSatPhase('thanks');
-      return;
-    }
-    setSatSubmitting(true);
-    setSatError('');
-    try {
-      // The server updates the response the rating step inserted, filling
-      // in the written note (satisfaction.js duplicate-update path).
-      await api.submitSatisfaction({
-        serviceRecordId: pendingSatisfaction.id,
-        rating: satRating,
-        feedbackText: note,
-      });
-      setSatPhase('thanks');
-    } catch (err) {
-      if (err?.status === 409) {
-        // A note is already stored for this visit (double-submit) — that IS
-        // the saved state, not a failure.
-        setSatPhase('thanks');
-        setSatSubmitting(false);
-        return;
-      }
-      // The rating from the previous step is already recorded, but this
-      // note is NOT — thanking the customer for a message we never received
-      // silently loses a service concern. Keep the form open to retry.
-      console.error(err);
-      setSatError('Your note could not be sent. Your rating is saved — please try sending the note again.');
-    }
-    setSatSubmitting(false);
-  };
 
   // position:relative lets the glass specular pseudo-elements anchor to each
   // card; inert without the glass theme mounted (no offsets, no stacking context).
@@ -3062,13 +3038,19 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
               Hello {customer.firstName || 'there'}!
             </h1>
           </div>
-          <button type="button" onClick={() => onSwitchTab?.('billing')} style={{
+          {/* Same glass chip as the quick actions — the opaque #FFF7ED panel
+              read as a peach block over the hero. The amber label carries
+              the "due" signal. */}
+          <button type="button" data-glass="chip" onClick={() => onSwitchTab?.('billing')} style={{
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
-            background: balanceReady ? (hasBalance ? '#FFF7ED' : GLASS_SUBTLE) : GLASS_SUBTLE,
-            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#E7E2D7') : 'rgba(255,255,255,0.65)'}`,
+            background: GLASS_SUBTLE,
+            border: '1px solid rgba(255,255,255,0.65)',
             cursor: 'pointer',
+            // A long-press on iOS selected the label + amount (blue bars).
+            userSelect: 'none',
+            WebkitUserSelect: 'none',
             textAlign: 'left',
             fontFamily: FONTS.body,
           }}>
@@ -3105,7 +3087,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
               <div style={{ minWidth: 0 }}>
                 <div data-glass="chip" style={dashboardLabel}><Icon name="calendar" size={14} strokeWidth={2} />Next Visit</div>
                 <div style={{ marginTop: 8, fontSize: 26, fontWeight: 700, color: B.glassNavy }}>{nextDateLabel}</div>
-                <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
+                <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
                 </div>
                 {nextService?.windowStart && (
@@ -3178,6 +3160,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                   position: 'relative',
                 }}>Add to Calendar</button>
               )}
+              {/* GATE_VISIT_PREP_PHOTOS (dark): shown only when the server's
+                  own eligibility says this visit currently takes photos —
+                  the same rule the appointment page's own block uses. */}
+              {nextService.prepPhotos?.eligible && (
+                <button type="button" onClick={() => setVisitPrepSheetFor(nextService.id)} data-glass-accent="" style={{
+                  ...dashboardSecondaryButton,
+                  position: 'relative',
+                }}>Send photos</button>
+              )}
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
@@ -3195,6 +3186,21 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             </div>
           )}
         </section>}
+
+        {/* GATE_VISIT_PREP_PHOTOS (dark): fixed-position overlay, so its
+            place in the tree doesn't affect layout. `photosRemaining`
+            defaults to the form's own full allowance when the read hasn't
+            landed yet — VisitPrepPhotoForm re-derives the real cap from it,
+            and the button itself only shows once eligible is true. */}
+        {nextService && (
+          <VisitPrepPhotoSheet
+            open={visitPrepSheetFor != null && String(visitPrepSheetFor) === String(nextService.id)}
+            onClose={() => setVisitPrepSheetFor(null)}
+            scheduledServiceId={nextService.id}
+            photosRemaining={nextService.prepPhotos?.photosRemaining}
+            onSent={() => { void nextRead.refresh(); }}
+          />
+        )}
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div data-glass="chip" style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
@@ -3255,100 +3261,42 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
 
       {!dashboardSecondarySelection && <PropertyAlertsCard data={propertyAlerts} />}
 
-      {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
-        <section data-glass="card" style={{ ...card, padding: 20, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
-          {satPhase === 'rate' && (
-            <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
-                  <ShellIconTile icon="star" tone="success" size={38} />
-                  <div style={{ minWidth: 0 }}>
-                    <div data-glass="chip" style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
-                    <div style={{ marginTop: 4, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>How was your visit?</div>
-                    <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
-                      {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
-                      {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName ? ` · ${pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}` : ''}
-                    </div>
-                  </div>
+      {reviewCardStatus === 'ready' && reviewCard && !reviewCardDismissed && (
+        <section data-glass="card" style={{ ...card, padding: 20, borderColor: '#BFDBFE' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
+              <ShellIconTile icon="star" tone="success" size={38} />
+              <div style={{ minWidth: 0 }}>
+                <div data-glass="chip" style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
+                <div style={{ marginTop: 4, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>How was your visit?</div>
+                <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                  {reviewCard.serviceType}
+                  {reviewCard.technicianName ? ` · ${reviewCard.technicianName}` : ''}
                 </div>
-                <ShellCloseButton onClick={() => setSatDismissed(true)} label="Dismiss feedback prompt" />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(5, minmax(0, 1fr))' : 'repeat(10, minmax(0, 1fr))', gap: 4, marginTop: 14 }}>
-                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => {
-                  const active = n <= (satHover || satRating);
-                  const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
-                  return (
-                    <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
-                      minWidth: 0, height: 38, borderRadius: 8, border: 'none',
-                      background: active ? color : GLASS_SUBTLE,
-                      color: active ? '#fff' : B.grayMid,
-                      fontWeight: 700, cursor: satSubmitting ? 'wait' : 'pointer',
-                    }}>{n}</button>
-                  );
-                })}
-              </div>
-              {satError && (
-                <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 12 }}>
-                  {satError}
-                </div>
-              )}
-            </>
-          )}
-          {satPhase === 'review' && (
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy }}>Thanks for the {satRating}/10.</div>
-              <div style={{ marginTop: 6, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                {satReviewLink
-                  ? <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.</>
-                  // No link means the review ask is queued to text later — a
-                  // bare Google link here couldn't be attributed and the
-                  // queued text would still send afterward.
-                  : <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team — keep an eye on your texts for our review link.</>}
-              </div>
-              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
-                {satReviewLink ? (
-                  <a data-glass-accent="" href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
-                    ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
-                    boxShadow: 'none', borderRadius: 8,
-                  }}>Open Google</a>
-                ) : null}
-                <button data-glass-accent="" type="button" onClick={() => setSatDismissed(true)} style={{
-                  ...PORTAL_BUTTON_BASE, background: '#fff', color: B.glassNavy, padding: '10px 18px',
-                  boxShadow: 'none', border: '1px solid #E7E2D7', borderRadius: 8,
-                }}>Done</button>
               </div>
             </div>
-          )}
-          {satPhase === 'feedback' && (
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Thanks for the feedback.</div>
-              <textarea
-                value={satFeedback}
-                onChange={e => setSatFeedback(e.target.value)}
-                placeholder="Anything we could do better?"
-                rows={3}
-                style={{
-                  width: '100%', marginTop: 10, padding: 12, borderRadius: 8,
-                  border: '1px solid #D8D0C0', fontSize: 14, fontFamily: FONTS.body,
-                  resize: 'vertical',
-                }}
-              />
-              {satError && (
-                <div role="alert" style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 10 }}>
-                  {satError}
-                </div>
-              )}
-              <button data-glass-accent="" type="button" onClick={handleSatFeedback} disabled={satSubmitting} style={{
-                ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.glassNavy,
-                color: '#fff', boxShadow: 'none', borderRadius: 8,
-              }}>{satSubmitting ? 'Sending...' : 'Send feedback'}</button>
-            </div>
-          )}
-          {satPhase === 'thanks' && (
-            <div style={{ textAlign: 'center', color: B.glassNavy, fontWeight: 700 }}>
-              Thank you. We appreciate the note.
-            </div>
-          )}
+            <ShellCloseButton
+              onClick={() => { rememberReviewCardDone(reviewCardKey(reviewCard)); setReviewCardDismissed(true); }}
+              label="Dismiss feedback prompt"
+            />
+          </div>
+          <div style={{ marginTop: 12, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+            A quick Google review helps neighbors find the {reviewCard.officeName || 'Waves'} team.
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <a
+              data-glass-accent=""
+              href={reviewCard.reviewLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              // Hide the card in the same handler; the link itself still opens Google.
+              onClick={() => { rememberReviewCardDone(reviewCardKey(reviewCard)); setReviewCardDismissed(true); }}
+              style={{
+                ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
+                boxShadow: 'none', borderRadius: 8,
+              }}
+            >Open Google</a>
+          </div>
         </section>
       )}
 
@@ -4130,13 +4078,6 @@ const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hC
 const VISIT_APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'requestChannel'];
 const APP_OPTION = { value: 'push', label: 'App' };
 const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
-const APPOINTMENT_CHANNEL_KEYS = [
-  'appointmentConfirmationChannel',
-  'serviceReminder72hChannel',
-  'serviceReminder24hChannel',
-  'enRouteChannel',
-  'techArrivedChannel',
-];
 
 // Gold on/off switch — the ONE toggle idiom for customer notification rows
 // (owner 2026-08-28: keep the gold on/off look; 2026-09-06: switches, never
@@ -4176,8 +4117,36 @@ function GoldSwitch({ on, onChange, label, disabled = false, locked = false }) {
   );
 }
 
+function NotificationLabelDisclosure({ label, description }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details onToggle={(event) => setOpen(event.currentTarget.open)} style={{ minWidth: 0 }}>
+      <summary
+        className="waves-focus-ring"
+        style={{
+          minHeight: 44, display: 'flex', alignItems: 'center', gap: 6,
+          cursor: 'pointer', listStyle: 'none', color: B.glassNavy,
+          fontSize: 16, fontWeight: 700, lineHeight: 1.25,
+        }}
+      >
+        <span style={{ minWidth: 0 }}>{label}</span>
+        <span aria-hidden="true" style={{ display: 'inline-flex', color: B.grayMid, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s ease' }}>
+          <Icon name="chevronDown" size={16} strokeWidth={2} />
+        </span>
+      </summary>
+      <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.5, paddingBottom: 4 }}>
+        {description}
+      </div>
+    </details>
+  );
+}
+
 function AppNotificationSettings({ prefs, app, saving, onSave }) {
+  const [expanded, setExpanded] = useState(false);
+  const settingsId = useId();
   if (!prefs.appPreferencesAvailable) return null;
+  const { fresh, registered } = app.status ?? {};
+  const connected = fresh === true;
   const connectionCopy = {
     checking: 'Checking this device…',
     granted: 'This device is connected.',
@@ -4188,51 +4157,65 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
     permission_unavailable: 'Waves did not receive a notification permission response. Check Waves in your device’s notification Settings, then try again.',
     registration_unavailable: 'This device could not connect. Check your connection and try again.',
     unavailable: 'App notification setup is unavailable on this device.',
-    web: 'Open the Waves app on your phone to connect a device.',
+    web: connected ? 'Connected to your Waves app.' : 'Open the Waves app on your phone to connect a device.',
   };
-  const connected = app.status?.fresh === true;
+  const needsSetup = prefs.pushEnabled === false || (app.deviceState !== 'checking' && !app.ready);
+  const showSettings = expanded || needsSetup;
+  const disclosureLabel = expanded ? 'Hide' : 'Manage';
   return (
-    <div style={{ marginTop: 16, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>App notifications</div>
-          <div role="status" style={{ marginTop: 4, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
-            {app.deviceState === 'web' && connected ? 'Connected to your Waves app.' : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
-          </div>
+    <div style={{ marginTop: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div role="status" style={{ fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
+          {prefs.pushEnabled === false ? 'App notifications are off.'
+            : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
         </div>
-        <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
-      </div>
-      {(prefs.pushEnabled === false || (!connected && app.status?.registered)) && (
-        <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
-          {prefs.pushEnabled === false ? 'App notifications are off. Your notification history is still available.'
-            : 'Open the app to refresh its connection.'}
-        </p>
-      )}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
-        {isNativeApp() && app.deviceState !== 'granted' && (
-          <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
-            {app.busy ? 'Connecting…' : 'Connect this device'}
+        {!needsSetup && (
+          <button type="button" data-glass="chip" aria-expanded={expanded} aria-controls={settingsId}
+            aria-label={`${disclosureLabel} app notification settings`}
+            onClick={() => setExpanded((previous) => !previous)}
+            style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, flexShrink: 0 }}>
+            {disclosureLabel}
           </button>
         )}
-        <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(VISIT_APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
-          Use app for visit updates
-        </button>
       </div>
-      <details style={{ marginTop: 8, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
-        <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>Delivery details</summary>
-        <p style={{ margin: '4px 0 12px' }}>
-          Use app notifications for appointments, reminders, technician updates, reports and requests. Alerts you have turned off stay off.
-        </p>
-        <p style={{ margin: '0 0 12px' }}>
-          If an app notification cannot be delivered, we may use text or email where available, following your preferences.
-          {prefs.smsEnabled === false ? ' Text backup is off.' : ''}
-          {prefs.emailEnabled === false ? ' Email backup is off.' : ''}
-        </p>
-        <p style={{ margin: '0 0 12px' }}>
-          Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
-        </p>
-        <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
-      </details>
+      <div id={settingsId} hidden={!showSettings} style={{ marginTop: 12, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Allow app notifications</div>
+          <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
+        </div>
+        {(prefs.pushEnabled === false || (!connected && registered)) && (
+          <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
+            {prefs.pushEnabled === false ? 'Your notification history is still available.'
+              : 'Open the app to refresh its connection.'}
+          </p>
+        )}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+          {isNativeApp() && app.deviceState !== 'granted' && (
+            <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+              {app.busy ? 'Connecting…' : 'Connect this device'}
+            </button>
+          )}
+          <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(VISIT_APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
+            Use app for visit updates
+          </button>
+        </div>
+        <details style={{ marginTop: 8, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
+          <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>Delivery details</summary>
+          <p style={{ margin: '4px 0 12px' }}>
+            Use app notifications for appointments, reminders, technician updates, reports and requests. Alerts you have turned off stay off.
+          </p>
+          <p style={{ margin: '0 0 12px' }}>
+            If an app notification cannot be delivered, we may use text or email where available, following your preferences.
+            {Object.entries({ smsEnabled: 'Text', emailEnabled: 'Email' })
+              .filter(([key]) => prefs[key] === false)
+              .map(([, label]) => ` ${label} backup is off.`)}
+          </p>
+          <p style={{ margin: '0 0 12px' }}>
+            Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
+          </p>
+          <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
+        </details>
+      </div>
     </div>
   );
 }
@@ -4565,52 +4548,31 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     }
   };
 
-  // Change the delivery channel (text / email / both) for one notification.
-  const handleChannelChange = async (channelKey, value) => {
-    if (prefsLocked[channelKey]) return;
-    const prevVal = prefs[channelKey] || 'sms';
-    if (prevVal === value) return;
-    setPrefsLocked(prev => ({ ...prev, [channelKey]: true }));
-    setPrefs(prev => ({ ...prev, [channelKey]: value }));
+  // Optional account alerts combine delivery and Off in one control. Off
+  // changes only the enable flag, retaining the saved delivery channel.
+  const handleChannelChange = async (channelKey, value, enabledKey) => {
+    const lockKeys = [channelKey, enabledKey].filter(Boolean);
+    if (lockKeys.some(key => prefsLocked[key])) return;
+    const changes = {
+      ...(channelKey && value !== 'off' ? { [channelKey]: value } : {}),
+      ...(enabledKey ? { [enabledKey]: value !== 'off' } : {}),
+    };
+    const keys = Object.keys(changes);
+    if (keys.every(key => prefs[key] === changes[key])) return;
+    const previous = Object.fromEntries(keys.map(key => [key, prefs[key]]));
+    setPrefsLocked(prev => ({ ...prev, ...Object.fromEntries(lockKeys.map(key => [key, true])) }));
+    setPrefs(prev => ({ ...prev, ...changes }));
     try {
-      const result = await api.updateNotificationPrefs({ [channelKey]: value });
-      if (channelKey === 'requestChannel' && result.preferences?.requestChannel !== value) {
-        throw new Error('Refresh the app to manage request notifications.');
+      const result = await api.updateNotificationPrefs(changes);
+      if ((enabledKey || channelKey === 'requestChannel') && keys.some(key => result.preferences?.[key] !== changes[key])) {
+        throw new Error('Refresh the app to manage notification preferences.');
       }
     } catch (err) {
-      setPrefs(prev => ({ ...prev, [channelKey]: prevVal }));
+      setPrefs(prev => ({ ...prev, ...previous }));
       showCustomerAlert('Could not update delivery preference. Please try again.');
       console.error(err);
     } finally {
-      setPrefsLocked(prev => ({ ...prev, [channelKey]: false }));
-    }
-  };
-
-  // One-tap shortcut: route every appointment update to the given channel
-  // (used for the "Traveling? Get appointment updates by email" toggle).
-  // Locks EVERY appointment key for the duration (and refuses to start while
-  // any individual update is in flight): an unlocked bulk PUT racing an
-  // individual channel change committed in arbitrary order, leaving the UI
-  // and the stored reminder channel different until reload.
-  const handleAllAppointmentChannels = async (value) => {
-    if (APPOINTMENT_CHANNEL_KEYS.some(k => prefsLocked[k])) return;
-    if (APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === value)) return;
-    const prevById = {};
-    const updates = {};
-    const locks = {};
-    APPOINTMENT_CHANNEL_KEYS.forEach(k => { prevById[k] = prefs[k] || 'sms'; updates[k] = value; locks[k] = true; });
-    setPrefsLocked(prev => ({ ...prev, ...locks }));
-    setPrefs(prev => ({ ...prev, ...updates }));
-    try {
-      await api.updateNotificationPrefs(updates);
-    } catch (err) {
-      setPrefs(prev => ({ ...prev, ...prevById }));
-      showCustomerAlert('Could not update delivery preference. Please try again.');
-      console.error(err);
-    } finally {
-      const unlocks = {};
-      APPOINTMENT_CHANNEL_KEYS.forEach(k => { unlocks[k] = false; });
-      setPrefsLocked(prev => ({ ...prev, ...unlocks }));
+      setPrefsLocked(prev => ({ ...prev, ...Object.fromEntries(lockKeys.map(key => [key, false])) }));
     }
   };
 
@@ -5287,56 +5249,26 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Service notifications</div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
-              Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
-            </div>
-            <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
-            <p id="appointment-delivery-note" style={{ margin: '16px 0 0', fontSize: 16, lineHeight: 1.5, color: muted }}>
+            <p id="appointment-delivery-note" style={{ margin: '4px 0 0', fontSize: 16, lineHeight: 1.5, color: muted }}>
               {perPropertyTexts
                 ? 'Delivery methods apply across your account. Turn appointment alerts on or off under Property notifications below.'
                 : 'Choose how you receive each update.'}
             </p>
-            {customer.email ? (() => {
-              const allEmail = APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === 'email');
-              const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
-              return (
-                <button
-                  data-glass-pill=""
-                  onClick={() => handleAllAppointmentChannels(allEmail ? 'sms' : 'email')}
-                  disabled={anySaving}
-                  style={{
-                    marginTop: 12, padding: '8px 14px', borderRadius: 999, minHeight: 44,
-                    border: `1px solid ${allEmail ? B.yellow : '#D8D0C0'}`,
-                    background: allEmail ? B.yellow : '#fff',
-                    color: B.glassNavy,
-                    fontSize: 14, fontWeight: 700, cursor: anySaving ? 'wait' : 'pointer',
-                    opacity: anySaving ? 0.6 : 1,
-                    display: 'inline-flex', alignItems: 'center', gap: 6,
-                  }}
-                >
-                  <Icon name={allEmail ? 'smartphone' : 'mail'} size={14} strokeWidth={2} />
-                  {allEmail ? 'Use text for appointments' : 'Use email for appointments'}
-                </button>
-              );
-            })() : (
-              <div style={{ marginTop: 8, fontSize: 14, color: muted }}>
-                Add an email to your profile to receive notifications by email.
-              </div>
-            )}
+            <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
           </div>
           <div style={{ padding: '4px 18px 12px' }}>
             {(() => {
               const items = [
                 { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'Appointment updates', desc: 'Bookings, changes and cancellations', icon: 'calendar', locked: false, defaultOn: true },
-                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '3-day reminder', icon: 'clock', locked: false, defaultOn: true },
-                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: 'Day-before reminder', icon: 'bell', locked: false, defaultOn: true },
+                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '3-day reminder', desc: 'A reminder three days before your visit', icon: 'clock', locked: false, defaultOn: true },
+                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: 'Day-before reminder', desc: 'A reminder the day before your visit', icon: 'bell', locked: false, defaultOn: true },
                 { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'On the way', desc: 'Live technician tracking', icon: 'truck', locked: false, defaultOn: true },
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
                 // Text / Email / Both: the arrival email twin (retired
                 // 2026-08-06) is back on the owner's 2026-09-06 go.
-                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Technician arrival', icon: 'door', locked: false, defaultOn: true },
+                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Technician arrival', desc: 'An alert when your technician reaches the property', icon: 'door', locked: false, defaultOn: true },
                 // Weather & property advisories (portal roadmap bet 6, owner
                 // ruling 2026-08-13: push + bell). A NEW alert type must ship
                 // with its self-service opt-out on the live settings surface
@@ -5344,8 +5276,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 // extension of the 2026-07-09 "stops at appointment alerts"
                 // ruling, which predates this lane. No channelKey: these are
                 // app/bell advisories only — never SMS or email.
-                ...(prefs.appPreferencesAvailable ? [{ key: 'serviceCompleted', channelKey: 'serviceCompleteChannel', label: 'Service reports', icon: 'document', locked: false, defaultOn: true }] : []),
-                { key: 'weatherAlerts', label: 'Weather & property alerts', desc: 'Rain and lawn advisories in the app', icon: 'cloudRain', locked: false, defaultOn: true },
+                ...(prefs.appPreferencesAvailable ? [{ key: 'serviceCompleted', channelKey: 'serviceCompleteChannel', label: 'Service reports', desc: 'Choose text or app alerts; app may fall back to text. Off stops all report notifications, including emails. Reports remain in Documents.', icon: 'document', locked: false, defaultOn: true }] : []),
+                { key: 'weatherAlerts', label: 'Weather & property alerts', desc: 'Rain and lawn advisories in the app. Choose Off to stop these alerts.', icon: 'cloudRain', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
                 // en-route alert above), Service Complete Report (locked
@@ -5362,36 +5294,35 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
               const propertyOwned = perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key);
+              const optionalDelivery = p.key === 'serviceCompleted' || p.key === 'weatherAlerts';
               return (
                 <div key={p.key} data-reminder-row="" style={{
-                  // Keep paired controls together on compact screens. A
-                  // property-owned alert has only a select here, so it fits
-                  // beside its label without repeating the property hint.
+                  // Let each label and its controls share a row while they
+                  // fit, then wrap the control group together on narrow screens.
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   flexWrap: 'wrap',
                   padding: '12px 0',
                   borderBottom: i < items.length - 1 ? '1px solid #E7E2D7' : 'none',
                   gap: 12,
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: propertyOwned ? '1 1 140px' : '1 1 160px', minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
                     <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>{p.label}</div>
-                      {p.desc && <div style={{ fontSize: 16, color: muted, lineHeight: 1.5, whiteSpace: 'normal', marginTop: 2 }}>{p.desc}</div>}
+                      <NotificationLabelDisclosure label={p.label} description={p.desc} />
                       {p.locked && (
                         <div style={{ fontSize: 14, color: B.orange, marginTop: 2, fontWeight: 700 }}>Required for service coordination</div>
                       )}
                     </div>
                   </div>
-                  {/* Select + switch travel together so a wrap never splits
-                      the controls across lines. */}
+                  {/* Legacy appointment switches stay beside their delivery
+                      choice. Optional account alerts use a single select. */}
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
-                    marginLeft: compact ? 0 : 'auto',
-                    flex: compact && p.channelKey && !propertyOwned ? '1 0 100%' : '0 0 auto',
-                    justifyContent: compact ? 'flex-end' : undefined,
+                    marginLeft: 'auto',
+                    flex: '0 0 auto',
+                    justifyContent: 'flex-end',
                   }}>
                   {p.channelKey && (() => {
                     // Email/Both can only be offered once an email is on file —
@@ -5414,27 +5345,33 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     const alertOn = perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key)
                       ? shownTextsEntry?.preferences?.[p.key] !== false
                       : isOn;
-                    const selectable = alertOn && opts.length > 1;
+                    const selectable = optionalDelivery || (alertOn && opts.length > 1);
                     return (
-                      <select
+                      <CustomerSelect
                         data-testid={propertyOwned ? `per-property-${p.key}` : undefined}
-                        value={prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
-                        onChange={(e) => handleChannelChange(p.channelKey, e.target.value)}
-                        disabled={!selectable || !!prefsLocked[p.channelKey]}
+                        value={optionalDelivery && !isOn ? 'off' : prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
+                        onChange={(e) => handleChannelChange(p.channelKey, e.target.value, optionalDelivery ? p.key : undefined)}
+                        disabled={!selectable || !!prefsLocked[p.channelKey] || (optionalDelivery && !!prefsLocked[p.key])}
                         aria-label={`Delivery method for ${p.label}`}
                         aria-describedby={propertyOwned ? 'appointment-delivery-note' : undefined}
-                        style={{
-                          fontSize: 16, fontWeight: 700, color: B.glassNavy,
-                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
-                          background: '#fff', fontFamily: 'inherit', flexShrink: 0,
-                          cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
-                        }}
                       >
                         {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !app.ready}>{o.label}</option>)}
-                      </select>
+                        {optionalDelivery && <option value="off">Off</option>}
+                      </CustomerSelect>
                     );
                   })()}
-                  {!propertyOwned && (
+                  {p.key === 'weatherAlerts' && (
+                    <CustomerSelect
+                      value={isOn ? 'push' : 'off'}
+                      onChange={(e) => handleChannelChange(null, e.target.value, p.key)}
+                      disabled={!!prefsLocked[p.key]}
+                      aria-label={`Delivery method for ${p.label}`}
+                    >
+                      <option value="push">App</option>
+                      <option value="off">Off</option>
+                    </CustomerSelect>
+                  )}
+                  {!propertyOwned && !optionalDelivery && (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
                       <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
                       {p.locked && (
@@ -5451,14 +5388,13 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, padding: '12px 0', borderTop: '1px solid #E7E2D7' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
                   <GlassTile name="mail" size={34} />
-                  <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Request updates</div>
+                  <NotificationLabelDisclosure label="Request updates" description="Updates when your service request is received or changes" />
                 </div>
-                <select aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
-                  disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}
-                  style={{ fontSize: 16, fontWeight: 700, fontFamily: 'inherit', padding: '7px 10px', minHeight: 44, borderRadius: 8, border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy, marginLeft: 'auto' }}>
+                <CustomerSelect aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
+                  disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}>
                   <option value="email">Email</option>
                   <option value="push" disabled={!app.ready && prefs.requestChannel !== 'push'}>App</option>
-                </select>
+                </CustomerSelect>
               </div>
             )}
           </div>
@@ -5550,7 +5486,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 { key: 'serviceReminder24h', label: '24-hour reminder', desc: 'The day before a visit', icon: 'bell' },
                 { key: 'techEnRoute', label: 'Tech en route', desc: 'Live GPS, about an hour out', icon: 'truck' },
                 { key: 'techArrived', label: 'Tech arrived', desc: 'The moment we reach the property', icon: 'door' },
-                { key: 'appointmentNotifyPrimary', label: 'Send these to me too', desc: 'Copy this property\'s notifications to you as well as the on-location contacts', icon: 'smartphone' },
+                { key: 'appointmentNotifyPrimary', label: 'Send me appointment alerts', desc: 'Receive this property\'s appointment and technician alerts in addition to any on-location contacts.', icon: 'smartphone' },
               ];
               const onCount = options.filter((o) => o.key !== 'appointmentNotifyPrimary' && property.preferences?.[o.key] !== false).length;
               const alertCount = options.length - 1;
@@ -5583,10 +5519,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                         return (
                           <div key={option.key} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderTop: '1px solid #E7E2D7' }}>
                             <GlassTile name={option.icon} />
-                            <span style={{ flex: 1, minWidth: 0 }}>
-                              <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{option.label}</span>
-                              <span style={{ display: 'block', fontSize: 14, color: muted, marginTop: 1 }}>{option.desc}</span>
-                            </span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <NotificationLabelDisclosure label={option.label} description={option.desc} />
+                            </div>
                             <GoldSwitch
                               on={on}
                               disabled={!!prefsLocked[lockKey]}
@@ -5714,7 +5649,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Me too” to send those texts to you as well.' : 'You’ll keep getting them too.'}
+                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"
@@ -5777,9 +5712,11 @@ function sameBillingChannels(left, right) {
 
 function BillingChannelFieldset({ field, channels, available, saving, onToggle, children }) {
   return (
-    <fieldset style={{ margin: '0 0 14px', padding: '14px 16px', background: GLASS_SUBTLE, borderRadius: 8, border: '1px solid #E7E2D7', minWidth: 0 }}>
-      <legend style={{ padding: 0, fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{field.label}</legend>
-      <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.5, marginTop: 2 }}>{field.description}</div>
+    <fieldset style={{ margin: '0 0 14px', padding: '14px 16px', background: GLASS_SUBTLE, borderRadius: 8, border: '1px solid rgba(255,255,255,0.7)', minWidth: 0 }}>
+      {/* float + full width pulls the legend inside the box instead of
+          notching it into the top border (native fieldset rendering). */}
+      <legend style={{ float: 'left', width: '100%', padding: 0, fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{field.label}</legend>
+      <div style={{ clear: 'both', fontSize: 16, color: B.grayDark, lineHeight: 1.5, paddingTop: 2 }}>{field.description}</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 12px', marginTop: 6 }}>
         {[
           { value: 'email', label: 'Email' },
@@ -5870,7 +5807,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const [paymentSmsOff, setPaymentSmsOff] = useState(false);
   const [paymentSmsReenabled, setPaymentSmsReenabled] = useState(false);
   const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
-  const [emailPrefEnabled, setEmailPrefEnabled] = useState(true);
   const [smsPrefEnabled, setSmsPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
@@ -5902,6 +5838,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const [achOffered, setAchOffered] = useState(false);
   const [bankPendingNotice, setBankPendingNotice] = useState(false);
   const [bankPendingVerifyUrl, setBankPendingVerifyUrl] = useState('');
+  const [bankPendingMicrodepositType, setBankPendingMicrodepositType] = useState(null);
   // Set-default consent retry: the default role carries Auto Pay, and a
   // method with no enrollment-scoped consent row 409s. The retry must
   // present the REAL SaveCardConsent checkbox — the recorded snapshot's
@@ -6011,7 +5948,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setBillingChannels(nextBillingChannels);
           setSavedBillingChannels(nextBillingChannels);
           setAppPreferencesAvailable(prefsData.appPreferencesAvailable === true);
-          setEmailPrefEnabled(prefsData.emailEnabled !== false);
           setSmsPrefEnabled(prefsData.smsEnabled !== false);
         }
         setLoading(false);
@@ -6123,6 +6059,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       if (awaitingMicrodeposits && setupIntent.payment_method) {
         await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
         setBankPendingVerifyUrl(setupIntent?.next_action?.verify_with_microdeposits?.hosted_verification_url || '');
+        setBankPendingMicrodepositType(setupIntent?.next_action?.verify_with_microdeposits?.microdeposit_type || null);
         setBankPendingNotice(true);
         setShowAddCard(false);
         paymentElementRef.current = null;
@@ -6649,11 +6586,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 
   // Email/Both delivery can only be offered with an email on file (the billing
   // recipient email or the account email) — otherwise the backend would
-  // suppress the texts with no deliverable email leg left. Same for the
-  // portal-wide email opt-out (Settings → Email Messages off): the receipt
-  // senders skip their email legs when email_enabled=false, so an email-only
-  // channel would suppress the text AND never email — the notice just drops.
-  const hasBillingEmail = !!(String(billingEmail || '').trim() || String(customer?.email || '').trim()) && emailPrefEnabled;
+  // suppress the texts with no deliverable email leg left. The portal-wide
+  // email switch does not matter here: payment emails cannot be turned off
+  // (owner ruling 2026-09-26).
+  const hasBillingEmail = !!(String(billingEmail || '').trim() || String(customer?.email || '').trim());
   const billingChannelAvailability = {
     email: hasBillingEmail,
     sms: smsPrefEnabled && !!String(customer?.phone || '').trim(),
@@ -6794,12 +6730,14 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               Payment methods, auto pay, receipts, and billing preferences.
             </div>
           </div>
-          <div style={{
+          {/* Glass, not a gold tint: 9% gold over the blue scene read as a
+              muddy green wash. The Pay button carries the gold. */}
+          <div data-glass="soft" style={{
             minWidth: compact ? '100%' : 190,
             padding: '14px 16px',
             borderRadius: 8,
-            background: currentBalance > 0 ? `${B.yellow}18` : GLASS_SUBTLE,
-            border: `1px solid ${currentBalance > 0 ? `${B.yellow}88` : '#E7E2D7'}`,
+            background: GLASS_SUBTLE,
+            border: '1px solid rgba(255,255,255,0.65)',
             boxSizing: 'border-box',
           }}>
             <div style={{ fontSize: 14, color: balanceTone, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
@@ -7037,14 +6975,16 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>{c.bankName}</div>}
               {isBankMethod(c.methodType) && c.achStatus === 'pending_verification' && (
                 <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 2 }}>
-                  Verification pending — watch for two small deposits.
+                  {/* The row doesn't say which verification Stripe chose, so
+                      this wording holds for one deposit or two. */}
+                  Verification pending — watch for {microdepositSavedPhrases(null).deposits} from Stripe.
                   {' '}
                   <button data-glass-accent=""
                     type="button"
                     onClick={() => handleResumeBankVerification(c.id)}
                     style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 14, fontWeight: 700, color: B.glassNavy, textDecoration: 'underline' }}
                   >
-                    Confirm deposits
+                    {microdepositSavedPhrases(null).actionLabel}
                   </button>
                 </div>
               )}
@@ -7095,14 +7035,14 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         )}
         {bankPendingNotice && !showAddCard && (
           <div style={{ padding: 10, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8, fontSize: 14, color: B.glassNavy, marginTop: 8 }}>
-            Bank account saved. Stripe will send two small deposits in 1–2 business days — once you confirm them, the account is verified and ready for Auto Pay.
+            Bank account saved. Stripe will send {microdepositSavedPhrases(bankPendingMicrodepositType).deposits} in 1–2 business days — once you {microdepositSavedPhrases(bankPendingMicrodepositType).confirmStep}, the account is verified and ready for Auto Pay.
             {bankPendingVerifyUrl && (
               <>
                 {' '}
                 <a href={bankPendingVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: B.glassNavy, fontWeight: 700 }}>
-                  Confirm the deposits here
+                  {microdepositSavedPhrases(bankPendingMicrodepositType).linkLabel}
                 </a>
-                {' '}once they arrive.
+                {' '}{microdepositSavedPhrases(bankPendingMicrodepositType).arrival}.
               </>
             )}
           </div>
@@ -7345,13 +7285,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           ].map(f => (
             <label key={f.key} style={{ display: 'block', minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>{f.label}</div>
-              <select value={f.value} onChange={e => f.set(e.target.value)} className="waves-focus-ring" style={{
-                width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
-                border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
-                fontSize: 14, fontFamily: FONTS.body, boxSizing: 'border-box',
-              }}>
+              <CustomerSelect fullWidth value={f.value} onChange={e => f.set(e.target.value)} className="waves-focus-ring">
                 {f.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
+              </CustomerSelect>
             </label>
           ))}
         </div>
@@ -7359,8 +7295,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         {filteredPayments.length === 0 && (
           <PortalInlineState
             icon="search"
-            title="No payments match your filters"
-            message="Try a different year or payment type to view more billing history."
+            title={payments.length ? 'No payments match your filters' : 'No payments yet'}
+            message={payments.length ? 'Try a different year or payment type to view more billing history.' : 'Your payments and receipts will appear here after your first payment.'}
           />
         )}
         {filteredPayments.map(p => (
@@ -7768,7 +7704,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
           className="waves-focus-ring"
           style={{
             width: '100%',
-            padding: '10px 42px 10px 12px',
+            padding: '10px 52px 10px 12px', minHeight: 44,
             borderRadius: 8,
             border: '1px solid #D8D0C0',
             fontSize: 14,
@@ -7783,7 +7719,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
         <button type="button" onClick={() => setShow(!show)} aria-label={show ? `Hide ${inputLabel}` : `Show ${inputLabel}`} style={{
           position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
           background: 'transparent', border: 'none', cursor: 'pointer',
-          color: '#475569', padding: 4, width: 32, height: 32,
+          color: PORTAL_SHELL.muted, padding: 10, width: 44, height: 44,
         }}><Icon name={show ? 'eyeOff' : 'eye'} size={18} strokeWidth={2} /></button>
       </div>
     </div>
@@ -7828,13 +7764,13 @@ function NumberStepper({ value, onChange, min = 0, max = 99, label = 'Value' }) 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <button type="button" onClick={() => onChange(Math.max(min, v - 1))} aria-label={`Decrease ${label}`} style={{
-        width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
+        width: 44, height: 44, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.glassNavy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="minus" size={16} strokeWidth={2} /></button>
       <span style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui, minWidth: 28, textAlign: 'center' }}>{v}</span>
       <button type="button" onClick={() => onChange(Math.min(max, v + 1))} aria-label={`Increase ${label}`} style={{
-        width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
+        width: 44, height: 44, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.glassNavy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="plus" size={16} strokeWidth={2} /></button>
@@ -7854,20 +7790,19 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
       disabled={disabled}
       style={{
         width: 50,
-        height: 30,
+        height: 44,
         borderRadius: 999,
         border: 'none',
         cursor: disabled ? 'wait' : 'pointer',
-        // Gold = on, pale gold = off — same treatment as every other portal
-        // switch (owner 2026-08-28: sliders are yellow in both states; no
-        // blue or grey tracks in the customer portal).
-        background: checked ? B.yellow : `${B.yellow}55`,
+        background: 'transparent',
         position: 'relative',
         flexShrink: 0,
-        transition: 'background 0.18s ease',
         opacity: disabled ? 0.7 : 1,
       }}
     >
+      {/* Preserve the 30px gold track inside a full-height touch target. */}
+      <span aria-hidden="true" style={{ position: 'absolute', inset: '7px 0', borderRadius: 999,
+        background: checked ? B.yellow : `${B.yellow}55`, transition: 'background 0.18s ease' }}>
       <span style={{
         position: 'absolute',
         top: 4,
@@ -7879,6 +7814,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
         boxShadow: '0 1px 3px rgba(15,23,42,0.22)',
         transition: 'left 0.18s ease',
       }} />
+      </span>
     </button>
   );
 }
@@ -9145,7 +9081,40 @@ const ARTICLES = [
   },
 ];
 
-function WeatherPestWidget({ customer, nextService }) {
+// Local Conditions slot on the Learn tab. GATE_PORTAL_YARD_CALENDAR (dark): the
+// server answers {available:false} off the gate and the existing
+// WeatherPestWidget renders exactly as before; on, the yard-month card takes
+// its place. While the gate answer is pending the widget is already mounted
+// (its reads start at once) but held on its own loading panel, so gate-off
+// pays no extra round trip and gate-on never flashes the old widget.
+function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = null }) {
+  const yard = useYardMonth();
+  // A card the server resolved to another house than this tab shows (the
+  // selected house retired, a stale claim) is withheld: re-read the property
+  // list and show the customer-level widget until the label follows.
+  const scopeStale = !!(scope && yard.status === 'on' && yard.data?.propertyScope
+    && scopeEchoMismatch(yard.data.propertyScope, scope.currentEntry || null, !!scope.savedScope, scope.selectedPropertyId || null));
+  useEffect(() => {
+    if (scopeStale && scope?.onSavedScopeUnavailable) scope.onSavedScopeUnavailable();
+  }, [scopeStale, scope?.onSavedScopeUnavailable]);
+  // Capacitor shell: target=_blank strands the SPA (F-017), so the app opens
+  // the report in the same in-app overlay the Services tab uses.
+  const { preview, openPagePreview, closePreview } = useReportPreview(
+    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
+  );
+  const onOpenReport = isNativeApp()
+    ? (url) => openPagePreview({ id: 'yard-last-lawn-visit', title: 'Lawn service report' }, url)
+    : null;
+  if (yard.status === 'on' && !scopeStale) return <>
+    <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} onOpenReport={onOpenReport} externalLinks={!isNativeApp()} />
+    {preview && <DocumentPreviewOverlay key="report-preview"
+      preview={preview} onClose={closePreview}
+      onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />}
+  </>;
+  return <WeatherPestWidget customer={customer} nextService={nextService} hold={yard.status === 'loading'} />;
+}
+
+function WeatherPestWidget({ customer, nextService, hold = false }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   // Fungus / chinch / irrigation are lawn advisories — pest-only customers
@@ -9172,7 +9141,7 @@ function WeatherPestWidget({ customer, nextService }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
 
-  if (loading || lawnHealth.loading) return (
+  if (hold || loading || lawnHealth.loading) return (
     <PortalStatePanel
       icon="cloud"
       eyebrow="Local Conditions"
@@ -9183,9 +9152,9 @@ function WeatherPestWidget({ customer, nextService }) {
 
   if (!weather) return null;
 
-  // Localized location label
-  const cityName = customer?.address?.city || '';
-  const localizedLocation = cityName ? `${cityName} Weather` : weather.location;
+  // The server names the place the data is actually for (the customer's own
+  // forecast city, or its fallback) — never label it with a different city.
+  const localizedLocation = weather.location ? `${weather.location.replace(/,\s*FL$/, '')} Weather` : 'Local Weather';
 
   // Build action items per pest pressure indicator
   const getActionItem = (type, level) => {
@@ -9273,7 +9242,7 @@ function WeatherPestWidget({ customer, nextService }) {
             {weather.temp}°
           </div>
           <div style={{ marginTop: compact ? 0 : 4, fontSize: 14, color: muted, textAlign: 'right' }}>
-            Tonight {weather.nightTemp}° · {weather.humidity}% humidity
+            {weather.isDaytime === false ? 'Tonight' : `Tonight ${weather.nightTemp}°`} · {weather.humidity}% humidity
           </div>
         </div>
       </div>
@@ -9555,7 +9524,7 @@ function ContentCard({ post, large, compact }) {
   );
 }
 
-function LearnTab({ customer }) {
+function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [alerts, setAlerts] = useState([]);
@@ -9572,7 +9541,7 @@ function LearnTab({ customer }) {
 
   useEffect(() => {
     api.getAlerts().then(d => setAlerts(d.alerts || [])).catch(() => {});
-    api.getBlogPosts().then(d => setBlogPosts(d.posts || [])).catch(() => {});
+    api.getBlogPosts(24).then(d => setBlogPosts(d.posts || [])).catch(() => {});
     api.getNewsletterPosts().then(d => setNewsletterPosts(d.posts || [])).catch(() => {});
     api.getExpertPosts().then(d => setExpertPosts(d.posts || [])).catch(() => {});
     api.getLocalNews().then(d => setLocalNews(d.posts || [])).catch(() => {});
@@ -9738,7 +9707,7 @@ function LearnTab({ customer }) {
         }}>
           {[
             // "Recent Posts", not "Blog Posts": the value is the feed's
-            // most-recent slice (capped at 6 by /feed/blog), NOT the size of
+            // most-recent slice (capped at 24 by /feed/blog), NOT the size of
             // the blog library — the old label undersold a 150+ post archive.
             { label: 'Recent Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
             { label: 'Expert Articles', value: expertPosts.length, sub: 'UF/IFAS and references' },
@@ -9783,7 +9752,7 @@ function LearnTab({ customer }) {
         </div>
       </section>
 
-      <WeatherPestWidget customer={customer} nextService={nextService} />
+      <LocalConditionsSlot customer={customer} nextService={nextService} onOpenPhotoId={onOpenPhotoId} scope={scope} />
 
       {alerts.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -10847,8 +10816,23 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
 // Station-map dropdown inside a plan row (owner 2026-07-15: the map sits
 // behind a click, never always-on). Chevron flips and the map fades/slides
 // in so the reveal reads as motion, not a static swap.
-function PlanStationMap({ map }) {
+// The station-map image is a signed proxy link that expires (2 h). The map is
+// fetched when My Plan mounts but the card only mounts on dropdown open, so a
+// tab left open can hold a dead link: re-request the map when the dropdown
+// opens if the payload is older than this, and once more on an image error.
+const STATION_MAP_STALE_MS = 90 * 60 * 1000;
+
+function PlanStationMap({ map, onOpen = null, onImageError = null }) {
   const [open, setOpen] = useState(false);
+  const retried = useRef(false);
+  const handleImageError = useCallback(() => {
+    // ONE refetch per mounted map, not per URL: a refetch returns a brand-new
+    // link, so keying on the URL would loop whenever the image keeps failing
+    // for a reason a fresh link cannot fix (e.g. the upstream provider is down).
+    if (!onImageError || retried.current) return;
+    retried.current = true;
+    onImageError();
+  }, [onImageError]);
   const [entered, setEntered] = useState(false);
   useEffect(() => {
     if (!open) { setEntered(false); return undefined; }
@@ -10861,7 +10845,7 @@ function PlanStationMap({ map }) {
     <div style={{ marginTop: 14 }}>
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={() => { if (!open && onOpen) onOpen(); setOpen(!open); }}
         aria-expanded={open}
         aria-controls={panelId}
         data-glass="soft"
@@ -10903,7 +10887,7 @@ function PlanStationMap({ map }) {
             opacity: entered ? 1 : 0,
             transform: entered ? 'translateY(0)' : 'translateY(-8px)',
           }}>
-            <StationMapCard variant="plan" hideTitle stationMap={map} sectionId={panelId} />
+            <StationMapCard variant="plan" hideTitle stationMap={map} sectionId={panelId} onImageError={handleImageError} />
           </div>
         </div>
       )}
@@ -10983,6 +10967,16 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
       .catch(() => setTermiteAnnualPlanStatus('error'));
   }, []);
 
+  const stationMapsLoadedAt = useRef(0);
+  const loadStationMaps = useCallback(() => (
+    api.getStationMap().then(d => {
+      stationMapsLoadedAt.current = Date.now();
+      setStationMaps(d?.available ? d : null);
+    }).catch(() => {})
+  ), []);
+  const refreshStationMapsIfStale = useCallback(() => {
+    if (Date.now() - stationMapsLoadedAt.current > STATION_MAP_STALE_MS) loadStationMaps();
+  }, [loadStationMaps]);
   const loadPlan = useCallback(() => {
     setPlanStatus('loading');
     Promise.all([
@@ -11020,9 +11014,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
       setBillingMode(d?.billing_mode || null);
       setResolvedNonMonthly(d?.non_monthly_billing === true);
     }).catch(() => {});
-    api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
+    loadStationMaps();
     loadTermiteAnnualPlan();
-  }, [loadPlan, cancelledAccount, loadTermiteAnnualPlan]);
+  }, [loadPlan, cancelledAccount, loadTermiteAnnualPlan, loadStationMaps]);
 
   const serviceMatches = (svcId, service = {}) => {
     // Server-resolved family wins when present (codex #3591 r58 P1):
@@ -11650,7 +11644,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                             program (trap map stays a report artifact). */}
                         {(svc.id === 'termite' || svc.id === 'rodent_bait') && (() => {
                           const map = stationMaps?.programs?.[svc.id === 'termite' ? 'termite' : 'rodent'];
-                          return map ? <PlanStationMap map={map} /> : null;
+                          return map ? <PlanStationMap map={map} onOpen={refreshStationMapsIfStale} onImageError={loadStationMaps} /> : null;
                         })()}
                       </div>
                     )}
@@ -11711,6 +11705,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
                   <div key={svc.id} style={{
+                    position: 'relative',
                     background: subtle,
                     border: '1px solid rgba(255,255,255,0.65)',
                     borderRadius: 14,
@@ -11720,7 +11715,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                       <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
                       <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 2 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(44px, 1fr))', gap: 2 }}>
                       {MONTH_LABELS.map((month, mi) => {
                         const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
                         const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
@@ -11735,7 +11730,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                         const tooltipKey = `${svc.id}-${mi}`;
                         const isHovered = isScheduled && hoveredCalendarItem === tooltipKey;
                         return (
-                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                          <div key={month} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
                             <button
                               type="button"
                               disabled={!isScheduled}
@@ -11743,10 +11738,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                               onMouseLeave={() => setHoveredCalendarItem(null)}
                               onFocus={() => isScheduled && setHoveredCalendarItem(tooltipKey)}
                               onBlur={() => setHoveredCalendarItem(null)}
+                              onClick={() => setHoveredCalendarItem(tooltipKey)}
                               aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
                               style={{
                                 width: '100%',
-                                height: 26,
+                                height: 44,
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
@@ -11778,10 +11774,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                                 position: 'absolute',
                                 zIndex: 30,
                                 bottom: 'calc(100% + 8px)',
-                                left: mi > 8 ? 'auto' : '50%',
-                                right: mi > 8 ? 0 : 'auto',
-                                transform: mi > 8 ? 'none' : 'translateX(-50%)',
-                                width: 190,
+                                left: 12,
+                                right: 12,
                                 padding: 10,
                                 borderRadius: 8,
                                 background: B.glassNavy,
@@ -11803,7 +11797,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                               fontWeight: isCurrentMonth ? 700 : 600,
                               letterSpacing: '0.02em',
                               color: isCurrentMonth ? B.wavesBlue : 'rgba(4,57,94,0.5)',
-                            }}>{month[0]}</div>
+                            }}>{month}</div>
                           </div>
                         );
                       })}
@@ -14066,7 +14060,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               Service reports, agreements, real estate reports, insurance certificates, and compliance paperwork.
             </div>
           </div>
-          <div style={{
+          {currentTotal > 0 && <div style={{
             minWidth: compact ? '100%' : 210,
             padding: '14px 16px',
             borderRadius: 8,
@@ -14083,10 +14077,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
               {totalDocs > currentTotal ? `${totalDocs} total on file` : 'Customer documents'}
             </div>
-          </div>
+          </div>}
         </div>
 
-        <div style={{
+        {currentTotal > 0 ? <div style={{
           display: 'grid',
           gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)',
           gap: 10,
@@ -14122,10 +14116,11 @@ function DocumentsTab({ customer, onSwitchTab }) {
               <div style={{ marginTop: 3, color: muted, fontSize: 14, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.sub}</div>
             </div>
           ))}
-        </div>
+        </div> : <PortalInlineState icon="document" title="No documents yet"
+          message="Your paperwork will appear here when it is available. You can still view completed visits or request paperwork below." />}
       </section>
 
-      <section data-glass="card" style={{ ...card, padding: 20 }}>
+      {currentTotal > 0 && <section data-glass="card" style={{ ...card, padding: 20 }}>
         {/* Search + Type on one grid with labels — same control as the
             Visits / Payment History filters (owner 08-28). */}
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '2fr 1fr', gap: 10 }}>
@@ -14149,13 +14144,9 @@ function DocumentsTab({ customer, onSwitchTab }) {
           </label>
           <label style={{ display: 'block', minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>Type</div>
-            <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} aria-label="Document type" className="waves-focus-ring" style={{
-              width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
-              border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
-              fontSize: 14, fontFamily: FONTS.body, boxSizing: 'border-box',
-            }}>
+            <CustomerSelect fullWidth value={typeFilter} onChange={e => setTypeFilter(e.target.value)} aria-label="Document type" className="waves-focus-ring">
               {typeFilters.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
+            </CustomerSelect>
           </label>
         </div>
         {hasActiveFilter && (
@@ -14163,7 +14154,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             Showing {resultCount} matching document{resultCount === 1 ? '' : 's'}.
           </div>
         )}
-      </section>
+      </section>}
 
       <section data-glass="card" style={{
         ...card,
@@ -14185,7 +14176,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       </section>
 
       {/* Document Categories */}
-      {filteredCategories.map(cat => (
+      {currentTotal > 0 && filteredCategories.map(cat => (
         <DocumentSection
           key={cat.id}
           section={cat}
@@ -14640,33 +14631,6 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // =========================================================================
 // NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
-// Keyboard opening can resize AND pan the visual viewport on iOS.
-function useSheetViewport(open, dialogRef) {
-  const [viewport, setViewport] = useState(null);
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!open || !vv) return undefined;
-    const update = () => setViewport({ height: Math.round(vv.height), top: Math.round(vv.offsetTop) });
-    update();
-    vv.addEventListener('resize', update);
-    vv.addEventListener('scroll', update);
-    return () => {
-      vv.removeEventListener('resize', update);
-      vv.removeEventListener('scroll', update);
-    };
-  }, [open]);
-  useEffect(() => {
-    if (!open || !viewport) return undefined;
-    const frame = requestAnimationFrame(() => {
-      const focused = document.activeElement;
-      if (dialogRef.current?.contains(focused) && focused.matches('input, textarea')) {
-        focused.scrollIntoView({ block: 'nearest' });
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [open, viewport?.height, viewport?.top, dialogRef]);
-  return viewport;
-}
 
 // My Property under a SECONDARY saved-property selection (GitHub codex r4
 // P1): the tab's facts, gate codes, pet plan, irrigation settings and access
@@ -15113,7 +15077,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
       ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
-      background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
+      // Mobile: full-screen sheet — keep the backdrop clear so the glass
+      // modal frosts the portal scene instead of an opaque tan wash.
+      background: compact ? 'transparent' : 'rgba(15,23,42,0.48)',
       backdropFilter: compact ? 'none' : 'blur(5px)',
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
@@ -15153,7 +15119,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       >
         <header style={{
           flexShrink: 0,
-          background: 'rgba(255,255,255,0.96)',
+          background: 'rgba(255,255,255,0.35)',
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           // Full-screen overlay: keep the header below the iOS status bar / notch.
@@ -15293,8 +15259,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                         style={{
                           minHeight: compact ? 94 : 104,
                           borderRadius: 8,
-                          border: `1px solid ${active ? B.yellow : PORTAL_SHELL.border}`,
-                          background: active ? PORTAL_SHELL.soft : PORTAL_SHELL.surface,
+                          border: `1px solid ${active ? B.yellow : 'rgba(255,255,255,0.7)'}`,
+                          background: active ? 'rgba(255,214,102,0.22)' : GLASS_SUBTLE,
                           color: PORTAL_SHELL.text,
                           cursor: 'pointer',
                           textAlign: 'left',
@@ -15306,7 +15272,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                           boxShadow: active ? '0 0 0 2px rgba(0,156,222,0.12)' : 'none',
                         }}
                       >
-                        <span style={{ ...iconTile, width: 34, height: 34, background: active ? PORTAL_SHELL.surface : PORTAL_SHELL.soft }}>
+                        <span style={{ ...iconTile, width: 34, height: 34, background: active ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.6)' }}>
                           <Icon name={c.icon} size={16} strokeWidth={2} />
                         </span>
                         <span>
@@ -15437,8 +15403,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                             minHeight: 72,
                             borderRadius: 8,
                             cursor: 'pointer',
-                            border: `1px solid ${active ? u.color : '#E7E2D7'}`,
-                            background: active ? u.bg : '#fff',
+                            border: `1px solid ${active ? u.color : 'rgba(255,255,255,0.7)'}`,
+                            background: active ? u.bg : GLASS_SUBTLE,
                             textAlign: 'left',
                             padding: 12,
                             display: 'flex',
@@ -15527,8 +15493,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                             minHeight: 44,
                             padding: '8px 10px',
                             borderRadius: 8,
-                            border: `1px solid ${active ? B.yellow : '#D8D0C0'}`,
-                            background: active ? '#F8FCFE' : '#fff',
+                            border: `1px solid ${active ? B.yellow : 'rgba(255,255,255,0.7)'}`,
+                            background: active ? 'rgba(255,214,102,0.22)' : GLASS_SUBTLE,
                             color: active ? B.glassNavy : B.textBody,
                             cursor: 'pointer',
                             fontSize: 14,
@@ -15573,8 +15539,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                         minHeight: compact ? 64 : 92,
                         borderRadius: 8,
                         cursor: photoProcessing ? 'wait' : 'pointer',
-                        border: '1px dashed #D8D0C0',
-                        background: '#F8FCFE',
+                        border: '1px dashed rgba(4,57,94,0.28)',
+                        background: GLASS_SUBTLE,
                         color: B.glassNavy,
                         display: 'flex',
                         flexDirection: 'column',
@@ -15678,8 +15644,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
             <footer style={{
               flexShrink: 0,
-              borderTop: '1px solid #E7E2D7',
-              background: 'rgba(255,255,255,0.96)',
+              borderTop: '1px solid rgba(255,255,255,0.65)',
+              background: 'rgba(255,255,255,0.35)',
               backdropFilter: 'blur(12px)',
               padding: compact
                 ? '10px calc(14px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))'
@@ -15893,15 +15859,32 @@ const MORE_TABS = [
 const CANCELLED_TABS = ['plan', 'visits', 'billing', 'documents'];
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
-function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY_TABS, moreTabs = MORE_TABS }) {
+function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef, tabs = PRIMARY_TABS, moreTabs = MORE_TABS }) {
+  const navRef = useRef(null);
+  useEffect(() => {
+    const measure = () => {
+      const height = navRef.current?.getBoundingClientRect().height;
+      if (height) document.documentElement.style.setProperty('--portal-bottom-nav-height', `${height}px`);
+    };
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(navRef.current);
+    measure();
+    window.addEventListener('resize', measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+      document.documentElement.style.removeProperty('--portal-bottom-nav-height');
+    };
+  }, []);
   const button = (t, onClick, isActive) => (
     <button
       key={t.id}
+      ref={t.id === 'more' ? moreButtonRef : undefined}
       type="button"
       onClick={onClick}
       aria-current={isActive ? 'page' : undefined}
       style={{
-        flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center',
+        flex: '1 0 auto', minWidth: 44, display: 'flex', flexDirection: 'column', alignItems: 'center',
         justifyContent: 'center', gap: 4, padding: '7px 2px', border: 'none',
         background: 'transparent', cursor: 'pointer', minHeight: 58,
         color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
@@ -15918,17 +15901,15 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
         background: B.yellow,
       }} />}
       <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
-      {/* 14px label floor (owner 2026-09-03); the ellipsis below is the
-          fallback if a caption ever outgrows its sixth of a 320px bar. */}
+      {/* Large labels move to another row; the measured bar lifts the FAB. */}
       <span style={{
         fontSize: 14, fontWeight: isActive ? 700 : 600, letterSpacing: 0,
-        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
         whiteSpace: 'nowrap', lineHeight: 1.2,
       }}>{t.label}</span>
     </button>
   );
   return (
-    <nav aria-label="Main" data-glass="" style={{
+    <nav ref={navRef} aria-label="Main" data-glass="" style={{
       position: 'fixed',
       bottom: 8,
       left: 'calc(10px + env(safe-area-inset-left, 0px))',
@@ -15938,7 +15919,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
       border: `1px solid ${PORTAL_SHELL.border}`,
       borderRadius: 8,
       boxShadow: '0 14px 32px rgba(15,23,42,0.16)',
-      display: 'flex', maxWidth: 700, margin: '0 auto',
+      display: 'flex', flexWrap: 'wrap', maxWidth: 700, margin: '0 auto',
       padding: '4px 8px max(6px, env(safe-area-inset-bottom))',
       boxSizing: 'border-box',
     }}>
@@ -16254,7 +16235,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
   };
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }, [messages]);
 
   const viewport = useSheetViewport(true, dialogRef);
@@ -16356,7 +16337,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           <ShellCloseButton onClick={onClose} label="Close chat" />
         </div>
 
-        <div style={{
+        <div role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text" style={{
           flex: compact ? '1 1 300px' : '1 1 360px',
           minHeight: 0,
           overflowY: 'auto',
@@ -16404,7 +16385,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
                     style={{
                       border: 'none', background: 'transparent', cursor: 'pointer',
                       fontSize: 14, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
-                      textDecoration: 'underline', padding: '2px 4px', marginTop: 2,
+                      textDecoration: 'underline', padding: '8px 4px', minHeight: 44, marginTop: 2,
                     }}
                   >
                     {reportState[i] === 'sending' ? 'Reporting…'
@@ -16508,6 +16489,17 @@ export default function PortalPage() {
   const [activeTab, setActiveTab] = useState(
     cancelledAccount && !CANCELLED_TABS.includes(initialTab) ? 'plan' : initialTab,
   );
+  // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
+  usePortalActivity(activeTab, `${customer?.id ?? ''}:${sessionEpoch}`);
+  const resetTabScroll = useRef(false);
+  const moreButtonRef = useRef(null);
+  useEffect(() => {
+    if (!resetTabScroll.current) return;
+    resetTabScroll.current = false;
+    // After outgoing sheets unlock the body, open explicit destinations
+    // at the top. History and focused deep links keep their own behavior.
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  }, [activeTab]);
   // Which My Plan service row to open expanded on the next Plan mount —
   // deep-link above or the home lawn teaser; nav clicks reset it.
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
@@ -16579,6 +16571,8 @@ export default function PortalPage() {
     // Plain nav clears any pending row focus so Plan doesn't keep
     // re-expanding a row the customer already closed.
     setPlanFocusService(null);
+    const nextTab = ['schedule', 'services'].includes(id) ? 'visits' : id;
+    resetTabScroll.current = nextTab !== 'request' && nextTab !== activeTab;
     if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); syncTabUrl('schedule'); return; }
     if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); syncTabUrl('services'); return; }
     if (id === 'request') { setShowReportIssue(true); return; }
@@ -16680,8 +16674,10 @@ export default function PortalPage() {
       if (headerRef.current) setNavStickyTop(headerRef.current.offsetHeight);
     };
     measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    if (headerRef.current) observer?.observe(headerRef.current);
     window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
+    return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
   }, []);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
@@ -16886,16 +16882,16 @@ export default function PortalPage() {
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto' }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 0 }}>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Customer Portal</div>
           </div>
         </div>
         {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
             renders as a glass card above the Waves AI bar in the content
             column. Mobile keeps the bottom nav untouched. */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexShrink: 0 }}>
           {/* The header Request button creates work — hidden for a cancelled
               account (C4), which keeps Call / Text in the account menu. */}
           {!isMobileShell && !cancelledAccount && (
@@ -16939,12 +16935,12 @@ export default function PortalPage() {
               data-glass="chip"
               style={{
                 minHeight: 44,
-                width: isMobileShell ? 44 : 'auto',
+                minWidth: 44,
                 borderRadius: 10,
                 background: PORTAL_SHELL.surface,
                 border: `1px solid ${PORTAL_SHELL.borderStrong}`,
                 position: 'relative',
-                padding: isMobileShell ? 0 : '4px 8px 4px 4px',
+                padding: isMobileShell ? 6 : '4px 8px 4px 4px',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -16958,8 +16954,9 @@ export default function PortalPage() {
               }}
             >
               <span style={{
-                width: 30,
-                height: 30,
+                minWidth: 30,
+                minHeight: 30,
+                padding: '0 3px', boxSizing: 'border-box',
                 borderRadius: 10,
                 background: PORTAL_SHELL.text,
                 color: '#fff',
@@ -17328,7 +17325,7 @@ export default function PortalPage() {
           card underneath the bar on notched phones. */}
       <main id="portal-main" tabIndex={-1} style={{
         padding: isMobileShell
-          ? '24px calc(16px + env(safe-area-inset-right, 0px)) calc(108px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
+          ? '24px calc(16px + env(safe-area-inset-right, 0px)) calc(var(--portal-bottom-nav-height, 78px) + 30px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
           : '24px calc(16px + env(safe-area-inset-right, 0px)) 32px calc(16px + env(safe-area-inset-left, 0px))',
         // shellMaxWidth is the content cap. Preserve the existing 760px
         // desktop content column now that safe-area padding is border-box.
@@ -17386,7 +17383,7 @@ export default function PortalPage() {
             wateringPlanCustomerId={wateringPlanCustomerId}
             onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
           />)}
-        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} onOpenPhotoId={photoIdAvailable ? () => setShowPhotoId(true) : null} scope={{ currentEntry: activeProperty, savedScope: portalProperties.some((p) => p.key), selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable: refreshProperties }} />}
         </PortalRefreshArea>
       </main>
 
@@ -17397,6 +17394,7 @@ export default function PortalPage() {
           onSelect={switchTab}
           onOpenMore={() => setShowMoreSheet(true)}
           moreActive={showMoreSheet}
+          moreButtonRef={moreButtonRef}
           tabs={cancelledAccount ? cancelledPrimaryTabs : PRIMARY_TABS}
           moreTabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
@@ -17406,17 +17404,17 @@ export default function PortalPage() {
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
           onClose={() => setShowMoreSheet(false)}
-          onRequest={cancelledAccount ? null : () => setShowReportIssue(true)}
-          onChat={cancelledAccount ? null : () => setShowChat(true)}
-          onOpenPhotoId={photoIdAvailable ? () => { setShowPhotoId(true); setShowMoreSheet(false); } : null}
+          onRequest={cancelledAccount ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowReportIssue(true); }}
+          onChat={cancelledAccount ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowChat(true); }}
+          onOpenPhotoId={photoIdAvailable ? () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowMoreSheet(false); } : null}
           tabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
       )}
 
       {/* Photo ID — floating button + sheet (GATE_CUSTOMER_PHOTO_ID; hidden
           entirely on a 404 from GET /api/photo-id, see usePhotoIdGate). */}
-      {photoIdAvailable && !showPhotoId && (
-        <PhotoIdFab onOpen={() => setShowPhotoId(true)} hasBottomNav={isMobileShell} />
+      {photoIdAvailable && (
+        <PhotoIdFab onOpen={() => setShowPhotoId(true)} hasBottomNav={isMobileShell} hidden={showPhotoId} />
       )}
       <PhotoIdSheet
         open={showPhotoId && photoIdAvailable}
@@ -17459,4 +17457,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

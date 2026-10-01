@@ -13,6 +13,8 @@ import {
   X,
 } from 'lucide-react';
 import { adminFetch } from '../../utils/admin-fetch';
+import { isMlUnit } from '../../lib/measure-units';
+import { formatMeasuredAmount } from '../../lib/mix-amount';
 import { Button, Badge, cn } from '../ui';
 
 function isLawnService(service) {
@@ -31,6 +33,15 @@ function fmtNumber(value, suffix = '') {
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
   return `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })}${suffix}`;
+}
+
+// A mix amount and its unit as the plan serves them, except an amount in mL,
+// which reads the way the truck measures it (tsp under 1 fl oz, else fl oz)
+// on its own basis: nothing a tech sees is in mL (owner ruling 2026-09-29).
+function mixAmountParts(amount, unit) {
+  if (!isMlUnit(unit)) return [fmtNumber(amount), unit || ''];
+  const basis = String(unit).split('/').slice(1).join('/').trim();
+  return [formatMeasuredAmount(amount, 'ml') || '—', basis ? `per ${basis}` : ''];
 }
 
 function Field({ label, value }) {
@@ -81,6 +92,7 @@ function NoticeList({ title, items, tone }) {
 function ProductLine({ item, checked, onToggle }) {
   const product = item.product;
   const mix = item.mix;
+  const [amountText, unitText] = mixAmountParts(mix?.amount, mix?.amountUnit);
   return (
     <div className="border-hairline border-zinc-200 rounded-sm p-3">
       <div className="flex items-start gap-3">
@@ -112,8 +124,8 @@ function ProductLine({ item, checked, onToggle }) {
         </div>
         {mix?.amount != null && (
           <div className="text-right flex-shrink-0">
-            <div className="u-nums text-13 font-medium text-zinc-900">{fmtNumber(mix.amount)}</div>
-            <div className="text-11 text-ink-secondary">{mix.amountUnit || ''}</div>
+            <div className="u-nums text-13 font-medium text-zinc-900">{amountText}</div>
+            <div className="text-11 text-ink-secondary">{unitText}</div>
           </div>
         )}
       </div>

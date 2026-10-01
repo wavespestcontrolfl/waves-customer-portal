@@ -22,8 +22,6 @@ const SCHEMA = {
     { key: 'activity_areas', label: 'Activity areas', type: 'chips', detail: true, requiredUnless: { field: 'evidence_level', value: 'None observed' }, options: ['Bedroom', 'Living room'] },
     { key: 'contributing_conditions', label: 'Contributing conditions', type: 'chips', detail: true, options: ['Pets', 'Carpet'] },
   ],
-  nextStepChips: ['Follow-up recommended'],
-  nextStepRequired: true,
   activity: null,
 };
 
@@ -37,8 +35,6 @@ function renderSection(values) {
       activityScore={null}
       activityScoreTouched={false}
       onActivityTap={() => {}}
-      nextStepChips={[]}
-      onToggleChip={() => {}}
       recommendations=""
       onRecommendationsChange={() => {}}
     />,

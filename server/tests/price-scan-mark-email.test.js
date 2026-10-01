@@ -153,4 +153,14 @@ describe('mark-email content', () => {
     expect(out.html).toContain('Bug &amp; Weed &lt;Pro&gt;');
     expect(out.html).not.toContain('<Pro>');
   });
+
+  // Sign-off is "Waves Pest Control" only — never "& Lawn Care" (owner
+  // ruling 2026-09-28). Checks the composed sign-off line itself, not the
+  // shared email-template footer/logo alt text (out of scope here).
+  test('signs off as "Waves Pest Control", never "& Lawn Care"', () => {
+    const out = composeMarkEmail([taurus]);
+    expect(out.text).toContain('Thanks,\nWaves Pest Control');
+    expect(out.text).not.toContain('Waves Pest Control & Lawn Care');
+    expect(out.html).toContain('Thanks,<br>Waves Pest Control</p>');
+  });
 });

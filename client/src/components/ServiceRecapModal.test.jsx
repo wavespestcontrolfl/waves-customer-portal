@@ -86,22 +86,23 @@ const MIX_CATALOG = [
   },
   {
     id: 5,
-    name: 'Talstar P',
+    name: 'Atticus Talak 7.9 F',
     category: 'Insecticide',
     active_ingredient: 'Bifenthrin',
     moa_group: '3A',
     default_rate: null,
     default_unit: null,
-    rate_unit: null,
+    rate_unit: 'fl_oz',
     default_rate_per_1000: null,
   },
   {
     id: 6,
+    // Real catalog rate per the owner ruling: 0.2 fl_oz/gal.
     name: 'LESCO 90/10 Nonionic Surfactant',
     category: 'Adjuvant',
     active_ingredient: null,
     moa_group: null,
-    default_rate: '0.03-0.64',
+    default_rate: '0.2',
     default_unit: 'fl_oz/gal',
     rate_unit: null,
     default_rate_per_1000: null,
@@ -153,6 +154,9 @@ describe('ServiceRecapModal application rates', () => {
     const input = screen.getByLabelText('Application rate for Adjourn SC');
     expect(input.value).toBe('4');
     expect(screen.getByText('oz')).toBeTruthy();
+    // 4 oz is the tank's house amount, not the label's fl oz per gallon: it is
+    // never flagged over Adjourn's 0.65 fl oz/gal label.
+    expect(screen.queryByText(/label max/)).toBeNull();
   });
 
   test('reopening a recap prefills the RECORDED rate, not the catalog default', async () => {
@@ -193,11 +197,13 @@ describe('ServiceRecapModal application rates', () => {
   });
 });
 
-// The default pest tank mix (owner 2026-08-29, lib/pest-default-mix) seeds
-// the primary field-tech completion too (codex P1 on #3611): a FRESH
-// recurring general-pest or pest re-service recap pre-selects Taurus SC,
-// Talstar P, and the non-ionic surfactant, rates prefilled exactly as a
-// manual tap would.
+// The default pest tank mix (lib/pest-default-mix) seeds the primary
+// field-tech completion too (codex P1 on #3611): a FRESH recurring
+// general-pest, one-time pest, or pest re-service recap pre-selects
+// Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10 Nonionic
+// Surfactant (owner ruling 2026-09-26 — supersedes the 2026-08-29
+// Talstar P / bare-surfactant list), rates prefilled exactly as a manual
+// tap would.
 describe('ServiceRecapModal default pest tank mix', () => {
   test('a fresh recurring pest recap pre-selects the mix with catalog rate prefills', async () => {
     const request = makeRequest({ products: MIX_CATALOG });
@@ -210,20 +216,24 @@ describe('ServiceRecapModal default pest tank mix', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Talstar P', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Non-ionic Surfactant', pressed: true })).toBeTruthy();
-    // The LESCO lawn surfactant is never substituted into the mix.
-    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
+    // The bare "Non-ionic Surfactant" row is never substituted into the mix —
+    // exact catalog identity only.
+    expect(screen.getByRole('button', { name: 'Non-ionic Surfactant' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Non-ionic Surfactant', pressed: true })).toBeNull();
     // Rates seed from the same catalog prefill a manual tap would use —
     // for Taurus the pest 4-oz house default (it outranks the dilution
     // band's low bound, same precedence the Adjourn SC test pins). The
-    // adjuvant gets no fabricated rate: isAdjuvantProduct keeps the
-    // insecticide house default off surfactants.
+    // surfactant gets its own real label rate (0.2 fl_oz/gal) — an
+    // adjuvant with a genuine catalog rate is never overridden by the
+    // insecticide 4-oz house default (isAdjuvantProduct only suppresses
+    // that default for a RATELESS adjuvant).
     expect(screen.getByLabelText('Application rate for Taurus SC').value).toBe('4');
-    expect(screen.queryByLabelText('Application rate for Non-ionic Surfactant')).toBeNull();
+    expect(screen.getByLabelText('Application rate for LESCO 90/10 Nonionic Surfactant').value).toBe('0.2');
   });
 
-  test('a one-time pest recap seeds nothing', async () => {
+  test('a bare one-time "Pest Control Service" recap still seeds nothing (alias-list exclusion)', async () => {
     const request = makeRequest({ products: MIX_CATALOG });
     render(
       <ServiceRecapModal
@@ -235,6 +245,38 @@ describe('ServiceRecapModal default pest tank mix', () => {
 
     expect(await screen.findByRole('button', { name: 'Taurus SC' })).toBeTruthy();
     expect(screen.queryByRole('button', { pressed: true })).toBeNull();
+  });
+
+  test('the named One-Time Pest Control Service DOES seed the mix (owner ruling 2026-09-26)', async () => {
+    const request = makeRequest({ products: MIX_CATALOG });
+    render(
+      <ServiceRecapModal
+        service={{ id: 'svc-1', serviceType: 'One-Time Pest Control Service' }}
+        request={request}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
+  });
+
+  test('a bare "Pest Control Service" recap carrying the one_time_pest_control key DOES seed the mix (Codex r4, PR #5049)', async () => {
+    // TechHomePage now threads the schedule row's completionProfile.serviceKey
+    // into the recap's service prop — the key, not the label, marks the job.
+    const request = makeRequest({ products: MIX_CATALOG });
+    render(
+      <ServiceRecapModal
+        service={{ id: 'svc-1', serviceType: 'Pest Control Service', serviceKey: 'one_time_pest_control' }}
+        request={request}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
   });
 
   test('a reopened recap keeps the recorded selection — no mix injection', async () => {

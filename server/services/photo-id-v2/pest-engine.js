@@ -30,6 +30,7 @@
 
 const MODELS = require('../../config/models');
 const catalog = require('../species-catalog');
+const { isApproved } = require('../species-catalog-approval');
 const { dispatch } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
 const { PEST_LIBRARY } = require('../pest-identification');
@@ -95,10 +96,139 @@ const ACTION_LABELS = {
 const REFERRAL_TEMPLATES = {
   bee_relocation: "Honey bees are protected pollinators we don't spray. We refer you to a licensed bee removal/relocation specialist who can safely relocate the colony.",
   wildlife_trapper: 'This is a wildlife visitor, not something pest control treats. We refer you to a licensed nuisance wildlife trapper for safe removal.',
-  report_fwc: 'This is protected wildlife. Please report it to the Florida Fish and Wildlife Conservation Commission (FWC) rather than handling it yourself.',
+  report_fwc: 'Please report this sighting to the Florida Fish and Wildlife Conservation Commission (FWC) rather than handling it yourself.',
   report_fdacs: 'This may be a regulated pest of concern. Please report it to the Florida Department of Agriculture and Consumer Services (FDACS).',
   protected_leave_alone: 'This animal and its burrow are protected by Florida law. Please leave it undisturbed — no treatment is needed here.',
+  // CDC: bites, scratches, or waking with a bat in the room need prompt
+  // medical/public-health assessment. FWC: exclusion is Florida's only legal
+  // removal method and is restricted during maternity season.
+  bat_exclusion: 'Bats can carry rabies. If you are bitten or scratched, or wake up with a bat in the room, contact a healthcare professional or local health department right away. Do not try to touch, trap, or handle it yourself. In Florida, exclusion is the only legal removal method and is restricted during maternity season; we refer you to a licensed wildlife professional.',
 };
+
+const DEFAULT_GENERIC_COMPATIBILITY = Object.freeze({
+  safety: Object.freeze({ stinging: false, venomous: false, disease_vector: false, structural_threat: false }),
+  serviceLine: 'pest',
+  serviceKey: null,
+  serviceLabel: 'Pest Consultation',
+  inspectionRequired: true,
+  urgency: 'low',
+});
+
+// An answer that names no approved entry (an unreviewed species, a spread of
+// candidates, or an unknown) shows ONLY these fixed templates: customer text
+// comes from owner-approved entries or from here, never from group prose. A
+// group's prose would have to stay right for every species under it,
+// reviewed or not, and each new species broke a different group's text.
+// The line is assembled from fixed hazard-class clauses, each chosen when
+// ANY entry under the answered node carries that hazard, so a node is
+// always triaged for its worst member (Codex #5106 r1).
+const UNNAMED_SAFETY_CLAUSES = Object.freeze({
+  base: "Until we know exactly what this is, keep your distance, don't touch it, and keep kids and pets away.",
+  // Venomous biters (snakes, widows, recluse): a bite needs care now.
+  venomousBite: 'If anyone is bitten, call 911 or get emergency medical care right away, even if it seems minor at first; for a sting or scratch, wash the area and call a doctor, and call 911 for trouble breathing or a severe reaction.',
+  general: 'If anyone is bitten, stung or scratched, wash the area and call a doctor; call 911 for trouble breathing or a severe reaction.',
+  // Wild mammals that bite (raccoons, bats, squirrels, opossums).
+  rabies: 'Wild mammals can carry rabies: if one bites or scratches anyone, wash the wound with soap and water and see a doctor or call the health department right away.',
+  // CDC: a bat bite can go unnoticed, so possible contact needs assessment.
+  bat: 'A bat bite can be too small to notice: if anyone wakes up with a bat in the room or may have touched one, call a doctor or the health department right away, even without a visible bite.',
+  irritant: 'If it touches bare skin or anything from it gets in the eyes, wash the skin with soap and water or rinse the eyes with clean water right away, and call a doctor if pain, redness or vision trouble lasts.',
+  allergen: 'People with allergies or asthma can react more strongly; call 911 for trouble breathing.',
+  vector: 'Wash your hands after any contact, and if anyone gets sick after a bite or contact, tell their doctor about it.',
+  pets: 'If a pet bites, licks or mouths it, call your vet right away.',
+  protected: "It may be protected by law, so don't harm, trap or move it or its nest or burrow.",
+});
+const UNNAMED_SAFETY_LINE = `${UNNAMED_SAFETY_CLAUSES.base} ${UNNAMED_SAFETY_CLAUSES.general}`;
+const UNNAMED_NEXT_PHOTO = Object.freeze({
+  ask: "From a safe distance, zoom in so it fills the frame and take one more photo in good light. Don't move closer or touch it.",
+  why: 'A sharper photo helps us narrow it down.',
+  photo_can_confirm: true,
+});
+
+// Every catalog entry under each node (entries, subgroups, groups and
+// categories), reviewed or not: an unnamed answer's safety line and v1
+// columns are derived from all of them, never from one group's own text.
+const NODE_MEMBERS = (() => {
+  const members = new Map();
+  for (const entry of catalog.listEntries({ section: 'pest' })) {
+    for (const { id } of catalog.lineage(entry.slug)) {
+      if (!members.has(id)) members.set(id, []);
+      members.get(id).push(entry);
+    }
+  }
+  return members;
+})();
+
+function keepsDistance(entry) {
+  return (!!entry.risk && entry.risk !== 'low') || !!entry.safety?.protected
+    || entry.role === 'wildlife' || entry.role === 'protected_wildlife';
+}
+
+function isVenomousBiter(entry) {
+  const safety = entry.safety || {};
+  return !!safety.venomous && !!safety.bites && !safety.stings && entry.risk === 'medical';
+}
+
+function isRabiesRisk(entry) {
+  return !!entry.safety?.bites && catalog.lineage(entry.slug).some((rung) => rung.id === 'wild-mammals');
+}
+
+// Each hazard an entry can carry, and the fixed clause that covers it. A
+// node's line includes every clause any member triggers, so no exposure a
+// draft entry's own prose would have covered goes unanswered.
+const HAZARD_CLAUSES = [
+  ['rabies', isRabiesRisk],
+  ['bat', (entry) => catalog.lineage(entry.slug).some((rung) => rung.id === 'bats')],
+  ['irritant', (entry) => !!entry.safety?.irritant],
+  ['allergen', (entry) => !!entry.safety?.allergen],
+  ['vector', (entry) => !!entry.safety?.disease_vector],
+  ['pets', (entry) => !!entry.safety?.toxic_to_pets],
+  ['protected', (entry) => !!entry.safety?.protected],
+];
+
+function clausesFor(entry) {
+  return HAZARD_CLAUSES.filter(([, applies]) => applies(entry)).map(([key]) => key);
+}
+
+// An unknown answer (no node) could be anything, so it is triaged for the
+// whole catalog.
+function unnamedSafetyLineFor(nodeId) {
+  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : catalog.listEntries({ section: 'pest' });
+  const extra = new Set(members.flatMap(clausesFor));
+  if (nodeId && !extra.size && !members.some(keepsDistance)) return null;
+  return [
+    UNNAMED_SAFETY_CLAUSES.base,
+    members.some(isVenomousBiter) ? UNNAMED_SAFETY_CLAUSES.venomousBite : UNNAMED_SAFETY_CLAUSES.general,
+    ...HAZARD_CLAUSES.filter(([key]) => extra.has(key)).map(([key]) => UNNAMED_SAFETY_CLAUSES[key]),
+  ].join(' ');
+}
+
+const URGENCY_ORDER = ['low', 'moderate', 'high'];
+
+/** The v1 columns for an unnamed answer, derived from every entry under the
+ * answered node: any hazard one of them carries, the most urgent urgency,
+ * and a service line/key/label only when they all share it. Inspection stays
+ * v1's own unmatched default (confirm in person first). No node (unknown) is
+ * that default throughout. */
+function derivedNodeCompatibility(nodeId) {
+  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : [];
+  if (!members.length) return { ...DEFAULT_GENERIC_COMPATIBILITY, safety: { ...DEFAULT_GENERIC_COMPATIBILITY.safety } };
+  const shared = (pick, fallback) => {
+    const values = new Set(members.map(pick));
+    return values.size === 1 ? [...values][0] : fallback;
+  };
+  const safety = {};
+  for (const key of Object.keys(DEFAULT_GENERIC_COMPATIBILITY.safety)) {
+    safety[key] = members.some((entry) => v1SafetyFallback(entry)[key]);
+  }
+  return {
+    ...DEFAULT_GENERIC_COMPATIBILITY,
+    safety,
+    serviceLine: shared((e) => e.service?.line || null, null) || DEFAULT_GENERIC_COMPATIBILITY.serviceLine,
+    serviceKey: shared((e) => e.service?.key || null, null),
+    serviceLabel: shared((e) => e.service?.label || null, null) || DEFAULT_GENERIC_COMPATIBILITY.serviceLabel,
+    urgency: URGENCY_ORDER[Math.max(...members.map((e) => URGENCY_ORDER.indexOf(e.urgency)), 0)],
+  };
+}
 
 function escalateBelow() {
   const raw = Number(process.env.PHOTO_ID_ESCALATE_BELOW);
@@ -189,10 +319,21 @@ function toImages(photos) {
  * a human's typed text. An unresolvable/hallucinated slug degrades to an
  * off-catalog candidate rather than being dropped, so it still contributes
  * its confidence/group signal to the lineage climb.
+ *
+ * Codex #5143 r1 P2: the candidates/escalation prompts only LIST pest-section
+ * entries, but nothing stopped a resolved slug from a DIFFERENT section
+ * (once plant/condition content lands) from being treated as a real pest
+ * identity — the prompt filter alone doesn't bound what the model can
+ * return. A slug that resolves to a non-pest node is rejected here, at the
+ * one place every model-returned identifier becomes a catalog node
+ * (candidates, verify's merge-by-slug, and escalation all route through
+ * this function) — treated exactly like an off-catalog/unresolved slug,
+ * never a v2 entry answer.
  */
 function resolveCandidate(raw) {
   const rawSlug = String(raw?.slug || '').trim();
-  const entry = rawSlug ? catalog.getEntry(rawSlug) : null;
+  const rawEntry = rawSlug ? catalog.getEntry(rawSlug) : null;
+  const entry = rawEntry && catalog.sectionOf(rawEntry) === 'pest' ? rawEntry : null;
   const confidence = clamp01(raw?.confidence);
   const traitsVisible = Array.isArray(raw?.traits_visible) ? raw.traits_visible.filter(Number.isFinite) : [];
   const traitsNotVisible = Array.isArray(raw?.traits_not_visible) ? raw.traits_not_visible.filter(Number.isFinite) : [];
@@ -250,32 +391,40 @@ function sameCandidateKey(a, b) {
 function candidateNodeId(candidate) {
   if (!candidate) return null;
   if (candidate.slug) return candidate.slug;
-  if (candidate.groupId && catalog.getGroup(candidate.groupId)) return candidate.groupId;
+  // Codex #5143 r1 P2: `group_id` is free-form model output — the same
+  // section guard `resolveCandidate` applies to a resolved slug applies
+  // here too, or an off-catalog answer naming e.g. `group_id: "turfgrasses"`
+  // (or, before this PR, the assay-only "nematodes") would still climb to a
+  // named group-level pest answer.
+  if (candidate.groupId) {
+    const group = catalog.getGroup(candidate.groupId);
+    if (group && catalog.sectionOf(group) === 'pest') return candidate.groupId;
+  }
   return null;
 }
 
 // Contract delta 2026-09-26 #5: risk dimensions for escalation are sting,
-// venom, structural, disease, inspection-first, toxic_to_pets, and (new)
-// irritant — any of these, or an explicit "call" verdict, makes a candidate
+// venom, structural, disease, inspection-first, toxic_to_pets, allergen,
+// irritant, protected status, and an explicit medical risk — any of these,
+// or a "call" verdict,
+// makes a candidate
 // consequential for the look-alike-close escalation trigger and decision
 // #2's harmless-plainly guard.
 function isConsequential(entry) {
   if (!entry) return false;
   const s = entry.safety || {};
   return entry.verdict === 'call'
-    || !!s.stings || !!s.venomous || !!s.structural || !!s.toxic_to_pets || !!s.irritant || !!s.disease_vector
+    || entry.risk === 'medical'
+    || !!s.stings || !!s.venomous || !!s.structural || !!s.toxic_to_pets || !!s.allergen || !!s.irritant || !!s.disease_vector || !!s.protected
     || !!entry.service?.inspection_first;
 }
 
 // Contract delta 2026-09-26 #1: the engine names an entry only when its
-// catalog review is owner-approved AND fact-check-clean — an unreviewed or
-// fact-check-pending entry can never be shown by name, whatever the models
-// say. Confidence math and escalation triggers are unaffected; only naming
-// (the `entry` level/block) is gated.
-function isApproved(entry) {
-  return !!entry && entry.review?.status === 'owner_approved' && Array.isArray(entry.verification) && entry.verification.length === 0;
-}
-
+// catalog review is owner-approved, fact-check-clean, AND its stored approval
+// hash still matches every authored field. Unreviewed, changed-after-approval,
+// or fact-check-pending entries can never be shown by name, whatever the
+// models say. Confidence math and escalation triggers are unaffected; only
+// naming (the `entry` level/block) is gated.
 function candidateContextFor(candidates) {
   return candidates.filter((c) => c.entry).map((c) => ({
     slug: c.slug,
@@ -487,10 +636,10 @@ function allLineageRungs(candidates) {
   for (const c of candidates) {
     const nodeId = candidateNodeId(c);
     if (!nodeId) continue;
-    for (const rung of catalog.lineage(nodeId)) {
+    for (const [depth, rung] of catalog.lineage(nodeId).entries()) {
       if (rung.level === 'entry') continue;
       const key = `${rung.level}:${rung.id}`;
-      if (!byKey.has(key)) byKey.set(key, rung);
+      if (!byKey.has(key)) byKey.set(key, { ...rung, depth });
     }
   }
   return [...byKey.values()];
@@ -504,7 +653,11 @@ function bestRungAtLevel(candidates, rungs, level) {
   for (const rung of rungs) {
     if (rung.level !== level) continue;
     const sum = sumConfidenceAtNode(candidates, level, rung.id);
-    if (sum >= LINEAGE_CLIMB_MIN && sum > bestSum) { best = rung; bestSum = sum; }
+    if (sum >= LINEAGE_CLIMB_MIN
+      && (sum > bestSum || (sum === bestSum && (rung.depth || 0) > (best?.depth || 0)))) {
+      best = rung;
+      bestSum = sum;
+    }
   }
   return best;
 }
@@ -631,7 +784,7 @@ function localLabel(entry, currentMonth) {
 function candidatesBlockFor(candidates, currentMonth) {
   const catalogCandidates = candidates.filter((c) => c.entry).slice(0, 3);
   const top = catalogCandidates.find((c) => isApproved(c.entry)) || catalogCandidates[0] || null;
-  return catalogCandidates.map((c) => {
+  const masked = catalogCandidates.map((c) => {
     const approved = isApproved(c.entry);
     const group = catalog.getGroup(c.entry.group);
     return {
@@ -645,8 +798,26 @@ function candidatesBlockFor(candidates, currentMonth) {
       // through an approved candidate's `difference_from_top` either).
       difference_from_top: approved && top?.entry && isApproved(top.entry) ? differenceFromTop(c, top) : null,
       local: localLabel(c.entry, currentMonth),
+      // A named alternative carries its own catalog warning — "Other
+      // possibilities" must not name brown recluse without its bite line
+      // (the plant engine's #5250 r6 rule). A masked row names nothing.
+      safety_line: approved ? (c.entry.safety_line || null) : null,
     };
   });
+  const visible = new Map();
+  for (const candidate of masked) {
+    const key = candidate.slug || `masked:${candidate.common_name}`;
+    const existing = visible.get(key);
+    if (!existing) {
+      visible.set(key, candidate);
+      continue;
+    }
+    // Collapsing indistinguishable masks must not add their confidences or
+    // imply that a hidden species' seasonal range applies to the whole group.
+    if (candidate.strength === 'possible') existing.strength = 'possible';
+    if (candidate.local !== existing.local) existing.local = null;
+  }
+  return [...visible.values()];
 }
 
 // Contract delta 2026-09-26 #3: a curated pair's OWN `photo_can_confirm`
@@ -657,16 +828,35 @@ function candidatesBlockFor(candidates, currentMonth) {
  * catalog look-alikes are sometimes one-way (bigheaded ant lists fire ant,
  * not the reverse; Codex #4916 r3). A reverse pair is returned with `slug`
  * pointing at `other`, so callers can treat it like `entry`'s own. */
-function pairBetween(entry, other) {
-  if (!entry || !other) return null;
-  const own = (entry.look_alikes || []).find((l) => l.slug === other.slug);
-  if (own) return own;
-  const reverse = (other.look_alikes || []).find((l) => l.slug === entry.slug);
-  return reverse ? { ...reverse, slug: other.slug } : null;
+function vetoAppliesToPhoto(edge, shownKind) {
+  if (edge?.photo_can_confirm !== false) return false;
+  return !edge.photo_veto_applies_to || !shownKind || edge.photo_veto_applies_to === shownKind;
 }
 
-function pairIfBothApproved(entry, other) {
-  const pair = pairBetween(entry, other);
+function edgeAppliesToPhoto(edge, shownKind) {
+  return !!edge && (!edge.photo_veto_applies_to || !shownKind || edge.photo_veto_applies_to === shownKind);
+}
+
+function pairBetween(entry, other, shownKind = null) {
+  if (!entry || !other) return null;
+  const own = (entry.look_alikes || []).find((l) => l.slug === other.slug);
+  const reverse = (other.look_alikes || []).find((l) => l.slug === entry.slug);
+  if (!own && !reverse) return null;
+  // If EITHER direction says no photo can settle the pair, it can't — from
+  // whichever side is on top (southern house spider over brown recluse must
+  // not read "pretty sure"; Codex #4974 r2).
+  // The edge that supplies the veto also supplies the wording: its
+  // next_photo/difference carry the "a photo can't settle this" guidance,
+  // which the other side's tip (e.g. "a close-up of the violin marking")
+  // would contradict (Codex #4974 r6).
+  const vetoing = vetoAppliesToPhoto(own, shownKind) ? own : (vetoAppliesToPhoto(reverse, shownKind) ? reverse : null);
+  if (vetoing) return { ...vetoing, slug: other.slug, photo_can_confirm: false };
+  const selected = [own, reverse].find((edge) => edgeAppliesToPhoto(edge, shownKind));
+  return selected ? { ...selected, slug: other.slug } : null;
+}
+
+function pairIfBothApproved(entry, other, shownKind = null) {
+  const pair = pairBetween(entry, other, shownKind);
   return pair && isApproved(catalog.getEntry(pair.slug)) ? pair : null;
 }
 
@@ -689,15 +879,60 @@ const NO_PHOTO_CONFIRMS = Object.freeze({
  * is a fact about the pair, not about whether the other side's page is
  * published yet (Codex round-0 P1, round 19: bed bug vs a still-planned
  * bat bug). Callers must not surface an unapproved target's identity. */
-function governingPair(top, second) {
-  return (second?.entry && pairBetween(top?.entry, second.entry)) || (top?.entry?.look_alikes || [])[0] || null;
+/** Every look-alike relationship `entry` has, from EITHER side: its own
+ * edges, plus edges other entries point at it with. Each is normalized by
+ * `pairBetween`, so a "no photo can settle this" on either side wins.
+ * Every single-entry fallback reads this one list, so a reverse-only veto
+ * (brown recluse -> southern house spider) can't be missed on any path
+ * (Codex #4974 r2-r4). Own edges come first, in authored order. */
+function lookAlikeEdges(entry, shownKind = null) {
+  if (!entry) return [];
+  const others = [
+    ...(entry.look_alikes || []).map((la) => la.slug),
+    ...catalog.listEntries({ section: 'pest' }).filter((o) => (o.look_alikes || []).some((la) => la.slug === entry.slug)).map((o) => o.slug),
+  ];
+  const seen = new Set();
+  const edges = [];
+  for (const slug of others) {
+    if (seen.has(slug) || slug === entry.slug) continue;
+    seen.add(slug);
+    const pair = pairBetween(entry, catalog.getEntry(slug) || { slug, look_alikes: [] }, shownKind);
+    if (pair) edges.push(pair);
+  }
+  return edges;
 }
 
-function firstApprovedLookAlike(entry) {
-  return (entry.look_alikes || []).find((la) => isApproved(catalog.getEntry(la.slug))) || null;
+function governingPair(top, second, shownKind = null) {
+  // Any look-alike no photo can separate governs first, whoever the
+  // runner-up is: a confirmable runner-up pair must not mask a different
+  // unconfirmable one (Formosan vs. Asian subterranean termite behind a
+  // Formosan/subterranean result; Codex #4974 r5). Prefer the runner-up's
+  // own pair when it is the unconfirmable one.
+  const edges = lookAlikeEdges(top?.entry, shownKind);
+  const runnerUp = second?.entry ? pairBetween(top?.entry, second.entry, shownKind) : null;
+  if (runnerUp?.photo_can_confirm === false) return runnerUp;
+  const veto = edges.find((e) => e.photo_can_confirm === false);
+  if (veto) return veto;
+  return runnerUp || edges[0] || null;
 }
 
-function nextPhotoFor(wording, candidates, level, nodeId) {
+function firstApprovedLookAlike(entry, shownKind = null) {
+  const edges = lookAlikeEdges(entry, shownKind).filter((e) => isApproved(catalog.getEntry(e.slug)));
+  return edges.find((e) => e.photo_can_confirm === false) || edges[0] || null;
+}
+
+/** A curated comparison's photo prompt. The pair names its look-alike, which
+ * need not be among the shown candidates, so that entry's own warning rides
+ * along (the plant engine's #5250 r7 rule). Callers pass only pairs whose
+ * target is approved. */
+function pairPrompt(pair, photoCanConfirm) {
+  const safetyLine = catalog.getEntry(pair.slug)?.safety_line || null;
+  return {
+    ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: photoCanConfirm, ...(safetyLine ? { safety_line: safetyLine } : {}),
+  };
+}
+
+function nextPhotoFor(wording, candidates, level, nodeId, shownKind = null) {
   if (wording === 'pretty_sure') return null;
   const top = candidates[0] || null;
   const second = candidates[1] || null;
@@ -708,43 +943,43 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   // (round 2): the pair's `ask`/`why` prose routinely names BOTH species by
   // common name, so this is only used when both sides are approved — an
   // unapproved look-alike must not surface even indirectly through it.
-  if (top?.entry && second?.entry && isApproved(top.entry) && isApproved(second.entry)) {
-    const pair = pairIfBothApproved(top.entry, second.entry);
-    if (pair) return { ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
+  // A look-alike no photo can separate outranks the runner-up pair's photo
+  // tip: say so instead (Codex #4974 r5).
+  // Computed at every level: an unapproved top candidate climbs to a node,
+  // but a pair no photo can separate still vetoes a retake prompt there
+  // (only its prose is withheld). Codex #5106 r1.
+  const governing = top?.entry ? governingPair(top, second, shownKind) : null;
+  if (governing?.photo_can_confirm === false) {
+    if (level !== 'entry' || !isApproved(catalog.getEntry(governing.slug))) return { ...NO_PHOTO_CONFIRMS };
+    return pairPrompt(governing, false);
   }
-  // Entry level with no usable second-candidate pair: the SAME fallback
-  // `catalog.nextPhoto` uses internally for a bare entry (its own first
-  // look-alike WHOSE OWN TARGET IS APPROVED) — read directly so
-  // `photo_can_confirm` survives (`catalog.nextPhoto`'s wrapper drops it).
+  if (top?.entry && second?.entry && isApproved(top.entry) && isApproved(second.entry)) {
+    const pair = pairIfBothApproved(top.entry, second.entry, shownKind);
+    if (pair) return pairPrompt(pair, pair.photo_can_confirm !== false);
+  }
+  // Entry level with no usable second-candidate pair: the entry's own first
+  // look-alike WHOSE OWN TARGET IS APPROVED, read directly so
+  // `photo_can_confirm` survives.
   if (level === 'entry' && top?.entry) {
-    const governing = governingPair(top, second);
     if (governing && !isApproved(catalog.getEntry(governing.slug))) {
       // Its prose names the unapproved look-alike, so it can't be shown.
-      // A pair no photo can settle gets fixed technician guidance (the
-      // group's photo prompt would contradict it); otherwise the group's
-      // generic prompt stands in.
+      // A pair no photo can settle gets fixed technician guidance (a retake
+      // prompt would contradict it); otherwise the fixed safe retake does.
       if (governing.photo_can_confirm === false) return { ...NO_PHOTO_CONFIRMS };
-      const np = catalog.nextPhoto(top.entry.group);
-      return { ask: np?.ask || null, why: np?.why || null, photo_can_confirm: true };
+      return { ...UNNAMED_NEXT_PHOTO };
     }
-    const fallbackPair = firstApprovedLookAlike(top.entry);
+    const fallbackPair = firstApprovedLookAlike(top.entry, shownKind);
     if (fallbackPair) {
-      return { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false };
+      return pairPrompt(fallbackPair, fallbackPair.photo_can_confirm !== false);
     }
-    // No usable pair: the entry's group prompt, then the general retake
-    // prompt, so an uncertain entry answer always carries guidance
-    // (pre-push audit on Codex #4916 r5).
-    const groupPrompt = catalog.nextPhoto(top.entry.group) || catalog.nextPhoto('other');
-    return groupPrompt ? { ask: groupPrompt.ask || null, why: groupPrompt.why || null, photo_can_confirm: true } : null;
+    // No usable approved pair: the fixed safe retake prompt, so an
+    // uncertain entry answer always carries guidance (pre-push audit on
+    // Codex #4916 r5).
+    return { ...UNNAMED_NEXT_PHOTO };
   }
-  // Node level (group/subgroup/category): the catalog's own authored
-  // prompt has no per-pair confirmability of its own — always
-  // photo_can_confirm: true (contract delta #3).
-  // An unknown answer (no node) falls back to the catalog's general
-  // "other" prompt, so the least identifiable photos still get retake
-  // guidance (pre-push audit on Codex #4916 r4).
-  const np = catalog.nextPhoto(nodeId || 'other');
-  return np ? { ask: np.ask || null, why: np.why || null, photo_can_confirm: true } : null;
+  // Node level (group/subgroup/category) or unknown: the fixed safe retake
+  // prompt, never a group's own prose (see UNNAMED_NEXT_PHOTO).
+  return { ...UNNAMED_NEXT_PHOTO };
 }
 
 function referralFor(entry) {
@@ -757,7 +992,7 @@ function referralFor(entry) {
 // harmless bar/likely), or null when none clears its bar — in which case
 // `buildAnswer` climbs the lineage instead. Split out of `buildAnswer` to
 // keep each rule's condition readable on its own line (lint: complexity).
-function entryLevelAnswer(candidates, top, blockPrettySure) {
+function entryLevelAnswer(candidates, top, blockPrettySure, shownKind = null) {
   if (!top?.entry || !isApproved(top.entry)) return null;
   const second = candidates[1] || null;
   // Codex round-0 P1 (rounds 5–6): a curated pair the catalog marks
@@ -776,15 +1011,16 @@ function entryLevelAnswer(candidates, top, blockPrettySure) {
   // (unapproved, or simply not each other's look-alike) still falls back
   // to the top entry's own first-approved look-alike, the same as having
   // no second candidate at all.
-  const applicablePair = (second?.entry && pairIfBothApproved(top.entry, second.entry)) || firstApprovedLookAlike(top.entry);
+  const applicablePair = (second?.entry && pairIfBothApproved(top.entry, second.entry, shownKind)) || firstApprovedLookAlike(top.entry, shownKind);
   const unconfirmablePair = applicablePair?.photo_can_confirm === false
-    || governingPair(top, second)?.photo_can_confirm === false;
+    || governingPair(top, second, shownKind)?.photo_can_confirm === false;
   // Codex round-0 P1 (rounds 10–15): "pretty sure" is only ever earned by a
   // confidence a real trait check produced. One gate here, instead of each
   // merge path proving it never lets an unchecked number through.
   const blocked = blockPrettySure || !top.verified;
   const named = (wording) => ({
-    level: 'entry', wording, nodeId: top.slug, subhead: top.entry.scientific_name || null,
+    // A sign has no species of its own to name in the subhead (Codex #4974 r8).
+    level: 'entry', wording, nodeId: top.slug, subhead: top.entry.kind === 'sign' ? null : (top.entry.scientific_name || null),
     headline: `${wording === 'pretty_sure' ? "We're pretty sure" : 'Likely'}: ${top.entry.common_name}`,
     entry: top.entry,
   });
@@ -822,6 +1058,20 @@ function groupBlockFor(level, nodeId, entry) {
   return null;
 }
 
+// One evidence-kind decision is shared by escalation gating, candidate
+// combination, and the final customer answer. Mixed reads remain unfiltered;
+// an explicit `both` still reaches pair-level photo-veto rules.
+function normalizeEvidenceKind(...reads) {
+  const present = reads.filter(Boolean);
+  if (present.length && present.every((value) => value === 'sign')) {
+    return { shownKind: 'sign', hiddenKind: 'organism' };
+  }
+  if (present.length && present.every((value) => value === 'organism')) {
+    return { shownKind: 'organism', hiddenKind: 'sign' };
+  }
+  return { shownKind: present.includes('both') ? 'both' : null, hiddenKind: null };
+}
+
 /**
  * Pure deterministic answer builder. `ctx.candidates` is the FINAL,
  * already-combined (Gemini + OpenAI, when escalated) candidate list, ranked
@@ -830,9 +1080,9 @@ function groupBlockFor(level, nodeId, entry) {
 function buildAnswer(ctx) {
   const {
     candidates, disagreed, disagreementNode, escalationTriggered, openaiAnswered, openaiStoodInAlone,
-    qualityUsable, qualityIssue, subjectConflict, currentMonth,
+    qualityUsable, qualityIssue, subjectConflict, evidenceKind = {}, currentMonth,
   } = ctx;
-  const unansweredTrigger = escalationTriggered && !openaiAnswered;
+  const unansweredTrigger = Boolean(escalationTriggered) && !openaiAnswered;
   // Codex round-0 P1 (round 10): an OpenAI candidate that stood in ALONE
   // because Gemini gave us nothing was never checked against a single
   // numbered trait by either provider (its own escalation prompt tells it
@@ -843,28 +1093,42 @@ function buildAnswer(ctx) {
   // an unusable or multi-subject photo, or legs that disagree on what the
   // photos show (Codex #4916 r4). Otherwise the answer read "pretty sure"
   // with a needs-more-evidence tier, no next photo, and high v1 confidence.
-  const evidenceBlocked = !qualityUsable || qualityIssue === 'multiple_subjects' || !!subjectConflict;
-  const blockPrettySure = unansweredTrigger || !!openaiStoodInAlone || evidenceBlocked;
-  const top = candidates[0] || null;
-
-  const picked = disagreed
-    ? climbedOrDisagreedAnswer(candidates, true, disagreementNode)
-    : (entryLevelAnswer(candidates, top, blockPrettySure) || climbedOrDisagreedAnswer(candidates, false, null));
+  const evidenceBlocked = [!qualityUsable, qualityIssue === 'multiple_subjects', Boolean(subjectConflict)].includes(true);
+  const blockPrettySure = [unansweredTrigger, Boolean(openaiStoodInAlone), evidenceBlocked].includes(true);
+  // A sign-only read never names or lists an organism (the photos show mud
+  // tubes, not a termite, and several species make them), and an
+  // organism-only read never names or lists a sign (Codex #4974 r7, r10).
+  // The contradicted kind is filtered out FIRST, so the best remaining
+  // candidate can still be the answer (r11). If nothing remains, the
+  // answer climbs the full list's lineage but names nothing.
+  const { hiddenKind = null, shownKind = null } = evidenceKind;
+  const shownCandidates = candidates.filter((candidate) => candidate.entry?.kind !== hiddenKind);
+  const answerCandidates = shownCandidates.length ? shownCandidates : candidates;
+  const top = shownCandidates[0];
+  let picked;
+  if (disagreed) {
+    picked = climbedOrDisagreedAnswer(candidates, true, disagreementNode);
+  } else {
+    picked = entryLevelAnswer(shownCandidates, top, blockPrettySure, shownKind)
+      || climbedOrDisagreedAnswer(answerCandidates, false, null);
+  }
   const { level, wording, nodeId, subhead, headline, entry } = picked;
 
   const group = groupBlockFor(level, nodeId, entry);
-  const evidence = evidenceFor(candidatesSupporting(candidates, level, nodeId));
-  const candidatesBlock = candidatesBlockFor(candidates, currentMonth);
-  const nextPhoto = nextPhotoFor(wording, candidates, level, nodeId);
+  // Evidence and other possibilities come from the same filtered list
+  // (Codex #4974 r8-r9).
+  const evidence = evidenceFor(candidatesSupporting(shownCandidates, level, nodeId));
+  // On a sign-only read the photos show no animal, so no organism is listed
+  // as another possibility either (Codex #4974 r8).
+  const candidatesBlock = candidatesBlockFor(shownCandidates, currentMonth);
+  const nextPhoto = nextPhotoFor(wording, answerCandidates, level, nodeId, shownKind);
 
   // Contract delta 2026-09-26 #3: a chosen pair no single photo can settle
   // keeps the tier at needs_more_evidence even at entry level (`likely`) —
   // added to the same-effect checks the original contract already listed
   // (quality, subject conflict, disagreement, above-entry-level).
-  const tier = (!qualityUsable || qualityIssue === 'multiple_subjects' || subjectConflict || disagreed || level !== 'entry'
-    || nextPhoto?.photo_can_confirm === false)
-    ? 'needs_more_evidence'
-    : 'ai_suggestion';
+  const needsMoreEvidence = [evidenceBlocked, disagreed, level !== 'entry', nextPhoto?.photo_can_confirm === false].includes(true);
+  const tier = needsMoreEvidence ? 'needs_more_evidence' : 'ai_suggestion';
 
   return {
     answer: { level, node_id: nodeId, wording, headline, subhead },
@@ -873,9 +1137,13 @@ function buildAnswer(ctx) {
     evidence,
     candidatesBlock,
     nextPhoto,
-    referral: entry ? referralFor(entry) : null,
+    // A referral is an approved entry's own routing; an unnamed answer goes
+    // to the team (or an inspection) instead of borrowing a group's.
+    referral: referralFor(entry),
+    genericCompatibility: entry ? { safety: {} } : derivedNodeCompatibility(nodeId),
+    genericSafetyLine: entry ? null : unnamedSafetyLineFor(nodeId),
     tier,
-    topEntrySlug: entry ? entry.slug : null,
+    topEntrySlug: entry?.slug || null,
   };
 }
 
@@ -902,7 +1170,7 @@ const V2_TO_V1_SLUG = buildV2ToV1Map();
 // node, bees, also holds carpenter and bumble bees) or "aphid-scale"
 // (tiny plant pests also holds mites and thrips) — pre-push audit on
 // Codex #4916 r3.
-const V1_INHERITABLE = new Set(['mosquito', 'black-widow', 'flea', 'tick', 'rodent', 'whitefly', 'sod-webworm']);
+const V1_INHERITABLE = new Set(['mosquito', 'black-widow', 'flea', 'tick', 'rodent', 'whitefly', 'sod-webworm', 'millipede']);
 // Named entries a non-inheritable v1 slug still describes exactly.
 const V1_BY_ENTRY = new Map([['honey-bee-swarm', 'honey-bee'], ['honey-bee-wall-colony', 'honey-bee']]);
 
@@ -910,22 +1178,23 @@ const V1_BY_ENTRY = new Map([['honey-bee-swarm', 'honey-bee'], ['honey-bee-wall-
  * mapping, else the nearest ancestor mapped to an inheritable v1 slug
  * (`aedes-mosquito` -> `mosquitoes` -> v1 "mosquito"). Anything else stays
  * unmatched rather than borrowing a v1 identity that isn't true of it. */
-function v1SlugFor(v2Slug) {
+function v1IdentityFor(v2Slug, { inheritableDirectOnly = false } = {}) {
   if (!v2Slug) return null;
   const own = V2_TO_V1_SLUG.get(v2Slug) || V1_BY_ENTRY.get(v2Slug);
-  if (own && V1_BY_SLUG.has(own)) return own;
+  if (own && V1_BY_SLUG.has(own) && (!inheritableDirectOnly || V1_INHERITABLE.has(own))) {
+    return { slug: own, inherited: false };
+  }
   const ancestors = catalog.lineage(v2Slug).slice().reverse().slice(1);
   for (const rung of ancestors) {
     const v1 = V2_TO_V1_SLUG.get(rung.id);
-    if (v1 && V1_INHERITABLE.has(v1)) return v1;
+    if (v1 && V1_INHERITABLE.has(v1)) return { slug: v1, inherited: true };
   }
   return null;
 }
 
 function categoryForV2Slug(slug) {
-  const entry = catalog.getEntry(slug);
-  const group = entry ? catalog.getGroup(entry.group) : null;
-  return (group && group.category) || 'other';
+  const category = catalog.lineage(slug).find((rung) => rung.level === 'category');
+  return category?.id || 'other';
 }
 
 function v1SafetyFallback(entry) {
@@ -935,8 +1204,6 @@ function v1SafetyFallback(entry) {
   };
 }
 
-const DEFAULT_SAFETY = { stinging: false, venomous: false, disease_vector: false, structural_threat: false };
-
 /**
  * Map the built v2 answer to the v1 columns the route still writes
  * (`species_slug`, `category`, `service_line`, `urgency`, a v1-shaped
@@ -944,33 +1211,69 @@ const DEFAULT_SAFETY = { stinging: false, venomous: false, disease_vector: false
  * `pestNextStepKindFromRow`/`pestReserviceLane` — all of which read
  * `report_contract` through v1's OWN `PEST_LIBRARY`/`GROUP_GENERIC`
  * vocabulary — keep working unchanged. When the v2 entry has no v1 legacy
- * slug (a new catalog entry v1 never had), this degrades exactly the way
- * v1's own unmatched-identification path already does: `identification.slug
- * = null`, generic category/service, `inspection_required: true` — never a
- * fabricated v1 identity.
+ * slug (a new catalog entry v1 never had), this keeps the selected catalog
+ * node's category while otherwise degrading exactly the way v1's own
+ * unmatched-identification path does: `identification.slug = null`, generic
+ * service, `inspection_required: true` — never a fabricated v1 identity.
  */
 function mapToV1(built) {
+  // A climbed node may use a generic legacy identity only when that v1 label
+  // is true of every descendant. Thus widow-spiders -> "Widow Spiders" and
+  // aedes -> "Mosquitoes", while bees never becomes "Honey Bees" and the
+  // whole tiny-plant-pests group never becomes "Aphids / Scale Insects".
   const topEntrySlug = built.topEntrySlug;
-  const v1Slug = v1SlugFor(topEntrySlug);
+  const selectedNodeId = topEntrySlug || built.answer.node_id;
+  const v1Identity = v1IdentityFor(selectedNodeId, { inheritableDirectOnly: !topEntrySlug }) || {};
+  const v1Slug = v1Identity.slug || null;
   const v1Item = v1Slug ? V1_BY_SLUG.get(v1Slug) : null;
-  const v2Entry = topEntrySlug ? catalog.getEntry(topEntrySlug) : null;
+  const v2Entry = catalog.getEntry(topEntrySlug);
+  const legacyItem = v1Item || {};
+  const namedEntry = v2Entry || { service: {} };
+  const namedService = namedEntry.service || {};
+  const inheritIdentityOnly = Boolean(v1Identity.inherited && v2Entry);
+  const namedServiceIdentity = inheritIdentityOnly
+    ? { serviceKey: namedService.key, serviceLabel: namedService.label }
+    : { serviceKey: null, serviceLabel: 'Pest Consultation' };
+  const genericCompatibility = Object(built.genericCompatibility);
 
-  const category = v1Item ? v1Item.category : (topEntrySlug ? categoryForV2Slug(topEntrySlug) : 'other');
-  const wordingConfidence = built.answer.wording === 'pretty_sure' ? 'high' : (built.answer.wording === 'likely' ? 'moderate' : 'low');
-  const confidence = built.tier === 'needs_more_evidence' && wordingConfidence === 'high' ? 'moderate' : wordingConfidence;
+  const category = legacyItem.category || categoryForV2Slug(selectedNodeId);
+  const wordingConfidence = { pretty_sure: 'high', likely: 'moderate' }[built.answer.wording] || 'low';
+  let confidence = wordingConfidence;
+  if (built.tier === 'needs_more_evidence' && confidence === 'high') confidence = 'moderate';
   // A tier that needs more evidence is never stored as settled in v1: the
   // v1 consumers (public label, history, next steps) read `contested` and
   // `confidence` to decide whether to hedge (Codex #4916 r4).
   const contested = built.tier === 'needs_more_evidence';
 
-  const safety = v1Item ? v1Item.safety : (v2Entry ? v1SafetyFallback(v2Entry) : DEFAULT_SAFETY);
-  const serviceLine = v1Item ? v1Item.service_line : (v2Entry ? (v2Entry.service?.line || 'pest') : 'pest');
-  const serviceKey = v1Item ? v1Item.service_key : null;
-  const serviceLabel = v1Item ? v1Item.service_label : 'Pest Consultation';
-  const inspectionRequired = v1Item ? v1Item.inspection_required : (v2Entry ? !!v2Entry.service?.inspection_first : true);
-  const urgency = v1Item ? v1Item.urgency : (v2Entry ? (v2Entry.urgency || 'low') : 'low');
-  const group = v1Item ? v1Item.group : null;
-  const label = v1Item ? v1Item.label : null;
+  const compatibilityKind = v1Item && !inheritIdentityOnly ? 'legacy' : (v2Entry ? 'named' : 'generic');
+  const compatibility = {
+    legacy: {
+      serviceLine: legacyItem.service_line,
+      serviceKey: legacyItem.service_key,
+      serviceLabel: legacyItem.service_label,
+      inspectionRequired: legacyItem.inspection_required,
+      urgency: legacyItem.urgency,
+      ...genericCompatibility,
+      safety: { ...legacyItem.safety, ...genericCompatibility.safety },
+    },
+    named: {
+      safety: v1SafetyFallback(namedEntry),
+      serviceLine: namedService.line,
+      ...namedServiceIdentity,
+      inspectionRequired: inheritIdentityOnly ? !!namedService.inspection_first : true,
+      urgency: namedEntry.urgency,
+    },
+    generic: {
+      ...DEFAULT_GENERIC_COMPATIBILITY,
+      ...genericCompatibility,
+      safety: { ...DEFAULT_GENERIC_COMPATIBILITY.safety, ...genericCompatibility.safety },
+    },
+  }[compatibilityKind];
+  const {
+    safety, serviceLine, serviceKey, serviceLabel, inspectionRequired, urgency,
+  } = compatibility;
+  const group = legacyItem.group || null;
+  const label = legacyItem.label || null;
 
   const reportContract = {
     contract_version: 'pest_id_v1',
@@ -987,7 +1290,7 @@ function mapToV1(built) {
     // candidate is a differential too — only the primary itself is
     // filtered out (Codex #4916 r2 P2).
     alternate_slugs: [...new Set(built.candidatesBlock
-      .map((c) => v1SlugFor(c.slug))
+      .map((c) => v1IdentityFor(c.slug)?.slug)
       .filter((v) => v && v !== v1Slug))],
   };
 
@@ -1048,7 +1351,10 @@ function pickVerifiedWinner(a, b) {
   return a;
 }
 
-function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
+function combineEscalation(geminiCandidates, escalationResult, contextSlugs, hiddenKind = null) {
+  const visibleGeminiCandidates = hiddenKind
+    ? geminiCandidates.filter((candidate) => candidate.entry?.kind !== hiddenKind)
+    : geminiCandidates;
   // Codex round-0 P1 (round 4): `dispatch()` does not locally validate a
   // provider's JSON against the requested schema — an `ok:true` response
   // whose `candidates` field isn't an array (or is missing) must be
@@ -1058,14 +1364,14 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
     // OpenAI unavailable (or answered something invalid) — Gemini's result
     // stands, capped from reading pretty_sure by `unansweredTrigger` inside
     // `buildAnswer`.
-    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false, openaiStoodInAlone: false };
+    return { finalCandidates: visibleGeminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false, openaiStoodInAlone: false };
   }
   const openaiCandidates = dedupeCandidates(
     sanitizedCandidatesOf(validLegJson(escalationResult, 'escalation')).filter(isValidEscalationCandidate).map(resolveCandidate)
       .map((c) => stripUncontextedTraits(c, contextSlugs)),
-  );
+  ).filter((c) => !hiddenKind || c.entry?.kind !== hiddenKind);
   const openaiTop = openaiCandidates[0] || null;
-  const geminiTop = geminiCandidates[0] || null;
+  const geminiTop = visibleGeminiCandidates[0] || null;
   // Codex round-0 P1 (round 2): the provider answered (HTTP ok, valid
   // JSON) but named NO candidate at all — that is not confirmation of
   // anything. Treat it the same as "unavailable" for the pretty_sure cap,
@@ -1085,7 +1391,7 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
   if (!openaiTop || !geminiTop) {
     // Neither side has a top candidate, or OpenAI found nothing new —
     // Gemini's (already below-threshold/contested) result stands.
-    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered, openaiStoodInAlone: false };
+    return { finalCandidates: visibleGeminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered, openaiStoodInAlone: false };
   }
   if (sameCandidateKey(geminiTop, openaiTop)) {
     // Codex round-0 P1 (rounds 12–13): "the higher of the two" only makes
@@ -1111,7 +1417,7 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
     return {
       // Both providers' own top is the answer's top; a stale runner-up with
       // a higher raw number must not displace it (Codex round-0 P1, round 15).
-      finalCandidates: [bumped, ...dedupeCandidates([...geminiCandidates.slice(1), ...openaiCandidates.slice(1)])
+      finalCandidates: [bumped, ...dedupeCandidates([...visibleGeminiCandidates.slice(1), ...openaiCandidates.slice(1)])
         .filter((c) => !sameCandidateKey(c, bumped))].slice(0, 3),
       disagreed: false,
       disagreementNode: null,
@@ -1120,7 +1426,7 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
     };
   }
   return {
-    finalCandidates: dedupeCandidates([geminiTop, openaiTop, ...geminiCandidates.slice(1), ...openaiCandidates.slice(1)]),
+    finalCandidates: dedupeCandidates([geminiTop, openaiTop, ...visibleGeminiCandidates.slice(1), ...openaiCandidates.slice(1)]),
     disagreed: true,
     disagreementNode: deepestSharedNode(candidateNodeId(geminiTop), candidateNodeId(openaiTop)),
     openaiAnswered,
@@ -1174,7 +1480,7 @@ async function identifyPestV2(photos = []) {
   const images = toImages(photos);
   if (!images.length) return { ok: false, reason: 'no_photos' };
 
-  const catalogEntries = catalog.listEntries();
+  const catalogEntries = catalog.listEntries({ section: 'pest' });
   // One overall wall-clock budget across the (up to three) SEQUENTIAL
   // provider legs, so a stalled candidates or verify call can never starve
   // escalation of its share (Codex round-0 P1, round 4).
@@ -1185,6 +1491,8 @@ async function identifyPestV2(photos = []) {
   // An `ok:true` response whose shape doesn't match what was requested is
   // treated the same as a failed leg — see `hasCandidatesArray`.
   const candidatesJson = validLegJson(candidatesResult, 'candidates');
+  const candidatesEnvelope = candidatesJson || {};
+  const candidatesShows = candidatesEnvelope.shows;
   const candidatesFromCall1 = candidatesJson ? dedupeCandidates(sanitizedCandidatesOf(candidatesJson).map(resolveCandidate)) : [];
   const catalogCandidates1 = candidatesFromCall1.filter((c) => c.entry);
 
@@ -1195,26 +1503,41 @@ async function identifyPestV2(photos = []) {
     verifiedCandidates = mergeVerify(candidatesFromCall1, verifyResult);
   }
 
-  const geminiMissed = !candidatesJson
-    || (catalogCandidates1.length > 0 && !verifyCoversAllCandidates(verifyResult, catalogCandidates1));
-  const contradicted = catalogCandidates1.length > 0 && detectSelfContradiction(candidatesJson, verifiedCandidates);
-  const lookAlikeClose = consequentialLookAlikeClose(verifiedCandidates);
+  // A high-confidence sign cannot suppress a second provider when this
+  // leg says the photo shows an organism (or vice versa). Apply the same
+  // evidence-kind rule used by the final answer to every escalation trigger.
+  let evidenceKind = normalizeEvidenceKind(candidatesShows);
+  const matchesShownKind = candidate => !evidenceKind.hiddenKind || candidate.entry?.kind !== evidenceKind.hiddenKind;
+  const triggerCandidates = verifiedCandidates.filter(matchesShownKind);
+  const triggerCatalogCandidates = catalogCandidates1.filter(matchesShownKind);
+  const triggerJson = {
+    ...candidatesEnvelope,
+    candidates: sanitizedCandidatesOf(candidatesJson).filter(candidate => matchesShownKind(resolveCandidate(candidate))),
+  };
+  const missingVerification = triggerCatalogCandidates.length > 0
+    && !verifyCoversAllCandidates(verifyResult, triggerCatalogCandidates);
+  const geminiMissed = [!candidatesJson, missingVerification].includes(true);
+  const contradicted = detectSelfContradiction(triggerJson, triggerCandidates);
+  const lookAlikeClose = consequentialLookAlikeClose(triggerCandidates);
   // Only a candidate that resolves to a catalog node can vouch for the
   // read; an unresolvable name's confidence must not suppress escalation.
-  const verifiedTop = dedupeCandidates(verifiedCandidates.filter((c) => candidateNodeId(c)))[0] || null;
+  const verifiedTop = dedupeCandidates(triggerCandidates.filter((c) => candidateNodeId(c)))[0] || null;
   const topConfidenceForTrigger = verifiedTop ? verifiedTop.confidence : 0;
 
-  const escalationReasons = [];
-  if (geminiMissed) escalationReasons.push('gemini_missed');
-  if (contradicted) escalationReasons.push('self_contradiction');
-  if (lookAlikeClose) escalationReasons.push('consequential_lookalike_close');
-  if (topConfidenceForTrigger < escalateBelow()) escalationReasons.push('low_confidence');
+  const escalationReasons = [
+    [geminiMissed, 'gemini_missed'],
+    [contradicted, 'self_contradiction'],
+    [lookAlikeClose, 'consequential_lookalike_close'],
+    [topConfidenceForTrigger < escalateBelow(), 'low_confidence'],
+  ].filter(([applies]) => applies).map(([, reason]) => reason);
   const escalationTriggered = escalationReasons.length > 0;
 
   let finalCandidates = dedupeCandidates(verifiedCandidates);
   let disagreed = false;
   let disagreementNode = null;
   let escalationResult = null;
+  let escalationJson = null;
+  let escalationShows = null;
   // Codex round-0 P1 (round 2): "OpenAI answered" must mean it actually
   // named a candidate, not merely that the HTTP call succeeded — an ok
   // response with an empty candidates list confirms nothing and must cap
@@ -1224,10 +1547,13 @@ async function identifyPestV2(photos = []) {
 
   if (escalationTriggered) {
     escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1), legTimeoutMs(1));
+    escalationJson = validLegJson(escalationResult, 'escalation');
+    escalationShows = (escalationJson || {}).shows;
+    evidenceKind = normalizeEvidenceKind(candidatesShows, escalationShows);
     const contextSlugs = new Set(catalogCandidates1.map((c) => c.slug));
     ({
       finalCandidates, disagreed, disagreementNode, openaiAnswered, openaiStoodInAlone,
-    } = combineEscalation(finalCandidates, escalationResult, contextSlugs));
+    } = combineEscalation(finalCandidates, escalationResult, contextSlugs, evidenceKind.hiddenKind));
   }
 
   // Codex round-0 P1 (PR-2b wiring round 1): `no_route` means the model
@@ -1240,27 +1566,25 @@ async function identifyPestV2(photos = []) {
   // a feature that is completely unconfigured. Fail the same way `identifyPest`
   // (v1) already does on a total vision miss — `{ok:false}`, a 503 at the
   // route — instead of a silent, empty "we couldn't tell" degrade.
-  const everyAttemptedLegUnconfigured = candidatesResult.reason === 'no_route'
-    && (!verifyResult || verifyResult.reason === 'no_route')
-    && (!escalationResult || escalationResult.reason === 'no_route');
+  const attemptedLegs = [candidatesResult, verifyResult, escalationResult].filter(Boolean);
+  const everyAttemptedLegUnconfigured = attemptedLegs.every((result) => result.reason === 'no_route');
   if (everyAttemptedLegUnconfigured) {
     return { ok: false, reason: 'no_route' };
   }
 
-  const escalationJson = validLegJson(escalationResult, 'escalation');
   // Neither vision leg produced a valid envelope (keys missing, timeouts,
   // provider errors, malformed output): nobody analyzed the photos, so
   // this is a failure, not an "unknown" read. A valid envelope with an
   // empty candidates list still is a genuine unknown (Codex #4916 r2 P1).
-  if (!candidatesJson && !escalationJson) {
+  if ([candidatesJson, escalationJson].every((result) => !result)) {
     return { ok: false, reason: 'vision_unavailable' };
   }
-  const quality = combineQuality(candidatesJson?.quality, escalationJson?.quality);
+  const quality = combineQuality(candidatesEnvelope.quality, (escalationJson || {}).quality);
   // A leg that names a candidate while reporting the photos show nothing
   // contradicts itself; one such read (or two agreeing ones) is as weak as
   // two legs that disagree (pre-push audit on Codex #4916 r1).
-  const subjectConflict = showsConflict(candidatesJson?.shows, escalationJson?.shows)
-    || candidatesJson?.shows === 'nothing' || escalationJson?.shows === 'nothing';
+  const subjectConflict = showsConflict(candidatesShows, escalationShows)
+    || [candidatesShows, escalationShows].includes('nothing');
   const currentMonth = etParts(new Date()).month;
 
   const built = buildAnswer({
@@ -1273,6 +1597,7 @@ async function identifyPestV2(photos = []) {
     qualityUsable: !!quality.usable,
     qualityIssue: quality.issue || 'none',
     subjectConflict,
+    evidenceKind,
     currentMonth,
   });
 
@@ -1287,6 +1612,7 @@ async function identifyPestV2(photos = []) {
     candidates: built.candidatesBlock,
     next_photo: built.nextPhoto,
     referral: built.referral,
+    generic_safety_line: built.genericSafetyLine,
   };
 
   const v1 = mapToV1({ ...built, disagreed });
@@ -1330,7 +1656,15 @@ module.exports = {
   RISK_LABELS,
   ACTION_LABELS,
   REFERRAL_TEMPLATES,
+  UNNAMED_SAFETY_LINE,
+  UNNAMED_SAFETY_CLAUSES,
+  UNNAMED_NEXT_PHOTO,
+  NO_PHOTO_CONFIRMS,
+  HAZARD_CLAUSES,
   escalateBelow,
   toImages,
-  _test: { candidateContextFor, mergeVerify, combineEscalation, showsConflict, V2_TO_V1_SLUG, v1SlugFor },
+  _test: {
+    candidateContextFor, mergeVerify, combineEscalation, showsConflict, normalizeEvidenceKind,
+    V2_TO_V1_SLUG, v1IdentityFor, pairBetween, unnamedSafetyLineFor,
+  },
 };

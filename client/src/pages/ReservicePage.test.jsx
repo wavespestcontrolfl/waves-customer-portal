@@ -186,6 +186,82 @@ describe('ReservicePage states', () => {
 
     expect(await screen.findByText(/you're covered/)).toBeInTheDocument();
   });
+
+  it('shows address-review recovery with no selectable times when browse is blocked', async () => {
+    stubFetch({ get: jsonResponse(bookablePayload({
+      availability: null,
+      location_review_required: true,
+    })) });
+    renderPage();
+
+    expect(await screen.findByText(/confirm your service address before we can schedule this re-service online/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose .* on/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+    expect(screen.queryByText(/pick a time below/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Your re-service is covered at/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Text or call/i).length).toBeGreaterThan(0);
+  });
+
+  it('clears stale slots when staff review lands during a date search', async () => {
+    const fetchMock = stubFetch({
+      findSlots: jsonResponse({
+        error: 'We need to confirm your service address before we can schedule this re-service online. Text or call us and we’ll take care of it.',
+        code: 'LOCATION_REVIEW_REQUIRED',
+      }, 409),
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'Tuesday afternoon' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByText(/confirm your service address before we can schedule this re-service online/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose .* on/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+    expect(screen.queryByText(/pick a time below/i)).not.toBeInTheDocument();
+    const search = fetchMock.mock.calls.find(([url]) => String(url).includes('/find-slots'));
+    expect(JSON.parse(search[1].body)).toEqual({ query: 'Tuesday afternoon', lane: 'pest' });
+  });
+
+  it('clears a selected slot when staff review lands during confirm and does not re-offer it', async () => {
+    const fetchMock = stubFetch({
+      post: jsonResponse({
+        error: 'We need to confirm your service address before we can schedule this re-service online. Text or call us and we’ll take care of it.',
+        code: 'LOCATION_REVIEW_REQUIRED',
+      }, 409),
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).not.toBeInTheDocument();
+    });
+    expect(screen.getAllByText(/confirm your service address before we can schedule this re-service online/i).length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+    expect(screen.queryByText(/pick a time below/i)).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url, opts]) => !String(url).includes('/ui-flags') && opts?.method !== 'POST')).toHaveLength(1);
+  });
+
+  it('keeps the ordinary slot-race refresh contract and offers the replacement time', async () => {
+    const replacement = bookablePayload().availability;
+    replacement.days[0].slots[0] = {
+      ...replacement.days[0].slots[0], start_time: '14:00', end_time: '14:45', start_label: '2:00 PM', end_label: '2:45 PM',
+    };
+    stubFetch({
+      post: jsonResponse({
+        error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: replacement,
+      }, 409),
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+
+    expect(await screen.findByText(/That time was just taken/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 2:00 PM on Sunday, July 12/ })).toBeInTheDocument();
+  });
 });
 
 
@@ -355,4 +431,90 @@ it('renders the curated strip order (adjusted score), not the day panel\'s raw p
   expect(order).toHaveLength(2);
   expect(order[0]).toContain('10:00 AM'); // packed (strip rank 1) renders first
   expect(order[1]).toContain('1:00 PM'); // demoted empty day (strip rank 2) renders second
+});
+
+// One-tap pest chips (GATE_RESERVICE_PEST_CHIPS): the server signals the
+// gate by including pestChoices in the GET payload — its absence must
+// render the page byte-identical to before this feature existed.
+describe('ReservicePage pest chips (GATE_RESERVICE_PEST_CHIPS)', () => {
+  const PEST_CHOICES = {
+    pest: [
+      { key: 'ants', label: 'Ants' },
+      { key: 'roaches', label: 'Roaches' },
+      { key: 'spiders', label: 'Spiders' },
+      { key: 'wasps', label: 'Wasps' },
+      { key: 'other', label: 'Something else' },
+    ],
+  };
+
+  it('renders one-tap pest chips when the server sends pestChoices, and toggling flips aria-pressed', async () => {
+    stubFetch({ get: jsonResponse(bookablePayload({ pestChoices: PEST_CHOICES })) });
+    renderPage();
+    // Wait for the chip itself: the lane auto-selects in an effect AFTER the
+    // first data render, and before it the textarea's own label also has the
+    // direct text "What are you seeing?" (its "(optional …)" suffix is a child
+    // span) — so waiting on that text could resolve on the pre-lane render and
+    // look for the chips too early (flaked in CI).
+    const antsChip = await screen.findByRole('button', { name: 'Ants' });
+    // The chip row heading renders with the choices.
+    expect(screen.getAllByText('What are you seeing?').length).toBeGreaterThan(0);
+    expect(antsChip).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(antsChip);
+    expect(antsChip).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(antsChip);
+    expect(antsChip).toHaveAttribute('aria-pressed', 'false');
+    // The textarea's own label switches to the secondary copy once chips
+    // are present (the plain "What are you seeing?" label is gone from it —
+    // that phrase now belongs to the chip-row heading above instead).
+    expect(screen.getByLabelText(/Anything else\?/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/What are you seeing\?/)).not.toBeInTheDocument();
+  });
+
+  it('sends the selected pests in the POST body', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(bookablePayload({ pestChoices: PEST_CHOICES })),
+      post: jsonResponse({
+        success: true, lane: 'pest', serviceType: 'Pest Control Re-Service',
+        date: '2026-07-12', window: { start: '13:00', end: '13:45' },
+        startLabel: '1:00 PM', endLabel: '1:45 PM', confirmationCode: 'WVS-1',
+      }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Roaches' }));
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const commit = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    const body = JSON.parse(commit[1].body);
+    expect(body.pests).toEqual(['ants', 'roaches']);
+  });
+
+  it('omits `pests` from the POST body when none are selected', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(bookablePayload({ pestChoices: PEST_CHOICES })),
+      post: jsonResponse({
+        success: true, lane: 'pest', serviceType: 'Pest Control Re-Service',
+        date: '2026-07-12', window: { start: '13:00', end: '13:45' },
+        startLabel: '1:00 PM', endLabel: '1:45 PM', confirmationCode: 'WVS-1',
+      }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const commit = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    const body = JSON.parse(commit[1].body);
+    expect(body).not.toHaveProperty('pests');
+  });
+
+  it('renders no chips, and keeps the original textarea label, when the server omits pestChoices (gate off — byte-identical)', async () => {
+    stubFetch({ get: jsonResponse(bookablePayload()) });
+    renderPage();
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ });
+    expect(screen.queryByRole('button', { name: 'Ants' })).not.toBeInTheDocument();
+    // The original label + helper copy is untouched (byte-identical).
+    expect(screen.getByLabelText(/What are you seeing\?/)).toBeInTheDocument();
+    expect(screen.getByText('(optional — helps your tech prep)')).toBeInTheDocument();
+  });
 });

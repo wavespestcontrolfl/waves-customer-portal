@@ -1,3 +1,4 @@
+const { billingLegDeliveryState, billingLegContactTime, previouslySettledBillingLegs } = require('./messaging/billing-channel-routing');
 /**
  * Late Payment Checker
  *
@@ -130,7 +131,32 @@ async function claimReservedEmail(ContactLedger, ledger) {
     ? await ContactLedger.claimAttempt(ledger)
     : { allowed: true };
   if (claim.delivered) return { allowed: false, delivered: true };
+  if (claim.resolved) {
+    return {
+      allowed: false,
+      resolved: true,
+      resolution: claim.resolution || ledger?.metadata?.resolution || 'prior_email_terminally_settled',
+    };
+  }
   return claim.allowed ? { allowed: true } : { allowed: false, held: true };
+}
+
+async function markEmailAtAcceptedTime(ContactLedger, ledger, result) {
+  if (typeof ContactLedger.markDelivered !== 'function') return false;
+  const occurredAt = result?.deduped ? billingLegContactTime(result) : null;
+  return ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []));
+}
+
+// Settle a reserved Email leg that did not reach the customer. A dispute hold that landed after the
+// preflight (COLLECTION_HOLD_DEFER from the email authority) is a WAIT: release the reservation, no
+// failed row. Any other definite non-send stamps send_failed as before; an uncertain outcome keeps
+// the reservation held.
+async function settleUnsentEmailReservation(ContactLedger, ledger, result, stamp) {
+  if (require('./collections/collection-hold').isHoldSuppression(result)) {
+    return ContactLedger.releaseHeldReservation(ledger);
+  }
+  if (result?.deliveryOutcome === 'uncertain') return false;
+  return ContactLedger.markSendFailed(ledger, stamp);
 }
 
 async function completePendingEmail(row, channel = 'sms+email') {
@@ -153,33 +179,42 @@ function pendingDeliveryChannel(row) {
   return activityMetadata(row).channel || 'sms';
 }
 
-async function dispatchReservedText(ContactLedger, ledger, dispatch) {
+async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = 'sms') {
   const claim = typeof ContactLedger.claimAttempt === 'function'
     ? await ContactLedger.claimAttempt(ledger)
     : { allowed: true };
-  if (claim.delivered) return { sent: true, deduped: true, deliveryOutcome: 'accepted' };
+  if (claim.delivered) return { sent: true, deduped: true, deliveryOutcome: 'accepted', eventVisibleAt: ledger.occurred_at };
   if (!claim.allowed) return { sent: false, deferred: true, code: 'PRIOR_TEXT_OUTCOME_UNCONFIRMED' };
   let result;
   try { result = await dispatch(); }
   catch (err) {
     // A throw that carries the provider's own outcome keeps it; anything
     // else is an unconfirmed attempt.
-    result = err.providerOutcome || {};
-    if (!['accepted', 'not_sent'].includes(result.deliveryOutcome)) {
-      return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
-    }
-    result = { ...result, sent: result.deliveryOutcome === 'accepted', retryable: result.deliveryOutcome === 'not_sent' };
+    result = err.providerOutcome || { deliveryOutcome: 'uncertain' };
+    // Classify the same way as a returned outcome, including a bell that
+    // committed before a later audit/provider failure.
+    result = { ...result, retryable: true };
+  }
+  // A dispute hold that landed after the policy consult refused this leg at the send boundary: a WAIT,
+  // not a failed send. Release the reservation (no failed row) and report a retryable deferral so the
+  // run leaves the tier open - the reminder goes out on the first run after the release.
+  if (require('./collections/collection-hold').isHoldSuppression(result)) {
+    await ContactLedger.releaseHeldReservation(ledger);
+    return { ...result, sent: false, retryable: true, deferred: true };
   }
   // A legacy blocked result with no outcome is a definite non-send.
   const outcome = result?.deliveryOutcome ?? (result?.blocked === true ? 'not_sent' : 'unconfirmed');
-  if (!['accepted', 'not_sent'].includes(outcome)) {
-    return { sent: false, deferred: true, code: 'TEXT_OUTCOME_UNCONFIRMED' };
+  const delivery = billingLegDeliveryState(channel, result || {});
+  if (!delivery && !['accepted', 'not_sent'].includes(outcome)) {
+    return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
   }
-  const accepted = outcome === 'accepted';
+  const accepted = !!delivery;
+  const occurredAt = billingLegContactTime(result);
   const stamped = accepted
-    ? (typeof ContactLedger.markDelivered === 'function' ? await ContactLedger.markDelivered(ledger) : true)
+    ? (typeof ContactLedger.markDelivered === 'function'
+      ? await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : [])) : true)
     : await ContactLedger.markSendFailed(ledger, { code: result.code || 'blocked' });
-  return stamped ? { ...result, sent: accepted } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
+  return stamped ? { ...result, sent: accepted, ...(delivery === 'deduped' ? { deduped: true } : {}) } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
 }
 
 function selectedNonEmailChannels(explicitChannels) {
@@ -233,7 +268,7 @@ async function dispatchSelectedNonEmail({ ContactLedger, customer, invoice, body
       },
       hasEmailLeg: true,
       ...(preDispatchCheck ? { preDispatchCheck } : {}),
-    }));
+    }), channel);
   }
   return { results, ledgers, sentChannels: deliveredChannelLabel(results),
     willRetry: Object.values(results).some((result) => !result.sent && isTransientSmsResult(result)) };
@@ -307,7 +342,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       return 'deduped';
     }
     const priorLedgerIds = pendingEmailEpisode.ledgerIds || [];
-    const pendingVerdict = await collectionsChannelPermitted(customer.id, inv.id, 'email', now, priorLedgerIds, true);
+    const pendingVerdict = await collectionsChannelPermitted(customer.id, inv.id, 'email', now, priorLedgerIds, true, true);
     if (!verdictAllows(pendingVerdict)) {
       // A durable denial (flag, suppression) means this Email is no longer
       // owed and must not hold the invoice on this tier forever; a spacing
@@ -332,25 +367,27 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     const claim = await claimReservedEmail(ContactLedger, emailLedger);
     if (claim.delivered) {
       await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
-      return 'sent';
+      return 'deduped';
+    }
+    if (claim.resolved) {
+      await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
+      return 'deduped';
     }
     if (!claim.allowed) return 'skip';
     const result = await sendMicrodepositVerificationEmail({
       invoice: inv, customer, touchKey: `${tierDays}d`, enforceBillingPreference: true,
     }).catch((e) => ({ ok: false, error: e.message }));
     if (result?.ok !== true) {
-      if (result?.deliveryOutcome !== 'uncertain') {
-        await ContactLedger.markSendFailed(emailLedger, { error: result?.reason || 'sidecar_failed' });
-      }
+      await settleUnsentEmailReservation(ContactLedger, emailLedger, result, { error: result?.reason || 'sidecar_failed' });
       if (isTerminalEmailRefusal(result)
         && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger.id }, 'email_terminal_refusal')) {
         await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
       }
       return 'skip';
     }
-    await ContactLedger.markDelivered(emailLedger);
+    await markEmailAtAcceptedTime(ContactLedger, emailLedger, result);
     await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
-    return 'sent';
+    return result.deduped ? 'deduped' : 'sent';
   }
 
   const body = await renderSmsTemplate('bank_verification_incomplete', {
@@ -369,7 +406,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       { microdeposit: true, channels: policyChannels });
     if (ownLedgerIds === null) return 'skip';
     const policyResults = await Promise.all(policyChannels.map((channel) =>
-      collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds, true)));
+      collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds, true, true)));
     const policy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
     const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
     const emailPermitted = policy.email;
@@ -396,7 +433,12 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       if (!emailLedger) return;
       const claim = await claimReservedEmail(ContactLedger, emailLedger);
       if (claim.delivered) {
+        emailResult = { ok: true, deduped: true, sentAt: emailLedger.occurred_at };
         emailDelivered = true;
+        return;
+      }
+      if (claim.resolved) {
+        emailResult = { ok: false, resolved: true, reason: claim.resolution };
         return;
       }
       if (!claim.allowed) return;
@@ -407,10 +449,8 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
         enforceBillingPreference: true,
       }).catch((e) => ({ ok: false, error: e.message }));
       emailDelivered = emailResult?.ok === true;
-      if (emailDelivered) await ContactLedger.markDelivered(emailLedger);
-      else if (emailResult?.deliveryOutcome !== 'uncertain') {
-        await ContactLedger.markSendFailed(emailLedger, { error: emailResult?.reason || 'sidecar_failed' });
-      }
+      if (emailDelivered) await markEmailAtAcceptedTime(ContactLedger, emailLedger, emailResult);
+      else await settleUnsentEmailReservation(ContactLedger, emailLedger, emailResult, { error: emailResult?.reason || 'sidecar_failed' });
     };
     if (explicitEmailSelected) await attemptEmail();
 
@@ -424,14 +464,18 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     await attemptEmail();
     if (delivery.willRetry) return 'skip';
     if (!delivery.sentChannels && !emailDelivered) return 'skip';
-    const terminalEmailResolved = !!delivery.sentChannels && isTerminalEmailRefusal(emailResult)
-      && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal');
+    const terminalEmailResolved = !!delivery.sentChannels && (emailResult?.resolved === true
+      || (isTerminalEmailRefusal(emailResult)
+        && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')));
     const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
       && !emailDelivered && !terminalEmailResolved;
+    const repair = previouslySettledBillingLegs([...Object.values(delivery.results), emailResult]);
+    const repaired = !!repair;
     const activityInsert = db('activity_log').insert({
+      ...(repair?.originalAt ? { created_at: repair.originalAt } : {}),
       customer_id: customer.id,
       action: 'microdeposit_verification_reminder',
-      description: `Micro-deposit verification re-nudge (${tierDays}-day): ${inv.title || 'invoice'} ${invoiceRef}`,
+      description: repaired ? `Original ${tierDays}-day ${delivery.results.push?.deduped ? 'App event' : 'reminder'} settled` : `Micro-deposit verification re-nudge (${tierDays}-day): ${inv.title || 'invoice'} ${invoiceRef}`,
       metadata: JSON.stringify({
         dedupeKey, invoiceId: inv.id, tierDays, daysOverdue: daysSince,
         ...(pendingEmail ? {
@@ -443,7 +487,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     });
     if (pendingEmail) await activityInsert;
     else await activityInsert.catch(() => {});
-    return 'sent';
+    return repaired ? 'deduped' : 'sent';
   } catch (e) {
     logger.error(`[late-payment] micro-deposit re-nudge failed for invoice ${inv.id}: ${e.message}`);
     return 'skip';
@@ -455,14 +499,45 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = [], detail = false) {
+// A microdeposit verification reminder is written as purpose
+// payment_verification, not an overdue reminder, so it names no source and
+// the spacing shadow never observes it (Codex #5189 r5); its policy verdict
+// is unchanged.
+async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = [], detail = false, verification = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds, logTag: 'late-payment', detail,
+    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds,
+    ...(verification ? {} : { source: 'late_payment_checker' }), logTag: 'late-payment', detail,
   });
 }
 
 const LatePaymentService = {
+  // Exposed so invoice-followups.js's orphan-adoption sweep can check for a
+  // pending (delivered-SMS, failed-email) legacy retry episode before
+  // arming a fresh sequence over it (Codex pre-push P0 B) — the SAME
+  // durable record and resolution rule this file's own retry logic reads,
+  // never a second implementation. Lazy-required there (this file already
+  // lazy-requires invoice-followups.js above to break the same cycle).
+  recoverPendingEmailEpisode,
   async checkAndNotify(daysOverdue = 7) {
+    // GATE_LATE_PAYMENT_CHECKER_OFF, read at call time (strict 'true'):
+    // dunning unification PR 3 — once every overdue invoice carries a
+    // follow-up sequence row (the Day 90 ladder, plus the orphan-adoption
+    // sweep in invoice-followups.js), this account-level checker is
+    // redundant with, and can double-nag alongside, the per-invoice ladder.
+    // On, retire before any query — nothing else in this file changes. Off
+    // (unset or any other spelling): byte-identical to before this gate.
+    // Retirement needs the Day 90 ladder live: with the ladder off the
+    // follow-up cadence ends at Day 30 and this checker is the only sender
+    // of the 60- and 90-day reminders.
+    if (process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true') {
+      if (process.env.GATE_DUNNING_LADDER_90 === 'true') {
+        logger.info('[late-payment-checker] retired: GATE_LATE_PAYMENT_CHECKER_OFF, the invoice follow-up ladder owns overdue invoices');
+        return {
+          notified: 0, emailedFallback: 0, skipped: 0, retired: true,
+        };
+      }
+      logger.warn('[late-payment-checker] GATE_LATE_PAYMENT_CHECKER_OFF ignored: GATE_DUNNING_LADDER_90 is not live, so the ladder cannot own the 60- and 90-day reminders yet');
+    }
     const now = new Date();
     const cutoff = new Date(now.getTime() - daysOverdue * 86400000);
 
@@ -729,7 +804,11 @@ const LatePaymentService = {
           if (!emailLedger) return emailResult;
           const claim = await claimReservedEmail(ContactLedger, emailLedger);
           if (claim.delivered) {
-            emailResult = { ok: true, deduped: true };
+            emailResult = { ok: true, deduped: true, sentAt: emailLedger.occurred_at };
+            return emailResult;
+          }
+          if (claim.resolved) {
+            emailResult = { ok: false, resolved: true, reason: claim.resolution };
             return emailResult;
           }
           if (!claim.allowed) {
@@ -757,9 +836,9 @@ const LatePaymentService = {
             logger.error(`[late-payment] Email sidecar failed for invoice ${inv.id}: ${emailErr.message}`);
           }
           if (emailResult?.ok === true) {
-            if (typeof ContactLedger.markDelivered === 'function') await ContactLedger.markDelivered(emailLedger);
-          } else if (emailResult?.deliveryOutcome !== 'uncertain') {
-            await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+            await markEmailAtAcceptedTime(ContactLedger, emailLedger, emailResult);
+          } else {
+            await settleUnsentEmailReservation(ContactLedger, emailLedger, emailResult, { reason: emailResult?.reason || 'email_not_sent' });
           }
           return emailResult;
         };
@@ -768,9 +847,36 @@ const LatePaymentService = {
           await attemptEmail();
           if (emailResult?.ok === true) {
             await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
-            notified++;
-          } else if ((isTerminalEmailRefusal(emailResult)
-            && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
+            const freshEmail = Number(!emailResult.deduped);
+            notified += freshEmail;
+            skipped += 1 - freshEmail;
+            // Sequence-less invoice, confirmed delivery on repair — same
+            // shared stamp as the normal path below (dunning unification,
+            // owner note: this checker is the only sender left for a 60/90
+            // -day invoice with no invoice_followup_sequences row once the
+            // legacy balance-reminder retires). Gated on
+            // GATE_BALANCE_REMINDER_LEGACY_OFF (Codex P1, round 3): unset,
+            // balance-reminder.js's OWN legacy latePaymentCheck() still runs
+            // unconditionally and already stamps every 60/90-day customer it
+            // reaches — but that method filters on customers.active AND
+            // waveguard_tier, while this checker does neither, so an
+            // unconditional stamp HERE would flip pipeline_stage for a
+            // customer legacy latePaymentCheck() would never have reached
+            // (an inactive-flagged or non-WaveGuard/flat-commercial account),
+            // breaking "unset = byte-identical." Run AFTER completePendingEmail
+            // above (the dedupe marker for this episode) and guarded (Codex
+            // P1): a failure here must never cost that marker.
+            if (tierDays >= 60 && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
+              && process.env.GATE_DUNNING_LADDER_90 === 'true') {
+              try {
+                await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
+              } catch (stampErr) {
+                logger.warn(`[late-payment] at-risk stamp failed for customer ${customer.id}: ${stampErr.message}`);
+              }
+            }
+          } else if (emailResult?.resolved === true
+            || (isTerminalEmailRefusal(emailResult)
+              && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
             || (emailDurablyDenied && await resolvePendingEmailEpisode(pendingEmailEpisode, 'email_policy_denied'))) {
             await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
             skipped++;
@@ -805,18 +911,21 @@ const LatePaymentService = {
         await attemptEmail();
 
         const emailDelivered = emailResult?.ok === true;
-        const terminalEmailResolved = !!delivery.sentChannels && isTerminalEmailRefusal(emailResult)
-          && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal');
+        const terminalEmailResolved = !!delivery.sentChannels && (emailResult?.resolved === true
+          || (isTerminalEmailRefusal(emailResult)
+            && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')));
         // A durably denied Email (flag, suppression) is not owed for this
         // tier and must not leave a pending hold that blocks later tiers.
         const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
           && !emailDelivered && !terminalEmailResolved;
 
+        const repair = previouslySettledBillingLegs([...Object.values(delivery.results), emailResult]);
+        const repaired = !!repair;
         if (delivery.sentChannels) {
-          notified++;
+          if (repaired) skipped++; else notified++;
           logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
         } else if (emailDelivered) {
-          emailedFallback++;
+          if (repaired) skipped++; else emailedFallback++;
           logger.info(`[late-payment] Email reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
         } else {
           // Neither channel reached the customer (SMS undeliverable AND no email
@@ -832,11 +941,12 @@ const LatePaymentService = {
         }
 
         const activityInsert = db('activity_log').insert({
+          ...(repair?.originalAt ? { created_at: repair.originalAt } : {}),
           customer_id: customer.id,
           action: 'late_payment_reminder',
-          description: `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
+          description: repaired ? `Original ${tierDays}-day ${delivery.results.push?.deduped ? 'App event' : 'reminder'} settled` : `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
           metadata: JSON.stringify({
-            invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince,
+            invoiceKey, invoiceId: inv.id, ...(repaired ? { delivery_repaired: true } : { amount: totalAmount, daysOverdue: daysSince }),
             tierDays,
             channel: delivery.sentChannels ? `${delivery.sentChannels}${emailDelivered ? '+email' : ''}` : 'email_only',
             ...(pendingEmail ? {
@@ -848,6 +958,30 @@ const LatePaymentService = {
         });
         if (pendingEmail) await activityInsert;
         else await activityInsert.catch(() => {});
+
+        // Sequence-less invoice, confirmed delivery this tier (dunning
+        // unification, owner note): once the legacy balance-reminder's
+        // account-level 60/90-day late check retires, this checker is the
+        // only sender left for an invoice with no invoice_followup_sequences
+        // row (adoption, GATE_DUNNING_ADOPT_ORPHANS, is dark by default), so
+        // it now owns the shared at-risk stamp for those same tiers — same
+        // helper invoice-followups.js's fireTouch uses for its Day 60/90
+        // steps, so the two callers can't drift on which fields it stamps.
+        // Gated on GATE_BALANCE_REMINDER_LEGACY_OFF (Codex P1, round 3): see
+        // the matching gate above on the repair path for why an unconditional
+        // stamp here would break "unset = byte-identical" (this checker
+        // reaches customers legacy latePaymentCheck()'s own active/
+        // waveguard_tier filters would have excluded). Run AFTER the
+        // activity_log dedupe marker above (Codex P1): a failure here must
+        // never cost that marker and risk a re-send.
+        if (tierDays >= 60 && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
+              && process.env.GATE_DUNNING_LADDER_90 === 'true') {
+          try {
+            await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
+          } catch (stampErr) {
+            logger.warn(`[late-payment] at-risk stamp failed for customer ${customer.id}: ${stampErr.message}`);
+          }
+        }
       } catch (smsErr) {
         logger.error(`[late-payment] SMS failed for customer ${customer.id}: ${smsErr.message}`);
         skipped++;

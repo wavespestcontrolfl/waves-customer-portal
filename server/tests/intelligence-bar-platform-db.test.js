@@ -12,7 +12,7 @@ const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
 
 suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
-  let db, server, origin, token, actor, customerA, customerB, nameA, firstName;
+  let db, server, origin, token, actor, customerA, customerB, nameA, firstName, suiteStartedAt;
   const sessionId = crypto.randomUUID();
   const originalEnv = { ...process.env };
   const tools = (name, input, id) => ({ content: [{ type: 'tool_use', name, input, id }], usage: {} });
@@ -45,6 +45,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     process.env.GATE_IB_WRITES_DISABLED = 'false';
     process.env.GATE_EDIT_APPT_ADDRESS = 'true';
     db = require('../models/db');
+    suiteStartedAt = (await db.raw('SELECT now() AS t')).rows[0].t;
     if (!(await db.schema.hasTable('ib_tasks'))) throw new Error('Apply the IB task migration to the isolated database first');
     actor = crypto.randomUUID(); customerA = crypto.randomUUID(); customerB = crypto.randomUUID();
     // A per-run first name: the shared isolated database accumulates fixtures, and a
@@ -67,6 +68,17 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
   beforeEach(() => mockModel.mockReset());
   afterAll(async () => {
     if (server) await new Promise(resolve => server.close(resolve));
+    // Every gap this suite records (the gap-report cases, or any scripted
+    // reply that declines) writes an `agents` admin bell in the gap's own
+    // transaction; remove them so CI's shared database carries no unread
+    // bells into later suites.
+    if (db && suiteStartedAt) {
+      await db('notifications')
+        .where('category', 'agents')
+        .where('created_at', '>=', suiteStartedAt)
+        .whereRaw("metadata->>'gapId' IS NOT NULL")
+        .del();
+    }
     if (db) await db.destroy();
     for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
     Object.assign(process.env, originalEnv);
@@ -1241,4 +1253,47 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     } finally { process.env.GATE_IB_THREADS = 'false'; }
   }, 30000);
 
+  // Gap reports (server/services/agent-gap-reports.js): recorded server-side
+  // from the tool loop, only when the reply says the bar could not do it.
+  describe('gap reports', () => {
+    // A short letters-and-digits token keeps each test's summary unique.
+    const uniqueToken = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const missQuery = () => `zzqx${uniqueToken()} wwzy${uniqueToken()}`; // no real word: discovery truly finds nothing
+
+    test('a search that finds nothing, then a reply that declines, leaves a missing_capability gap', async () => {
+      const query = missQuery();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query }, 'discover'))
+        .mockResolvedValueOnce(answer('I could not find a way to do that from the bar.'));
+      const result = await api('/query', request('Do something that does not exist'));
+      expect(result.status).toBe(200);
+      // flush() is awaited before the reply, so the row exists once the request returns.
+      const row = await db('agent_gap_reports').where({ source: 'intelligence-bar', kind: 'missing_capability', summary: query }).first();
+      expect(row).toMatchObject({ occurrences: 1, attempted: 'Searched the bar; no matching tool' });
+      await db('agent_gap_reports').where('id', row.id).del();
+    }, 30000);
+
+    test('the same miss with a reply that does not decline records nothing', async () => {
+      const query = missQuery();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query }, 'discover'))
+        .mockResolvedValueOnce(answer('Here is the summary you asked for.'));
+      const result = await api('/query', request('Summarize today'));
+      expect(result.status).toBe(200);
+      expect(await db('agent_gap_reports').where({ summary: query }).first()).toBeUndefined();
+    }, 30000);
+
+    test('a partly declined request records each of its searches, noting which ones ran a related tool', async () => {
+      const query = missQuery();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query }, 'discover-miss'))
+        .mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover-hit'))
+        .mockResolvedValueOnce(tools('update_customer', { customer_id: customerB, updates: { notes: 'Synthetic recovered note' } }, 'update'))
+        .mockResolvedValueOnce(answer("I can't do the first part from the bar, but the note update is awaiting confirmation."));
+      const result = await api('/query', request('First try something odd, then update this customer'));
+      expect(result.status).toBe(200);
+      const miss = await db('agent_gap_reports').where({ summary: query }).first();
+      expect(miss.attempted).toBe('Searched the bar; no matching tool');
+      const related = await db('agent_gap_reports').where({ source: 'intelligence-bar', summary: 'update customer fields' }).first();
+      expect(related.attempted).toBe('Searched the bar; a related tool ran, but the reply still declined part of the request');
+      await db('agent_gap_reports').whereIn('id', [miss.id, related.id]).del();
+    }, 30000);
+  });
 });

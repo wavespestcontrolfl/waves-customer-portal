@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const logger = require('./logger');
 const { ASK_SPACING_MS, looksLikeReviewAsk } = require('./review-ask-history');
 const { dispatchReviewAsk } = require('./review-ask-dispatch');
 const { requiresDurableFinalize } = require('./messaging/deferred-replay-registry');
@@ -16,6 +17,28 @@ const { requiresDurableFinalize } = require('./messaging/deferred-replay-registr
 // bundled completion row before that row's own marker gets stripped.
 const { REVIEW_ASK_MARKER, reserveForRequest } = require('./messaging/review-ask-reservation');
 
+// dispatchReviewAsk results that hold a queued review text for later.
+const REVIEW_HOLD_CODES = ['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY', 'REVIEW_CLICK_STATE_UNAVAILABLE'];
+
+// The one sentence a dispatch completion text appends to invite a review.
+// complete-scheduled-service.js builds the suffix from it and the strip below
+// matches it, so a wording change cannot leave a suffix the strip misses.
+const COMPLETION_REVIEW_INVITE = 'Enjoyed the service? A quick review means the world:';
+const COMPLETION_REVIEW_SUFFIX_RE = new RegExp(
+  `\\n\\n${COMPLETION_REVIEW_INVITE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} (?:https?:\\/\\/)?[^\\s]+(?=\\s*(?:Reply STOP to (?:unsubscribe|opt out)\\.?)?\\s*$)`,
+  'i',
+);
+const stripCompletionReviewLine = (body) => String(body || '').replace(COMPLETION_REVIEW_SUFFIX_RE, '').trim();
+// For a customer who already tapped: when the exact sentence no longer
+// matches (edited wording), drop every later paragraph that reads as a review
+// ask, then any review-page link left, so no working review link goes out.
+// The first paragraph (the completion itself) is always kept.
+const withoutReviewInvite = (body) => {
+  const [first = '', ...rest] = String(body || '').split(/\n{2,}/);
+  return [first, ...rest.filter((p) => !looksLikeReviewAsk(p))].join('\n\n')
+    .replace(/[ \t]*(?:https?:\/\/)?[a-z0-9.-]+(?::\d+)?\/(?:api\/)?rate\/[A-Za-z0-9][^\s]*/gi, '').trim();
+};
+
 async function acceptedScheduledSms(id, err) {
   if (err?.providerOutcome?.deliveryOutcome === 'accepted') return err.providerOutcome;
   const row = await db('sms_log').where({ direction: 'outbound' })
@@ -27,6 +50,7 @@ async function acceptedScheduledSms(id, err) {
 
 async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundled_review_request_id || meta.replay_purpose === 'review_request' || looksLikeReviewAsk(msg.message_body)) {
   const completedAt = new Date();
+  const evidence = require('./messaging/billing-prior-delivery').scheduledPriorInvoiceEvidence(meta, result, msg);
   // Preserve the queue time while ordering the conversation by delivery.
   // Finalization evidence rides the same atomic update so a crash cannot
   // lose the owed replay hooks or the accepted SID they need.
@@ -36,13 +60,16 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
     metadataSql += " || jsonb_build_object('finalize_pending', true, 'provider_message_id', ?::text)";
     bindings.push(result.providerMessageId || null);
   }
+  metadataSql += evidence.metadataSql;
+  bindings.push(...evidence.bindings);
   if (reviewAsk) {
     metadataSql += " || jsonb_build_object('review_ask_delivered_at', ?::timestamptz)";
     bindings.push(completedAt);
   }
   await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
     status: 'sent',
-    created_at: completedAt,
+    // An event dedupe retires the queue; it is not a fresh contact.
+    created_at: evidence.createdAt || completedAt,
     updated_at: completedAt,
     metadata: db.raw(metadataSql, bindings),
   });
@@ -191,68 +218,79 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
     }
   };
   if (!reviewAsk) return dispatch();
-  const result = await dispatchReviewAsk(msg.customer_id, dispatch);
-  if (!['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'].includes(result?.code)) return result;
+  // A dispatch completion text may carry one bundled review invitation as its
+  // last line. dispatchReviewAsk runs the send-time click guard for it under
+  // the same lock hold as the provider call: a tracked tap since the visit
+  // (REVIEW_LINK_CLICKED) drops the line and suppresses the ask; an unreadable
+  // click state (REVIEW_CLICK_STATE_UNAVAILABLE) is a hold like spacing, so the
+  // line is never sent blind. The completion itself always goes out.
+  const bundledReviewRequestId = meta.entry_point === 'dispatch_completion_deferred' ? meta.bundled_review_request_id : null;
+  const result = await dispatchReviewAsk(msg.customer_id, dispatch, { clickAskId: bundledReviewRequestId });
+  const clicked = result?.code === 'REVIEW_LINK_CLICKED';
+  if (!clicked && !REVIEW_HOLD_CODES.includes(result?.code)) return result;
   // Completion delivery must not wait behind its optional review invitation.
   // Remove only the exact suffix we generated, preserving every receipt,
   // invoice and report link. Persist body and linkage together before send.
-  if (meta.entry_point === 'dispatch_completion_deferred' && meta.bundled_review_request_id) {
-    const body = msg.message_body.replace(/\n\nEnjoyed the service\? A quick review means the world: (?:https?:\/\/)?[^\s]+(?=\s*(?:Reply STOP to (?:unsubscribe|opt out)\.?)?\s*$)/i, '').trim();
-    if (body && body !== msg.message_body && !looksLikeReviewAsk(body)) {
-      const explicitRetryAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
-      const reviewRetryAt = explicitRetryAt && !Number.isNaN(explicitRetryAt.getTime())
-        ? explicitRetryAt
-        : new Date(Date.now() + 15 * 60 * 1000);
-      const bundledReviewRequestId = meta.bundled_review_request_id;
-      // A crash right after a prior provider handoff (or stale-claim
-      // recovery finding no separate delivery proof) can leave THIS row
-      // requeued with review_ask_reservation already set from that earlier
-      // attempt — the only evidence it may have reached the customer. This
-      // branch is about to strip that same marker so the row can continue
-      // as an ordinary completion send; deleting it in place would erase
-      // the prior attempt's evidence entirely (codex P1, deferred audit).
-      // Migrate it to a standalone reservation through the seam — keyed to
-      // the same review request, inserted (or renewed, if one already
-      // exists from an earlier pass through this exact branch) in the SAME
-      // transaction as the strip below — so it survives as the ordinary
-      // unresolved reservation every reader already honors, independent of
-      // what happens to this row next.
-      const priorReservationPending = meta.review_ask_reservation === true;
-      // The completion/receipt must continue without the optional ask, but
-      // dropping its only replay linkage used to strand an unscheduled inline
-      // request: delivery finalization could no longer mark it delivered and
-      // terminal recovery could no longer arm its standalone fallback. Arm
-      // the still-pending request in the SAME transaction as the body rewrite
-      // so every committed stripped completion leaves one durable send owner.
-      // A zero-row update means the request is already delivered, suppressed,
-      // missing, or actively claimed and therefore owns its own settlement.
-      await db.transaction(async trx => {
-        await trx('review_requests')
-          .where({ id: bundledReviewRequestId, status: 'pending' })
-          .whereNull('sms_sent_at')
-          .update({ scheduled_for: reviewRetryAt });
-        if (priorReservationPending) {
-          await reserveForRequest({
-            trx,
-            request: { id: bundledReviewRequestId, customer_id: msg.customer_id },
-            to: msg.to_phone,
-            body: msg.message_body,
-            fromPhone: msg.from_phone,
-          });
-        }
-        const changed = await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
-          message_body: body,
-          metadata: trx.raw(`COALESCE(metadata, '{}'::jsonb) - 'bundled_review_request_id' - '${REVIEW_ASK_MARKER}'`),
-          updated_at: new Date(),
+  // A clicked customer's completion goes out even when that line does not
+  // match the known wording: its review paragraphs and links are removed.
+  const stripped = bundledReviewRequestId && stripCompletionReviewLine(msg.message_body);
+  const strippedClean = Boolean(stripped) && stripped !== msg.message_body && !looksLikeReviewAsk(stripped);
+  if (strippedClean || clicked) {
+    const body = strippedClean ? stripped : withoutReviewInvite(msg.message_body);
+    const explicitRetryAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
+    const reviewRetryAt = explicitRetryAt && !Number.isNaN(explicitRetryAt.getTime())
+      ? explicitRetryAt
+      : new Date(Date.now() + 15 * 60 * 1000);
+    // A crash right after a prior provider handoff (or stale-claim
+    // recovery finding no separate delivery proof) can leave THIS row
+    // requeued with review_ask_reservation already set from that earlier
+    // attempt — the only evidence it may have reached the customer. This
+    // branch is about to strip that same marker so the row can continue
+    // as an ordinary completion send; deleting it in place would erase
+    // the prior attempt's evidence entirely (codex P1, deferred audit).
+    // Migrate it to a standalone reservation through the seam — keyed to
+    // the same review request, inserted (or renewed, if one already
+    // exists from an earlier pass through this exact branch) in the SAME
+    // transaction as the strip below — so it survives as the ordinary
+    // unresolved reservation every reader already honors, independent of
+    // what happens to this row next.
+    const priorReservationPending = meta.review_ask_reservation === true;
+    // The completion/receipt must continue without the optional ask, but
+    // dropping its only replay linkage used to strand an unscheduled inline
+    // request: delivery finalization could no longer mark it delivered and
+    // terminal recovery could no longer arm its standalone fallback. Arm
+    // the still-pending request in the SAME transaction as the body rewrite
+    // so every committed stripped completion leaves one durable send owner
+    // (or, after a click, suppress it so nothing follows).
+    // A zero-row update means the request is already delivered, suppressed,
+    // missing, or actively claimed and therefore owns its own settlement.
+    await db.transaction(async trx => {
+      await trx('review_requests')
+        .where({ id: bundledReviewRequestId, status: 'pending' })
+        .whereNull('sms_sent_at')
+        .update(clicked ? { status: 'suppressed', scheduled_for: null } : { scheduled_for: reviewRetryAt });
+      if (priorReservationPending) {
+        await reserveForRequest({
+          trx,
+          request: { id: bundledReviewRequestId, customer_id: msg.customer_id },
+          to: msg.to_phone,
+          body: msg.message_body,
+          fromPhone: msg.from_phone,
         });
-        if (!changed) throw new Error('Scheduled completion claim lost before removing review invitation');
+      }
+      const changed = await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
+        message_body: body,
+        metadata: trx.raw(`COALESCE(metadata, '{}'::jsonb) - 'bundled_review_request_id' - '${REVIEW_ASK_MARKER}'`),
+        updated_at: new Date(),
       });
-      msg.message_body = body;
-      delete meta.bundled_review_request_id;
-      delete meta.review_ask_reservation;
-      reviewAsk = false;
-      return dispatch();
-    }
+      if (!changed) throw new Error('Scheduled completion claim lost before removing review invitation');
+    });
+    if (!strippedClean) logger.warn(`[scheduled-sms] review line did not match the known wording for a customer who already tapped a review link; review paragraphs and links removed, bundled ask suppressed (smsLogId=${msg.id})`);
+    msg.message_body = body;
+    delete meta.bundled_review_request_id;
+    delete meta.review_ask_reservation;
+    reviewAsk = false;
+    return dispatch();
   }
   // These are pre-provider holds, not failed delivery attempts. Refund the
   // claim's attempt and retain the existing metadata/finalization contract.
@@ -270,4 +308,4 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   return { ...result, scheduledHold: true };
 }
 
-module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms };
+module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms, COMPLETION_REVIEW_INVITE, stripCompletionReviewLine };

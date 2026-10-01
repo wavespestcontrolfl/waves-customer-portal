@@ -391,6 +391,128 @@ describe('invoice tier discounts', () => {
     expect(invoice.total).toBe(0);
   });
 
+  // Codex pre-push P1: a stamped estimated_price of 0 on an UNPRICED
+  // per-application visit (no stale primary_line_price to reconcile —
+  // unlike the callback test above, this row was never gross-priced at
+  // all) is not the same shape as the callback reconciliation. storedNetAmount
+  // used to prefer `scheduled.estimated_price` whenever it was numeric at
+  // all (hasNumericValue(0) is true), so it read the stamped 0 as the
+  // AUTHORITATIVE frozen net and reconciled the fee-fallback primary line
+  // straight back down to $0 via a "Scheduled price adjustment" — even
+  // though the caller's own fallbackAmount (97.20, resolveScheduledServiceCharge's
+  // per-application-fee fallback — the SAME positive-price precedence
+  // completionInvoiceAmount uses) is what should anchor the reconciliation
+  // when the row itself carries no positive price. Preview
+  // (MobileCheckoutSheet) and mint must land on the SAME $137.20 (fee +
+  // a $40 checkout extra) — this pins the mint side.
+  test('a zero-priced per-application visit with no stale gross column bills the fee fallback, not a reconciled $0', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: null, property_type: 'residential' },
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Quarterly Pest Control',
+        estimated_price: 0,
+        primary_line_price: null,
+      }],
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService('scheduled-1', {
+      fallbackAmount: 97.2,
+      fallbackDescription: 'Quarterly Pest Control',
+      extraLineItems: [{
+        description: 'Checkout Extra', quantity: 1, unit_price: 40, amount: 40,
+      }],
+    });
+
+    expect(scheduledInvoice.lineItems.some((item) => item.description === 'Scheduled price adjustment')).toBe(false);
+    expect(scheduledInvoice.lineItems.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(137.2);
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Quarterly Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+    expect(invoice.total).toBe(137.2);
+  });
+
+  // Codex pre-push P1 (round 3): the OPPOSITE, supported shape from the test
+  // above — completion-pricing's discount engine froze a fully-discounted
+  // application at a genuine $0 net, stamping a positive primary_line_price
+  // (the pre-discount gross base) alongside estimated_price: 0. A caller
+  // whose fallbackAmount does NOT also happen to be 0 (unlike
+  // completion-pricing.postgres.test.js's own "fully discounted application
+  // stays zero" case, which passes fallbackAmount: 0 and so never actually
+  // exercises this guard) must not reconcile this real $0 invoice back up
+  // toward that fallback.
+  test('a provenance-backed $0 (positive primary_line_price, 0 estimated_price) stays zero even against a positive fallback', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: null, property_type: 'residential' },
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Quarterly Pest Control',
+        estimated_price: 0,
+        primary_line_price: 100,
+      }],
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService('scheduled-1', {
+      // A different caller's positive fallback (e.g. the per-application
+      // fee resolveScheduledServiceCharge would fall to for an UNPRICED
+      // visit) — this visit is NOT unpriced, so it must never win.
+      fallbackAmount: 97.2,
+      fallbackDescription: 'Quarterly Pest Control',
+    });
+
+    expect(scheduledInvoice.lineItems.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(0);
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Quarterly Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+    expect(invoice.total).toBe(0);
+  });
+
+  // Codex round 4 P0: `authoritativeZero` used to re-derive this predicate
+  // inline as `Number(scheduled.estimated_price) === 0`, and Number(null)
+  // === 0 — so a NEVER-PRICED row (estimated_price null, no net stamp at
+  // all) with a stale positive primary_line_price ALSO satisfied it,
+  // anchoring storedNetAmount at 0 instead of the caller's own fallbackAmount
+  // (97.20 — the SAME per-application-fee precedence completionInvoiceAmount
+  // uses) and reconciling a genuinely-owed fee all the way down to $0.
+  // Fixed: it now nets to the fallback (via a "Scheduled price adjustment"
+  // reconciling the stale $100 gross primary line down to it — the SAME
+  // reconciliation shape as "gross callback lines" above, just anchored at
+  // 97.20 instead of 0), never $0.
+  test('a null estimated_price with a positive primary_line_price is NOT an authoritative zero — nets to the fee fallback, never $0', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: null, property_type: 'residential' },
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Quarterly Pest Control',
+        estimated_price: null,
+        primary_line_price: 100,
+      }],
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService('scheduled-1', {
+      fallbackAmount: 97.2,
+      fallbackDescription: 'Quarterly Pest Control',
+    });
+
+    expect(scheduledInvoice.lineItems.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(97.2);
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Quarterly Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+    expect(invoice.total).toBe(97.2);
+  });
+
   test('scheduled invoice creation hydrates service date and type', async () => {
     const ctx = setupDb({
       customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },

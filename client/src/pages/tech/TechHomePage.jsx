@@ -50,6 +50,7 @@ import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
+import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
@@ -90,6 +91,22 @@ const API = import.meta.env.VITE_API_URL || '';
 // services-table backed signal (the schedule API attaches it).
 function isPestControlService(service) {
   return service?.completionProfile?.category === 'pest_control';
+}
+
+// Fast Complete (PR C, GATE_RESERVICE_FAST_COMPLETE): a pest re-service
+// (free between-visit callback, completionProfile.serviceKey ===
+// 'pest_re_service') opens the one-screen FastCompleteSheet instead of the
+// full ServiceRecapModal when the gate is on. `reserviceFastCompleteEnabled`
+// rides the schedule payload per service (mirrors inspectionCreditAvailable
+// — server/routes/admin-schedule.js) so the gate needs no client redeploy.
+// Gate off, or any other service, is byte-identical to today's routing.
+function isReserviceFastCompleteEligible(service) {
+  return service?.reserviceFastCompleteEnabled === true
+    && service?.completionProfile?.serviceKey === 'pest_re_service'
+    // A completed (or otherwise closed) re-service stays on the recap
+    // editor, which updates an existing record; /complete would only
+    // answer service_already_completed and drop the tech's corrections.
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
 
 // Typed specialty jobs (profile cut over to the service-report flow with a
@@ -137,6 +154,7 @@ async function techRequest(path, options = {}) {
   if (!res.ok) {
     const error = new Error(data?.error || `Request failed (${res.status})`);
     error.status = res.status;
+    error.code = data?.code;
     throw error;
   }
   return data;
@@ -178,7 +196,7 @@ function serviceTechnicianId(service) {
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
-import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, stopHasCustomerSentPhotos, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 const ON_SITE_ELIGIBLE = new Set(['en_route']);
@@ -250,6 +268,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [leadTarget, setLeadTarget] = useState(null);
   const [outcomeTarget, setOutcomeTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
+  const [fastCompleteService, setFastCompleteService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -611,6 +630,14 @@ export default function TechHomePage({ section = 'today' }) {
           && !['sent', 'closed'].includes(service.linkedProject?.status))
       ))
     : myServices;
+  // Shared by every entry point that would otherwise call setRecapService
+  // directly: a pest re-service under the gate opens the one-screen Fast
+  // Complete sheet instead of the full recap modal. Everything else routes
+  // exactly as before.
+  const openPestCompletion = useCallback((service) => {
+    if (isReserviceFastCompleteEligible(service)) setFastCompleteService(service);
+    else setRecapService(service);
+  }, []);
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {
       const only = projectServices[0];
@@ -619,14 +646,14 @@ export default function TechHomePage({ section = 'today' }) {
       if (usesDispatchCompletion(only)) {
         openTypedCompletion(only);
       } else if (isPestControlService(only)) {
-        setRecapService(only);
+        openPestCompletion(only);
       } else {
         openProjectOrContinue(only);
       }
       return;
     }
     setShowProjectPicker(true);
-  }, [projectServices, openProjectOrContinue]);
+  }, [projectServices, openProjectOrContinue, openPestCompletion]);
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
@@ -639,7 +666,7 @@ export default function TechHomePage({ section = 'today' }) {
   const openServiceReport = (service) => {
     if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
     if (usesDispatchCompletion(service)) openTypedCompletion(service);
-    else if (isPestControlService(service)) setRecapService(service);
+    else if (isPestControlService(service)) openPestCompletion(service);
     else openProjectOrContinue(service);
   };
   const fieldTools = [
@@ -983,7 +1010,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onProject={(s) => (
                   usesDispatchCompletion(s)
                     ? openTypedCompletion(s)
-                    : isPestControlService(s) ? setRecapService(s) : openProjectOrContinue(s)
+                    : isPestControlService(s) ? openPestCompletion(s) : openProjectOrContinue(s)
                 )}
                 onPhotos={(s) => setPhotoTarget({
                   id: s.id,
@@ -1068,7 +1095,7 @@ export default function TechHomePage({ section = 'today' }) {
           onSelect={(service) => {
             setShowProjectPicker(false);
             if (usesDispatchCompletion(service)) openTypedCompletion(service);
-            else if (isPestControlService(service)) setRecapService(service);
+            else if (isPestControlService(service)) openPestCompletion(service);
             else openProjectOrContinue(service);
           }}
         />
@@ -1081,10 +1108,60 @@ export default function TechHomePage({ section = 'today' }) {
             id: recapService.id,
             customerName: recapService.customer_name || recapService.customerName,
             serviceType: recapService.service_type || recapService.serviceType,
+            // The catalog key lets the recap recognize a one-time pest job
+            // booked under the bare "Pest Control Service" label, which the
+            // label alone deliberately doesn't match (Codex r4, PR #5049).
+            serviceKey: recapService.completionProfile?.serviceKey
+              || recapService.serviceKey || recapService.service_key_snapshot || null,
           }}
           request={techRequest}
           onClose={() => setRecapService(null)}
           onCompleted={() => { setRecapService(null); fetchSchedule(); }}
+        />
+      )}
+
+      {fastCompleteService && (
+        <FastCompleteSheet
+          key={fastCompleteService.id}
+          service={{
+            id: fastCompleteService.id,
+            customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
+            serviceType: fastCompleteService.service_type || fastCompleteService.serviceType,
+            address: shortAddress(fastCompleteService.address) || fastCompleteService.address || '',
+            timeLabel: serviceWindowLabel(fastCompleteService) || '',
+            // The visit the tech tapped, checked against the live context:
+            // a row that went stale (moved to another customer or day) must
+            // not complete against the new visit.
+            routedCustomerId: fastCompleteService.customerId || fastCompleteService.customer_id || null,
+            routedScheduledDate: fastCompleteService.scheduledDate || fastCompleteService.scheduled_date || null,
+            // The row's property (null = never stamped with one; absent on
+            // an older payload = no verdict), then its full address ("line1
+            // line2, city, state zip", built from the same visit-then-customer
+            // address the context resolves) for visits without a property.
+            routedPropertyId: 'propertyId' in fastCompleteService ? fastCompleteService.propertyId : undefined,
+            routedAddress: typeof fastCompleteService.address === 'string' ? fastCompleteService.address : null,
+            // GATE_FAST_COMPLETE_RECAP rides the same schedule row: only an
+            // exact true turns the customer recap on (see the sheet). Absent
+            // (an older payload) or false = the sheet sends no customer text.
+            recapEnabled: fastCompleteService.fastCompleteRecapEnabled === true,
+          }}
+          request={techRequest}
+          onClose={(options) => {
+            setFastCompleteService(null);
+            // A sheet blocked on a stale row asks for a refresh, so reopening
+            // routes from the live schedule instead of the same old row.
+            if (options?.refresh) fetchSchedule();
+          }}
+          onCompleted={() => { setFastCompleteService(null); fetchSchedule(); }}
+          // "Full form" and "+ Other product" go to the full completion screen
+          // (the Dispatch CompletionPanel deep link typed jobs already use): it
+          // loads the live visit and records every product's method, amount,
+          // targets and area, which the recap modal's /pest-recap path cannot.
+          onFullForm={() => {
+            const raw = fastCompleteService;
+            setFastCompleteService(null);
+            openTypedCompletion(raw);
+          }}
         />
       )}
 
@@ -1447,6 +1524,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
   // separate invoices, so a prepaid primary must not hide a sibling's
   // amount due.
   const money = stopCollectSummary(stop);
+  const customerSentPhotos = stopHasCustomerSentPhotos(stop);
   const street = shortAddress(service.address);
   const serviceLabel = stopSummaryLabel(stop)
     || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';
@@ -1488,7 +1566,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
           }}>
             {serviceLabel}{street ? ` · ${street}` : ''}
           </p>
-          {(indicator.hasAlerts || money.collectNeeded) && (
+          {(indicator.hasAlerts || money.collectNeeded || customerSentPhotos) && (
             <div style={{ display: 'flex', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
               {indicator.hasAlerts && (
                 <span style={chipStyle(indicator.hasChemical ? '#ef4444' : DARK.teal)}>
@@ -1497,6 +1575,9 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
               )}
               {money.collectNeeded && (
                 <span style={chipStyle('#f59e0b')}>💵 Collect {fmtMoney(money.amount)}</span>
+              )}
+              {customerSentPhotos && (
+                <span style={chipStyle(DARK.teal)}>📷 Customer sent photos</span>
               )}
             </div>
           )}

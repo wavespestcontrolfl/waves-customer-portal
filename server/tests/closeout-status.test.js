@@ -570,8 +570,11 @@ describe('closeout-status: comms + follow-up', () => {
   test('evidence on a sibling service_records row counts: token on the older record (codex r17)', () => {
     const rec1 = { ...closedOutInputs().record, id: 'rec-new', report_view_token: null, report_generated_at: null };
     const rec2 = { ...closedOutInputs().record, id: 'rec-old', report_view_token: 't'.repeat(32), report_generated_at: '2026-08-30T18:05:00Z' };
-    const { facts } = deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1, rec2] }));
+    const { facts, reportRecordId } = deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1, rec2] }));
     expect(facts.report).toMatchObject({ state: 'done', reason: 'report_published', hasToken: true });
+    // A repair of the report facts must act on the record they were read from.
+    expect(reportRecordId).toBe('rec-old');
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1] })).reportRecordId).toBe('rec-new');
   });
 
   test('GH r4: sibling invoice + billing outage → unknown; sibling posture never relabels the token record; non-performed invoice → contradiction; inactive visit beats failed attempt', () => {
@@ -916,6 +919,41 @@ describe('closeout-status: Agent D findings', () => {
       visit: { ...closedOutInputs().visit, estimated_price: null }, liveInvoice: null,
     });
     expect(deriveCloseoutFacts(perApp).facts.invoice).toMatchObject({ state: 'pending', reason: 'expected_auto_charge_not_minted', amount: 98 });
+  });
+
+  // Owner ruling (round 13, codex pre-push P2): "propagate the new void
+  // hold to billing projections". The SAME unpriced per_application shape
+  // as the test above, but with perApplicationVoidHold already resolved
+  // (loadCloseoutInputs' own async call to billing-lane.js's shared
+  // perApplicationCompletionVoidHold) — deriveBillingExpectation must
+  // report the held/review state, never the positive auto_charge amount
+  // predictCompletionBilling alone would compute (it has no sibling-coverage
+  // awareness at all).
+  test('a voided combined invoice with no live replacement holds the per_application projection for review, never a positive auto_charge amount', () => {
+    const held = closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'per_application', per_application_fee: 98, autopay_enabled: true },
+      lane: { mode: 'per_application', source: 'explicit' }, autopayActive: true,
+      visit: { ...closedOutInputs().visit, estimated_price: null, source_estimate_id: 'est-1' },
+      liveInvoice: null,
+      perApplicationVoidHold: { id: 'inv-void', status: 'void' },
+    });
+    const expectation = deriveBillingExpectation(held);
+    expect(expectation).toMatchObject({ kind: 'sibling_needs_review', amount: null, why: 'combined_invoice_voided', voidedInvoiceId: 'inv-void' });
+    expect(deriveCloseoutFacts(held).facts.invoice).toMatchObject({ state: 'pending', reason: 'expected_sibling_needs_review_not_minted' });
+  });
+
+  // The unaffected case: no hold resolved (the common case — every
+  // non-per_application lane, or a per_application visit with nothing
+  // voided) previews exactly as before.
+  test('with no void hold resolved, the per_application projection is unaffected', () => {
+    const notHeld = closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'per_application', per_application_fee: 98, autopay_enabled: true },
+      lane: { mode: 'per_application', source: 'explicit' }, autopayActive: true,
+      visit: { ...closedOutInputs().visit, estimated_price: null, source_estimate_id: 'est-1' },
+      liveInvoice: null,
+      perApplicationVoidHold: null,
+    });
+    expect(deriveBillingExpectation(notHeld)).toMatchObject({ kind: 'auto_charge', amount: 98 });
   });
 });
 

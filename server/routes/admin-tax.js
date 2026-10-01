@@ -1864,8 +1864,13 @@ router.get('/bank-import/status', async (req, res, next) => {
     if (!gateEnvValue('GATE_BANK_IMPORT')) return res.json({ enabled: false });
     await healBankImportSnapshot();
     const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
+    const bankChanges = await db('bank_transactions')
+      .whereRaw("suggestion->'plaidModified' IS NOT NULL OR suggestion->'plaidRemoved' IS NOT NULL")
+      .count('* as n').first();
     res.json({
       enabled: true,
+      bankChanges: parseInt(bankChanges?.n, 10) || 0,
+      plaidEnabled: gateEnvValue('GATE_PLAID_SYNC'),
       counts: Object.fromEntries(counts.map(c => [c.status, parseInt(c.n, 10)])),
     });
   } catch (err) { next(err); }
@@ -1874,6 +1879,150 @@ router.get('/bank-import/status', async (req, res, next) => {
 router.use('/bank-import', (req, res, next) => {
   if (!gateEnvValue('GATE_BANK_IMPORT')) return res.status(404).json({ error: 'not found' });
   next();
+});
+
+// ── Plaid live feed (GATE_PLAID_SYNC, nested under GATE_BANK_IMPORT) ────────
+// Connect a bank through Plaid Link, confirm each account's label / type /
+// start date, then transactions sync hourly (cron) or on demand into the
+// same staging table the CSV upload fills. See services/plaid-sync.js.
+
+const plaidSync = require('../services/plaid-sync');
+const { PlaidError } = require('../services/plaid-client');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// With the feed switched off, what it already left behind stays
+// manageable: rows carrying a bank change that blocks every claim can be
+// resolved (local only), and a connection — which still counts as CSV
+// coverage for its label — can be seen and revoked. Connecting, setup and
+// syncing stay off.
+const PLAID_POSTS_OPEN_WHEN_OFF = /^\/(rows\/[^/]+\/bank-change|items\/[^/]+\/disconnect)$/;
+
+router.use('/bank-import/plaid', (req, res, next) => {
+  const openWhenOff = req.method === 'GET' ? req.path === '/status' : PLAID_POSTS_OPEN_WHEN_OFF.test(req.path);
+  if (!gateEnvValue('GATE_PLAID_SYNC') && !openWhenOff) return res.status(404).json({ error: 'not found' });
+  next();
+});
+
+router.param('plaidItemId', (req, res, next, id) => {
+  if (!UUID_RE.test(String(id))) return res.status(404).json({ error: 'connection not found' });
+  next();
+});
+
+router.param('plaidRowId', (req, res, next, id) => {
+  if (!UUID_RE.test(String(id))) return res.status(404).json({ error: 'no bank change on this row' });
+  next();
+});
+
+function plaidRouteError(res, next, err) {
+  if (err instanceof PlaidError) return res.status(502).json({ error: err.message, plaidErrorCode: err.errorCode });
+  if ([400, 404, 409, 503].includes(err.status)) return res.status(err.status).json({ error: err.message });
+  return next(err);
+}
+
+router.get('/bank-import/plaid/status', async (req, res, next) => {
+  try {
+    res.json(await plaidSync.getStatus());
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// itemId present = update mode (re-authenticate an existing connection)
+router.post('/bank-import/plaid/link-token', async (req, res, next) => {
+  try {
+    const { itemId } = req.body || {};
+    if (itemId !== undefined && itemId !== null && !UUID_RE.test(String(itemId))) {
+      return res.status(400).json({ error: 'invalid itemId' });
+    }
+    const out = await plaidSync.createLinkToken({ clientUserId: req.technicianId, itemId: itemId || null });
+    res.json(out);
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+router.post('/bank-import/plaid/connect', async (req, res, next) => {
+  try {
+    const { publicToken, institutionName } = req.body || {};
+    if (typeof publicToken !== 'string' || !publicToken || publicToken.length > 300) {
+      return res.status(400).json({ error: 'publicToken is required' });
+    }
+    const itemId = await plaidSync.connectItem({ publicToken, institutionName });
+    res.json({ success: true, itemId });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// Confirming the mapping activates a new connection and runs its first sync
+// right away (the operator is watching); later edits re-sync too.
+router.post('/bank-import/plaid/items/:plaidItemId/setup', async (req, res, next) => {
+  try {
+    await plaidSync.setupItem(req.params.plaidItemId, (req.body || {}).accounts);
+    res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+router.post('/bank-import/plaid/items/:plaidItemId/reconnected', async (req, res, next) => {
+  try {
+    await plaidSync.markReconnected(req.params.plaidItemId);
+    res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+router.post('/bank-import/plaid/items/:plaidItemId/sync', async (req, res, next) => {
+  try {
+    res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// A reviewed row the bank later corrected (plaidModified) or withdrew
+// (plaidRemoved) is never rewritten under the operator; this is where they
+// resolve it. 'dismiss' keeps the row as reviewed, clears the flag and
+// records the dismissed version (plaidDismissed) so a later full re-sync
+// of that same version doesn't raise it again. 'apply' takes the bank's
+// corrected values — only on an UNMATCHED row (unlink it first), and only
+// for the exact flag the operator saw.
+router.post('/bank-import/plaid/rows/:plaidRowId/bank-change', async (req, res, next) => {
+  try {
+    const { action, expected } = req.body || {};
+    if (!['apply', 'dismiss'].includes(action)) return res.status(400).json({ error: "action must be 'apply' or 'dismiss'" });
+    // `expected` = the flags exactly as the operator saw them. Both actions
+    // are conditioned on it, so a correction or withdrawal that arrived
+    // after the page loaded is never applied or erased unseen.
+    const seenModified = expected?.plaidModified ?? null;
+    const seenRemoved = expected?.plaidRemoved ?? null;
+    if (!seenModified && !seenRemoved) return res.status(400).json({ error: 'expected (the bank change shown) is required' });
+    const sameVersion = (q) => q.whereRaw(
+      "coalesce(suggestion->'plaidModified', 'null'::jsonb) = ?::jsonb AND coalesce(suggestion->'plaidRemoved', 'null'::jsonb) = ?::jsonb",
+      [JSON.stringify(seenModified), JSON.stringify(seenRemoved)],
+    );
+    const row = await db('bank_transactions').where({ id: req.params.plaidRowId, source: 'plaid' }).first('id', 'status', 'suggestion');
+    if (!bankImport.hasUnresolvedBankChange(row)) return res.status(404).json({ error: 'no bank change on this row' });
+    const stale = () => res.status(409).json({ error: 'the bank changed this row again — reload and review the latest change' });
+    if (action === 'dismiss') {
+      const changed = await sameVersion(db('bank_transactions').where({ id: row.id })).update({
+        suggestion: bankImport.suggestionMerge({ plaidDismissed: seenRemoved ? { removed: true } : seenModified }, ['plaidModified', 'plaidRemoved']),
+        updated_at: new Date(),
+      });
+      return changed ? res.json({ success: true }) : stale();
+    }
+    if (seenRemoved) return res.status(409).json({ error: 'the bank withdrew this transaction — dismiss it, or unlink and ignore the row' });
+    if (row.status !== 'unmatched') return res.status(409).json({ error: 'unlink this row before applying the bank\'s correction' });
+    // replaced, not edited in place (see plaidSync.supersedeUnmatchedRow):
+    // under the row lock, re-check status + the exact version shown. The
+    // values applied are the STORED flag the CAS just matched — never the
+    // request body's copy.
+    const replaced = await db.transaction(async (trx) => {
+      const locked = await sameVersion(trx('bank_transactions').where({ id: row.id, status: 'unmatched' })).forUpdate().first('id', 'suggestion');
+      return locked ? plaidSync.supersedeUnmatchedRow(trx, row.id, locked.suggestion.plaidModified) : null;
+    });
+    return replaced ? res.json({ success: true }) : stale();
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// Revokes the connection at Plaid. Rows already imported stay (they may be
+// linked to expenses); the feed just stops.
+router.post('/bank-import/plaid/items/:plaidItemId/disconnect', async (req, res, next) => {
+  try {
+    await plaidSync.disconnectItem(req.params.plaidItemId, { confirmedRemovedAtPlaid: (req.body || {}).confirmedRemovedAtPlaid === true });
+    res.json({ success: true });
+  } catch (err) { plaidRouteError(res, next, err); }
 });
 
 router.post('/bank-import/upload', async (req, res, next) => {
@@ -1926,6 +2075,8 @@ router.post('/bank-import/upload', async (req, res, next) => {
     // duplicates. (Force inserts below stay outside: their retry is already
     // idempotent via the confirmation token.)
     const inserted = [];
+    const feedCoveredHashes = new Set();
+    let feedCoverage = null;
     await db.transaction(async (trx) => {
       // Advisory xact-lock serializes uploads per canonical label, making
       // the label→type invariant race-free: two concurrent FIRST uploads
@@ -1943,6 +2094,24 @@ router.post('/bank-import/upload', async (req, res, next) => {
         e.status = 400;
         throw e; // rolls back before any insert
       }
+      // A Plaid feed on this label covers some days (live: its start date
+      // onward; history: each day it already imported rows for, even if
+      // since stopped). CSV and feed rows can't be deduped against each other
+      // (they hash differently), so those days are skipped here and
+      // reported — never imported as silent duplicates. Read under the same
+      // label lock the feed setup takes.
+      feedCoverage = await plaidSync.feedCoverageForLabel(trx, label, toInsert.map(r => r.txn_date));
+      if (feedCoverage.liveType && feedCoverage.liveType !== accountType) {
+        const e = new Error(`"${label}" is fed by a live bank connection as ${plaidSync.ACCOUNT_TYPE_NOUN[feedCoverage.liveType]} — keep that type, or use a different label`);
+        e.status = 400;
+        throw e; // rolls back before any insert
+      }
+      const kept = [];
+      for (const r of toInsert) {
+        if (feedCoverage.isCovered(r.txn_date)) feedCoveredHashes.add(r.row_hash); else kept.push(r);
+      }
+      toInsert.length = 0;
+      toInsert.push(...kept);
       for (let i = 0; i < toInsert.length; i += 500) {
         const batch = await trx('bank_transactions')
           .insert(toInsert.slice(i, i + 500))
@@ -1958,7 +2127,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
     // earlier export. The operator sees exactly which rows were skipped and
     // can add the real one by hand if it wasn't a re-upload.
     const insertedHashes = new Set(inserted.map(r => r.row_hash));
-    const duplicateRows = hashed.filter(r => !insertedHashes.has(r.row_hash));
+    const duplicateRows = hashed.filter(r => !insertedHashes.has(r.row_hash) && !feedCoveredHashes.has(r.row_hash));
     // Force path for the split-across-uploads case: a genuinely distinct
     // identical transaction in a SEPARATE file hashes like a re-upload and
     // is skipped above. When the operator confirms these are real:
@@ -2074,6 +2243,10 @@ router.post('/bank-import/upload', async (req, res, next) => {
       // would dwarf the upload itself
       skipped: skipped.slice(0, 50),
       skippedTotal: skipped.length,
+      // rows on/after a live bank feed's start date for this label
+      feedCovered: feedCoveredHashes.size,
+      feedLiveFrom: feedCoverage ? feedCoverage.liveFrom : null,
+      feedDays: feedCoverage ? feedCoverage.fedDays.slice(0, 31) : [],
       matching,
       matchingError,
     });
@@ -2097,7 +2270,10 @@ router.get('/bank-import/transactions', async (req, res, next) => {
     // txn_date+created_at, and an unstable order across offset pages would
     // repeat some rows and silently drop others from review.
     let q = db('bank_transactions').orderBy('txn_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc').limit(limit + 1).offset(offset);
-    if (status) q = q.where('status', String(status));
+    // bank_change = Plaid rows the bank corrected/withdrew after review
+    // (not a status — a flag the operator resolves via /plaid/rows/:id)
+    if (status === 'bank_change') q = q.where(qb => qb.whereNotNull(db.raw("suggestion->'plaidModified'")).orWhereNotNull(db.raw("suggestion->'plaidRemoved'")));
+    else if (status) q = q.where('status', String(status));
     if (account) q = q.where('account_label', String(account));
     if (month && /^\d{4}-\d{2}$/.test(String(month))) {
       q = q.whereRaw("to_char(txn_date, 'YYYY-MM') = ?", [String(month)]);
@@ -2160,6 +2336,10 @@ router.post('/bank-import/suggest', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// every manual claim below refuses a Plaid row with an unresolved bank
+// change: it still holds the pre-correction values (bankImport.hasUnresolvedBankChange)
+const BANK_CHANGE_BLOCKS_CLAIM = 'the bank changed this transaction after it was reviewed — apply or dismiss the bank change first';
+
 // Create a real expense from a staged debit. Card-statement credits
 // (refunds) do NOT create rows here — negative expenses would violate the
 // ledger's [0, amount] deductible invariant and the P&L clamps; refunds go
@@ -2174,6 +2354,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — refund credits use apply-refund' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
 
     const suggested = row.suggestion?.categoryId || null;
     const categoryId = req.body?.categoryId || suggested;
@@ -2207,6 +2388,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
         }).returning('*');
         const claimed = await trx('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })
+          .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
           .update({ status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
         if (!claimed) {
           const e = new Error('row was matched by someone else mid-flight');
@@ -2231,10 +2413,11 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
   try {
     const { expenseId } = req.body || {};
     if (!expenseId) return res.status(400).json({ error: 'expenseId is required' });
-    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status', 'amount', 'txn_date');
+    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status', 'amount', 'txn_date', 'suggestion');
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits link to expenses' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
     // Plausibility is judged and the claim committed in ONE transaction
     // with the expense row LOCKED — a concurrent expense edit or refund
     // between an unlocked validation and the claim could otherwise leave
@@ -2265,6 +2448,7 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
         }
         return trx('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })
+          .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
           .update({ status: 'matched_expense', matched_expense_id: expenseId, match_method: 'manual', matched_at: new Date(), updated_at: new Date() });
       });
     } catch (err) {
@@ -2298,6 +2482,7 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
       return res.status(400).json({ error: 'only statement credits apply as refunds' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
     // a credit RELEASED against this expense already reduced it once — a
     // second application would double-reduce the ledger
     if (row.suggestion?.releasedRefundOf && String(row.suggestion.releasedRefundOf) === String(expenseId)) {
@@ -2359,6 +2544,7 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
         }).returning(['id', 'amount', 'tax_deductible_amount']);
         const claimed = await trx('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })
+          .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
           .update({
             status: 'refund_applied',
             match_method: 'refund',
@@ -2427,6 +2613,7 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
       return res.status(400).json({ error: 'only bank-account credits link to payouts' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
     const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'status', 'amount', 'arrival_date', 'reconciled');
     if (!payout) return res.status(404).json({ error: 'payout not found' });
     // Only money that actually REACHED the bank can explain a bank credit —
@@ -2448,6 +2635,7 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
     try {
       claimed = await db('bank_transactions')
         .where({ id: row.id, status: 'unmatched' })
+        .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
         .update({
           status: 'matched_payout',
           matched_payout_id: payoutId,

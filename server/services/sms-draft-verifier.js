@@ -28,6 +28,7 @@ Check EVERY concrete detail in the draft, one by one — each:
 - location ("exterior bushes", "kitchen", "attic")
 - date, day, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "9–10am")
 - technician name, or who is coming / on the way
+- an ETA or "how many minutes away" claim about today's visit ("about 15 minutes away", "20 minutes out")
 - specific action or commitment ("we'll pick up the trap", "we'll coordinate X", "we'll be there Wednesday")
 - claim about what was found, caught, treated, or inspected
 - service cadence/frequency, or a treatment-timing rule
@@ -38,6 +39,7 @@ A detail is GROUNDED only if it appears in the FACTS, or in what the customer LI
 - The customer's message supports ONLY their literal words — never an inference. A message about "spiders" does NOT support "flying bugs"; a message that just gives a name does NOT support a "pickup" request; "the trap" does NOT support "the attic trap".
 - Warm acknowledgments, generic brand voice, and offers to confirm/follow up are fine. But a SPECIFIC commitment, date, place, or job detail is a violation unless grounded.
 - VALUE MATCHING — match the exact value, not just the category. A date, day, or time is grounded ONLY if that EXACT value is in the FACTS. A date that DIFFERS from the facts — even by one day — is a VIOLATION, never "close enough". Example: FACTS say next service 6/15, draft says "Tuesday June 16" → VIOLATION (wrong date, not the 6/15 on file). Seeing "there is a date in the facts" is NOT enough; the value must match.
+- AN ETA CLAIM ("about N minutes away", "N minutes out", "on the way, N minutes out") is grounded ONLY if the FACTS contain a "LIVE ETA" line for today's visit stating that EXACT number of minutes — a different number, a rounded-off number, or no LIVE ETA line at all, is a VIOLATION. "The tech is on the way" alone (no minutes stated) only needs a LIVE STATUS en-route line, same as before.
 - BILLING is high-stakes — any statement about billing status or resolution ("paid in full", "you're all set", "your payment went through", "that charge was an error", "it appears to be a mistake") is a VIOLATION unless that exact status is in BALANCE/FACTS. A reassurance the facts don't confirm is unsafe.
 - For every specific date, time, technician name, or commitment in the draft, you must be able to QUOTE the exact FACTS or customer text that supports it. If you can't quote a source, it is a violation.
 
@@ -47,7 +49,45 @@ or:
 {"supported": false, "violations": ["draft says 'Wednesday' — not in facts or the customer's message", "assumes a 'pickup' the customer never requested", "says 'attic trap' but only 'trap' is grounded"]}`;
 }
 
-function buildVerifierUserPrompt(factsBlock, inboundMessage, draftReply) {
+// `offeredTimes` (PR #5119, GATE_SMS_REAL_ANSWERS only): the drafter's own
+// structured declaration of which OPEN TIMES (date, window) pairs the reply
+// offers — already checked deterministically against the OPEN TIMES list
+// (validateOfferedTimes). What that check CANNOT do without parsing prose
+// is bind each declared DATE to the day the customer-visible text names
+// ("Wednesday 9-11" written, Tuesday declared), so the mapping rides here
+// for the verifier to check like any other fact. Empty/omitted → the prompt
+// is byte-identical to before (every gate-off caller and pinned exam).
+const OPEN_TIMES_HEADER = 'OPEN TIMES (real, bookable slots, ET'; // buildFactsBlock's section header, verbatim
+const REAL_ANSWERS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:'; // stamped into EVERY gate-on facts block, OPEN TIMES or not
+function buildVerifierUserPrompt(factsBlock, inboundMessage, draftReply, offeredTimes = []) {
+  const declared = Array.isArray(offeredTimes)
+    ? offeredTimes.filter((e) => e && typeof e.date === 'string' && typeof e.window === 'string' && e.date && e.window)
+    : [];
+  // The section is present whenever OPEN TIMES was in play for this draft
+  // (real-answers gate on, slots fetched) — INCLUDING when the drafter
+  // declared nothing (pre-push audit P1: an empty declaration must still be
+  // checked, or a raw undeclared offer that happens to share a booked
+  // visit's window text passes the deterministic check AND reaches a
+  // verifier that was never told offers need declaring, and then no
+  // send-time snapshot exists to recheck it).
+  // Every real-answers draft gets the section (pre-push audit P1 on r7):
+  // when availability timed out, returned nothing, or had no city, OPEN
+  // TIMES is omitted — and that is exactly when the model must offer NO
+  // time at all, not even one the customer suggested (the base rules accept
+  // a customer's literal words as grounding for a DATE, never as an OFFER).
+  const facts = String(factsBlock || '');
+  const realAnswersDraft = declared.length > 0 || facts.includes(OPEN_TIMES_HEADER) || facts.includes(REAL_ANSWERS_MARKER);
+  const hasOpenTimes = facts.includes(OPEN_TIMES_HEADER);
+  const noneLine = hasOpenTimes
+    ? '(none — the drafter declares that this draft offers NO new appointment times)'
+    : '(none — NO OPEN TIMES were available for this draft, so it must offer NO appointment time at all; a time the customer suggested is a request to confirm later, never an offer)';
+  const declaredSection = realAnswersDraft
+    ? `
+
+DECLARED OFFERS (the drafter says these are the ONLY new appointment times the draft offers, each copied from OPEN TIMES):
+${declared.length ? declared.map((e) => `- ${e.date}: ${e.window}`).join('\n') : noneLine}
+Check the mapping: every appointment time the draft OFFERS must name the SAME day and window as one DECLARED OFFER (a draft that writes "Wednesday" for a Tuesday declaration, or offers a time with no declared entry — including ANY offer when the declaration is "none" — is a VIOLATION). A time in the draft that is NOT a declared offer may only restate an already-scheduled visit from UPCOMING SERVICES, on that visit's own day.`
+    : '';
   return `FACTS:
 ${factsBlock}
 
@@ -55,7 +95,7 @@ CUSTOMER'S CURRENT MESSAGE:
 "${inboundMessage}"
 
 DRAFT REPLY:
-"${draftReply}"
+"${draftReply}"${declaredSection}
 
 Fact-check the draft now.`;
 }

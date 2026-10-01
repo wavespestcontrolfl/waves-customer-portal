@@ -51,6 +51,7 @@ function flatView(extraction) {
   const meta = extraction.meta || {};
   const sentiment = extraction.sentiment_and_lead || {};
   const history = extraction.customer_history || {};
+  const consent = extraction.consent || {};
 
   return {
     first_name: caller.first_name || null,
@@ -64,6 +65,12 @@ function flatView(extraction) {
     // Watched by replay variance (FIELD_GROUPS medium).
     caller_id_disclaimed: typeof caller.caller_id_disclaimed === 'boolean' ? caller.caller_id_disclaimed : null,
     phone_note: caller.phone_note || null,
+    // sms_declined (schema 1.19.0, codex P1 on #5292) — the dedicated
+    // explicit-SMS-refusal field, distinct from sms_consent_given=false
+    // ("never asked"). Tri-state like caller_id_disclaimed: null (never
+    // judged, including every pre-1.19 row) is distinct from an explicit
+    // false. Watched by replay variance (FIELD_GROUPS medium).
+    sms_declined: typeof consent.sms_declined === 'boolean' ? consent.sms_declined : null,
 
     address_line1: addr.street_line_1 || null,
     address_line2: addr.street_line_2 || null,
@@ -124,6 +131,25 @@ function flatView(extraction) {
     preferred_date_time: sched.confirmed_start_at || null,
     proposed_start_at: sched.proposed_start_at || null,
     agent_committed_booking: sched.agent_committed_booking === true,
+    caller_accepted_slot: sched.caller_accepted_slot === true,
+    moved_appointment_date: sched.moved_appointment_date || null,
+    // Verbatim-words fields (schema 1.17.0) that the reschedule applier
+    // checks against their evidence quotes instead of parsing speech.
+    agreed_slot_words: sched.agreed_slot_words || null,
+    moved_appointment_words: sched.moved_appointment_words || null,
+    // Language judgements (schema 1.20.0): tri-state, null = not judged, which
+    // the reschedule applier fails closed on.
+    definite_commitment: typeof sched.definite_commitment === 'boolean' ? sched.definite_commitment : null,
+    relative_date_used: typeof sched.relative_date_used === 'boolean' ? sched.relative_date_used : null,
+    moved_appointment_relative_date_used: typeof sched.moved_appointment_relative_date_used === 'boolean'
+      ? sched.moved_appointment_relative_date_used : null,
+    // Commercial dictated booking judgements (schema 1.21.0): tri-state, null =
+    // not judged, which the path fails closed on.
+    price_offered_by_staff: typeof svc.price_offered_by_staff === 'boolean' ? svc.price_offered_by_staff : null,
+    price_accepted_by_caller: typeof svc.price_accepted_by_caller === 'boolean' ? svc.price_accepted_by_caller : null,
+    price_is_final: typeof svc.price_is_final === 'boolean' ? svc.price_is_final : null,
+    staff_accepted_proposed_slot: typeof sched.staff_accepted_proposed_slot === 'boolean' ? sched.staff_accepted_proposed_slot : null,
+    selected_day_words: typeof sched.selected_day_words === 'string' ? sched.selected_day_words : null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
     follow_up_date_time: sched.follow_up_start_at || null,
 

@@ -17,9 +17,9 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, addressMayNameUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
-const { isInServiceAreaBox } = require('../services/service-area');
+const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -295,6 +295,28 @@ function cachedAggregateResolvesToOwnUnit(record, address) {
   return Number.isFinite(units) && units > 1 && buildings === units;
 }
 
+// Condo unit folio (GATE_CONDO_UNIT_FOLIO) cache freshness. Gate ON: a
+// unit address whose cached row predates the folio (no `_unitFolio` — it came
+// from the address search the old drop fell back to, possibly the building's
+// figures) misses once; so does a 'county_unavailable' stamp older than a day
+// (the county leg failed or found nothing, so the check never ran — retry,
+// but not on every lookup). Gate OFF: a row the folio touched misses, so the
+// kill switch rolls every cached unit back to the pre-feature lookup instead
+// of serving unit facts until the 180-day TTL. Pure; cache rows are inputs,
+// never mutated.
+const UNIT_FOLIO_UNAVAILABLE_RETRY_MS = 24 * 60 * 60 * 1000;
+function cachedUnitFolioStale(record, address, now = Date.now()) {
+  if (!record) return false;
+  const live = typeof condoUnitFolioEnabled === 'function' && condoUnitFolioEnabled();
+  if (!live) return Boolean(record._unitFolio);
+  if (!addressMayNameUnit(address)) return false;
+  const stamp = record._unitFolio;
+  if (!stamp) return true;
+  if (stamp.status !== 'county_unavailable') return false;
+  const checkedAt = Date.parse(stamp.checkedAt);
+  return !Number.isFinite(checkedAt) || now - checkedAt >= UNIT_FOLIO_UNAVAILABLE_RETRY_MS;
+}
+
 async function performPropertyLookupCore(address, options = {}) {
   const t0 = Date.now();
   // options.persist === false: read-everything, WRITE-NOTHING mode for
@@ -326,6 +348,12 @@ async function performPropertyLookupCore(address, options = {}) {
       // a known-superseded classification must not reach report/portal
       // pricing either (codex P1).
       logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — treating as a miss');
+      cached = null;
+    }
+    if (cached && cachedUnitFolioStale(cached.property_record, address)) {
+      // Condo unit folio stamp out of step with the gate (cacheOnly callers
+      // take the ordinary miss, as above).
+      logger.info('[property-lookup] cached unit address out of step with condo unit folio gate — treating as a miss');
       cached = null;
     }
     if (cached) {
@@ -538,6 +566,23 @@ async function performPropertyLookupCore(address, options = {}) {
     result.propertyRecord = aiProperty;
     result.rentcast = aiProperty;
 
+    // Condo unit folio outcome (GATE_CONDO_UNIT_FOLIO) rides the cached
+    // record like _floodZone: the profile flags an ambiguous unit match, and
+    // its status tells cachedUnitFolioStale whether the check ran. With no
+    // match, "no stacked building" is definitive only when the county roll
+    // answered for the point; a failed / empty leg stamps 'county_unavailable'
+    // so a transient outage never pins the fallback for the cache lifetime.
+    if (typeof condoUnitFolioEnabled === 'function' && condoUnitFolioEnabled()
+      && (lookupDiag.unitFolio || addressMayNameUnit(address))) {
+      if (lookupDiag.unitFolio) {
+        result.propertyRecord._unitFolio = { status: lookupDiag.unitFolio.status, candidates: lookupDiag.unitFolio.candidates ?? null };
+      } else if (lookupDiag.countyGisAnswered) {
+        result.propertyRecord._unitFolio = { status: 'no_stacked_building', candidates: null };
+      } else {
+        result.propertyRecord._unitFolio = { status: 'county_unavailable', candidates: null, checkedAt: new Date().toISOString() };
+      }
+    }
+
     // FEMA NFHL flood-zone evidence (point query, fail-open, evidence-only).
     // Rides the merged property record so cache hits keep it. Skipped on
     // partial-match geocodes (low-trust point) and when no record exists to
@@ -689,7 +734,7 @@ async function performPropertyLookupCore(address, options = {}) {
     lng = geo.lng;
 
     // Validate within SWFL service area
-    if (!isInServiceAreaBox(lat, lng)) {
+    if (!isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })) {
       result.errors.push({ source: 'geo', message: 'Outside SWFL service area' });
     }
 
@@ -739,7 +784,7 @@ async function performPropertyLookupCore(address, options = {}) {
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
-        inServiceArea: isInServiceAreaBox(lat, lng),
+        inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }),
         _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
@@ -1061,7 +1106,19 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     propertyRecord: record,
     rentcast: record,
     avm: null,
-    satellite: buildSatelliteUrlSet(lat, lng),
+    // A cache hit judges the rectangle overlap on the same county/ZIP evidence
+    // the fresh path passes (geo.county / geo.zip), so cache state never
+    // changes the in-area verdict.
+    satellite: buildSatelliteUrlSet(lat, lng, {
+      county: record?._parcel?.county || record?.county || null,
+      // AI-only records carry zipCode '' — fall back to the formatted
+      // address, the cache row's normalized address, then the typed one.
+      zip: record?.zipCode
+        || zipFromAddressText(record?.formattedAddress)
+        || zipFromAddressText(row?.normalized_address)
+        || zipFromAddressText(address)
+        || null,
+    }),
     aiAnalysis,
     enriched,
     errors: [],
@@ -1077,7 +1134,7 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
 
 // Client-facing satellite URL set (no vision base64s — cache hits skip the
 // vision pipeline entirely; the stored aiAnalysis already covers it).
-function buildSatelliteUrlSet(lat, lng) {
+function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
   if (!mapsKey) return null;
@@ -1090,7 +1147,7 @@ function buildSatelliteUrlSet(lat, lng) {
     superCloseUrl: urlAtZoom(20),
     closeUrl: urlAtZoom(19),
     wideUrl: urlAtZoom(18),
-    inServiceArea: isInServiceAreaBox(lat, lng),
+    inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence),
   };
 }
 
@@ -2206,6 +2263,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     fieldVerifyFlags.push({
       field: 'propertyType',
       reason: `Unit address in a stacked condo building — quoted as ONE condo unit (single level, no lot, no pool assumed). The building's story count, the community pool, and every satellite read (turf, landscape, water) describe the whole parcel and were dropped. Confirm the unit's floor (upper floors price as Condo — Upper)${unitSqFtKept ? ' and its sq ft' : ', and get the unit\'s own sq ft from the customer'}.${typeProvenance}`,
+      priority: 'HIGH',
+    });
+  }
+  if (rc?._unitFolio?.status === 'multiple_unit_matches' && condoUnitFolioEnabled()) {
+    fieldVerifyFlags.push({
+      field: 'squareFootage',
+      reason: `The unit number matches ${Number(rc._unitFolio.candidates) > 1 ? `${rc._unitFolio.candidates} ` : 'several '}county unit records at this address (the same unit number in more than one building), so the unit's own county record could not be picked. Confirm the building and the unit's sq ft with the customer.`,
       priority: 'HIGH',
     });
   }
@@ -5770,6 +5834,7 @@ module.exports._private = {
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,
   cachedAggregateResolvesToOwnUnit,
+  cachedUnitFolioStale,
   subdivisionMedianEstimate,
   inFlightLookups,
   lookupCoalesceKey,

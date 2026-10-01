@@ -73,6 +73,29 @@ test('a pre-submit release frees the slot for retry, while path changes invalida
   expect(await E.beginSubmission(s.db,{prospectId:s.placement.id,leaseToken:s.token,citation:{website:'https://wavespestcontrol.com',location:'sarasota'}})).toBe(false);
   expect(s.db._tables.seo_link_attempts).toHaveLength(1);
 });
+test('owner-queue safety guard: the signup runner never claims an ai_citation-discovered domain — a stray AUTO_FREE row is refused, not honored', async () => {
+  // decideAuthority downgrades AUTO_FREE→OWNER_FREE for a domain whose
+  // first-touch source is `ai_citation` (link-authority-policy.js); authorize()
+  // recomputes the decision from the CURRENT domain row and compares it to the
+  // stored authority row (line 44's `decided.level === row.level` check) — so
+  // even a pre-existing AUTO_FREE row (a bug, a stale row, a race) is refused
+  // here rather than honored, independent of the bridge ever having written it.
+  const s = scenario({ domain: { source: 'ai_citation' } });
+  expect(await authorize(s)).toBeNull();
+});
+test('owner-queue safety guard: the SAME domain with a real first-touch source claims normally', async () => {
+  const s = scenario({ domain: { source: 'competitor_gap' } });
+  expect(await authorize(s)).toBeTruthy();
+});
+test('owner-queue safety guard: an owner-approved OWNER_FREE row on an ai_citation domain still claims (the owner decided, not the software)', async () => {
+  const s = scenario({ domain: { source: 'ai_citation' }, policy: { auto_free_acquisition: false }, authority: { level: 'OWNER_FREE' } });
+  expect(await authorize(s)).toBeNull(); // no approval yet
+  const approval = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, dimension: 'execution', action: 'acquire', instance_key: s.authority.instance_key, authority: 'OWNER_FREE', decision: 'approved', decision_inputs_hash: s.authority.decision_inputs_hash, path_revision: 1 };
+  s.db._tables.seo_link_approvals.push(approval);
+  s.db._tables.seo_link_placement_authorities[0].approval_id = approval.id;
+  expect(await authorize(s)).toBeTruthy();
+});
+
 test('send-first acquisition waits for the initial communication instance to be satisfied',async()=>{
   const s=scenario({path:{acquisition_type:'content_submission',link_type:'resource'},placement:{status:'contacted'}});
   expect(await authorize(s)).toBeNull();

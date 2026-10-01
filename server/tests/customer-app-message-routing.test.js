@@ -1,7 +1,10 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => false) })); // hold lookup: none of these fixtures is a hold
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/billing-channel-email', () => ({ sendBillingChannelEmail: jest.fn() }));
+// The Text-leg event dedupe has its own suites (billing-text-leg-dedupe*); here it is a pass-through.
+jest.mock('../services/messaging/billing-text-leg-dedupe', () => ({ withBillingTextLegLock: (_input, send) => send() }));
 jest.mock('../services/messaging/audit', () => ({ persistAudit: jest.fn(async () => ({ id: 'audit-test' })) }));
 jest.mock('../services/messaging/validators/line-type', () => ({
   ...jest.requireActual('../services/messaging/validators/line-type'),
@@ -19,6 +22,13 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 // hold reads; the hold itself is covered by
 // send-customer-message-callback-number-hold.test.js and
 // callback-number-hold-boundary.test.js.
+// The messaging-hold read (payment_failure is hold-gated at the send boundary) is covered by the
+// dispute-hold suites; this file's bespoke `db` double cannot answer it, and an unanswerable read
+// fails closed, so here no customer is held.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../services/disclaimed-number-holds', () => ({
   disclaimedNumberBlocksSend: jest.fn(async () => false),
   disclaimedNumberHeldForVisit: jest.fn(async () => false),
@@ -133,14 +143,18 @@ test('an unavailable invoice guard keeps a retry without falling back around the
 
 test('temporary native failures retain their delay and never invoke a Text fallback', async () => {
   prefs.invoice_channel = 'push';
-  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000 });
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000, bellPersisted: true });
   const startedAt = Date.now();
   const result = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
   expect(result).toMatchObject({ sent: false, blocked: false, code: 'APP_PROVIDER_RETRY',
-    deliveryOutcome: 'uncertain', retryable: true, deferred: true, retryAfterMs: 900000 });
+    deliveryOutcome: 'uncertain', retryable: true, deferred: true, retryAfterMs: 900000, bellPersisted: true });
   expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(startedAt + 900000);
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
   expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000 });
+  const stale = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
+  expect(stale.bellPersisted).toBeUndefined();
 });
 
 test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc'])('hard suppression %s still blocks app delivery', async (reason) => {
@@ -194,9 +208,12 @@ test('a fallback rechecks a new opt-out rather than bypassing it', async () => {
 });
 
 test('an event already being pushed defers without racing a backup text', async () => {
-  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true });
-  expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, deferred: true, reason: 'push_in_flight' });
+  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true, deliveryOutcome: 'uncertain', bellPersisted: true });
+  expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, deferred: true, reason: 'push_in_flight', deliveryOutcome: 'uncertain', bellPersisted: true });
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+
+  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true, deliveryOutcome: 'uncertain' });
+  expect((await sendCustomerMessage(input)).bellPersisted).toBeUndefined();
 });
 
 test.each([{ bundled_review_request_id: 'qa-review' }, { mms_fallback_reason: 'fixture-failure' }])('excluded review and media fallback keep their text delivery: %j', async (metadata) => {
@@ -485,6 +502,32 @@ test('request delivery forwards the queued status and transition identity to the
 });
 
 describe('explicit billing channel combinations', () => {
+  test('a later native guard refusal preserves an observed original App event', async () => {
+    prefs.billing_channels = ['push'];
+    const visibleAt = new Date(Date.now() - 86400000);
+    Twilio.sendSMS.mockImplementation(async (_to, _body, hooks) => {
+      expect(await hooks.preSendCheck()).toMatchObject({ ok: false });
+      expect(hooks.explicitPushOnly).toBe(true);
+      return { success: false, appUnavailable: true, error: 'app_event_already_visible', eventVisibleAt: visibleAt };
+    });
+    const result = await sendCustomerMessage({ ...input, purpose: 'billing', preSendCheck: async () => false,
+      metadata: { billingDeliveryCategory: 'billing', billingDeliveryLeg: 'push', notificationEventKey: 'billing:prior', appOnly: true } });
+    expect(result).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(require('../services/messaging/billing-channel-routing').billingLegDeliveryState('push', result)).toBe('deduped');
+    expect(result.bellPersisted).toBeUndefined();
+    expect(result.providerMessageId).toBeUndefined();
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  });
+
+  test('an already visible App event keeps its settlement evidence without a Text fallback', async () => {
+    prefs.billing_channels = ['push'];
+    const visibleAt = new Date(Date.now() - 86400000);
+    Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(await sendCustomerMessage({ ...input, purpose: 'billing', metadata: {
+      billingDeliveryCategory: 'billing', billingDeliveryLeg: 'push', notificationEventKey: 'billing:event-1', appOnly: true,
+    } })).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  });
   const combinations = [
     ['email'], ['sms'], ['push'], ['email', 'sms'],
     ['email', 'push'], ['sms', 'push'], ['email', 'sms', 'push'],
@@ -542,12 +585,12 @@ describe('explicit billing channel combinations', () => {
     expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
   });
 
-  test('a disabled email leg does not prevent the selected text', async () => {
+  test('the portal-wide email switch being off does not prevent the selected email or text (payment emails cannot be turned off)', async () => {
     prefs.payment_receipt_channels = ['email', 'sms'];
     prefs.email_enabled = false;
     const result = await sendCustomerMessage(input);
-    expect(result.channelResults).toMatchObject({ email: { sent: false, code: 'EMAIL_OPTED_OUT' }, sms: { sent: true } });
-    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+    expect(result.channelResults).toMatchObject({ email: { sent: true }, sms: { sent: true } });
+    expect(sendBillingChannelEmail).toHaveBeenCalledTimes(1);
   });
 
   test('an unresolved phone-keyed suppression read fails CLOSED for Email, same as App (finding A)', async () => {
@@ -1128,5 +1171,244 @@ describe('explicit billing channel combinations', () => {
     expect(await bellPushAllowed(customerId, 'invoice')).toBe(false);
     prefs.invoice_channels = ['push'];
     expect(await bellPushAllowed(customerId, 'invoice')).toBe(false);
+  });
+});
+
+// The activation-checklist finding from PR #4843 (Codex round-6, cited at
+// send-customer-message.js:419 as of that PR): InvoiceService.sendViaSMS
+// always supplies withProviderHandoff, but that handoff is only allowlisted
+// for SMS/App — an explicit customer Email selection fanned out by
+// dispatchBillingChannels used to hit the SAME allowlist and refuse with
+// UNSUPPORTED_PROVIDER_HANDOFF, silently losing the Email leg. These pin the
+// fix: the Email leg drops withProviderHandoff and instead runs the SAME
+// invoice preconditions through billingEmailPreSendCheck, composed into
+// providerPreparationCheck and invoked exactly as the Email authority does
+// (channel:'email', database: the locked trx) — see invoice.js's
+// checkInvoiceDeliveryPreconditions for the shared check.
+// #4843 gate checklist: a definite SendGrid rejection after the handoff comes
+// back from the billing Email adapter as its blocked replay hold. The
+// messaging wrapper must keep that code, or producers (which replay only
+// REPLAY_HOLD_CODES) would drop an Email-only notice again.
+describe('billing Email replay hold survives the messaging wrapper', () => {
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('an Email-only notice rejected by SendGrid stays a replay hold for its producer', async () => {
+    prefs.billing_channels = ['email'];
+    const nextAllowedAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    sendBillingChannelEmail.mockResolvedValueOnce({
+      sent: false, provider: 'email', providerMessageId: null, deliveryOutcome: 'not_sent', blocked: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'EMAIL_PROVIDER_ERROR', reason: 'SendGrid 429: rejected',
+      retryable: true, providerRejected: true, deferred: true, nextAllowedAt,
+    });
+    const result = await sendCustomerMessage({
+      to: '+19415550142', body: 'Your payment is due soon.', channel: 'sms', audience: 'customer',
+      purpose: 'billing', customerId, entryPoint: 'autopay_pre_charge_reminder',
+      metadata: { original_message_type: 'autopay_pre_charge', billingDeliveryCategory: 'billing',
+        notificationEventKey: 'precharge:qa:2026-01-06' },
+    });
+    expect(result.channelResults.email).toMatchObject({
+      sent: false, blocked: true, code: 'BILLING_EMAIL_PREPARATION_HOLD', deferred: true, retryable: true, nextAllowedAt,
+    });
+    expect(require('../services/messaging/billing-channel-routing').isReplayHold(result)).toBe(true);
+  });
+});
+
+describe('invoice_send_via_sms explicit billing Email leg (send-customer-message.js billingEmailPreSendCheck guard)', () => {
+  // Mirrors the shape InvoiceService.sendViaSMS actually sends to
+  // sendCustomerMessage — entryPoint/purpose/audience gate both the
+  // withProviderHandoff allowlist and the Email leg's guard exemption.
+  const invoiceInput = (overrides = {}) => ({
+    to: '+19415550142', body: 'Your invoice is ready: https://waves.test/pay',
+    channel: 'sms', audience: 'customer', purpose: 'payment_link', customerId,
+    invoiceId: 'test-invoice', entryPoint: 'invoice_send_via_sms',
+    metadata: { original_message_type: 'invoice', billingDeliveryCategory: 'invoice', notificationEventKey: 'invoice:test-invoice:sent' },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    Twilio.sendSMS.mockResolvedValue({ success: true, deliveryOutcome: 'accepted', sid: `SM${'1'.repeat(32)}` });
+    // invoice_send_via_sms is deliberately NOT in send-window.js's operator/
+    // customer-action exemption sets (only an authenticated route's explicit
+    // operatorInitiated marker exempts it) — pin the clock inside the 8am-8pm
+    // ET window so these assertions never depend on the real wall clock.
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('an Email-only explicit selection reaches the Email adapter with a pre-send check that runs the invoice guard', async () => {
+    prefs.invoice_channels = ['email'];
+    const billingEmailPreSendCheck = jest.fn(async () => ({ ok: true }));
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(invoiceInput({ withProviderHandoff, billingEmailPreSendCheck }));
+
+    expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+    expect(sendBillingChannelEmail).toHaveBeenCalledTimes(1);
+    // withProviderHandoff must never wrap the Email leg — that would take
+    // THIS handoff's own lock on the invoice row the Email authority already
+    // holds a DIFFERENT lock on (deadlock).
+    expect(withProviderHandoff).not.toHaveBeenCalled();
+
+    // The Email adapter's hooks carry providerPreparationCheck as
+    // preSendCheck. Invoking it exactly as billing-channel-email-authority.js
+    // does (channel:'email', database: the locked trx) must reach the
+    // caller's billingEmailPreSendCheck with that same locked handle.
+    // providerPreparationCheck's suppression/consent recheck (it runs for
+    // every billingDeliveryLeg, not just Email) reads through the SAME `db`
+    // double the rest of this file uses — a bare jest.fn() has no query
+    // builder and fails those reads closed before ever reaching our hook.
+    const [, hooks] = sendBillingChannelEmail.mock.calls[0];
+    await expect(hooks.preSendCheck({ database: db })).resolves.toMatchObject({ ok: true });
+    expect(billingEmailPreSendCheck).toHaveBeenCalledWith({ channel: 'email', database: db });
+  });
+
+  test('an accepted Email replay keeps its deduped identity and original time through routing', async () => {
+    prefs.invoice_channels = ['email'];
+    const acceptedAt = new Date('2026-01-02T14:00:00Z');
+    sendBillingChannelEmail.mockResolvedValueOnce({ sent: true, provider: 'email',
+      deliveryOutcome: 'accepted', providerMessageId: 'email:prior', deduped: true, sentAt: acceptedAt });
+
+    const result = await sendCustomerMessage(invoiceInput({
+      withProviderHandoff: jest.fn(async (dispatch) => dispatch()),
+      billingEmailPreSendCheck: jest.fn(async () => ({ ok: true })),
+    }));
+
+    expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted', deduped: true });
+    expect(result.channelResults.email).toMatchObject({
+      sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: acceptedAt,
+    });
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('an Email+Text explicit selection runs both legs; the Text leg still goes through withProviderHandoff', async () => {
+    prefs.invoice_channels = ['email', 'sms'];
+    const billingEmailPreSendCheck = jest.fn(async () => ({ ok: true }));
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(invoiceInput({ withProviderHandoff, billingEmailPreSendCheck }));
+
+    expect(result.channelResults).toMatchObject({ email: { sent: true }, sms: { sent: true } });
+    expect(sendBillingChannelEmail).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    // Only the Text leg takes the locked invoice handoff.
+    expect(withProviderHandoff).toHaveBeenCalledTimes(1);
+    const [, emailHooks] = sendBillingChannelEmail.mock.calls[0];
+    await emailHooks.preSendCheck({ database: db });
+    expect(billingEmailPreSendCheck).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['send_claim_lost', 'Invoice send claim changed; delivery not attempted'],
+    ['INVOICE_VISIT_TERMINAL', 'Linked visit is cancelled; delivery not attempted'],
+    ['INVOICE_BALANCE_CHANGED', 'Invoice balance changed while preparing delivery; retry send'],
+  ])('billingEmailPreSendCheck blocking on %s stops the Email adapter with that same code', async (code, reason) => {
+    prefs.invoice_channels = ['email'];
+    const billingEmailPreSendCheck = jest.fn(async () => ({ ok: false, code, reason }));
+    // Stand-in for billing-channel-email-authority.js's preSendBlock: it
+    // invokes hooks.preSendCheck under its own lock and maps a non-ok verdict
+    // onto a blocked email outcome carrying the SAME code.
+    sendBillingChannelEmail.mockImplementation(async (_input, hooks) => {
+      const verdict = await hooks.preSendCheck({ database: db });
+      if (verdict.ok !== true) {
+        return { sent: false, provider: 'email', providerMessageId: null, deliveryOutcome: 'not_sent',
+          blocked: true, code: verdict.code, reason: verdict.reason };
+      }
+      return { sent: true, provider: 'email', providerMessageId: 'email:qa', deliveryOutcome: 'accepted' };
+    });
+    const result = await sendCustomerMessage(invoiceInput({
+      withProviderHandoff: jest.fn(async (dispatch) => dispatch()), billingEmailPreSendCheck,
+    }));
+    expect(result.channelResults.email).toMatchObject({ sent: false, blocked: true, code });
+  });
+
+  test('a caller supplying withProviderHandoff on an Email leg from any OTHER entry point is still UNSUPPORTED_PROVIDER_HANDOFF', async () => {
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    // Shaped exactly like one leg dispatchBillingChannels would recurse into
+    // (channel + metadata.billingDeliveryLeg already resolved to 'email'),
+    // but from a DIFFERENT entryPoint — the allowlist must still refuse it.
+    const result = await sendCustomerMessage({
+      to: '+19415550142', body: 'hi', channel: 'email', audience: 'customer', purpose: 'payment_link',
+      customerId, invoiceId: 'test-invoice', entryPoint: 'some_other_entry_point',
+      metadata: { billingDeliveryLeg: 'email', billingDeliveryCategory: 'invoice', notificationEventKey: 'qa:other-caller' },
+      withProviderHandoff,
+    });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_PROVIDER_HANDOFF' });
+    expect(withProviderHandoff).not.toHaveBeenCalled();
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
+  test('an Email leg with withProviderHandoff but no billingEmailPreSendCheck is refused, never silently dropped to no invoice check at all', async () => {
+    prefs.invoice_channels = ['email'];
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(invoiceInput({ withProviderHandoff }));
+    expect(result.channelResults.email).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_PROVIDER_HANDOFF' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+});
+
+// Split PR 3 of #4963: a queued invoice notice (invoice_send_deferred) replays
+// under the scheduler's scheduled_sms_cron entry point, and its unlocked
+// recheck runs before recipient resolution and provider preparation. The
+// replay carries the same invoice pair the immediate send does, so every leg
+// re-checks the invoice under its lock at the provider boundary.
+describe('queued invoice notice replay (invoice_send_deferred) takes the invoice handoffs', () => {
+  const replayInput = (overrides = {}) => ({
+    to: '+19415550142', body: 'Your invoice is ready: https://waves.test/pay',
+    channel: 'sms', audience: 'customer', purpose: 'payment_link', customerId,
+    invoiceId: 'test-invoice', entryPoint: 'scheduled_sms_cron',
+    metadata: { original_message_type: 'invoice', original_entry_point: 'invoice_send_deferred',
+      billingDeliveryCategory: 'invoice', notificationEventKey: 'invoice:test-invoice:sent' },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    Twilio.sendSMS.mockResolvedValue({ success: true, deliveryOutcome: 'accepted', sid: `SM${'1'.repeat(32)}` });
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('Email+Text: the Text leg runs inside the invoice handoff and the Email leg runs the invoice check under its own lock', async () => {
+    prefs.invoice_channels = ['email', 'sms'];
+    const billingEmailPreSendCheck = jest.fn(async () => ({ ok: true }));
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(replayInput({ withProviderHandoff, billingEmailPreSendCheck }));
+
+    expect(result.channelResults).toMatchObject({ email: { sent: true }, sms: { sent: true } });
+    expect(withProviderHandoff).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    const [, emailHooks] = sendBillingChannelEmail.mock.calls[0];
+    await emailHooks.preSendCheck({ database: db });
+    expect(billingEmailPreSendCheck).toHaveBeenCalledWith({ channel: 'email', database: db });
+  });
+
+  test('a refusal at the invoice handoff stops the Text leg before Twilio', async () => {
+    prefs.invoice_channels = ['sms'];
+    const withProviderHandoff = jest.fn(async () => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent',
+      code: 'INVOICE_REPLAY_INELIGIBLE', reason: 'invoice-terminal:void' }));
+    const result = await sendCustomerMessage(replayInput({ withProviderHandoff, billingEmailPreSendCheck: jest.fn() }));
+    expect(withProviderHandoff).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sent: false, code: 'INVOICE_REPLAY_INELIGIBLE' });
+  });
+
+  test('its Email leg without the invoice check is refused, never sent unchecked', async () => {
+    prefs.invoice_channels = ['email'];
+    const result = await sendCustomerMessage(replayInput({ withProviderHandoff: jest.fn(async (dispatch) => dispatch()) }));
+    expect(result.channelResults.email).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_PROVIDER_HANDOFF' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['another queued producer', { original_entry_point: 'dispatch_completion_deferred' }],
+    ['a row with no original entry point', {}],
+  ])('%s cannot take the invoice handoff', async (_label, metadata) => {
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(replayInput({ withProviderHandoff,
+      metadata: { original_message_type: 'invoice', billingDeliveryCategory: 'invoice',
+        notificationEventKey: 'invoice:test-invoice:sent', ...metadata } }));
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_PROVIDER_HANDOFF' });
+    expect(withProviderHandoff).not.toHaveBeenCalled();
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
   });
 });

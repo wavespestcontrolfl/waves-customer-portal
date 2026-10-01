@@ -775,6 +775,72 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
+  // scheduling.caller_accepted_slot / moved_appointment_date (schema
+  // 1.16.0): they decide whether the reschedule applier moves a visit and
+  // which one, so a model that drifts on either must show in the replay.
+  describe('reschedule agreement variance coverage', () => {
+    test('caller_accepted_slot and moved_appointment_date are registered as high-severity fields', () => {
+      expect(FIELD_GROUPS.high).toEqual(expect.arrayContaining(['caller_accepted_slot', 'moved_appointment_date']));
+    });
+
+    test('caller_accepted_slot treats a missing value as not accepted, like agent_committed_booking', () => {
+      expect(normalizeField('caller_accepted_slot', null)).toBe(false);
+      expect(normalizeField('caller_accepted_slot', true)).toBe(true);
+      const variances = compareFlatFields({ caller_accepted_slot: null }, { caller_accepted_slot: false }, true);
+      expect(variances.find((v) => v.field === 'caller_accepted_slot')).toBeUndefined();
+    });
+
+    test('compareFlatFields reports a high-severity variance when the moved appointment changes', () => {
+      const variances = compareFlatFields({ moved_appointment_date: '2026-09-24' }, { moved_appointment_date: '2026-12-24' }, true);
+      expect(variances.find((v) => v.field === 'moved_appointment_date')).toMatchObject({ severity: 'high' });
+    });
+  });
+
+  // scheduling.agreed_slot_words / scheduling.moved_appointment_words
+  // (schema 1.17.0): the reschedule applier checks these verbatim words
+  // against their evidence quotes instead of parsing speech, so a model
+  // that drifts on either must show in the replay just like the fields
+  // they ride alongside.
+  describe('agreed-slot and moved-appointment verbatim-words variance coverage', () => {
+    test('agreed_slot_words and moved_appointment_words are registered as high-severity fields', () => {
+      expect(FIELD_GROUPS.high).toEqual(expect.arrayContaining(['agreed_slot_words', 'moved_appointment_words']));
+    });
+
+    test('agreed_slot_words normalizes to a day|hour|period signature, case- and whitespace-insensitive', () => {
+      expect(normalizeField('agreed_slot_words', null)).toBeNull();
+      expect(normalizeField('agreed_slot_words', { day: 'Thursday', hour: 'Two', period: null })).toBe('thursday|two|');
+      expect(normalizeField('agreed_slot_words', { day: '  Thursday ', hour: 'two', period: null }))
+        .toBe(normalizeField('agreed_slot_words', { day: 'thursday', hour: 'Two', period: null }));
+    });
+
+    test('agreed_slot_words with no hour normalizes to null (never a false positive on a malformed value)', () => {
+      expect(normalizeField('agreed_slot_words', { day: 'Thursday', hour: '', period: null })).toBeNull();
+    });
+
+    test('compareFlatFields reports a high-severity variance when the agreed slot words change', () => {
+      const variances = compareFlatFields(
+        { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+        { agreed_slot_words: { day: 'Thursday', hour: 'three', period: null } },
+        true
+      );
+      expect(variances.find((v) => v.field === 'agreed_slot_words')).toMatchObject({ severity: 'high' });
+    });
+
+    test('compareFlatFields reports a high-severity variance when the moved-appointment words change', () => {
+      const variances = compareFlatFields(
+        { moved_appointment_words: 'the 24th' },
+        { moved_appointment_words: 'the 25th' },
+        true
+      );
+      expect(variances.find((v) => v.field === 'moved_appointment_words')).toMatchObject({ severity: 'high' });
+    });
+
+    test('moved_appointment_words treats a missing value as null, not a variance against an empty string', () => {
+      const variances = compareFlatFields({ moved_appointment_words: null }, { moved_appointment_words: undefined }, true);
+      expect(variances.find((v) => v.field === 'moved_appointment_words')).toBeUndefined();
+    });
+  });
+
   // caller.caller_id_disclaimed / caller.phone_note (schema 1.14.0, live
   // miss 2026-09-25, call 6fee5f34): without these in FIELD_GROUPS, a model
   // that stops catching (or starts hallucinating) the disclaim would go
@@ -819,5 +885,82 @@ describe('call extraction replay variance reporting', () => {
         .filter((v) => v.field === 'caller_id_disclaimed' || v.field === 'phone_note');
       expect(variances).toEqual([]);
     });
+  });
+
+  // consent.sms_declined (schema 1.19.0, codex P1 on #5292): the dedicated
+  // explicit-SMS-refusal field the booking-link staging check reads
+  // (call-booking-link-text.js) — without it in FIELD_GROUPS, a model that
+  // stops catching (or starts hallucinating) a refusal would go unnoticed
+  // by the weekly replay/model bake-off.
+  // The reschedule language judgements (schema 1.20.0) the applier verifies.
+  describe('reschedule language judgement variance coverage', () => {
+    test('each is a high-severity replay field and stays a genuine tri-state', () => {
+      for (const field of ['definite_commitment', 'relative_date_used', 'moved_appointment_relative_date_used']) {
+        expect(FIELD_GROUPS.high).toContain(field);
+        expect(compareFlatFields({ [field]: true }, { [field]: false }, true).find((v) => v.field === field).severity).toBe('high');
+        expect(normalizeField(field, null)).toBeNull();
+        expect(normalizeField(field, false)).toBe(false);
+      }
+    });
+  });
+
+  describe('consent.sms_declined variance coverage', () => {
+    test('sms_declined is registered in FIELD_GROUPS', () => {
+      const allFields = new Set(Object.values(FIELD_GROUPS).flat());
+      expect(allFields.has('sms_declined')).toBe(true);
+    });
+
+    test('compareFlatFields reports a variance when sms_declined flips', () => {
+      const variances = compareFlatFields({ sms_declined: null }, { sms_declined: true }, true);
+      const variance = variances.find((v) => v.field === 'sms_declined');
+      expect(variance).toBeDefined();
+      expect(variance.severity).toBe('medium');
+    });
+
+    test('normalizeField keeps sms_declined a genuine tri-state (null distinct from false)', () => {
+      expect(normalizeField('sms_declined', null)).toBeNull();
+      expect(normalizeField('sms_declined', false)).toBe(false);
+      expect(normalizeField('sms_declined', true)).toBe(true);
+      expect(normalizeField('sms_declined', null)).not.toBe(normalizeField('sms_declined', false));
+    });
+
+    test('compareFlatFields reports no variance when nothing changed', () => {
+      const flat = { sms_declined: false };
+      const variances = compareFlatFields(flat, { ...flat }, true).filter((v) => v.field === 'sms_declined');
+      expect(variances).toEqual([]);
+    });
+  });
+});
+
+describe('replay extraction grounds relative dates on the real call start (codex #5377)', () => {
+  test('extractCallDataV2 receives callStartedAt(call), not the fallback row insert time', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    const at = src.indexOf('CRP._test.extractCallDataV2(transcriptForExtraction');
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 600)).toMatch(/callStartedAt: require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(call\)/);
+  });
+});
+
+describe('shadow verification grounds relative dates on the real call start (codex #5377 r16)', () => {
+  test('verify-v2-shadow-path passes callStartedAt(r) to extractCallDataV2, not the row insert time', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/verify-v2-shadow-path'), 'utf8');
+    const at = src.indexOf('CRP._test.extractCallDataV2(');
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 700)).toMatch(/callStartedAt: require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(r\) \|\| new Date\(\)/);
+    expect(src.slice(at, at + 700)).not.toContain('new Date(r.created_at)');
+  });
+});
+
+describe('a retranscribed replay never borrows the stored V1 service view (codex #5377 r19 P2)', () => {
+  test('contextFor passes extracted: null for a transcript that differs from the stored one', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    expect(src).toContain("...(transcript !== undefined && transcript !== call.transcription ? { extracted: null } : {}),");
+  });
+
+  test('the audit quote check holds a V2 call when it has no V1 record', () => {
+    const { auditCommercialQuoteBookableFor } = require('../services/call-recording-processor')._test;
+    const row = { id: 'svc-roach', service_key: 'cockroach_control', name: 'Cockroach Control Service', short_name: 'Cockroach Control', billing_type: 'one_time', pricing_type: 'fixed', base_price: '350.00' };
+    const v2 = { meta: { schema_version: '1.21.0' }, service_request: { specific_service_name: row.name } };
+    expect(auditCommercialQuoteBookableFor({ extracted: null, transcription: 'x', services: [row] })(150, v2)).toBe(false);
   });
 });

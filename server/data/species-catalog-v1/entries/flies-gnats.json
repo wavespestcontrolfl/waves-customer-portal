@@ -15,7 +15,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "c81e1107efbed2fc711000ecb8feead2953bafbadf956b9f5f9d7200acf3d887"
     },
     "slug": "lovebug",
     "common_name": "Lovebug",
@@ -41,7 +42,7 @@
       {
         "slug": "non-biting-midge",
         "difference": "Lovebugs have a red thorax and often fly stuck together in pairs; non-biting midges are smaller, mosquito-shaped, and don't pair up.",
-        "next_photo": "A close-up of the body color and shape, and whether two individuals are joined together.",
+        "next_photo": "From a safe distance, zoom in on the body color and shape, and whether two individuals are joined together.",
         "photo_can_confirm": true
       }
     ],
@@ -119,7 +120,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "08fcabcc6f9c4ff51bc0c451e5c29913dbf8ae4caee7b21240c9cdd00c07ae95"
     },
     "slug": "drain-fly",
     "common_name": "Drain Fly",
@@ -224,7 +226,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "be8f43e750e17c9fcce47388c4d4a0098d37d13d5144a48a8e67f805981061cf"
     },
     "slug": "fungus-gnat",
     "common_name": "Fungus Gnat",
@@ -308,6 +311,1032 @@
     "links": {
       "site_page": "/pest-identifier/fungus-gnat/",
       "guides": []
+    }
+  },
+  {
+    "slug": "house-fly",
+    "kind": "organism",
+    "common_name": "House Fly",
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "house fly",
+      "house flies",
+      "musca domestica"
+    ],
+    "scientific_name": "Musca domestica",
+    "rank": "species",
+    "group": "flies-gnats",
+    "subgroup": "filth-flies",
+    "site_category": "Flies & gnats",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Dull gray fly with four faint dark stripes on the thorax",
+      "Large, reddish compound eyes that nearly touch on top of a male's head",
+      "Soft, sponge-like mouthparts used to sop up liquids, never to bite",
+      "Drawn to garbage, pet waste, and food left out, especially near kitchens and trash areas"
+    ],
+    "look_alikes": [
+      {
+        "slug": "stable-fly",
+        "difference": "House fly has soft sponging mouthparts and never bites; the near-identical stable fly has a forward-pointing needle mouthpart and bites ankles",
+        "next_photo": "From a safe distance, zoom in straight on at the front of the head showing the shape of the mouthpart.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "kitchen",
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "small-fly"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can carry bacteria on its body from garbage or waste to food and counters; keep food covered and wipe down surfaces it has landed on.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A very common nuisance fly that picks up bacteria from garbage and waste and can spread it to food and counters just by landing. Tightening up trash cans, pet waste cleanup and door seals is the main thing that helps with most house fly problems.",
+      "fact": "It can pick up and carry bacteria from dozens of different diseases just by walking across contaminated surfaces before landing on food."
+    },
+    "tech_notes": "Sanitation is primary control: trash storage/pickup, pet waste, exposed food/organic waste, door/window seals. Adulticide/fly bait per label for heavy pressure.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/138696"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "1f649ead3f54fbcb7c2acc12d59296ee0d83954cf04fb88f01223bc0bcca92cc"
+    }
+  },
+  {
+    "slug": "blow-fly",
+    "kind": "organism",
+    "common_name": "Blow Fly (green bottle fly)",
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "bottle fly"
+    ],
+    "aliases": [
+      "blow fly",
+      "blow flies",
+      "green bottle fly",
+      "bottle fly"
+    ],
+    "scientific_name": "Calliphoridae",
+    "rank": "family",
+    "group": "flies-gnats",
+    "subgroup": "filth-flies",
+    "site_category": "Flies & gnats",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Shiny metallic green, blue or copper body, noticeably more colorful than a house fly",
+      "Larger and heavier-bodied than a house fly, with a loud buzz",
+      "Drawn strongly to dead animals, garbage and pet waste rather than fresh food",
+      "Often the first fly to show up after something has died nearby"
+    ],
+    "look_alikes": [
+      {
+        "slug": "house-fly",
+        "difference": "Blow fly has a shiny metallic green, blue or copper body; house fly is dull gray with faint dark stripes and no metallic shine",
+        "next_photo": "From a safe distance, zoom in under bright light showing whether the body has a metallic shine.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "garage-storage",
+      "lawn-garden",
+      "attic-walls"
+    ],
+    "looks": [
+      "small-fly"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can carry bacteria from carrion or waste to food and counters; keep food covered and wipe down surfaces it has landed on.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A shiny, metallic fly that shows up fast around garbage, pet waste or anything dead, often within minutes. A sudden cluster of them indoors, especially in an attic or wall, is worth checking for a dead animal in that area.",
+      "fact": "It can smell decaying matter from a very long distance and is often one of the first insects to find a carcass, which is why it is so useful to forensic investigators."
+    },
+    "tech_notes": "Indoor clusters, especially near attic/wall voids, can indicate a dead rodent or animal in that space; inspect before treating. Otherwise sanitation (garbage, pet waste) is primary control.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/in903"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "8e5b78ee638eec326f2fda7463c237aaa999e393fbcf0ed5e3c1e98ca58960de"
+    }
+  },
+  {
+    "slug": "fruit-fly",
+    "kind": "organism",
+    "common_name": "Fruit Fly",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "fruit fly",
+      "fruit flies",
+      "drosophila"
+    ],
+    "scientific_name": "Drosophila spp.",
+    "rank": "genus",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Flies & gnats",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny tan to light brown fly with bright red eyes",
+      "Slow, hovering flight around fruit bowls, trash cans and recycling bins",
+      "Shows up fast around overripe or rotting produce, empty cans and sugary spills",
+      "Can also breed in drains and disposals if organic buildup is present"
+    ],
+    "look_alikes": [
+      {
+        "slug": "phorid-fly",
+        "difference": "Fruit fly has bright red eyes and flies in slow hovering loops; phorid fly has a humped back and tends to run rapidly across surfaces instead of flying off",
+        "next_photo": "A close-up showing eye color, or a few seconds watching whether it runs or flies when disturbed",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen"
+    ],
+    "looks": [
+      "small-fly"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tiny fly that breeds fast in overripe fruit, empty bottles and cans, and drains, going from egg to adult in about a week. Cleaning out the breeding source, not just swatting the flies you see, is what ends an infestation.",
+      "fact": "It can complete its entire life cycle from egg to adult in about a week in warm weather, which is why numbers can explode from just one forgotten piece of fruit."
+    },
+    "tech_notes": "Locate breeding source (overripe produce, recycling, drains/disposal buildup) rather than treating adults alone; sanitation resolves most cases without product application.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/polkco/2022/07/01/florida-farm-pests-fruit-flies-drosophila-ssp/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f4fc414cfdd1969d560deca6ecb42e86b186cbb07f0191d2a7dc5e9e05404fb2"
+    }
+  },
+  {
+    "slug": "phorid-fly",
+    "kind": "organism",
+    "common_name": "Phorid Fly",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "scuttle fly",
+      "humpbacked fly"
+    ],
+    "aliases": [
+      "phorid fly",
+      "phorid flies",
+      "scuttle fly",
+      "humpbacked fly"
+    ],
+    "scientific_name": "Megaselia scalaris",
+    "rank": "species",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Flies & gnats",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny fly with a noticeably humped, arched back over the thorax",
+      "Runs rapidly across counters and surfaces instead of taking flight right away",
+      "Breeds in a wide range of decaying organic matter: drains, garbage, rotting produce, even dead animals",
+      "Similar size to a fruit fly but darker and less red-eyed"
+    ],
+    "look_alikes": [
+      {
+        "slug": "fruit-fly",
+        "difference": "Phorid fly has a humped back and tends to run across surfaces when disturbed; fruit fly has bright red eyes and flies off in slow loops instead of running",
+        "next_photo": "A close-up showing the shape of the back, or a few seconds watching whether it runs or flies when disturbed",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "bathroom",
+      "garage-storage"
+    ],
+    "looks": [
+      "small-fly"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A small fly that breeds in almost any decaying organic matter, from clogged drains to rotting food to, rarely, a dead animal in a wall. Persistent indoor numbers are worth tracking to their breeding source rather than just swatting the flies you see.",
+      "fact": "Its habit of running fast across a surface instead of flying off right away is one of the easiest ways to tell it apart from a fruit fly at a glance."
+    },
+    "tech_notes": "Very broad breeding range (drains, garbage, decaying matter, occasionally carrion); persistent indoor presence with no obvious kitchen source warrants checking for a dead animal in a void. Sanitation/source removal is primary control.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Phoridae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Could not load a UF/IFAS EENY page dedicated to this exact species (Megaselia scalaris); IFAS source found (IN1144) covers a related agricultural Megaselia use case rather than the household nuisance angle.",
+      "approval_hash": "d55dee180f6cde6488a19160570243aeb3cae09192242177ba3b532c1b1912e1"
+    }
+  },
+  {
+    "slug": "black-soldier-fly",
+    "kind": "organism",
+    "common_name": "Black Soldier Fly",
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "black soldier fly",
+      "black soldier flies",
+      "hermetia illucens"
+    ],
+    "scientific_name": "Hermetia illucens",
+    "rank": "species",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Flies & gnats",
+    "stages": [
+      "adult",
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Sleek, dark, wasp-like fly, but with only two wings and no stinger",
+      "Two small, translucent 'window' patches near the base of the abdomen, giving it a pinched-waist look",
+      "Pale, whitish tips on the back legs",
+      "Larvae are found in compost, manure or rotting organic matter, not in clean food"
+    ],
+    "look_alikes": [
+      {
+        "slug": "great-golden-digger-wasp",
+        "difference": "Black soldier fly has two wings and small clear window patches near the abdomen base; the wasp has four wings, a visible stinger and no window patches",
+        "next_photo": "From a safe distance, zoom in counting the wings and checking for translucent patches near the base of the abdomen.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "small-fly",
+      "wasp-bee"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A wasp-mimicking fly that isn't known to sting or bite people and whose larvae actually help break down compost and food waste. Its loud buzz and wasp-like look often worry people more than the insect itself warrants — it's best left alone.",
+      "fact": "Its larvae are so good at breaking down food scraps that they are now farmed commercially as a way to recycle food waste."
+    },
+    "tech_notes": "Beneficial decomposer; no treatment needed. Larvae in compost/organic waste are beneficial, not a pest issue.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/waltonco/2026/06/26/got-compost-meet-the-black-soldier-fly/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Verdict changed from harmless to ally: it's a beneficial decomposer, not just an inert visitor, so role beneficial / verdict ally fits better. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "167164db361fc5cf1d566ebb631853c087864a4b7c8891a2809046a58856cf48"
+    }
+  },
+  {
+    "slug": "crane-fly",
+    "kind": "organism",
+    "common_name": "Crane Fly",
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "swarming",
+    "verification": [],
+    "aka": [
+      "mosquito hawk",
+      "mosquito eater"
+    ],
+    "aliases": [
+      "crane fly",
+      "crane flies",
+      "mosquito hawk",
+      "mosquito eater"
+    ],
+    "scientific_name": "Tipulidae",
+    "rank": "family",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Flies & gnats",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Looks like an oversized mosquito, but with a stouter body and no biting mouthparts",
+      "Very long, thin, stilt-like legs that detach easily if grabbed",
+      "Weak, fluttery flight and often just rests on walls or screens",
+      "No biting mouthparts, and doesn't hunt other insects despite the 'mosquito hawk' nickname"
+    ],
+    "look_alikes": [
+      {
+        "slug": "gallinipper",
+        "difference": "Crane fly has extremely long, thin, stilt-like legs and a slender body with no biting mouthparts; gallinipper has short, sturdy, hairy legs and bites hard",
+        "next_photo": "From a safe distance, zoom in on the legs showing whether they are extremely long and thin, or short and stout.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lights-windows",
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "small-fly",
+      "flying-biter"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Despite the 'mosquito hawk' nickname, this giant-looking mosquito lookalike has no biting mouthparts and doesn't hunt real mosquitoes. It's harmless to have around, and fine to just let it fly back outside.",
+      "fact": "Its long legs are built to snap off easily as a defense, which lets it escape a predator's grip by leaving a leg behind."
+    },
+    "tech_notes": "No biting mouthparts; not a health or nuisance-biting concern despite its size and mosquito-like look. No treatment needed for adults.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://entomologytoday.org/2015/08/17/mosquito-hawk-skeeter-eater-giant-mosquito-no-no-and-no/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Larvae (leatherjackets) can occasionally feed on grass roots elsewhere in the US, but this is not established as a significant SWFL turf issue; kept scope to the adult, which is the form usually photographed indoors/on screens. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "47d9a2f1e5c84af24dada3e2562c463d20c4897ca6578d33f873ecbada41ef76"
+    }
+  },
+  {
+    "slug": "non-biting-midge",
+    "kind": "organism",
+    "common_name": "Non-biting Midge (blind mosquito)",
+    "role": "nuisance",
+    "risk": "medical",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "blind mosquito"
+    ],
+    "aliases": [
+      "non biting midge",
+      "blind mosquito",
+      "blind mosquitoes",
+      "chironomid",
+      "chironomids"
+    ],
+    "scientific_name": "Chironomidae",
+    "rank": "family",
+    "group": "flies-gnats",
+    "subgroup": "non-biting-outdoor-flies",
+    "site_category": "Flies & gnats",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Looks like a slim mosquito but has no biting mouthparts at all",
+      "Often shows up in huge swarms near porch lights, especially close to lakes, ponds or retention ponds",
+      "Rests with front legs held up and out, unlike a mosquito's low resting posture",
+      "Large die-offs can leave piles of dead insects on porches, cars and windowsills"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southern-house-mosquito",
+        "difference": "Non-biting midge holds its front legs up and out and has no biting mouthparts; southern house mosquito rests low, flat to the surface, and bites readily",
+        "next_photo": "From a safe distance, zoom in from the side showing how the front legs are held while resting.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lights-windows",
+      "lanai-patio",
+      "pool-water"
+    ],
+    "looks": [
+      "flying-biter",
+      "small-fly"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Doesn't bite or spread disease, but large swarms and dead-insect buildup can bother people with asthma or insect allergies.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A non-biting insect that breeds by the millions in nearby lake or pond mud and swarms toward lights, especially near the water. Numbers depend on the whole waterbody, not just one yard, so cutting back unnecessary outdoor lighting near the water helps more than yard treatment.",
+      "fact": "Despite looking just like a mosquito, it has no functional biting mouthparts at all and cannot feed on blood."
+    },
+    "tech_notes": "Source is regional (lake/pond sediment), not the individual property; residential treatment has limited effect. Reducing exterior lighting facing the water is the most practical homeowner-level step.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/polkco/2017/10/11/aquatic-midges-also-known-as-blind-mosquitoes/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "2273ed3e776b49bcf93aaacc25cedb36316a800c602c5d89f96ab06856c7f4f9"
+    }
+  },
+  {
+    "slug": "hover-fly",
+    "kind": "organism",
+    "common_name": "Hover Fly (flower fly)",
+    "aka": [
+      "Flower Fly",
+      "Syrphid Fly"
+    ],
+    "aliases": [
+      "hover fly",
+      "hover flies",
+      "flower fly",
+      "syrphid fly",
+      "syrphidae"
+    ],
+    "scientific_name": "Syrphidae",
+    "rank": "family",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Flies & gnats",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "traits": [
+      "Yellow-and-black or brown-and-yellow striped body that mimics a bee or wasp",
+      "Only one pair of wings, unlike a real bee or wasp's two pairs",
+      "Hovers nearly motionless in midair near flowers before darting to a new spot",
+      "Larvae of many species are small, slug-like maggots that actively hunt aphids on plants"
+    ],
+    "look_alikes": [
+      {
+        "slug": "yellowjacket",
+        "difference": "Hover fly has one pair of wings, hovers still in place, and has no stinger; yellowjacket has two pairs of wings, flies more erratically, and can sting",
+        "next_photo": "From a safe distance, zoom in checking wing count and whether it hovers motionless versus flying erratically.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "wasp-bee",
+      "small-fly"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Looks like a bee or wasp but has no stinger to sting with, and doesn't bite people either.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless bee mimic that pollinates flowers as an adult, and many species have aphid-eating larvae as a bonus. There's no stinger and nothing to treat here.",
+      "fact": "Its bee-like colors are just a bluff for protection; it has no way to sting even if it wanted to."
+    },
+    "tech_notes": "No treatment indicated; reassure customers this is a bee/wasp mimic with a single pair of wings and no stinger.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Syrphidae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "a2632e248d3236c8c65256c3b1893e89afd2ab18e55779d9815b9ca8ebbdf929"
+    }
+  },
+  {
+    "slug": "robber-fly",
+    "kind": "organism",
+    "common_name": "Robber Fly",
+    "aka": [],
+    "aliases": [
+      "robber fly",
+      "robber flies",
+      "asilidae"
+    ],
+    "scientific_name": "Asilidae",
+    "rank": "family",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Flies & gnats",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "traits": [
+      "Elongated, often bristly fly with a dense tuft of stiff bristles ('mustache') on its face",
+      "Large eyes that bulge out on either side of a notched top of the head",
+      "Ambushes and grabs other flying insects in midair, including wasps, bees and even dragonflies",
+      "Rests on fence posts, plant tips or bare ground, darting out after passing prey"
+    ],
+    "look_alikes": [
+      {
+        "slug": "wheel-bug",
+        "difference": "Robber fly is a true fly with one pair of wings and a bristly face; wheel bug is a true bug with a distinctive gear-shaped crest on its back",
+        "next_photo": "From a safe distance, zoom in on the back checking for a wheel/gear-shaped crest versus a bristly face and single wing pair.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lights-windows"
+    ],
+    "looks": [
+      "small-fly"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its bite is sharp and can really hurt for a bit if it's handled, but it isn't dangerous and only happens if it's grabbed.",
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A skilled aerial predator that helps thin out other flying insects, including some real pests. It won't come after a person, and only bites defensively if it's caught and held.",
+      "fact": "It's bold enough to tackle insects much better armed than itself, including wasps, bees and dragonflies, snatching them right out of the air."
+    },
+    "tech_notes": "No treatment indicated; beneficial predator. Advise not to handle it bare-handed to avoid a defensive bite.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Asilidae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 40: role changed from nuisance to beneficial and verdict from watch to ally, since the copy/tech_notes already describe it as a beneficial predator (validator requires verdict ally when role is beneficial). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "afa3225c7c2b37d678a5ce998ddbdb3af972bb9eac69aec034fdbc5ee025d875"
     }
   }
 ]

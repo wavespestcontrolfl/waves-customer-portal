@@ -1854,17 +1854,24 @@ describe('startPrecedesCall\'s call site is exempted by an existing call appoint
 // call into prompts/call-extraction-v1.js) carries its own ARRIVAL WINDOW
 // EXCEPTION text and had the same "Tuesday, 2 to 4" ambiguous-period gap the
 // sibling v1 prompt was just fixed for. Fixed here with the identical rule.
-describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION requires an unambiguous period, same as the sibling v1 prompt (codex #4919 round-8 P1)', () => {
+describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION states or business-hours-reads the period, same as the sibling v1 prompt (codex #4919 round-8 P1; owner decision 2026-09-29)', () => {
   const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
   test('the rule requires UNAMBIGUOUS period and gives "Tuesday, 2 to 4 PM" as the qualifying example, not the bare "Tuesday, 2 to 4"', () => {
     const ruleAt = processorSrc.indexOf('ARRIVAL WINDOW EXCEPTION:');
     expect(ruleAt).toBeGreaterThan(-1);
-    const section = processorSrc.slice(ruleAt, ruleAt + 1600);
+    const section = processorSrc.slice(ruleAt, ruleAt + 3600);
     expect(section).toContain('UNAMBIGUOUS period for that start');
     expect(section).toContain('"Tuesday, 2 to 4 PM"');
-    expect(section).toContain('"Tuesday, 2 to 4", "between 2 and 4"');
-    expect(section).toContain('does NOT count as confirmed');
+    // Owner decision 2026-09-29 (prompt v18): an hour with no AM/PM is read as
+    // business hours when both sides committed to it, with the same closed
+    // shapes as the V2 prompt (never an approximation, bound or alternative).
+    expect(section).toContain('BUSINESS-HOURS READING');
+    expect(section).toContain('"Tuesday, 2 to 4"; "between 2 and 4"');
+    expect(section).toContain('"can we plan on 2 o\'clock?" answered "Sure."');
+    expect(section).toContain('appointment_confirmed stays false');
+    expect(section).toContain('"two or three"');
+    expect(section).not.toContain('does NOT count as confirmed (you would otherwise have to invent AM or PM)');
     expect(section).not.toMatch(/"Tuesday, 2 to 4"\)\s*DOES count as confirmed/);
     // The already-unambiguous examples still qualify unchanged.
     expect(section).toContain('"between 6 and 9 tonight"');
@@ -2132,6 +2139,314 @@ describe('clarify-draft target phone (owner directive 2026-09-26: both direction
   });
 });
 
+// Codex pre-push r1 P1 on PR #5012: the outbound auto-booking TCPA recompute
+// (GATE_CALL_OUTBOUND_BOOKING) had its own hand-written `impliedConsent:
+// false`, which re-blocked an eligible outbound return call's confirmation
+// SMS regardless of what the enforce-mode verdict decided a few hundred
+// lines earlier. Both call sites now read this ONE predicate — pinning it
+// here catches either site drifting from the other again.
+describe('outboundImpliedConsentEligible (owner ruling 2026-09-26, shared by every checkTcpaConsent call site)', () => {
+  const { outboundImpliedConsentEligible } = CallRecordingProcessor._test;
+
+  test('inbound always qualifies, regardless of the eligibility flag', () => {
+    expect(outboundImpliedConsentEligible({ direction: 'inbound' }, false)).toBe(true);
+    expect(outboundImpliedConsentEligible({ direction: 'inbound' }, true)).toBe(true);
+    expect(outboundImpliedConsentEligible({}, false)).toBe(true);
+  });
+
+  test('outbound qualifies ONLY when the caller reports it eligible (prior contact confirmed)', () => {
+    expect(outboundImpliedConsentEligible({ direction: 'outbound' }, true)).toBe(true);
+    expect(outboundImpliedConsentEligible({ direction: 'outbound' }, false)).toBe(false);
+    expect(outboundImpliedConsentEligible({ direction: 'outbound' }, undefined)).toBe(false);
+  });
+
+  test('an outbound-api/outbound-dial Twilio direction is still "outbound" by prefix', () => {
+    expect(outboundImpliedConsentEligible({ direction: 'outbound-dial' }, false)).toBe(false);
+    expect(outboundImpliedConsentEligible({ direction: 'outbound-dial' }, true)).toBe(true);
+  });
+});
+
+// Codex pre-push r1 P2 on PR #5012: `!droppedMidIntake` is NOT evidence of a
+// real conversation — that detector requires MIN_CALL_SECONDS of engagement
+// BEFORE it can even fire, so an early drop (connected, hung up in the
+// first few seconds) reads as "too short to judge" (never flagged dropped)
+// and would otherwise pass the clarify-draft's `!droppedMidIntake` check as
+// though the call had completed normally. hasRealTwoWayConversation is the
+// independent predicate every outbound return-message site now shares.
+describe('hasRealTwoWayConversation (owner ruling 2026-09-26: never on a call that dropped before a real conversation)', () => {
+  const { hasRealTwoWayConversation, speakerTurns } = CallRecordingProcessor._test;
+
+  test('speakerTurns: labels a turn with both its normalized role and its RAW label, and folds unlabeled continuation lines in', () => {
+    const t = speakerTurns('Agent: Hi there\nCaller: Hi\nthis is Sam\nAgent: Great, Sam');
+    expect(t).toEqual([
+      { speaker: 'other', label: 'Agent', text: 'Agent: Hi there' },
+      { speaker: 'caller', label: 'Caller', text: 'Caller: Hi\nthis is Sam' },
+      { speaker: 'other', label: 'Agent', text: 'Agent: Great, Sam' },
+    ]);
+  });
+
+  test('an early drop — connected and hung up in the first few seconds — is NOT a real conversation', () => {
+    expect(hasRealTwoWayConversation('Agent: Waves Pest Control, this is Sam.\nCaller: Sorry, wrong number.')).toBe(false);
+  });
+
+  test('a substantial back-and-forth (even one that later drops mid-address) IS a real conversation', () => {
+    expect(hasRealTwoWayConversation([
+      'Agent: Hi, this is Waves calling about your quote request.',
+      'Caller: Oh yes, thanks for calling back.',
+      'Agent: Great — what is your service address?',
+      'Caller: Sure, it is one two three —',
+      'Caller: hold on,',
+    ].join('\n'))).toBe(true);
+  });
+
+  test('dead air / one-sided pickup (no reply from the other side) is NOT a real conversation', () => {
+    expect(hasRealTwoWayConversation('Agent: Hello?\nAgent: Anyone there?\nAgent: Ok, hanging up.\nAgent: Goodbye.')).toBe(false);
+  });
+
+  test('a raw unlabeled transcript (no speaker turns at all) fails closed', () => {
+    expect(hasRealTwoWayConversation('just some text with no speaker labels at all here')).toBe(false);
+    expect(hasRealTwoWayConversation('')).toBe(false);
+    expect(hasRealTwoWayConversation(null)).toBe(false);
+  });
+
+  test('label identity is irrelevant — outbound diarization swapping "Caller"/"Agent" still counts the exchange', () => {
+    // Same shape as the accepted case above but with the labels swapped
+    // (simulating outbound diarization mislabeling who is who) — the
+    // predicate counts turn alternation, never who said what.
+    expect(hasRealTwoWayConversation([
+      'Caller: Hi, this is Waves calling about your quote request.',
+      'Agent: Oh yes, thanks for calling back.',
+      'Caller: Great — what is your service address?',
+      'Agent: Sure, it is one two three.',
+    ].join('\n'))).toBe(true);
+  });
+
+  // Codex pre-push r2 P2: when BOTH the OpenAI labeling pass and the Gemini
+  // fallback miss, the kept raw transcript carries raw diarization
+  // ("Speaker 1:"/"Speaker 2:") instead of Caller/Agent — speakerTurns
+  // normalizes BOTH of those to the 'other' ROLE (neither matches
+  // caller/customer), so the OLD role-based check never saw two parties.
+  // The RAW label text itself must decide this instead.
+  test('raw diarization ("Speaker 1:"/"Speaker 2:", both labeling passes missed) with a genuine multi-turn exchange IS a real conversation', () => {
+    expect(hasRealTwoWayConversation([
+      'Speaker 1: Hi, this is Waves calling about your quote request.',
+      'Speaker 2: Oh yes, thanks for calling back.',
+      'Speaker 1: Great — what is your service address?',
+      'Speaker 2: Sure, it is one two three.',
+    ].join('\n'))).toBe(true);
+  });
+
+  test('a single speaker throughout (only one raw label, however many turns) is NOT a real conversation', () => {
+    expect(hasRealTwoWayConversation([
+      'Speaker 1: Hi, this is Waves.',
+      'Speaker 1: Just calling to follow up.',
+      'Speaker 1: Ok, I will try again later.',
+      'Speaker 1: Goodbye.',
+    ].join('\n'))).toBe(false);
+  });
+
+  test('a short exchange (two distinct speakers, but under 4 turns) is NOT a real conversation', () => {
+    expect(hasRealTwoWayConversation('Speaker 1: Hello?\nSpeaker 2: Wrong number.')).toBe(false);
+  });
+});
+
+// Codex pre-push r4 P1 on PR #5012, reversing r1's own guidance: folding
+// hasRealTwoWayConversation into the SHARED outboundReturnMessagesEligible
+// flag blocked a legitimate short confirmed exchange — offer → acceptance →
+// confirmation is 3 turns, so GATE_CALL_OUTBOUND_BOOKING books it but the
+// implied-consent recompute would have suppressed its confirmation SMS. The
+// shared flag is prior contact ONLY; hasRealTwoWayConversation moved to the
+// clarify-draft call site alone (the one site with no other conversation
+// precondition). Source-shape assertions, mirroring this file's existing
+// "callDateET reads call.created_at directly" pattern — the actual
+// booking-confirmation path is exercised end-to-end only through the full
+// processRecording pipeline, which this suite does not run live.
+describe('hasRealTwoWayConversation lives ONLY at the clarify-draft site, not in the shared eligibility flag (codex pre-push r4 P1)', () => {
+  const { hasRealTwoWayConversation } = CallRecordingProcessor._test;
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the shared outboundReturnMessagesEligible gate does not call hasRealTwoWayConversation', () => {
+    const gateLine = src.split('\n').find((l) => l.includes("isEnabled('callOutboundReturnMessages')") && l.includes('isOutboundCall(call)'));
+    expect(gateLine).toBeDefined();
+    expect(gateLine).not.toContain('hasRealTwoWayConversation');
+  });
+
+  test('the clarify-draft site alone ANDs hasRealTwoWayConversation onto outboundReturnMessagesEligible', () => {
+    expect(src).toContain('outboundReturnMessagesEligible && hasRealTwoWayConversation(transcription)');
+  });
+
+  test('a 3-turn confirmed exchange (offer, acceptance, confirmation) still clears hasRealTwoWayConversation\'s own >= 4 floor only when it needs to — but the SHARED flag never calls it at all, so eligibility itself never depends on turn count', () => {
+    // Direct proof of the fix's actual behavior change: with prior contact
+    // established, outboundReturnMessagesEligible no longer cares how many
+    // turns the transcript has — a short 3-turn confirmed booking (this
+    // string) would have failed the OLD >= 4 combined check, but the new
+    // gate condition never evaluates hasRealTwoWayConversation at all.
+    const threeTurnConfirmedExchange = [
+      'Agent: We can do Tuesday at 9 AM, does that work?',
+      'Caller: Yes, that works.',
+      'Agent: Great, you are confirmed for Tuesday at 9 AM.',
+    ].join('\n');
+    expect(hasRealTwoWayConversation(threeTurnConfirmedExchange)).toBe(false);
+  });
+});
+
+// Codex pre-push r2 P2 on PR #5012: an outbound row that was never
+// prelinked (call.customer_id null) but whose dialed number matches an
+// existing customer (knownCaller, the phone pre-lookup) reached
+// hasPriorContact with NO customer evidence at all — only the phone-based
+// call/text/lead probes, missing the "existing customer" signal the owner
+// ruling names outright.
+describe('outboundPriorContactCustomerId (owner ruling 2026-09-26: knownCaller.id counts too, never a same-call creation, never a customer created after the call)', () => {
+  const { outboundPriorContactCustomerId } = CallRecordingProcessor._test;
+  const CALL_STARTED = new Date('2026-09-26T15:00:00Z');
+  const BEFORE_CALL = new Date('2026-09-01T00:00:00Z');
+  const AFTER_CALL = new Date('2026-09-27T00:00:00Z');
+
+  test('prelinked call.customer_id is used when its row predates the call', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+      before: CALL_STARTED, callCustomerCreatedAt: BEFORE_CALL,
+    })).toBe('cust-1');
+  });
+
+  test('a not-prelinked call falls back to knownCaller.id (the phone pre-lookup) when its row predates the call', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-2', createdAt: BEFORE_CALL }, callMeta: {},
+      before: CALL_STARTED,
+    })).toBe('cust-2');
+  });
+
+  test('neither source present → null (falls through to the phone-based probes)', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: null, callMeta: {}, before: CALL_STARTED,
+    })).toBeNull();
+  });
+
+  test('a customer THIS call itself created (call.customer_id matches the created_customer_id stamp) never counts, even though its row necessarily predates `before`', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-new' }, knownCaller: null, callMeta: { created_customer_id: 'cust-new' },
+      before: CALL_STARTED, callCustomerCreatedAt: BEFORE_CALL,
+    })).toBeNull();
+  });
+
+  test('a customer THIS call itself created still never counts even when it also surfaces as knownCaller (a reprocess rediscovering its own creation)', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-new', createdAt: BEFORE_CALL }, callMeta: { created_customer_id: 'cust-new' },
+      before: CALL_STARTED,
+    })).toBeNull();
+  });
+
+  test('a DIFFERENT customer than the one this call created still counts on either source, when it predates the call', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-old' }, knownCaller: null, callMeta: { created_customer_id: 'cust-new' },
+      before: CALL_STARTED, callCustomerCreatedAt: BEFORE_CALL,
+    })).toBe('cust-old');
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-old', createdAt: BEFORE_CALL }, callMeta: { created_customer_id: 'cust-new' },
+      before: CALL_STARTED,
+    })).toBe('cust-old');
+  });
+
+  // Codex pre-push r6 P1: a customer match must predate the call it is
+  // being offered as evidence for — a form submitted mid-call, an
+  // unrelated later signup on the same number, or a different reprocess
+  // must fall through to the timestamp-bounded probes instead.
+  test('a customer created BEFORE the call counts (call.customer_id and knownCaller.id both)', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+      before: CALL_STARTED, callCustomerCreatedAt: BEFORE_CALL,
+    })).toBe('cust-1');
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-2', createdAt: BEFORE_CALL }, callMeta: {},
+      before: CALL_STARTED,
+    })).toBe('cust-2');
+  });
+
+  test('a customer created AFTER the call does NOT count — falls through to null so the timestamp-bounded probes decide', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+      before: CALL_STARTED, callCustomerCreatedAt: AFTER_CALL,
+    })).toBeNull();
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-2', createdAt: AFTER_CALL }, callMeta: {},
+      before: CALL_STARTED,
+    })).toBeNull();
+  });
+
+  test('a candidate with no readable created_at (a lookup failure) fails closed, never counted', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+      before: CALL_STARTED, callCustomerCreatedAt: null,
+    })).toBeNull();
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-2', createdAt: null }, callMeta: {},
+      before: CALL_STARTED,
+    })).toBeNull();
+  });
+
+  test('the same-call-created exclusion still applies even when the customer predates `before` due to a stale/incorrect before value', () => {
+    // Belt-and-suspenders: the created_customer_id stamp exclusion is
+    // checked FIRST and independently of the timing check.
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-new' }, knownCaller: null, callMeta: { created_customer_id: 'cust-new' },
+      before: AFTER_CALL, callCustomerCreatedAt: BEFORE_CALL,
+    })).toBeNull();
+  });
+});
+
+// Codex pre-push r6 P1 on PR #5012: the dropped-call "sorry we got cut off"
+// text is an independent send path from the booking-confirmation leg — it
+// never consulted the disclaimed-number hold (callback_number_needed: the
+// caller said the dialed/ANI number isn't theirs and gave no callback of
+// their own), so the text could still go to that exact number. This was a
+// PRE-EXISTING gap on BOTH directions, not outbound-specific — the fix
+// applies unconditionally at the one shared send site. The actual send
+// decision only runs inside the full processRecording pipeline (transcription,
+// extraction, DB), which this suite does not execute live, so this pins the
+// source shape: the check exists, sits between the no-ANI check and the
+// real send branch (never after — a held number must never dispatch), and
+// is not gated behind any direction check of its own (the surrounding
+// smsAni ternary already runs both directions in the SAME block).
+describe('dropped-call text honors the disclaimed-number hold, both directions (codex pre-push r6 P1)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const blockStart = src.indexOf('if (droppedMidIntake && leadId) {');
+  const noAniIdx = src.indexOf("smsOutcome = { sent: false, skipped: 'no_usable_ani' };", blockStart);
+  const holdIdx = src.indexOf('genuineNewProspect && callbackNumberNeededHoldActive', blockStart);
+  const realSendIdx = src.indexOf('sendDroppedCallAddressRequest({', blockStart);
+
+  test('the block, the no-ANI check, the hold check, and the real send all exist, in that order', () => {
+    expect(blockStart).toBeGreaterThan(-1);
+    expect(noAniIdx).toBeGreaterThan(blockStart);
+    expect(holdIdx).toBeGreaterThan(noAniIdx);
+    expect(realSendIdx).toBeGreaterThan(holdIdx);
+  });
+
+  test('the hold check is not wrapped in its own isOutboundCall/direction branch — it applies to whichever direction reached this shared block', () => {
+    const between = src.slice(noAniIdx, holdIdx);
+    expect(between).not.toContain('isOutboundCall');
+  });
+
+  test('a held number is skipped with an explicit callback_number_needed code, never a silent fall-through to the real send', () => {
+    expect(src).toContain("smsOutcome = { sent: false, skipped: 'callback_number_needed' };");
+  });
+});
+
+// Owner 2026-09-30: a caller who said no to texts on THIS call gets no
+// dropped-call text. Read from the live V2 extraction (the row may not be
+// saved yet); the sender itself checks every earlier call with the number.
+describe('dropped-call text honors a "no texts" said on the call itself', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const blockStart = src.indexOf('if (droppedMidIntake && leadId) {');
+  const declinedIdx = src.indexOf('genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true', blockStart);
+  const realSendIdx = src.indexOf('sendDroppedCallAddressRequest({', blockStart);
+
+  test('the decline check sits before the real send and skips with said_no_texts', () => {
+    expect(declinedIdx).toBeGreaterThan(blockStart);
+    expect(realSendIdx).toBeGreaterThan(declinedIdx);
+    expect(src.slice(declinedIdx, realSendIdx)).toContain("smsOutcome = { sent: false, skipped: 'said_no_texts' };");
+  });
+});
+
 // codex #4919 round-9: the callStartedAt(call) anchoring at the extraction,
 // canAutoRoute, and callDateET call sites was removed with the
 // provider-timestamp/call-timeline work it was introduced alongside — this
@@ -2213,5 +2528,47 @@ describe('booking site files the missing_last_name advisory card (codex #4991 r1
     expect(sanitized.errorToken).toBe('23505');
     expect(sanitized.message).toBe('last-name advisory insert failed');
     expect(sanitized.stack).not.toContain(raw.message);
+  });
+});
+
+// Codex r9 P1 (#5012): an archived customer must never stand in as
+// prior-contact consent. The fallback created_at lookup for call.customer_id
+// applies the same live-customer predicate as the phone pre-lookup. The
+// lookup lives inline in processRecording, so this pins its source shape.
+describe('outbound prior-contact: the call.customer_id created_at lookup is live-customers only', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test("the lookup filters deleted_at IS NULL before reading created_at", () => {
+    expect(src).toContain("db('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at')");
+    expect(src).not.toContain("db('customers').where({ id: call.customer_id }).first('created_at')");
+  });
+});
+
+// Owner ruling 2026-09-30 (#5466): a reply to the customer's own inbound call
+// is never held to 8 AM — but only when it IS a reply to something they just
+// did. Fable review: processAllPending retries and admin force-reprocess can
+// book a visit days after the call at 11 PM; those sends keep the hold.
+describe('inbound-reply quiet-hours marker is fresh-inbound only (#5466)', () => {
+  const { isFreshInboundCall } = require('../services/call-recording-processor')._test;
+  const NOW = Date.parse('2026-10-01T02:00:00Z');
+
+  test('fresh inbound call → true; outbound → false; stale / undated → false', () => {
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW - 10 * 60 * 1000) }, NOW)).toBe(true);
+    expect(isFreshInboundCall({ direction: 'outbound-api', created_at: new Date(NOW - 10 * 60 * 1000) }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW - 2 * 24 * 60 * 60 * 1000) }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound' }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW + 60 * 1000) }, NOW)).toBe(false);
+  });
+
+  test('all three call-pipeline send sites use the fresh-inbound helper, never a bare direction check', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const cardAt = src.indexOf("trigger: 'ai_call_pipeline',\n                recipientPhone");
+    expect(cardAt).toBeGreaterThan(-1);
+    expect(src.slice(cardAt, cardAt + 500)).toContain('customerInitiated: isFreshInboundCall(call)');
+    const confirmationSites = src.split("purpose: 'appointment_confirmation',").slice(1)
+      .map((chunk) => chunk.slice(0, 1400));
+    const marked = confirmationSites.filter((c) => c.includes("isFreshInboundCall(call) ? { customerInitiated: true } : {}"));
+    expect(marked).toHaveLength(2);
+    expect(src).not.toContain('!isOutboundCall(call) ? { customerInitiated: true }');
   });
 });

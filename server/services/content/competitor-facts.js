@@ -7,12 +7,12 @@
  *   - CATEGORY mode (always allowed): compares provider CATEGORIES
  *     ("National chain" / "Local SWFL company" / "DIY") on neutral buying
  *     criteria. Names no real business — zero verification/legal surface.
- *   - NAMED-COMPETITOR mode (gated + always human-reviewed): names real
- *     competitors. To stay honest and legally safe, a competitor may be named
- *     ONLY if it appears in COMPETITORS below, and the post is ALWAYS routed to
- *     human review before it can publish (comparison-table-gate.js enforces the
- *     allowlist, the attribution requirement, and the no-disparagement /
- *     no-rigged-ranking rules).
+ *   - NAMED-COMPETITOR mode (gated): names real competitors. To stay honest
+ *     and legally safe, a competitor may be named ONLY if it appears in
+ *     COMPETITORS below (comparison-table-gate.js enforces the allowlist, the
+ *     attribution requirement, and the no-disparagement / no-rigged-ranking
+ *     rules). An autonomous blog publishes unattended only when every name is
+ *     on OWNER_APPROVED_AUTOPUBLISH_IDS; other lanes route to human review.
  *
  * MAINTENANCE (owner): this is a hand-curated, first-party reference — like
  * gbp-reviews.json. Only NEUTRAL, PUBLICLY-VERIFIABLE, NON-COMPARATIVE
@@ -50,7 +50,12 @@ const COMPETITORS = [
   {
     id: 'terminix',
     name: 'Terminix',
-    aliases: ['terminix pest control'],
+    // "Terminix Global Holdings" is the parent company's real legal name
+    // (curated alias, not suffix-stripped — #5146 r9: stripping generic
+    // words like "Global"/"Holdings" off an unrecognized name can misread an
+    // unrelated company as an approved one, so only true legal-entity
+    // suffixes are stripped; a genuine variant belongs here instead).
+    aliases: ['terminix pest control', 'terminix global holdings'],
     attributes: {
       // NOTE: not re-fetched 2026-06-22 (site returned 403); values are
       // well-established public knowledge — re-verify before relying on them.
@@ -142,6 +147,15 @@ const COMPETITORS = [
     id: 'turner-pest',
     name: 'Turner Pest Control',
     aliases: ['turner pest'],
+    // Case-sensitive bare brand (owner ruling 2026-09-27 D2 names it
+    // "Turner", and intercept copy uses the short form): "Turner" /
+    // "TURNER" only — never a lowercase word.
+    aliasesCS: ['Turner'],
+    // Link destinations: "turnerpest" (turnerpest.com, /turnerpest/) is
+    // specific; bare "turner" is a surname / common noun ("/tina-turner/",
+    // "compost-turner"), so it counts only in a pest-context URL (#5146 r8).
+    urlAliases: ['turnerpest'],
+    urlAliasesInContext: ['turner'],
     attributes: {
       reach: { value: 'Florida (statewide)', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
@@ -159,7 +173,16 @@ const COMPETITORS = [
   {
     id: 'hometeam-pest-defense',
     name: 'HomeTeam Pest Defense',
-    aliases: ['hometeam pest', 'home team pest defense'], // not bare 'hometeam'
+    // TAEXX is HomeTeam's tubes-in-the-wall product name, sold under the
+    // brand (owner ruling 2026-09-27, D2: "HomeTeam (also sold as TAEXX)").
+    aliases: ['hometeam pest', 'home team pest defense', 'taexx'], // not bare case-insensitive 'hometeam'
+    // Case-sensitive bare brand: "HomeTeam" / "HOMETEAM" name the company;
+    // lowercase "hometeam" / "home team" stay ordinary prose.
+    aliasesCS: ['HomeTeam'],
+    // Link destinations lowercase their slugs ("/providers/hometeam"): the
+    // bare brand matches case-insensitively in URL tokens ONLY, and only in
+    // a pest-context URL ("hometeam" is also a sports word).
+    urlAliasesInContext: ['hometeam'],
     attributes: {
       reach: { value: 'Multi-state (US, incl. Florida)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://pestdefense.com', asOf: '2026-06-22' },
@@ -210,7 +233,42 @@ const COMPETITORS = [
       guarantee: { value: 'Healthy Lawn Guarantee — "we\'ll gladly visit your property as often as needed between scheduled visits to make any necessary adjustments and to ensure your satisfaction"; site footnote: "Guarantee applies to full program customers only"', source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
     },
   },
+  {
+    // Owner ruling 2026-09-28 added Aptive to the unattended list (it was a
+    // detection-only signal before). Official host is aptivepestcontrol.com
+    // (goaptive.com is the company's older domain) — NOT aptive.com, which
+    // is an unrelated software company. Both values verified against
+    // aptivepestcontrol.com on 2026-09-28 (WebFetch): "Aptive provides
+    // residential pest control services in 6,000+ cities across 37 states"
+    // and "Aptive schedules recurring services during the year based on the
+    // service plan you select" (/pest-control/). Nothing else is curated.
+    id: 'aptive',
+    name: 'Aptive Environmental',
+    aliases: ['aptive', 'aptive pest control', 'aptive environmental llc'],
+    // The company's official domains (verified 2026-09-28). Never aptive.com.
+    hosts: ['aptivepestcontrol.com', 'goaptive.com'],
+    // Link-path tokens: the older goaptive.com host tokenizes to "goaptive".
+    urlAliases: ['goaptive'],
+    attributes: {
+      reach: { value: 'Multi-state (37 US states, per the company)', source: 'https://aptivepestcontrol.com/', asOf: '2026-09-28' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://aptivepestcontrol.com/pest-control/', asOf: '2026-09-28' },
+    },
+  },
 ];
+
+// Competitors the owner approved for UNATTENDED blog publishing (owner
+// rulings 2026-09-27 D2 + 2026-09-28: comparison/alternatives blog posts may
+// name Orkin, Terminix, HomeTeam (also sold as TAEXX), Turner, Massey and
+// TruGreen and publish with no human sign-off; Aptive and Truly Nolen added
+// 2026-09-28 ~07:05Z). A draft naming ANY other
+// business — including a COMPETITORS record not listed here, or a name only
+// an operator brief authorized — does not autopublish; naming anyone else
+// needs a new owner ruling. Ids, not display names, so every alias of an
+// approved record resolves through findCompetitor().
+const OWNER_APPROVED_AUTOPUBLISH_IDS = Object.freeze([
+  'orkin', 'terminix', 'hometeam-pest-defense', 'turner-pest', 'massey-services', 'trugreen',
+  'aptive', 'truly-nolen',
+]);
 
 // Detection-only list of pest-control BUSINESS names that may plausibly appear
 // in a draft. Used purely to recognize that "a real business is being named"
@@ -233,8 +291,6 @@ const COMPETITOR_BRAND_SIGNALS = [
   'Turner Pest Control',
   'Nozzle Nolen',
   'Rentokil',
-  'Aptive',
-  'Aptive Environmental',
   'Hawx',
   'Catseye',
   // Suffix-less lawn/mosquito franchise brands — no pest-industry suffix, so
@@ -268,6 +324,7 @@ for (const c of COMPETITORS) {
   ALLOWLIST_INDEX.set(normalize(c.name), c);
   for (const a of c.aliases || []) ALLOWLIST_INDEX.set(normalize(a), c);
   for (const a of c.aliasesCS || []) ALLOWLIST_INDEX.set(normalize(a), c);
+  for (const a of [...(c.urlAliases || []), ...(c.urlAliasesInContext || [])]) ALLOWLIST_INDEX.set(normalize(a), c);
 }
 
 // Case-INSENSITIVE detectable tokens: allowlist names/aliases + detection-only
@@ -291,14 +348,70 @@ const DETECTABLE_NAMES_CS = (() => {
   return [...set].sort((a, b) => b.length - a.length);
 })();
 
-/** findCompetitor(name) → allowlist record | null (matches name or alias). */
+// Case-INSENSITIVE aliases honored in link-destination tokens only:
+// `urlAliases` are specific on their own ("goaptive", "turnerpest");
+// `urlAliasesInContext` ("turner", "hometeam") count only when the same URL
+// carries pest / provider wording (URL_PEST_CONTEXT_RE) — never
+// "/wiki/Tina_Turner" or "/tools/compost-turner" (#5146 r8).
+const URL_ALIAS_NAMES = (() => {
+  const set = new Set();
+  for (const c of COMPETITORS) for (const a of c.urlAliases || []) set.add(a);
+  return [...set].sort((a, b) => b.length - a.length);
+})();
+const URL_CONTEXT_ALIAS_NAMES = (() => {
+  const set = new Set();
+  for (const c of COMPETITORS) for (const a of c.urlAliasesInContext || []) set.add(a);
+  return [...set].sort((a, b) => b.length - a.length);
+})();
+const URL_PEST_CONTEXT_RE = /\b(?:pests?|termites?|exterminat\w*|bugs?|lawns?|mosquito(?:es)?|rodents?|wildlife|providers?|compan(?:y|ies)|reviews?|alternatives?|vs|versus|plans?|pricing|cancel\w*|contracts?)\b/i;
+
+// Trailing legal / corporate suffixes stripped (repeatedly) when an exact
+// name/alias lookup misses: "Orkin, LLC", "Massey Services, Inc.",
+// "HomeTeam Pest Defense, Inc." resolve to their curated record instead of
+// reading as a distinct company (#5146 r7). ONLY true legal-entity suffixes
+// belong here — a DESCRIPTIVE word (Services, Global, Group, Holdings, "the")
+// must never be stripped: an off-list company that happens to share an
+// approved short prefix ("Turner Services LLC" is not Turner Pest Control;
+// "HomeTeam Services LLC" is not HomeTeam Pest Defense) would otherwise read
+// as approved and bypass the owner-list restriction (#5146 r9). A genuine
+// legal-name variant that needs a descriptive word (e.g. "Terminix Global
+// Holdings") is a curated alias on its record instead — see COMPETITORS.
+const LEGAL_SUFFIX_TOKENS = new Set(['llc', 'inc', 'incorporated', 'corp', 'corporation', 'co', 'company', 'ltd', 'lp', 'llp', 'pllc']);
+
+/** findCompetitor(name) → allowlist record | null (matches name or alias, legal suffixes ignored). */
 function findCompetitor(name) {
-  return ALLOWLIST_INDEX.get(normalize(name)) || null;
+  const key = normalize(name);
+  const exact = ALLOWLIST_INDEX.get(key);
+  if (exact) return exact;
+  const words = key.split(' ').filter(Boolean);
+  // A dotted suffix ("L.L.C.", "P.L.L.C.") normalizes to one-letter words;
+  // rejoin the longest trailing run of them that spells a legal suffix.
+  let run = words.length;
+  while (run > 0 && words[run - 1].length === 1) run -= 1;
+  for (let i = run; i < words.length - 1; i += 1) {
+    const joined = words.slice(i).join('');
+    if (LEGAL_SUFFIX_TOKENS.has(joined)) {
+      words.splice(i, words.length - i, joined);
+      break;
+    }
+  }
+  while (words.length > 1 && LEGAL_SUFFIX_TOKENS.has(words[words.length - 1])) {
+    words.pop();
+    const hit = ALLOWLIST_INDEX.get(words.join(' '));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /** isKnownCompetitor(name) → true iff `name` is on the curated allowlist. */
 function isKnownCompetitor(name) {
-  return ALLOWLIST_INDEX.has(normalize(name));
+  return findCompetitor(name) !== null;
+}
+
+/** isOwnerApprovedForAutopublish(name) → true iff `name` resolves to a record on OWNER_APPROVED_AUTOPUBLISH_IDS. */
+function isOwnerApprovedForAutopublish(name) {
+  const rec = findCompetitor(name);
+  return Boolean(rec && OWNER_APPROVED_AUTOPUBLISH_IDS.includes(rec.id));
 }
 
 /**
@@ -322,7 +435,7 @@ function attributeValues(name) {
  * sourced facts and may therefore be named. A longer name shadows the shorter
  * names it contains (so "Massey Services" does not also report bare "Massey").
  */
-function findBusinessMentions(text) {
+function findBusinessMentions(text, { url = false } = {}) {
   // Normalize curly quotes/apostrophes → straight so a stylized spelling like
   // All "U" Need or Keller's still matches the straight-quote aliases.
   const haystack = String(text || '')
@@ -333,9 +446,17 @@ function findBusinessMentions(text) {
   const claimedRanges = []; // [start,end) already attributed to a longer name
   // Case-insensitive tokens + case-sensitive ones (generic-word brands), merged
   // longest-first so the longest match wins regardless of which list it came from.
+  // `url: true` — the text is link-destination tokens: specific URL aliases
+  // (urlAliases) always match; bare brand aliases that are case-sensitive
+  // in prose (HomeTeam, Turner) match their lowercase slug form only in a
+  // pest-context URL (urlAliasesInContext).
   const candidates = [
     ...DETECTABLE_NAMES.map((display) => ({ display, ci: true })),
-    ...DETECTABLE_NAMES_CS.map((display) => ({ display, ci: false })),
+    // Prose-casing aliases say nothing in a URL ("/wiki/Tina_Turner"): link
+    // tokens use the URL alias lists instead.
+    ...(url ? [] : DETECTABLE_NAMES_CS.map((display) => ({ display, ci: false }))),
+    ...(url ? URL_ALIAS_NAMES.map((display) => ({ display, ci: true })) : []),
+    ...(url && URL_PEST_CONTEXT_RE.test(haystack) ? URL_CONTEXT_ALIAS_NAMES.map((display) => ({ display, ci: true })) : []),
   ].sort((a, b) => b.display.length - a.display.length);
   for (const { display, ci } of candidates) {
     // Escape regex metachars, then let any whitespace match between words so
@@ -383,8 +504,10 @@ function listForPrompt() {
 module.exports = {
   COMPETITORS,
   COMPETITOR_BRAND_SIGNALS,
+  OWNER_APPROVED_AUTOPUBLISH_IDS,
   findCompetitor,
   isKnownCompetitor,
+  isOwnerApprovedForAutopublish,
   attributeValues,
   findBusinessMentions,
   listForPrompt,

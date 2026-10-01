@@ -3,6 +3,7 @@ const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
+const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
@@ -57,6 +58,30 @@ const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, isInvoi
 // who began an ACH entry (attaching a us_bank_account PM) then switches to
 // Card. Detect that specific rejection so the caller can recover by minting a
 // fresh PI for the selected tender rather than failing the switch.
+// A third-party payer's bill is never collected from the homeowner's saved
+// method. The refusal carries PAYER_BILLED_GUARD (Codex #3492 r10) so every
+// caller re-routes the bill to the payer instead of treating it as a decline
+// (and handing the homeowner a pay link).
+function payerBilledGuardError(message) {
+  return Object.assign(new Error(message), { code: 'PAYER_BILLED_GUARD' });
+}
+
+// chargeInvoiceWithSavedCard's Bill-To check on the LOCKED invoice row (see
+// its call site): a payer stamped on the invoice always refuses.
+function assertLockedInvoiceNotPayerBilled(lockedInvoice) {
+  if (lockedInvoice.payer_id) {
+    throw payerBilledGuardError('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+  }
+}
+
+// requireAutopayForCustomerId's deleted-account check on the LOCKED customer
+// row (see its call site).
+function assertLockedCustomerNotDeleted(lockedCustomer) {
+  if (lockedCustomer?.deleted_at) {
+    throw Object.assign(new Error('This customer account was deleted — Auto Pay is not armed. Review before charging.'), { code: 'CUSTOMER_DELETED' });
+  }
+}
+
 function isIncompatibleAttachedMethodError(err) {
   const message = String(err?.message || err?.raw?.message || '').toLowerCase();
   return message.includes('incompatible with the attached paymentmethod')
@@ -140,7 +165,13 @@ async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
 // lease that proves a bound PI is a dead session rather than a live page.
 const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
 
-async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db) {
+// readOnly: reach a verdict without writing (a READ ONLY transaction or a pure
+// resolver such as customer-dunning's). ANY unresolved claimed/ambiguous
+// attempt is pending: a stale submitted claim reads as ambiguous (what the
+// writing path promotes it to), and a stale pre-submit or fresh claim reads as
+// in progress (STRIPE_CHARGE_IN_PROGRESS) — a read never releases a claim
+// whose worker may still commit. Nothing is updated.
+async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false } = {}) {
   let chargeAttempt = await database('stripe_invoice_charge_attempts')
     .where({ invoice_id: invoiceId })
     .whereIn('status', ['claimed', 'ambiguous'])
@@ -148,7 +179,14 @@ async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = 
     .first('id', 'status', 'stripe_payment_intent_id', 'idempotency_key', 'submitted_at', 'created_at');
   if (chargeAttempt) {
     let ambiguous = chargeAttempt.status === 'ambiguous';
-    if (!ambiguous && savedCardClaimIsStale(chargeAttempt)) {
+    if (!ambiguous && readOnly) {
+      // Nothing is released or promoted here, and a stale PRE-submit claim
+      // stays fenced: the original worker can still commit its submission
+      // after we looked, so a read cannot conclude "released". Stale +
+      // submitted reads as ambiguous (what the writing path promotes it to);
+      // stale pre-submit and fresh both read as in progress.
+      if (savedCardClaimIsStale(chargeAttempt) && savedCardClaimWasSubmitted(chargeAttempt)) chargeAttempt.status = 'ambiguous';
+    } else if (!ambiguous && savedCardClaimIsStale(chargeAttempt)) {
       if (!savedCardClaimWasSubmitted(chargeAttempt)) {
         const released = await releaseStalePreSubmitSavedCardClaim(chargeAttempt, database).catch((releaseErr) => {
           logger.error(`[stripe] could not release stale pre-submit saved-card claim ${chargeAttempt.id}: ${releaseErr.message}`);
@@ -402,6 +440,15 @@ async function resolveNoFundsSavedCardChargeAttempt({
   attemptId,
   invoiceId,
   failureMessage,
+  // Codex #4971 r16 P1 (finding 2): the raw Stripe decline_code/error code,
+  // persisted alongside the failure so a crash-recovery reader (termite-
+  // annual-renewal-charge.js pendingChargeOutcomeVerdict) can tell an
+  // AMBIGUOUS live outcome (authentication_required — the off-session PI
+  // can still be completed and succeed later) from a genuine terminal
+  // decline, without the in-memory classified error a live catch handler
+  // has. Optional; every other caller of this function omits it and the
+  // column stays null, unaffected.
+  declineCode = null,
   database = db,
 }) {
   if (!attemptId || !invoiceId) return false;
@@ -442,6 +489,7 @@ async function resolveNoFundsSavedCardChargeAttempt({
       .update({
         status: 'failed',
         error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
+        decline_code: declineCode,
         resolved_at: new Date(),
         updated_at: new Date(),
       });
@@ -455,6 +503,11 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
   customerId,
   stripePaymentIntentId,
   failureMessage,
+  // Codex #4971 r24 P1: the asynchronous failure's own code (a bank
+  // return, an async card decline) — persisted as decline_code so the
+  // termite renewal's crash recovery reads this as the CUSTOMER-side
+  // failure it is (a failure notice + pay link), never as a bare refusal.
+  declineCode = null,
   database = db,
 }) {
   if (!attemptId || !invoiceId || !customerId || !stripePaymentIntentId) return false;
@@ -525,6 +578,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
         status: 'failed',
         stripe_payment_intent_id: stripePaymentIntentId,
         error_message: String(failureMessage || 'Stripe reported payment failure').slice(0, 1000),
+        ...(declineCode ? { decline_code: String(declineCode).slice(0, 100) } : {}),
         resolved_at: new Date(),
         updated_at: new Date(),
       });
@@ -1253,6 +1307,10 @@ const StripeService = {
   async chargeSavedPaymentMethodOffSession({ customerId, paymentMethodId, amountDollars, description, metadata = {}, idempotencyKey = null }) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
+    // Default-on: an active collections DISPUTE hold refuses the fee charge
+    // before any Stripe call (COLLECTION_HOLD_ACTIVE / _CHECK_FAILED,
+    // retryable). No caller overrides it (a fee charge is always automatic).
+    await assertNoCollectionHold(customerId);
     if (!paymentMethodId) throw new Error('No payment method to charge');
     const amountCents = Math.round(Number(amountDollars) * 100);
     if (!Number.isFinite(amountCents) || amountCents <= 0) throw new Error('Invalid charge amount');
@@ -1427,9 +1485,17 @@ const StripeService = {
    *   same request but provides no cross-process dedupe.
    * @returns {object} payments table row
    */
-  async charge(customerId, amountDollars, description, metadata = {}, idempotencyKey = null) {
+  async charge(customerId, amountDollars, description, metadata = {}, idempotencyKey = null, { operatorOverride = false, overrideTrail = null } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
+    // Default-on: an active collections DISPUTE hold refuses monthly dues and
+    // every retry before any Stripe call (COLLECTION_HOLD_ACTIVE /
+    // _CHECK_FAILED, retryable — billing-cron defers instead of failing the
+    // obligation). Only an explicit staff override (admin Charge now) skips it,
+    // and it records the override HERE, at the boundary, when a hold is active
+    // (overrideTrail names the admin/route; never blocks the charge).
+    if (operatorOverride) await recordHoldOverride({ customerId, ...(overrideTrail || {}) });
+    else await assertNoCollectionHold(customerId);
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
@@ -1783,6 +1849,14 @@ const StripeService = {
             // the retry sweep's already-collected guard match on this
             // (metadata-first, payment_date window only as legacy fallback).
             ...(metadata.billed_month ? { billed_month: metadata.billed_month } : {}),
+            // Stripe's settlement moment, so readers never wait on the
+            // succeeded webhook for it (Codex #4996 r14): an off-session
+            // intent is created, confirmed and charged in one request, so a
+            // synchronous success landed at the intent's own creation — and a
+            // replayed intent keeps its original time, never this run's. A
+            // bank charge is stamped by the webhook as it clears.
+            ...(status === 'paid' && Number(paymentIntent.created) > 0
+              ? { settled_event_at: new Date(Number(paymentIntent.created) * 1000).toISOString() } : {}),
           }),
         }).returning('*');
         return row;
@@ -1898,8 +1972,8 @@ const StripeService = {
   // ladder) stamp `initiated_by: 'machine'` — the webhook's send-window
   // provenance classifier otherwise reads a bare 'one_time' PI as the
   // customer's own payment and texts its ACH lifecycle notices at night.
-  async chargeOneTime(customerId, amount, description, idempotencyKey = null, metadata = {}) {
-    return this.charge(customerId, amount, description, { type: 'one_time', ...metadata }, idempotencyKey);
+  async chargeOneTime(customerId, amount, description, idempotencyKey = null, metadata = {}, { operatorOverride = false, overrideTrail = null } = {}) {
+    return this.charge(customerId, amount, description, { type: 'one_time', ...metadata }, idempotencyKey, overrideTrail ? { operatorOverride, overrideTrail } : { operatorOverride });
   },
 
   // =========================================================================
@@ -1919,7 +1993,17 @@ const StripeService = {
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
     if (invoice.payer_id) {
-      throw new Error('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+      // Codex #4971 r16 P1 (finding 3): typed the SAME as
+      // chargeInvoiceWithSavedCard's own payer-billed refusal below
+      // (assertLockedInvoiceNotPayerBilled) — this quote used to throw a
+      // plain untyped Error, so a payer assigned since the mint reduced
+      // termite-annual-renewal-charge.js's renewalChargeCeiling to an
+      // undifferentiated 'charge_quote_unavailable' deferral, retried
+      // forever (the payer never resolves the quote either way). The typed
+      // code lets that caller route it into the SAME payer_billed
+      // follow-through the charge path already has for a payer discovered
+      // any other way.
+      throw payerBilledGuardError('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
     }
 
     const card = await db('payment_methods').where({ id: paymentMethodId }).first();
@@ -1994,6 +2078,10 @@ const StripeService = {
   // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
   // which caps the PRE-surcharge amount due, and from expectedTotal, which
   // demands exact equality.
+  // opts.operatorOverride — a staff member explicitly ordered THIS charge
+  // (admin card-on-file): skips the default collections-dispute-hold guard and
+  // records the override (opts.overrideTrail = {actorId, ip, userAgent, route,
+  // invoiceId}) at the charge boundary when a dispute hold is active.
   // opts.customerInitiated — the customer is at the keyboard for THIS charge
   // (estimate-accept annual prepay on a saved method). Stamps the PI
   // `initiated_by: 'customer'` and the receipt job `customer_initiated`, so
@@ -2001,7 +2089,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireVisitCompletionPacketId = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2035,7 +2123,7 @@ const StripeService = {
     // invoice — the saved card belongs to invoice.customer_id (the homeowner),
     // but this bill is the payer's. AR routes to the payer AP inbox.
     if (invoice.payer_id) {
-      throw new Error('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+      throw payerBilledGuardError('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
     }
 
     const card = await db('payment_methods').where({ id: paymentMethodId }).first();
@@ -2097,6 +2185,17 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
+        // The invoice's OWN Bill-To, under its row lock (Codex #4971 r10 P1).
+        // A payer stamped on the invoice (at mint — InvoiceService.create
+        // persists it — or by a writer racing the unlocked read above) makes
+        // it the payer's bill whatever the customer's default payer reads
+        // now: the self-pay re-resolves below see only the CURRENT default,
+        // so a payer cleared after the stamp read "self-pay" there. The
+        // unlocked check above already refuses payer_id for every caller;
+        // this closes its race. (A packet WITHDRAWN from the customer to a
+        // payer — payer_id still null — is refused by the row-aware
+        // assertInvoiceCollectible right below.)
+        assertLockedInvoiceNotPayerBilled(lockedInvoice);
         assertInvoiceCollectible(lockedInvoice);
         // Frozen-consent hard cap, enforced against the LOCKED invoice
         // (Codex #3153 r7 P0) and BEFORE any account-credit application
@@ -2153,6 +2252,22 @@ const StripeService = {
             });
           }
         }
+        // A DISPUTE hold from a collections call (collections_flags
+        // collection_hold, customer-level; see collections/collection-hold.js)
+        // stops every off-session charge by DEFAULT — the customer was told
+        // all billing follow-up is on hold (B10). Customer- and operator-
+        // initiated callers opt out (customerInitiated / operatorOverride).
+        // Read inside this transaction; a lookup failure throws
+        // COLLECTION_HOLD_CHECK_FAILED and rolls the charge back (fail
+        // closed). Both refusals are pre-Stripe and retryable.
+        if (!customerInitiated && !operatorOverride) {
+          await assertNoCollectionHold(lockedInvoice.customer_id, trx);
+        } else if (operatorOverride && !customerInitiated) {
+          // Override recorded at the boundary: read inside this transaction
+          // (the same read the default guard would have refused on), so a hold
+          // that landed after the route was entered is still attributed.
+          await recordHoldOverride({ customerId: lockedInvoice.customer_id, ...(overrideTrail || {}), database: trx });
+        }
         // Auto Pay SERIALIZED with the charge (Codex #3153 r13 P1): the
         // callers' boundary snapshots leave an interval a pause/opt-out
         // commit can slip inside, and pausing touches only the customers
@@ -2167,8 +2282,15 @@ const StripeService = {
           const lockedCustomer = await trx('customers')
             .where({ id: requireAutopayForCustomerId })
             .forUpdate()
-            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status', 'billing_mode', 'monthly_rate', 'waveguard_tier');
+            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status', 'billing_mode', 'monthly_rate', 'waveguard_tier', 'deleted_at');
           lockedCustomerRow = lockedCustomer || null;
+          // A deleted account's Auto Pay is not armed (Codex #4971 r10 P1),
+          // for EVERY caller of this option: account deletion only stamps
+          // customers.deleted_at (routes/auth.js DELETE /account) and leaves
+          // autopay_enabled set, while the monthly billing cron already
+          // excludes deleted customers. Detectable, so a caller can retire
+          // the charge instead of treating it as a decline.
+          assertLockedCustomerNotDeleted(lockedCustomer);
           if (!lockedCustomer || !(await customerOnAutopay(lockedCustomer, { db: trx }))) {
             throw new Error('Auto Pay is no longer active for this customer.');
           }
@@ -2421,6 +2543,11 @@ const StripeService = {
             await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
             lockedInvoice.stripe_payment_intent_id = null;
           }
+          // Codex #4971 r29 P1: a caller holding a session gate over this
+          // charge (the termite renewal) re-asserts it immediately before
+          // each money-moving step inside this flow — here the credit
+          // apply (a throw rolls this transaction back, nothing applied).
+          if (typeof assertBeforeMoneyMoves === 'function') assertBeforeMoneyMoves();
           const { applyAccountCreditToInvoice } = require('./customer-credit');
           await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
             logger.warn(`[stripe] charge-time account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
@@ -2539,6 +2666,10 @@ const StripeService = {
           },
         };
         if (invSurchargeDetails) invPiParams.amount_details = invSurchargeDetails;
+        // Codex #4971 r29 P1: ...and again right before the submission
+        // boundary — a throw here lands BEFORE the durable submission marker,
+        // so the claim stays releasable and nothing reached Stripe.
+        if (typeof assertBeforeMoneyMoves === 'function') assertBeforeMoneyMoves();
         // This durable marker is the fail-closed submission boundary. It is
         // written immediately before the synchronous SDK invocation: claims
         // abandoned earlier remain releasable, while any process death from
@@ -2626,6 +2757,14 @@ const StripeService = {
             surcharge_rate_bps: invRateBps,
             surcharge_policy_version: invPolicyVersion,
             source: 'admin_card_on_file',
+            // Stripe's settlement moment, so readers never wait on the
+            // succeeded webhook for it (Codex #4996 r14): an off-session
+            // intent is created, confirmed and charged in one request, so a
+            // synchronous success landed at the intent's own creation — and a
+            // replayed intent keeps its original time, never this run's. A
+            // bank charge is stamped by the webhook as it clears.
+            ...(status === 'paid' && Number(paymentIntent.created) > 0
+              ? { settled_event_at: new Date(Number(paymentIntent.created) * 1000).toISOString() } : {}),
           }),
         }).returning('*');
       });
@@ -2761,10 +2900,28 @@ const StripeService = {
           // retry remains possible.
           logger.error(`[stripe] could not record saved-card failure for invoice ${invoiceId}: ${recordErr.message}`);
         }
+        // Codex #4971 r16 P1 (finding 2): the SAME decline_code the
+        // wavesCardDecline marker below reads — persisted on the durable
+        // attempt row so a crash BEFORE this in-memory classification ever
+        // runs (the process dies right after Stripe's confirm response, or
+        // right after this row resolves) leaves a recovery reader
+        // (termite-annual-renewal-charge.js pendingChargeOutcomeVerdict)
+        // something to classify by other than the raw error_message text.
+        // Codex #4971 r23 P1: decline_code is persisted ONLY for a CUSTOMER
+        // decline (the exact rule the wavesCardDecline marker below uses) —
+        // the renewal's crash recovery (pendingChargeOutcomeVerdict) derives
+        // declined-vs-refused from that column alone, so a non-decline error
+        // code (an InvalidRequestError's resource_missing, say) persisted
+        // there would recover as a false "your payment method was declined"
+        // notice. A non-decline keeps its raw code in the message instead.
+        const customerDecline = err.type === 'StripeCardError' || err.code === 'card_declined' || Boolean(err.decline_code);
+        const rawCode = err.decline_code || err.raw?.decline_code || err.code || null;
+        const declineCode = customerDecline ? rawCode : null;
         await resolveNoFundsSavedCardChargeAttempt({
           attemptId: chargeAttempt.id,
           invoiceId,
-          failureMessage: err.message || 'Card charge failed',
+          failureMessage: `${err.message || 'Card charge failed'}${!customerDecline && rawCode ? ` (${rawCode})` : ''}`,
+          declineCode,
         }).catch((attemptErr) => {
           logger.error(`[stripe] charge-attempt release failed after deterministic decline ${chargeAttempt.id}; claim remains blocking: ${attemptErr.message}`);
         });
@@ -2777,12 +2934,12 @@ const StripeService = {
         // a false decline for an internal error. attemptedAmount is the
         // surcharge-inclusive total computeChargeAmount priced (what the
         // customer actually saw attempted), never the pre-surcharge base.
-        if (err.type === 'StripeCardError' || err.code === 'card_declined' || err.decline_code) {
+        if (customerDecline) {
           chargeFailed.wavesCardDecline = {
             attemptedAmount: Number.isFinite(total) ? total : null,
             cardBrand: card.card_brand || null,
             cardLast4: card.last_four || null,
-            declineCode: err.decline_code || err.code || null,
+            declineCode,
           };
         }
         // SCA step-up (Codex r28): a declined off-session confirm (e.g.
@@ -3013,6 +3170,11 @@ const StripeService = {
       )
       .orderBy('payments.payment_date', 'desc')
       .limit(limit);
+    // The collections-hold deferral placeholder (B10), armed or collected by the retry
+    // sweep, is never a payment: a customer-facing history would show it as FAILED with
+    // "Update Payment Method". The route's total / cursor math applies the same
+    // predicate, so both stay in step.
+    q = excludeHoldDeferralPlaceholders(q, 'payments');
     if (offset > 0) q = q.offset(offset);
     return q;
   },
@@ -3027,7 +3189,19 @@ const StripeService = {
    * @param {{ amount?: number, reason?: string }} options
    * @returns {object} updated payment row
    */
-  async refund(paymentId, { amount, reason } = {}) {
+  // Codex #4971 r6 P1: a full refund of a termite annual-plan payment
+  // revokes the prior year a renewal charge checks under the parent-decision
+  // gate — so the gate is held from BEFORE the provider call through the
+  // ledger stamp and credit restore (annual-prepay-renewals
+  // withTermiteGateForCharge; no termite term → no lock, unchanged).
+  async refund(paymentId, options = {}) {
+    return require('./annual-prepay-renewals').withTermiteGateForCharge(
+      { paymentIds: [paymentId] },
+      () => this._refundPayment(paymentId, options),
+    );
+  },
+
+  async _refundPayment(paymentId, { amount, reason } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -3275,6 +3449,17 @@ const StripeService = {
           // balance) — see the gross-up block above.
           refundParams.amount = grossCents;
         }
+        // Codex #4971 r15 P1: when this refund carries a termite term
+        // (refund() above ran it inside withTermiteGateForCharge), assert
+        // the gate's lock session is still alive immediately before the
+        // Stripe call — a no-op outside any held gate. A typeof guard, not
+        // a require-shape assumption: a test's own narrow mock of
+        // annual-prepay-renewals that predates this assertion simply has
+        // nothing to assert against.
+        {
+          const parentLock = require('./annual-prepay-renewals').assertParentDecisionLockAlive;
+          if (typeof parentLock === 'function') parentLock();
+        }
         refund = await stripe.refunds.create(refundParams, { idempotencyKey });
       }
     } catch (err) {
@@ -3371,8 +3556,9 @@ const StripeService = {
     ]);
     if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
 
-    try {
-      await db('payments')
+    // The ledger write itself — called inside the gated transaction below.
+    const stampRefundOnPayment = async (trx) => {
+      await trx('payments')
         .where({ id: paymentId })
         .update({
           status: isFullRefund ? 'refunded' : 'paid',
@@ -3394,7 +3580,21 @@ const StripeService = {
               }
             : {}),
           metadata: JSON.stringify(clearedMeta),
+          // The ledger's refund time (Codex #4971 r6 P1: the termite
+          // renewal's late-paid alert dates a parent's revocation by it).
+          updated_at: new Date(),
         });
+    };
+    try {
+      // Chokepoint B (Codex #4971 r4 P1): the stamp runs in its own
+      // transaction whose FIRST lock is the renewal parent-decision gate —
+      // a full-refund stamp flips a termite parent's paid evidence, so it
+      // commits before the renewal charge's last parent re-check or waits
+      // out that charge's submission. No-op without a termite term.
+      await db.transaction(async (trx) => {
+        await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
+        await stampRefundOnPayment(trx);
+      });
     } catch (dbErr) {
       // Refund issued, ledger write failed. The pending attempt marker is
       // still set, so a retry replays the SAME idempotency key regardless
@@ -3420,7 +3620,12 @@ const StripeService = {
         const inv = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first('id');
         if (inv) {
           const { returnAppliedCreditOnRefund } = require('./customer-credit');
-          await db.transaction((trx) => returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx));
+          // Gate first (Codex #4971 r4 P1): returning credit is money the
+          // renewal charge could consume — same entry rule as the stamp.
+          await db.transaction(async (trx) => {
+            await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
+            return returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx);
+          });
         }
       } catch (creditErr) {
         logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
@@ -5485,14 +5690,24 @@ const StripeService = {
       let resolvedPaymentMethod = pi.payment_method_types?.[0] || 'card';
       let bankLastFour = null;
       let pmdType = null;
+      // When a card charge's money landed: its balance transaction, which
+      // Stripe creates once the charge succeeds — after 3DS or any delayed
+      // authentication, unlike the charge's own creation (Codex #4996 r13).
+      // Readers date the payment by it, never by this handler's run time: a
+      // /confirm that repairs a missing row days later must not date old
+      // money as new (r12). A bank (ACH) charge's balance transaction is
+      // created when it is submitted, before it succeeds, so a bank payment
+      // takes its moment from the succeeded webhook instead (pre-push audit).
+      let chargeSettledAt = null;
 
       // Get receipt and card info from the charge
       if (charge) {
         try {
           const chargeObj = typeof charge === 'string'
-            ? await stripe.charges.retrieve(charge)
+            ? await stripe.charges.retrieve(charge, { expand: ['balance_transaction'] })
             : charge;
           receiptUrl = chargeObj.receipt_url || null;
+          chargeSettledAt = Number(chargeObj.balance_transaction?.created) || null;
           const pmd = chargeObj.payment_method_details;
           pmdType = pmd?.type || null;
           if (pmd?.card) {
@@ -5879,6 +6094,8 @@ const StripeService = {
             charged_amount: chargedTotal,
             payment_method: resolvedPaymentMethod,
             payment_state: paymentStatus,
+            ...(paymentStatus === 'paid' && pmdType === 'card' && chargeSettledAt > 0
+              ? { settled_event_at: new Date(chargeSettledAt * 1000).toISOString() } : {}),
           }),
         };
 
@@ -5901,10 +6118,23 @@ const StripeService = {
           // the payments row before it settles the invoice, so /confirm racing
           // (or repairing after) a half-applied webhook must still be able to
           // mark the open invoice paid — money genuinely arrived (Codex P2).
+          // The rewrite merges into the row's metadata rather than replacing
+          // it: what a webhook or a refund stamped first stays — Stripe's
+          // settlement moment, the payer of payer-funded money, a refund
+          // attempt in flight — or an ACH that settled days after it began
+          // would read as settled when it started, payer money as the
+          // homeowner's own, and a refund in flight as untouched money
+          // (Codex #4996 r11/r12). The merge runs in the UPDATE itself, on
+          // the row as it stands then: the row was read without a lock, and a
+          // refund that resolved since must not have its cleared markers
+          // written back (pre-push audit). A settlement moment the row
+          // already carries (the webhook's event time) outranks this one (r13).
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
             .whereNotIn('status', ['refunded', 'disputed'])
-            .update(paymentPayload)
+            .update({ ...paymentPayload,
+              metadata: trx.raw(`(COALESCE(metadata, '{}'::jsonb) || ?::jsonb)
+                || jsonb_strip_nulls(jsonb_build_object('settled_event_at', metadata -> 'settled_event_at'))`, [paymentPayload.metadata]) })
             .returning('*');
           if (!record) {
             throw new Error('Payment record changed while confirming — refresh the invoice and try again');

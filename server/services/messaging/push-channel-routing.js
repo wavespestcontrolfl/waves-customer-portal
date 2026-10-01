@@ -109,6 +109,9 @@ const PRESENTATION = {
   appointment_confirmation: { title: 'Appointment update', link: '/?tab=visits', category: 'service' },
   appointment_cancelled: { title: 'Appointment cancelled', link: '/?tab=visits', category: 'service' },
   tech_arrived: { title: 'Your technician has arrived', link: '/', category: 'service' },
+  // The separate lawn watering text (GATE_LAWN_WATERING_SMS) follows the
+  // completion notice's App / Text choice; its push lands on Documents too.
+  lawn_watering_instruction: { title: 'Watering after today’s visit', link: '/?tab=documents', category: 'service' },
   // en-route deep-links HOME: the authenticated live tracker (map + ETA)
   // renders on the dashboard, not the Visits tab — the tap must land on
   // the same live view the SMS /track link promises.
@@ -205,6 +208,7 @@ const APP_FIRST_TYPES = new Set([
   'tech_arrived', 'service_complete', 'service_complete_with_invoice',
   'service_complete_paid_receipt', 'service_complete_annual_prepay', 'service_complete_prepaid',
   'service_report_v1', 'service_report_v1_with_invoice', 'receipt', 'deposit_receipt',
+  'lawn_watering_instruction',
 ]);
 
 const PREF_CHANNEL_COLUMN = {
@@ -214,6 +218,7 @@ const PREF_CHANNEL_COLUMN = {
   ...Object.fromEntries(APPOINTMENT_UPDATE_TYPES.map((type) => [type, 'appointment_confirmation_channel'])),
   tech_arrived: 'tech_arrived_channel',
   ...Object.fromEntries([...APP_FIRST_TYPES].filter((type) => type.startsWith('service_')).map((type) => [type, 'service_complete_channel'])),
+  lawn_watering_instruction: 'service_complete_channel',
   tech_en_route: 'en_route_channel',
   receipt: 'payment_receipt_channel',
   deposit_receipt: 'payment_receipt_channel',
@@ -365,9 +370,9 @@ function heartbeatCutoff() {
 // (non-window senders).
 function windowGuardFrom(preSendCheck) {
   if (typeof preSendCheck !== 'function') return undefined;
-  const guard = async () => {
+  const guard = async (options) => {
     try {
-      const verdict = await preSendCheck();
+      const verdict = await preSendCheck(options);
       if (verdict === true) return true;
       return verdict?.ok === true ? verdict : false;
     } catch {
@@ -421,6 +426,15 @@ async function recordBell(customerId, messageType, body, dedupeKey, appointmentI
 function hasDurableAppReplay(messageType, billingDeliveryCategory) {
   return Boolean(billingDeliveryCategory)
     || ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType]);
+}
+
+// A persisted in-app bell is customer-visible even when no device accepts the
+// push. Only a bell inserted or refreshed by THIS attempt carries this
+// attempt's copy; a deduped unchanged bell still shows the earlier one.
+function bellReachedThisAttempt(appNotification) {
+  // A suppressed sentinel ({ id: null, suppressed: true }) inserted nothing.
+  if (!appNotification?.id || appNotification.suppressed === true) return false;
+  return appNotification.deduped !== true || appNotification.refreshed === true;
 }
 
 // One sms_log proof per accepted push (Codex #4816 r44–r48). The first
@@ -479,9 +493,10 @@ async function repairPushProof({ appNotification, body, customerId, notification
   }
 }
 
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory, templateKey, templateVariantId }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
+  let bell = {};
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
@@ -536,7 +551,17 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         ...(appointmentId ? { metadata: { proof_scope: proofScope } } : {}),
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
-      if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' };
+      bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
+      // The event's original copy is already visible even if its commit
+      // acknowledgement was lost. Settle that episode without asserting
+      // delivery of this retry's copy or minting native-push proof for it.
+      if (billingDeliveryCategory && notificationEventKey && appNotification?.id
+        && appNotification.deduped === true && !appNotification.suppressed && !appNotification.refreshed) {
+        return { delivered: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appNotification.created_at };
+      }
+      if (appNotification?.push?.reason === 'push_in_flight') {
+        return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight', ...bell };
+      }
       // notifyCustomer returns null only when its dedupe lock/read or the
       // notification insert failed, before any bell or push exists. For a
       // notice with a durable replay owner that is an infrastructure failure
@@ -545,7 +570,9 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         return { delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'notification_ledger_failed' };
       }
     }
-    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' };
+    // A persisted in-app bell is customer-visible even when no device accepts
+    // the push; callers that must not undo a seen notice read bellPersisted.
+    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
@@ -562,10 +589,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // families retain their existing fallback policy.
       if (explicitPushOnly && appNotification?.push?.retryable && hasDurableAppReplay(messageType, billingDeliveryCategory)) {
         return { delivered: false, retryable: true, deliveryOutcome: 'uncertain', reason: 'native_provider_retryable',
-          retryAfterMs: appNotification.push.retryAfterMs || 60000 };
+          retryAfterMs: appNotification.push.retryAfterMs || 60000, ...bell };
       }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
-      return { delivered: false, deliveryOutcome: 'not_sent' };
+      return { delivered: false, deliveryOutcome: 'not_sent', ...bell };
     }
     deliveryOutcome = 'accepted';
     const acceptedAt = appNotification?.push?.deduped
@@ -595,6 +622,11 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // readers that scope by property (SMS commitment evidence) need
         // it on the proof row itself (Codex #4816 r40).
         ...proofScope,
+        // Same rendering-template evidence the SMS leg's sms_log row gets
+        // (services/twilio.js buildSmsLogRow) — never inferred, only
+        // carried through when the caller supplied it.
+        ...(templateKey ? { template_key: templateKey } : {}),
+        ...(templateVariantId ? { template_variant_id: templateVariantId } : {}),
         ...extra,
       }),
     });
@@ -712,7 +744,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (deliveryOutcome === 'accepted') {
       return acceptedResult || { delivered: true, deliveryOutcome: 'accepted', sid: 'push:delivered' };
     }
-    return { delivered: false, retryable: deliveryOutcome === 'uncertain', deliveryOutcome, reason: 'push_attempt_failed' };
+    return { delivered: false, retryable: deliveryOutcome === 'uncertain', deliveryOutcome, reason: 'push_attempt_failed', ...bell };
   }
 }
 

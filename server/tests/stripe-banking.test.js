@@ -59,7 +59,7 @@ describe('stripe banking service', () => {
     stripeClient = {
       balance: { retrieve: jest.fn() },
       balanceTransactions: { list: jest.fn() },
-      payouts: { create: jest.fn(), retrieve: jest.fn(), list: jest.fn() },
+      payouts: { create: jest.fn(), retrieve: jest.fn(), list: jest.fn(), cancel: jest.fn() },
     };
 
     db = jest.fn((table) => {
@@ -523,6 +523,159 @@ describe('stripe banking service', () => {
 
     await expect(service.createInstantPayout(50, { idempotencyKey: 'ipo_propagate_status' }))
       .rejects.toMatchObject({ message: 'Insufficient instant available balance', status: 400 });
+  });
+
+  describe('listPendingPayouts', () => {
+    test('lists live pending payouts from Stripe, converting cents to dollars', async () => {
+      stripeClient.payouts.list.mockResolvedValue({
+        data: [{
+          id: 'po_pending_1',
+          amount: 25050,
+          currency: 'usd',
+          arrival_date: 1780000000,
+          method: 'standard',
+          status: 'pending',
+        }],
+        has_more: false,
+      });
+
+      const result = await service.listPendingPayouts(10);
+
+      expect(stripeClient.payouts.list).toHaveBeenCalledWith({ status: 'pending', limit: 10 });
+      expect(result).toEqual({
+        payouts: [{
+          id: 'po_pending_1',
+          amount: 250.5,
+          currency: 'usd',
+          arrival_date: new Date(1780000000 * 1000).toISOString(),
+          method: 'standard',
+          status: 'pending',
+        }],
+        total: 1,
+        has_more: false,
+      });
+    });
+
+    test('leaves instant and automatic payouts out — cancelPayout can never act on them', async () => {
+      stripeClient.payouts.list.mockResolvedValue({
+        data: [
+          { id: 'po_pending_std', amount: 1000, currency: 'usd', arrival_date: 1780000000, method: 'standard', status: 'pending', automatic: false },
+          { id: 'po_pending_inst', amount: 2000, currency: 'usd', arrival_date: 1780000000, method: 'instant', status: 'pending', automatic: false },
+          { id: 'po_pending_auto', amount: 3000, currency: 'usd', arrival_date: 1780000000, method: 'standard', status: 'pending', automatic: true },
+        ],
+        has_more: false,
+      });
+
+      const result = await service.listPendingPayouts(10);
+
+      expect(result.payouts.map((p) => p.id)).toEqual(['po_pending_std']);
+      expect(result.total).toBe(1);
+    });
+
+    test('defaults and caps the limit', async () => {
+      stripeClient.payouts.list.mockResolvedValue({ data: [], has_more: false });
+
+      await service.listPendingPayouts(500);
+      expect(stripeClient.payouts.list).toHaveBeenCalledWith({ status: 'pending', limit: 100 });
+
+      await service.listPendingPayouts();
+      expect(stripeClient.payouts.list).toHaveBeenCalledWith({ status: 'pending', limit: 20 });
+    });
+  });
+
+  describe('cancelPayout', () => {
+    test('cancels a still-pending standard payout and mirrors the new status locally', async () => {
+      stripeClient.payouts.retrieve.mockResolvedValue({
+        id: 'po_cancel_1', status: 'pending', method: 'standard', amount: 10000, currency: 'usd',
+      });
+      stripeClient.payouts.cancel.mockResolvedValue({
+        id: 'po_cancel_1', status: 'canceled', method: 'standard', amount: 10000, currency: 'usd', arrival_date: 1780000000,
+      });
+
+      const result = await service.cancelPayout('po_cancel_1', { requestedBy: 'admin-1' });
+
+      expect(stripeClient.payouts.retrieve).toHaveBeenCalledWith('po_cancel_1');
+      expect(stripeClient.payouts.cancel).toHaveBeenCalledWith('po_cancel_1');
+      expect(result).toEqual({
+        payout_id: 'po_cancel_1',
+        status: 'canceled',
+        amount: 100,
+        currency: 'usd',
+        arrival_date: new Date(1780000000 * 1000).toISOString(),
+        method: 'standard',
+      });
+      expect(payoutUpdate).toEqual({ status: 'canceled', synced_at: expect.any(String) });
+    });
+
+    test('forwards a provided idempotency key to the Stripe cancel call', async () => {
+      stripeClient.payouts.retrieve.mockResolvedValue({ id: 'po_cancel_2', status: 'pending', method: 'standard', amount: 5000, currency: 'usd' });
+      stripeClient.payouts.cancel.mockResolvedValue({ id: 'po_cancel_2', status: 'canceled', method: 'standard', amount: 5000, currency: 'usd' });
+
+      await service.cancelPayout('po_cancel_2', { idempotencyKey: 'cpo_confirm_abc' });
+
+      expect(stripeClient.payouts.cancel).toHaveBeenCalledWith('po_cancel_2', {}, { idempotencyKey: 'cpo_confirm_abc' });
+    });
+
+    test('refuses an automatic payout without calling cancel — Stripe does not allow it', async () => {
+      stripeClient.payouts.retrieve.mockResolvedValue({ id: 'po_auto_1', status: 'pending', method: 'standard', automatic: true, amount: 5000, currency: 'usd' });
+
+      await expect(service.cancelPayout('po_auto_1')).rejects.toThrow('Stripe does not allow cancelling automatic payouts');
+      expect(stripeClient.payouts.cancel).not.toHaveBeenCalled();
+    });
+
+    test('refuses an instant payout without calling cancel', async () => {
+      stripeClient.payouts.retrieve.mockResolvedValue({ id: 'po_instant_1', status: 'pending', method: 'instant', amount: 5000, currency: 'usd' });
+
+      await expect(service.cancelPayout('po_instant_1')).rejects.toThrow('Instant payouts settle within minutes and cannot be cancelled.');
+      expect(stripeClient.payouts.cancel).not.toHaveBeenCalled();
+    });
+
+    test('a payout already canceled is reported as success without a second Stripe call — retry after a lost response', async () => {
+      stripeClient.payouts.retrieve.mockResolvedValue({
+        id: 'po_done_1', status: 'canceled', method: 'standard', amount: 5000, currency: 'usd', arrival_date: 1780000000,
+      });
+
+      const result = await service.cancelPayout('po_done_1', { idempotencyKey: 'cpo_confirm_retry1' });
+
+      expect(stripeClient.payouts.cancel).not.toHaveBeenCalled();
+      // Local banking history is brought in line even on the retry path.
+      expect(payoutUpdate).toEqual({ status: 'canceled', synced_at: expect.any(String) });
+      expect(result).toEqual({
+        payout_id: 'po_done_1',
+        status: 'canceled',
+        amount: 50,
+        currency: 'usd',
+        arrival_date: new Date(1780000000 * 1000).toISOString(),
+        method: 'standard',
+        already_canceled: true,
+      });
+    });
+
+    test.each(['in_transit', 'paid', 'failed'])(
+      'refuses a payout already %s without calling cancel',
+      async (status) => {
+        stripeClient.payouts.retrieve.mockResolvedValue({ id: 'po_terminal_1', status, method: 'standard', amount: 5000, currency: 'usd' });
+
+        await expect(service.cancelPayout('po_terminal_1')).rejects.toThrow(
+          `This payout is already ${status.replace(/_/g, ' ')} and can no longer be cancelled`,
+        );
+        expect(stripeClient.payouts.cancel).not.toHaveBeenCalled();
+      },
+    );
+
+    test('requires a payout id', async () => {
+      await expect(service.cancelPayout('')).rejects.toThrow('A Stripe payout id is required.');
+      expect(stripeClient.payouts.retrieve).not.toHaveBeenCalled();
+    });
+
+    test('propagates a Stripe cancel error statusCode onto err.status', async () => {
+      stripeClient.payouts.retrieve.mockResolvedValue({ id: 'po_cancel_3', status: 'pending', method: 'standard', amount: 5000, currency: 'usd' });
+      const stripeErr = Object.assign(new Error('You cannot cancel a payout after it has already been paid out.'), { statusCode: 400 });
+      stripeClient.payouts.cancel.mockRejectedValue(stripeErr);
+
+      await expect(service.cancelPayout('po_cancel_3'))
+        .rejects.toMatchObject({ message: 'You cannot cancel a payout after it has already been paid out.', status: 400 });
+    });
   });
 
   describe('reconcilePayout guards', () => {

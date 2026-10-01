@@ -125,4 +125,4 @@ async function storeTreeShrubCustomerPhotos({
   }
 }
 
-module.exports = { storeFunnelPhotos, storeTreeShrubCustomerPhotos };
+module.exports = { storeFunnelPhotos, storeTreeShrubCustomerPhotos, uploadFunnelPhotoToS3 };

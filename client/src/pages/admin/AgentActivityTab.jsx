@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Badge, Button, Card, Select, cn } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -130,21 +130,41 @@ async function markDigestRead(item) {
   }
 }
 
-function ActivityRow({ item, onReview }) {
-  const [open, setOpen] = useState(false);
-  const meta = STATUS_META[item.status] || STATUS_META.completed;
+function ActivityRow({ item, onReview, onDone, doneBusy, focused }) {
+  const [open, setOpen] = useState(() => !!focused);
+  const rowRef = useRef(null);
+  // The bell's ops_digest rows deep-link here with &focus=<notification id>
+  // (client/src/components/NotificationBell.jsx) when their own link is
+  // this shared feed — open and scroll to the exact row rather than landing
+  // on the top of a long list.
+  useEffect(() => {
+    if (focused) rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focused]);
+  // A done digest (a person's, or its condition cleared) reads "Done" and
+  // carries its one-line resolution.
+  const meta = item.doneAt ? { label: "Done", tone: "neutral" } : STATUS_META[item.status] || STATUS_META.completed;
   const expandable = item.steps?.length > 0 || item.detail;
   // Review: the owner owes a decision. A digest of any status keeps its
   // link too (a FIX: digest's remediation page) — its email was suppressed,
   // so this row is the only way to reach it.
   const needsAction = !!item.link && (item.status === "awaiting_review" || item.kind === "digest");
   const actionLabel = item.status === "awaiting_review" ? "Review" : "Open";
+  // Done: Review/Open only marks the row read, and read is not done — an
+  // ACT/REVIEW (or FIX) digest stays pinned here until a person closes it.
+  // An Activity-only row never reaches the bell, so this is its only Done.
+  // The server sends `version` only for a row that can still be marked done.
+  const canDone = item.kind === "digest" && !!item.notificationId && !!item.version;
+  const doneButton = canDone && (
+    <Button size="sm" variant="secondary" onClick={() => onDone?.(item)} disabled={doneBusy}>
+      Done
+    </Button>
+  );
   return (
-    <li className="border-t border-hairline border-zinc-200 first:border-t-0">
+    <li ref={rowRef} className={cn("border-t border-hairline border-zinc-200 first:border-t-0", focused && "bg-zinc-100")}>
       <div className="flex items-start gap-3 px-3 py-3 md:px-4">
         <div className="w-14 flex-shrink-0 pt-0.5 text-12 text-ink-tertiary u-nums">
-          <div>{fmtTime(item.startedAt)}</div>
-          {fmtDay(item.startedAt) && <div>{fmtDay(item.startedAt)}</div>}
+          <div>{fmtTime(item.eventAt || item.startedAt)}</div>
+          {fmtDay(item.eventAt || item.startedAt) && <div>{fmtDay(item.eventAt || item.startedAt)}</div>}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -154,6 +174,7 @@ function ActivityRow({ item, onReview }) {
           <div className="mt-0.5 text-12 text-ink-secondary">
             {item.agent}
             {item.subtitle ? ` · ${item.subtitle}` : ""}
+            {item.resolution ? ` · ${item.resolution}` : ""}
             {item.stepsTotal > 0 ? ` · ${item.stepsDone} of ${item.stepsTotal} steps` : ""}
             {item.durationMs != null ? ` · ${fmtMs(item.durationMs)}` : ""}
           </div>
@@ -180,6 +201,7 @@ function ActivityRow({ item, onReview }) {
           )}
         </div>
         <div className="flex flex-shrink-0 items-center gap-1">
+          {canDone && <span className="hidden md:inline-flex">{doneButton}</span>}
           {needsAction && (
             <Link
               to={item.link}
@@ -202,15 +224,16 @@ function ActivityRow({ item, onReview }) {
           )}
         </div>
       </div>
-      {needsAction && (
-        <div className="px-3 pb-3 md:hidden">
-          <Link
+      {(needsAction || canDone) && (
+        <div className="flex items-center gap-2 px-3 pb-3 md:hidden">
+          {canDone && doneButton}
+          {needsAction && <Link
             to={item.link}
             onClick={() => onReview?.(item)}
             className="inline-flex h-11 items-center rounded-sm border-hairline border-zinc-300 bg-white px-4 text-12 font-medium uppercase tracking-label text-zinc-900 no-underline u-focus-ring"
           >
             {actionLabel}
-          </Link>
+          </Link>}
         </div>
       )}
     </li>
@@ -224,9 +247,19 @@ export default function AgentActivityTab() {
   const [feed, setFeed] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // ?focus=<notification id> — the bell's deep link into this feed (a
+  // digest item's id is `digest:<that same id>` — see digestItem in
+  // services/agent-activity.js).
+  const [searchParams] = useSearchParams();
+  const focusParam = searchParams.get("focus");
+  const focusTarget = focusParam ? `digest:${focusParam}` : null;
   // Only the latest request may write state: two quick window changes can
   // resolve out of order and the 24h rows would overwrite the 7d view.
   const requestRef = useRef(0);
+  // Done: the id being closed (disables its button) and a short inline note
+  // after a stale or failed Done.
+  const [doneBusyId, setDoneBusyId] = useState(null);
+  const [doneNote, setDoneNote] = useState(null);
 
   const load = useCallback(async () => {
     const requestId = ++requestRef.current;
@@ -234,17 +267,41 @@ export default function AgentActivityTab() {
     setLoading(true);
     setError(null);
     try {
-      const next = await adminFetch(`/admin/agents/activity?hours=${hours}`);
+      // Pass ?focus= through so the server can load that ONE row even when
+      // it's read and older than the window (server/routes/admin-agents.js
+      // -> agent-activity.js's loadDigestRows) — otherwise the bell's deep
+      // link can point at a row this fetch would never otherwise return.
+      const focusQuery = focusParam ? `&focus=${encodeURIComponent(focusParam)}` : "";
+      const next = await adminFetch(`/admin/agents/activity?hours=${hours}${focusQuery}`);
       if (isCurrent()) setFeed(next);
     } catch (e) {
       if (isCurrent()) setError(e?.message || "Failed to load activity");
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [hours]);
+  }, [hours, focusParam]);
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  // Done sends the content version the feed served, so a row rewritten in
+  // place since it was loaded answers 409 instead of being closed unseen.
+  const markDigestDone = useCallback(async (item) => {
+    if (!item?.notificationId || !item?.version) return;
+    setDoneBusyId(item.id);
+    setDoneNote(null);
+    try {
+      await adminFetch(`/admin/notifications/${item.notificationId}/done`, {
+        method: "PUT",
+        body: JSON.stringify({ version: item.version }),
+      });
+    } catch (e) {
+      setDoneNote(e?.status === 409 ? "That item changed — the feed was refreshed." : "Could not mark that done — try again.");
+    } finally {
+      setDoneBusyId(null);
+    }
+    await load();
   }, [load]);
 
   useVisiblePageRefresh(load, { intervalMs: 30_000, enabled: !loading });
@@ -296,6 +353,12 @@ export default function AgentActivityTab() {
         </label>
       </div>
 
+      {doneNote && (
+        <div className="text-14 text-ink-secondary" role="status">
+          {doneNote}
+        </div>
+      )}
+
       {error && (
         <div className="flex flex-wrap items-center justify-between gap-3 text-13 text-alert-fg" role="alert">
           <span>{error}</span>
@@ -345,7 +408,7 @@ export default function AgentActivityTab() {
         ) : (
           <ol>
             {items.map((item) => (
-              <ActivityRow key={item.id} item={item} onReview={markDigestRead} />
+              <ActivityRow key={item.id} item={item} onReview={markDigestRead} onDone={markDigestDone} doneBusy={doneBusyId === item.id} focused={focusTarget != null && item.id === focusTarget} />
             ))}
           </ol>
         )}

@@ -28,7 +28,26 @@
 const fs = require('fs');
 const path = require('path');
 
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const dbFn = jest.fn();
+  // Codex round-7 P1/P2: recordDecision's own advisory lock
+  // (withParentDecisionLock) acquires a raw connection and its blocking
+  // pg_advisory_lock always resolves (never the 55P03 timeout path) —
+  // same pattern admin-customers-cancel-plan.test.js already uses for its
+  // own session-scoped advisory lock.
+  const lockConn = { query: jest.fn().mockResolvedValue({ rows: [] }) };
+  dbFn.client = {
+    locked: true,
+    lockConn,
+    acquireConnection: jest.fn(async () => lockConn),
+    releaseConnection: jest.fn(async () => {}),
+    // The renewal gate's session lock (withParentDecisionLock) runs on a
+    // dedicated connection outside the pool (Codex #4971 r12 P1).
+    acquireRawConnection: jest.fn(async () => lockConn),
+    destroyRawConnection: jest.fn(async () => {}),
+  };
+  return dbFn;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
@@ -499,7 +518,10 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     // is a ratchet: ANY new dynamic mutation in the file (which could carry
     // `payload.status` or `column === 'status'` invisibly to a textual scan)
     // fails until the file is re-audited and the count updated.
-    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 9 };
+    // Re-audited 2026-09-30 (B10): +1 = the ONE reason update in
+    // repointFlagsReleaseCollisions (dispute-hold promotion / fallback carry), which runs
+    // only for collections_flags and writes `reason` — never this table.
+    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 10 };
 
     const writes = [];
     const unscannable = [];
@@ -613,8 +635,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       expect(WRITTEN_STATUSES).toContain(s);
       expect(LEGACY_ONLY_STATUSES).not.toContain(s);
     }
-    // Only two files write the status today. A third writer is a new move
-    // and belongs in the doc's "Where" column.
+    // Two files write the status today. termite-annual-renewal-charge.js
+    // (slice 6b) writes NO status directly — moves 16/17 both call the
+    // canonical recordDecision('renew'/'cancel') writer here in `R` instead
+    // of a parallel status write in `TR` (P2-1 fix). A third writer is a
+    // new move and belongs in the doc's "Where" column.
     const writerFiles = [...new Set(writes.map((w) => w.file))].sort();
     expect(writerFiles).toEqual([
       'server/routes/admin-invoices.js',
@@ -622,7 +647,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     ]);
   });
 
-  test('every write site keeps its documented WHERE guard (moves 1–15) — loosening a guard fails here', () => {
+  test('every write site keeps its documented WHERE guard (moves 1–17) — loosening a guard fails here', () => {
     // Exact source-level pin of each write's guard chain, in scan order.
     // (`orWhere` branches are pinned behaviorally in the notice-claim test
     // below; this list covers the where/whereIn/whereNull/whereNotIn guards.)
@@ -707,6 +732,13 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // Move 12: reverse-prepaid un-pay — undecided, non-cancelled only.
       { expr: "'payment_pending'", guards: ['where({ id: locked.annual_prepay_term_id })', "whereNull('renewal_decision')", "whereNotIn('status', ['cancelled', 'canceled'])"] },
     ]);
+
+    // termite-annual-renewal-charge.js writes NO status directly (P2-1):
+    // moves 16/17 both trigger the SAME recordDecision writer pinned above
+    // as moves 6/8, from inside `R`'s syncTermForInvoicePayment and `TR`'s
+    // own processGraceLapseForTerm respectively — neither is a literal
+    // `.update({ status })` chain on `annual_prepay_terms` in `TR` itself.
+    expect(statusWriteSites(read('server/services/termite-annual-renewal-charge.js'))).toEqual([]);
   });
 
   test('the doc names every stage in the CHECK, every write site, and the read-side grouping constants', () => {
@@ -733,6 +765,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     expect(f({ status: 'sent' })).toBe('payment_pending');
     expect(f({ status: 'paid' })).toBe('active');
     expect(f({ status: 'viewed', paid_at: new Date() })).toBe('active');
+    // Codex #4971 r21 P1: a prepay invoice settled entirely by account
+    // credit is 'prepaid' with NO paid_at (stripe.js credit-coverage seam)
+    // — consumed credit is money collected, so the term activates.
+    expect(f({ status: 'prepaid' })).toBe('active');
+    expect(f({ status: 'PREPAID', paid_at: null })).toBe('active');
     // Both spellings and refunded on the INVOICE all land on term 'cancelled' —
     // never on the legacy term names.
     for (const invStatus of ['void', 'cancelled', 'canceled', 'refunded']) {
@@ -740,12 +777,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     }
   });
 
-  test('sanctioned computed-key identifiers (*Col) can never be status: the column helpers return only notice_/payment_reminder_ names', () => {
+  test('sanctioned computed-key identifiers (*Col) can never be status: the column helpers return only notice_ names', () => {
     for (const days of [30, 15, 7, 3, 1, 0, 99, null]) {
-      for (const fn of [_private.noticeColumnForDaysOut, _private.noticeClaimColumnForDaysOut,
-        _private.paymentReminderColumnForDaysOut, _private.paymentReminderClaimColumnForDaysOut]) {
+      for (const fn of [_private.noticeColumnForDaysOut, _private.noticeClaimColumnForDaysOut]) {
         const col = fn(days);
-        if (col !== null) expect(col).toMatch(/^(notice|payment_reminder)_/);
+        if (col !== null) expect(col).toMatch(/^notice_/);
         expect(col).not.toBe('status');
       }
     }
@@ -797,11 +833,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     expect(src).toContain("const PAYMENT_PENDING_STATUS = 'payment_pending';");
   });
 
-  test('the doc moves table has 15 rows with CHECK-valid targets and each row names its documented guard', () => {
+  test('the doc moves table has 17 rows with CHECK-valid targets and each row names its documented guard', () => {
     const doc = read(DOC);
     const rows = [...doc.matchAll(/^\| (\d+) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \|$/gm)]
       .map((m) => ({ n: Number(m[1]), from: m[2], to: m[3], trigger: m[4], where: m[5], guard: m[6] }));
-    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
     const valid = new Set([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES]);
     for (const r of rows) {
       for (const s of r.to.matchAll(/`([a-z_]+)`/g)) expect(valid.has(s[1])).toBe(true);
@@ -825,6 +861,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       13: { from: st(['payment_pending', 'cancelled']), to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
       14: { from: st(['renewed']), to: st(['cancelled']), where: 'supersedeRenewWithCustomerCancel' },
       15: { from: st(['payment_pending']), to: st(['cancelled']), where: 'settleDecidedPendingTerms' },
+      16: { from: st(['active', 'renewal_pending']), to: st(['renewed']), where: "recordDecision('renew')" },
+      17: { from: st(['active', 'renewal_pending']), to: st(['cancelled']), where: "recordDecision('cancel')" },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
@@ -851,6 +889,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       13: 'renewal_decision IS NULL',
       14: "renewal_decision = 'renew' AND NOT EXISTS",
       15: "status = 'payment_pending' AND renewal_decision = 'cancel'",
+      16: 'ACTIVE_STATUSES AND renewal_decision IS NULL',
+      17: 'ACTIVE_STATUSES AND renewal_decision IS NULL',
     };
     for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });
@@ -879,6 +919,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         whereNull: jest.fn().mockReturnThis(),
         update: jest.fn().mockReturnThis(),
         returning: jest.fn().mockResolvedValue([{ id: 'term-1' }]),
+        // Codex round-7 P1 (redesigned): the termite-scoping peek — a plain
+        // (non-termite) term reads no annual_plan_version, so every one of
+        // these ordinary moves stays byte-identical to before (no lock, no
+        // transaction wrapper).
+        first: jest.fn().mockResolvedValue({ annual_plan_version: null }),
         // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
         columnInfo: jest.fn().mockResolvedValue({}),
       };

@@ -570,6 +570,8 @@ describe('bundle split survives 1-cent per-service rounding drift (buildPricingB
   test('splits into pest + lawn sections, lawn with its own application ladder', async () => {
     const bundle = await buildPricingBundle(driftEstimate());
     expect(bundle.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+    // Both services carry the plan terms on their own rows (termsScope).
+    expect(bundle.services.map((s) => s.termsScope)).toEqual(['all', 'all']);
 
     const pest = bundle.services[0];
     expect(pest.frequencies.map((f) => f.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);

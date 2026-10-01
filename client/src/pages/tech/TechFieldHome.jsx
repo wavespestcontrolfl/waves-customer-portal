@@ -1,11 +1,12 @@
 import { ArrowRight, BookOpen, Camera, ChevronRight, ClipboardList, CloudRain, FileText, Leaf, MapPin, Navigation, RefreshCw, Wrench } from 'lucide-react';
-import { serviceWindowLabel, stopPropertyAlerts, stopStatusLabel, stopSummaryLabel, stopWindow } from './routeStops';
+import { serviceWindowLabel, stopPropertyAlerts, stopStatusLabel, stopSummaryLabel, stopWindow, stopHasCustomerSentPhotos } from './routeStops';
 
 function StopCard({ stop, onOpen, disabled, featured = false, index }) {
   const service = stop.primary;
   const name = service.customerName || service.customer_name || 'Customer';
   const active = stop.services.some((row) => ['on_site', 'en_route'].includes(row.status));
   const serviceLabel = stopSummaryLabel(stop) || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';
+  const customerSentPhotos = stopHasCustomerSentPhotos(stop);
   if (!featured) return (
     <button type="button" className="tf-stop" onClick={() => onOpen(stop)} disabled={disabled}>
       <span className="tf-stop-number">{index + 1}</span>
@@ -14,6 +15,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
         <strong>{name}</strong>
         <span className="tf-muted">{service.address}</span>
         <span className="tf-muted">{serviceLabel}</span>
+        {customerSentPhotos && <span className="tf-tag">📷 Customer sent photos</span>}
       </span>
       <ChevronRight size={20} aria-hidden="true" />
     </button>
@@ -25,7 +27,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
         <p className="tf-muted">{serviceWindowLabel(stopWindow(stop)) || 'Time not set'}</p>
         <h2>{name}</h2>
         <p className="tf-muted">{service.address}</p>
-        <div className="tf-tags"><span className="tf-tag">{serviceLabel}</span></div>
+        <div className="tf-tags"><span className="tf-tag">{serviceLabel}</span>{customerSentPhotos && <span className="tf-tag">📷 Customer sent photos</span>}</div>
         {stopPropertyAlerts(stop).map((alert, i) => (
           <div key={i} className={`tf-alert ${alert?.type === 'chemical' ? 'tf-error' : ''}`}>
             {typeof alert === 'string' ? alert : alert.text}

@@ -297,7 +297,11 @@ async function loadCompletionPricing(serviceId, { database = db, role = 'technic
   const completedAmount = await completedApplicationPrice(database, service);
   const currentCharge = completionInvoiceAmount({ estimatedPrice: service.estimated_price, isCallback: service.is_callback,
     perApplicationBilling: customer.billing_mode === 'per_application', perApplicationFee: customer.per_application_fee,
-    monthlyRate: customer.monthly_rate, billingMode: customer.billing_mode });
+    monthlyRate: customer.monthly_rate, billingMode: customer.billing_mode,
+    // Codex round 4 P1 follow-through: `service` is the full scheduled_services
+    // row, so primary_line_price is on it — pass it or a fully-discounted $0
+    // review misreads its own frozen zero as unpriced and falls back to the fee.
+    primaryLinePrice: service.primary_line_price });
   const view = {
     serviceId: service.id, estimate: source.estimate ? { id: source.estimate.id, reference: source.estimate.estimate_slug,
       status: source.estimate.status, tier: source.estimate.waveguard_tier,

@@ -68,6 +68,13 @@ function grantTopicMergeLock(locked = true) {
   db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked }] }) }));
 }
 beforeEach(() => grantTopicMergeLock(true));
+// The publisher's owner-list chokepoint makes one company-extraction model
+// call on the final text; these posts name no company unless a test says so
+// (the chokepoint's own decision logic stays real).
+const businessNameConfirmer = require('../services/content/business-name-confirmer');
+beforeEach(() => {
+  jest.spyOn(businessNameConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: [] });
+});
 const gh = require('../services/content-astro/github-client');
 const authorService = require('../services/content-astro/author-service');
 const { validateBlogFrontmatter } = require('../services/content-astro/schema-validator');
@@ -251,6 +258,17 @@ describe('blog Astro frontmatter validation', () => {
     const result = validateBlogFrontmatter(validFrontmatter({ bogus_field: 'x' }));
     expect(result.ok).toBe(false);
     expect(result.errors.join('\n')).toMatch(/bogus_field is not allowed/);
+  });
+
+  test('accepts the vendored cost-guide price_range and next_steps fields, shape-checked', () => {
+    expect(validateBlogFrontmatter(validFrontmatter({
+      post_type: 'cost',
+      price_range: ['termite_bait_install', 'termite_trenching'],
+      next_steps: [{ label: 'Get a quote', href: '/pest-control-calculator/' }],
+    }))).toEqual({ ok: true, errors: [] });
+    const blank = validateBlogFrontmatter(validFrontmatter({ price_range: [''] }));
+    expect(blank.ok).toBe(false);
+    expect(blank.errors.join('\n')).toMatch(/price_range\.0 must be at least 1 character/);
   });
 
   test('reports a meta_description over the max length', () => {
@@ -571,6 +589,79 @@ describe('blog Astro frontmatter validation', () => {
     });
   });
 
+  // Codex r10 on #5216: next_steps buttons are shipped customer copy, so the
+  // semantic compliance pass sees them (as the links they render as).
+  test('the semantic compliance pass receives the next_steps buttons', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 125, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/125' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+    const complianceGate = require('../services/content/compliance-gate');
+    const spy = jest.spyOn(complianceGate, 'evaluate');
+    try {
+      const frontmatter = validFrontmatter({ slug: '/ant-trails-bradenton/', next_steps: [{ label: 'Found a live one?', href: '/contact/' }] });
+      await AstroPublisher.publishOrUpdatePage({ type: 'draft', frontmatter, body: 'Waves Pest Control guidance for Bradenton homeowners.' }, { action_type: 'new_supporting_blog' });
+      const pass = spy.mock.calls.find(([arg]) => String(arg?.body || '').includes(complianceGate.META_SECTION_MARKER));
+      expect(pass).toBeTruthy();
+      expect(pass[0].body).toContain('[Found a live one?](/contact/)');
+    } finally { spy.mockRestore(); }
+  });
+
+  test('publishOrUpdatePage refuses a draft that links a competitor, before any branch (owner rulings 2026-09-28: refuse, don\'t rewrite)', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 124, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/124' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await expect(AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({ slug: '/ant-trails-bradenton/' }),
+        // Neutral anchor text: naming the competitor in prose is the owner-list
+        // check's business (#5146); this test is about the link.
+        body: 'Waves Pest Control guidance. [One local guide](https://www.turnerpest.com/ants) lists ant tips; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+      },
+      { action_type: 'new_supporting_blog' }
+    )).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
+  test('publishOrUpdatePage: a competitor page listed in notes_for_reviewer reaches the editorial review as evidence and never the page (Codex r6 on #5191)', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 125, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/125' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+    const editorialEvidence = require('../services/content/editorial-evidence');
+    const filesSpy = jest.spyOn(editorialEvidence, 'filesForDocument').mockResolvedValue([]);
+    try {
+      await AstroPublisher.publishOrUpdatePage(
+        {
+          type: 'draft',
+          frontmatter: validFrontmatter({ slug: '/ant-trails-bradenton/' }),
+          body: 'Waves Pest Control guidance. One local guide lists ant tips; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+          notes_for_reviewer: 'Evidence sources: https://www.turnerpest.com/ants (their ant page), https://example.org/not-a-competitor',
+        },
+        { action_type: 'new_supporting_blog' }
+      );
+      expect(filesSpy).toHaveBeenCalledWith(expect.objectContaining({ evidenceUrls: ['https://www.turnerpest.com/ants'] }));
+      const written = gh.putFile.mock.calls[0][0].content;
+      expect(written).toContain('One local guide lists ant tips');
+      expect(written).not.toMatch(/turnerpest\.com/);
+    } finally {
+      filesSpy.mockRestore();
+    }
+  });
+
   test('a spoke-routed draft with an OFF-SITE emitted canonical parks — spoke routing must not erase the canonical before the guard (Codex r5)', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
@@ -666,7 +757,10 @@ describe('blog Astro frontmatter validation', () => {
         },
         body: 'A comparison for Southwest Florida homeowners choosing between a national pest brand and local service.',
       },
-      { action_type: 'new_supporting_blog', service: 'pest', target_keyword: 'orkin vs local pest control', schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] }
+      // Operator-authorized Orkin (the publisher's final-text comparison
+      // gate evaluates exactly like the runner's, operator brief included).
+      { action_type: 'new_supporting_blog', service: 'pest', target_keyword: 'orkin vs local pest control', schema_types: ['Article', 'BreadcrumbList', 'FAQPage'],
+        gsc_signal: { bucket: 'operator_intercept' }, voice_constraints: { operator_brief: { working_title: 'Orkin vs. a Local SWFL Pest Control Company' } } }
     );
 
     const fmModule = require('../services/content-astro/frontmatter');
@@ -1028,6 +1122,61 @@ describe('Astro publisher autonomous draft adapter', () => {
     expect(gh.createIssueComment).toHaveBeenCalledWith(42, expect.stringContaining('@codex review'));
   });
 
+  test('a cost-guide draft commits the mapped price_range; a model-emitted list never ships', async () => {
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 43, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/43' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage({
+      type: 'draft',
+      frontmatter: validFrontmatter({
+        title: 'Termite Treatment Cost in Bradenton',
+        slug: '/termite-treatment-cost-bradenton/',
+        canonical: 'https://www.wavespestcontrol.com/termite-treatment-cost-bradenton/',
+        primary_keyword: 'termite treatment cost bradenton',
+        category: 'termite',
+        post_type: 'cost',
+        price_range: ['model_invented_key'],
+      }),
+      body: 'What shapes termite treatment pricing for Bradenton homes.',
+    }, { action_type: 'new_supporting_blog' });
+
+    const committed = gh.putFile.mock.calls.find(([arg]) => arg.path.endsWith('.mdx'))[0];
+    const parsed = require('../services/content-astro/frontmatter').parse(committed.content);
+    expect(parsed.data.price_range).toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    expect(gh.createPr.mock.calls[0][0].body).toContain('Price card (`price_range`): termite_bait_install, termite_bait_monitoring, termite_trenching');
+  });
+
+  test('updating a live post keeps its owner-set price_range verbatim', async () => {
+    gh.createBranch.mockResolvedValue({});
+    const livePath = 'src/content/blog/pest-control/pest-control-cost-venice.mdx';
+    const live = { sha: 'live-sha', path: livePath, content: '---\ntitle: Old\nslug: /pest-control/pest-control-cost-venice/\nprice_range:\n  - one_time_pest\n---\nold body' };
+    gh.getFile.mockImplementation(async (path) => (path === livePath ? live : null));
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 44, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/44' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage({
+      type: 'draft',
+      frontmatter: validFrontmatter({
+        title: 'Pest Control Cost in Venice',
+        slug: '/pest-control/pest-control-cost-venice/',
+        canonical: 'https://www.wavespestcontrol.com/pest-control/pest-control-cost-venice/',
+        primary_keyword: 'pest control cost venice',
+        post_type: 'cost',
+      }),
+      body: 'What shapes pest control pricing for Venice homes.',
+    }, { action_type: 'new_supporting_blog' });
+
+    const committed = gh.putFile.mock.calls.find(([arg]) => arg.path === livePath)[0];
+    const parsed = require('../services/content-astro/frontmatter').parse(committed.content);
+    expect(parsed.data.price_range).toEqual(['one_time_pest']);
+  });
+
   test('migrates a legacy .md post to .mdx instead of writing components into Markdown', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
@@ -1180,6 +1329,78 @@ describe('Astro publisher autonomous draft adapter', () => {
       pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/55',
       url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
     });
+  });
+});
+
+describe('every blog commit passes the competitor-link check (owner rulings 2026-09-28)', () => {
+  test('fm.stringify appears only inside competitorFreeMarkdown; all four lanes call it', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/content-astro/astro-publisher'), 'utf8');
+    expect((src.match(/fm\.stringify\(/g) || []).length).toBe(1);
+    expect(src).toMatch(/function competitorFreeMarkdown\([^)]*\) \{[\s\S]{0,400}?fm\.stringify\(/);
+    for (const fn of ['publishAstro', 'publishOrUpdatePage', 'publishMetadataRewrite', 'publishRefresh']) {
+      const start = src.indexOf(`async function ${fn}(`);
+      const next = src.indexOf('\nasync function ', start + 10);
+      expect(src.slice(start, next === -1 ? undefined : next)).toMatch(/competitorFreeMarkdown\(/);
+    }
+  });
+});
+
+describe('publishMetadataRewrite refuses a page that links a competitor (owner rulings 2026-09-28)', () => {
+  const metadataDraft = {
+    type: 'metadata',
+    title: 'Pest Control in Lakewood Ranch, FL | Waves',
+    meta_description: 'Need pest control in Lakewood Ranch? Waves helps identify, treat, and prevent common Southwest Florida pest problems.',
+  };
+  const brief = (targetUrl) => ({
+    action_type: 'rewrite_title_meta',
+    target_url: targetUrl,
+    target_keyword: 'pest control lakewood ranch fl',
+    city: 'Lakewood Ranch',
+    service: 'pest',
+  });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.putFile.mockResolvedValue({ commit: { sha: 'metadata-sha' } });
+    gh.createPr.mockResolvedValue({ number: 56, html_url: 'https://github.com/x/y/pull/56', head: { sha: 'h' } });
+    gh.createIssueComment.mockResolvedValue({});
+  });
+
+  test('a BLOG target: refused before any branch, nothing rewritten', async () => {
+    const fmModule = require('../services/content-astro/frontmatter');
+    gh.getFile.mockResolvedValue({
+      sha: 'existing-sha',
+      content: fmModule.stringify(
+        validFrontmatter({
+          slug: '/lakewood-ranch-pest-guide/',
+          title: 'Old Lakewood Ranch Pest Guide Title',
+          meta_description: 'An old meta description for the Lakewood Ranch pest guide that satisfies the blog schema length bound here.',
+          canonical: 'https://www.wavespestcontrol.com/lakewood-ranch-pest-guide/',
+        }),
+        'Compare [Orkin](https://www.orkin.com/) before you sign.',
+      ),
+    });
+    await expect(AstroPublisher.publishMetadataRewrite(metadataDraft, brief('https://www.wavespestcontrol.com/blog/lakewood-ranch-pest-guide/')))
+      .rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('a SERVICE/LOCATION target is refused the same way (owner ruling: every page)', async () => {
+    gh.getFile.mockResolvedValue({
+      sha: 'existing-sha',
+      content: [
+        '---',
+        'title: Old Lakewood Ranch Title',
+        'slug: /pest-control-lakewood-ranch-fl/',
+        'meta_description: Old meta description.',
+        'canonical: https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+        '---',
+        'Compare [Orkin](https://www.orkin.com/) before you sign.',
+      ].join('\n'),
+    });
+    await expect(AstroPublisher.publishMetadataRewrite(metadataDraft, brief('https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/')))
+      .rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
   });
 });
 
@@ -1621,6 +1842,83 @@ describe('Astro publisher hero image republish', () => {
     }));
   });
 
+  test('publishAstro (admin / calendar lane): a post that links a competitor is blocked by its guardrails and fixed by hand', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: '/images/blog/ant-trails-bradenton/hero.webp',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails start with moisture. [One national guide](https://www.terminix.com/ants/) says the same; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toMatchObject({
+      code: 'BLOG_GUARDRAILS_FAILED',
+      details: expect.arrayContaining([expect.objectContaining({ code: 'COMPETITOR_LINK' })]),
+    });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  describe('cost-guide price card on the scheduled/admin lane', () => {
+    const costPost = () => ({
+      id: 'post-1',
+      title: 'Termite Treatment Cost in Bradenton',
+      slug: 'termite-treatment-cost-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to understand what shapes termite treatment pricing and what to ask before booking. Learn more here.',
+      keyword: 'termite treatment cost bradenton',
+      category: 'termite',
+      post_type: 'cost',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Termite bait station beside a Bradenton home',
+      content: '## What shapes the price\n\nHome size, construction type, and the treatment approach all shape what termite work costs in Bradenton.',
+    });
+    const livePath = 'src/content/blog/termite-treatment-cost-bradenton.md';
+    const publishAndReadCommitted = async () => {
+      const queries = [chain({ first: jest.fn().mockResolvedValue(costPost()) }), chain()];
+      db.mockImplementation(() => queries.shift() || chain());
+      await AstroPublisher.publishAstro('post-1');
+      const md = gh.putFile.mock.calls.map(([arg]) => arg).find((arg) => arg.path === livePath);
+      return require('../services/content-astro/frontmatter').parse(md.content).data;
+    };
+
+    test('a cost row publishes with the mapped price_range', async () => {
+      expect((await publishAndReadCommitted()).price_range)
+        .toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    }, 60000);
+
+    test('a republish keeps the live post\'s owner-set price_range verbatim', async () => {
+      gh.getFile.mockImplementation(async (path) => {
+        if (path === livePath) return { sha: 'live-sha', content: '---\ntitle: Old\nprice_range:\n  - termite_trenching\n---\nold body' };
+        return path.endsWith('/hero.webp') ? { sha: 'existing-hero-sha' } : null;
+      });
+      expect((await publishAndReadCommitted()).price_range).toEqual(['termite_trenching']);
+    }, 60000);
+  });
+
   test('recomputes FAQPage schema after an editorial repair adds a visible FAQ section', async () => {
     const editorialEvidence = require('../services/content/editorial-evidence');
     const repairedBody = [
@@ -1985,6 +2283,45 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
       astro_status: 'pr_open',
       astro_requires_human_merge: true,
     }));
+  });
+
+  // The scheduler's publish auto-merges through pages-poll, so it goes
+  // through the same owner-list chokepoint on its final text (Codex r6).
+  test('a scheduled post naming an off-list company is refused before any branch', async () => {
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const read = chain({ first: jest.fn().mockResolvedValue({ ...plainPost(), content: '## Choosing a provider\n\nBug Out competes with local providers in Bradenton.' }) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list' });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('Bug Out competes');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(update.update).not.toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open' }));
+  });
+
+  test('a scheduled post naming only owner-list competitors keeps the human-merge stamp; an admin publish skips the check and is stamped for an admin merge', async () => {
+    businessNameConfirmer.extractCompanyNames.mockResolvedValue({ ok: true, key: 'k', companies: ['Orkin'] });
+    let read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    let update = chain();
+    let queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open', astro_requires_human_merge: true }));
+
+    businessNameConfirmer.extractCompanyNames.mockClear();
+    read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    update = chain();
+    queries = [read, update];
+    await AstroPublisher.publishAstro('post-1', { humanApproved: true });
+    expect(businessNameConfirmer.extractCompanyNames).not.toHaveBeenCalled();
+    // The skipped check is backed by an enforced manual merge (pages-poll
+    // withholds auto-merge on this stamp).
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open', astro_requires_human_merge: true }));
   });
 
   test('namedCompetitorAutopublish never reaches this lane — the stamp stays TRUE even with the flag on (manual/calendar posts keep their human merge)', async () => {
@@ -4315,6 +4652,35 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     } finally { spy.mockRestore(); }
   });
 
+  // The owner-list chokepoint runs on the FINAL committed text: a company
+  // named only in a REUSED live image alt is caught there (Codex r5 on #5146).
+  test('update run: an off-list company only in a publisher-reused image alt blocks the commit', async () => {
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Bug Out technician checking pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+    );
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[1]) } };
+      return null;
+    });
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[4], model: 'm', alt: 'Generated alt two' }));
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const d = draft();
+    expect(d.body).not.toMatch(/Bug Out/);
+
+    await expect(AstroPublisher.publishOrUpdatePage(d, { action_type: 'new_supporting_blog' }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('![Bug Out technician checking pellets]');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+  });
+
   test('update run: intro-slot reuse compares against the LIVE title — a retitled article does not inherit its old intro illustration (GH r2)', async () => {
     const { reusableLiveBodyImage } = AstroPublisher._internals;
     const live = { file: { content: fmModule.stringify({ title: 'Old Title' }, 'Intro prose.\n\n![Old intro pic](/images/blog/x/body-1.webp)\n\n## A\n\nProse.\n') } };
@@ -4771,9 +5137,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('bodyImageRefs: an inline destination with trailing junk is literal text, not an image; a wrapped (multi-line) label is still one image on its first line (GH r12)', async () => {
     const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
-    expect(bodyImageRefs('![alt](/images/blog/x/body-1.webp trailing-junk)\n![ok](/images/blog/x/body-2.webp "title")')).toEqual([{ alt: 'ok', src: '/images/blog/x/body-2.webp', line: 1 }]);
+    expect(bodyImageRefs('![alt](/images/blog/x/body-1.webp trailing-junk)\n![ok](/images/blog/x/body-2.webp "title")')).toEqual([{ alt: 'ok', src: '/images/blog/x/body-2.webp', line: 1, endLine: 1 }]);
     const wrapped = '## A\n\nProse.\n\n![Technician\nworking](/images/blog/x/hero.webp)\n\n![b](/images/blog/x/body-2.webp)';
-    expect(bodyImageRefs(wrapped)).toEqual([{ alt: 'Technician working', src: '/images/blog/x/hero.webp', line: 4 }, { alt: 'b', src: '/images/blog/x/body-2.webp', line: 7 }]);
+    expect(bodyImageRefs(wrapped)).toEqual([{ alt: 'Technician working', src: '/images/blog/x/hero.webp', line: 4, endLine: 5 }, { alt: 'b', src: '/images/blog/x/body-2.webp', line: 7, endLine: 7 }]);
     expect((await validateBodyImageRefs({ body: wrapped, heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/embeds the hero image/);
     // The section scanner sees the wrapped image under its heading.
     const { sections } = AstroPublisher._internals.scanBodySections(wrapped, { title: 'T' });
@@ -4860,7 +5226,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('bodyImageRefs: an empty destination renders (empty src) and is REJECTED; a picture inside a merely styled <div> is scanned, definitely-hidden containers still are not (GH r14)', async () => {
     const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
-    expect(bodyImageRefs('![illustration]()\n![b](<>)')).toEqual([{ alt: 'illustration', src: '', line: 0 }, { alt: 'b', src: '', line: 1 }]);
+    expect(bodyImageRefs('![illustration]()\n![b](<>)')).toEqual([{ alt: 'illustration', src: '', line: 0, endLine: 0 }, { alt: 'b', src: '', line: 1, endLine: 1 }]);
     expect((await validateBodyImageRefs({ body: '![illustration]()\n\n![p](/images/blog/x/body-1.webp)', heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/not committed.*empty src/);
     const styled = '<div class="figure" style="max-width:600px">\n\n![styled](/images/blog/x/hero.webp)\n\n</div>\n<div hidden>\n\n![gone](/images/blog/x/body-9.webp)\n\n</div>\n<div aria-hidden="true">\n\n![gone2](/images/blog/x/body-8.webp)\n\n</div>';
     expect(bodyImageRefs(styled).map((r) => r.src)).toEqual(['/images/blog/x/hero.webp']);

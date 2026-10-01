@@ -27,7 +27,11 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockResolvedValue(null) }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
+  // A system retire closes the bell done (read is not done).
+  _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
+}));
 jest.mock('../services/cancellation-confirmations', () => ({
   confirmationChannelAvailability: jest.fn(async (c) => ({ sms: !!(c && c.phone), email: !!(c && c.email) })),
   sendCancellationConfirmations: jest.fn().mockResolvedValue({ smsSent: true, emailSent: true, channels: ['sms', 'email'], smsTemplateKey: 'service_cancellation_confirmation' }),
@@ -120,6 +124,9 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   recordDecision: (...args) => mockRecordDecision(...args),
   // ADMIN-BUG-R18: an already-decided term takes the run's disposition.
   recordCancelDisposition: jest.fn(async () => null),
+  // null = not a renewal successor (the real helper's answer for a term with
+  // no renewed_from_term_id); an untraceable one answers { resolved: false }.
+  _private: { successorCoverageScope: jest.fn(async () => null) },
 }));
 
 jest.mock('../models/db', () => {
@@ -139,6 +146,10 @@ jest.mock('../models/db', () => {
     lockConn,
     acquireConnection: jest.fn(async () => lockConn),
     releaseConnection: jest.fn(async () => {}),
+    // The renewal gate's session lock (withParentDecisionLock) runs on a
+    // dedicated connection outside the pool (Codex #4971 r12 P1).
+    acquireRawConnection: jest.fn(async () => lockConn),
+    destroyRawConnection: jest.fn(async () => {}),
   };
   return db;
 });
@@ -184,6 +195,13 @@ function builderFor(table) {
       whereNull(c) { current.push((r) => r[col(c)] == null); return group; },
       whereNotNull(c) { current.push((r) => r[col(c)] != null); return group; },
       orWhereNotNull(c) { disjuncts.push(current); current = [(r) => r[col(c)] != null]; return group; },
+      // openToCloser's "done by a person" branch (PERSON_DONE_BY_SQL).
+      orWhereRaw(sql) {
+        if (!/person_done_by/.test(String(sql))) throw new Error(`fake db group: unsupported orWhereRaw ${sql}`);
+        disjuncts.push(current);
+        current = [(r) => r.done_at != null && /^([0-9]+|[0-9a-f-]{36}|claude)$/i.test(String(r.done_by ?? ''))];
+        return group;
+      },
       // The prior-refund check links payments to the prepay invoice via
       // metadata JSON (same predicate the renewals reconciler uses).
       whereRaw(sql, bindings) {
@@ -196,7 +214,7 @@ function builderFor(table) {
         return group;
       },
     };
-    fn.call(group);
+    fn.call(group, group);
     disjuncts.push(current);
     return (r) => disjuncts.some((ds) => ds.every((c) => c(r)));
   };
@@ -1703,7 +1721,7 @@ describe('POST /:id/cancel-plan', () => {
       expect(body.processed).toBe(true);
       expect(body.errors).toEqual([]);
       expect(mockState.service_requests[0].status).toBe('resolved');
-      expect(mockState.notifications[0].read_at).not.toBeNull();
+      expect(mockState.notifications[0]).toMatchObject({ done_by: 'admin-cancellation', done_at: expect.anything() });
     }));
 
     test('a repair retry after the refunded term LEFT coverage carries the recorded prepay facts — the financial record is never blanked', () => withServer(async (baseUrl) => {

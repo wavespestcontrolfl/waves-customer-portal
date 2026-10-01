@@ -70,20 +70,26 @@ test('grounding carries the typed facts and withholds registered pesticide names
   expect(message).not.toContain('Gentrol');
 });
 
-test('deterministic fallback = ratified copy + photos line + next visit; no station clause', () => {
+test('deterministic fallback = ratified copy + photos line, never the next visit date; no station clause', () => {
   const text = deterministicSummary(groundingFacts(roachInput()));
   expect(text).toContain('Cockroach activity was high today.');
   expect(text).toContain('We applied an insect growth regulator');
   expect(text).toContain('Photos from this visit are included with this report.');
-  expect(text).toContain('Your next visit is scheduled for Monday, August 3, arriving 3–5 PM.');
+  // the report's upcoming-visits section carries the date (owner ruling 2026-09-28)
+  expect(text).not.toMatch(/August 3|3–5 PM|next visit is scheduled/);
   expect(text).not.toContain('traps were inspected');
 });
 
 test('follow-up windows from the ratified copy ground their own numerals', () => {
-  const facts = groundingFacts(roachInput());
+  // With nothing scheduled, the ratified follow-up window grounds itself.
+  const facts = groundingFacts(roachInput({ nextAppointment: null }));
   expect(ungroundedClaims('A follow-up visit in 10–14 days keeps you ahead of newly hatching activity.', facts)).toEqual([]);
   // an altered follow-up window is ungrounded
   expect(ungroundedClaims('A follow-up visit in 21 days is recommended.', facts)).toContain('ungrounded_number:21');
+  // With the follow-up on the schedule, the narrative never states its timing.
+  const scheduled = groundingFacts(roachInput());
+  expect(ungroundedClaims('A follow-up visit in 10–14 days keeps you ahead of newly hatching activity.', scheduled))
+    .toContain('visit_timing_stated:in 10–14 days');
   // capture/consumption talk has no grounding on a cockroach report
   expect(ungroundedClaims('A capture was recorded at the kitchen monitor.', facts)).toContain('unsupported_capture_claim');
 });
@@ -289,9 +295,15 @@ test('round-14 guards: free-text locations and care contradictions', () => {
   expect(ungroundedClaims('Treatment was completed in the primary bedroom.', bedroomFacts)).toEqual([]);
 
   // a negated clause naming a distinctive care word contradicts the copy
+  const unscheduled = groundingFacts(roachInput({ nextAppointment: null }));
+  expect(ungroundedClaims('No follow-up is needed after today’s service.', unscheduled))
+    .toContain('contradicted_care_copy');
+  // with the follow-up on the schedule, the schedule itself is the evidence
   const facts = groundingFacts(roachInput());
   expect(ungroundedClaims('No follow-up is needed after today’s service.', facts))
-    .toContain('contradicted_care_copy');
+    .toContain('contradicted_scheduled_visit');
+  expect(ungroundedClaims('Do not return to treated rooms until they are dry.', facts))
+    .not.toContain('contradicted_scheduled_visit');
 });
 
 test('round-13 guards: activity contradiction, embedded recommendations, list cardinality, palmetto alias', async () => {
@@ -564,7 +576,7 @@ test('zero-state polarity: negated ratified copy rejects positive observation cl
 });
 
 test('word-form intervals hit the global number check', () => {
-  const facts = groundingFacts(roachInput());
+  const facts = groundingFacts(roachInput({ nextAppointment: null }));
   // the ratified window is 10–14 days; "twenty days" has no raw digit but
   // must still be grounded (codex P1 r4)
   expect(ungroundedClaims('A follow-up in twenty days is recommended.', facts)).toContain('ungrounded_number:20');
@@ -685,7 +697,7 @@ test('termite bait maps ground activity-status counts by their own role', () => 
 });
 
 test('clean model copy is accepted; a withheld pesticide echo falls back', async () => {
-  const clean = 'Cockroach activity was high today, with German cockroaches noted in the kitchen, bathrooms, and under the sink. We applied an insect growth regulator, treated cracks and crevices, and completed a flush-out treatment. Photo evidence documented droppings and cast skins under the kitchen sink. A follow-up visit in 10–14 days is recommended, and your next visit is scheduled for Monday, August 3, arriving 3–5 PM.';
+  const clean = 'Cockroach activity was high today, with German cockroaches noted in the kitchen, bathrooms, and under the sink. We applied an insect growth regulator, treated cracks and crevices, and completed a flush-out treatment. Photo evidence documented droppings and cast skins under the kitchen sink. We will check back at your next visit.';
   const accepted = await applyTypedReportNarrative(roachInput(), {
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: clean } }),
   });
@@ -694,7 +706,9 @@ test('clean model copy is accepted; a withheld pesticide echo falls back', async
   // and mandatory care sentences embedded in the ratified BODY (the
   // "keep treated areas undisturbed" obligation) append too (codex r2+r3)
   expect(accepted).toContain(clean);
-  expect(accepted).toContain('A follow-up visit in 10–14 days is recommended to stay ahead of newly hatching activity.');
+  // with the follow-up on the schedule its timed sentence left the ratified
+  // copy (owner ruling 2026-09-28), so it is never appended either
+  expect(accepted).not.toContain('10–14 days');
   expect(accepted).toContain('Please keep treated areas undisturbed so the treatment can work.');
 
   const echoed = await applyTypedReportNarrative(roachInput(), {

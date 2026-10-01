@@ -361,3 +361,55 @@ describe('commitFiles — atomic multi-file commit via the git data API', () => 
     await expect(gh.commitFiles({ message: 'm', files: [{ path: 'a', content: 'x' }] })).rejects.toThrow('requires branch');
   });
 });
+
+describe('content-astro github-client request deadline', () => {
+  const originalEnv = { ...process.env };
+  const originalFetch = global.fetch;
+  beforeEach(() => { process.env.GITHUB_TOKEN = 'test-token'; });
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    global.fetch = originalFetch;
+  });
+
+  test('calls outside a deadline scope carry no abort signal', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce(jsonResponse({ sha: 's', path: 'p', content: '' }));
+    await gh.getFile('p');
+    expect(global.fetch.mock.calls[0][1].signal).toBeUndefined();
+  });
+
+  test('a call after the deadline fails without reaching GitHub', async () => {
+    global.fetch = jest.fn();
+    await expect(gh.runWithRequestDeadline(Date.now() - 1, () => gh.getFile('p')))
+      .rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('an in-flight call is aborted at the deadline', async () => {
+    global.fetch = jest.fn((url, init) => new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason));
+    }));
+    await expect(gh.runWithRequestDeadline(Date.now() + 20, () => gh.getFile('p')))
+      .rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+  });
+
+  test('a 5xx whose error body stalls past the deadline is a deadline error, not an HTTP error', async () => {
+    global.fetch = jest.fn((url, init) => Promise.resolve({
+      ok: false,
+      status: 502,
+      headers: { get: () => 'text/plain' },
+      text: () => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason));
+      }),
+    }));
+    await expect(gh.runWithRequestDeadline(Date.now() + 20, () => gh.createPr({ head: 'b', title: 't', body: 'x' })))
+      .rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a call inside the deadline completes normally', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce(jsonResponse({ sha: 's', path: 'p', content: '' }));
+    await expect(gh.runWithRequestDeadline(Date.now() + 60_000, () => gh.getFile('p')))
+      .resolves.toMatchObject({ sha: 's' });
+    expect(global.fetch.mock.calls[0][1].signal).toBeDefined();
+  });
+});

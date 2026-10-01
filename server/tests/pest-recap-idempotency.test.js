@@ -338,6 +338,33 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(runAndSwallowErrors).toHaveBeenLastCalledWith(store.records[0].id, knex);
   });
 
+  test('a staff recap rating always clears client_pest_rating_defaulted — recap has no first-visit-default concept (owner ruling 2026-09-29)', async () => {
+    const store = {
+      serviceStatus: 'scheduled',
+      records: [],
+      extraRecordCols: {
+        client_pest_rating: {}, client_pest_rating_source: {}, client_pest_rating_at: {}, client_pest_rating_defaulted: {},
+      },
+    };
+    const knex = makeKnex(store);
+    const args = {
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Treated kitchen + garage.',
+      products: [{ product_name: 'Termidor' }],
+      customerRecap: 'Service complete.',
+      sendSms: false,
+      clientPestRating: 5,
+      knex,
+    };
+    expect((await submitRecap(args)).ok).toBe(true);
+    expect(store.recordInserts[0]).toMatchObject({ client_pest_rating: 5, client_pest_rating_defaulted: false });
+    expect((await submitRecap({ ...args, clientPestRating: 3 })).ok).toBe(true);
+    const ratingPatch = (store.recordUpdates || []).find((patch) => 'client_pest_rating' in patch);
+    expect(ratingPatch).toMatchObject({ client_pest_rating: 3, client_pest_rating_defaulted: false });
+  });
+
   test('with technician rating entry switched off, a recap rating is ignored and nothing rescores (follow-up to #4741)', async () => {
     const { loadActiveConfig } = require('../services/pest-pressure/store');
     loadActiveConfig.mockResolvedValueOnce({ allowTechnicianClientRatingEntry: false, enabledServiceLines: ['pest'] });

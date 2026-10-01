@@ -144,6 +144,33 @@ function preserveWithdrawalStamp(database) {
   return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
 }
 
+// The accepted-Text/pending-Email marker on scheduled_send_error (matched everywhere by
+// prefix): the queue's sender treats the Text leg as delivered and sends only the Email.
+// A combined-visit invoice whose link rides the visit summary text is scheduled under it
+// from the start (visit-completion-packets.js).
+const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
+// The same marker for an invoice whose Text leg is carried by the visit summary text: the
+// suffix says the Email is then the customer's only guaranteed path to the link, so a failed
+// Email is retried (the queue's own attempt cap) instead of finalizing the invoice as sent.
+const SUMMARY_TEXT_CARRIED_ERROR = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}:visit_summary`;
+// The planned state that precedes it: the Text leg belongs to the visit summary text, which has
+// not been accepted yet. The queue's sender never texts the invoice and does NOT count the Text
+// leg as delivered (no BILLING_EMAIL_PENDING... prefix on purpose); it is promoted to the
+// carried marker above only when the summary's link-bearing text is accepted.
+const SUMMARY_TEXT_PLANNED_ERROR = 'SUMMARY_TEXT_PLANNED';
+
+// The scheduled-send queue's own send claim is told apart from an operator's by its token: the
+// column is a uuid, so the queue's tokens are version-8 uuids (the version nibble is '8'), which
+// nothing else generates. The visit summary needs the difference: a planned invoice claimed by the
+// queue sends email only (the summary text still carries the link), while any other claim on the
+// invoice may text it.
+function newQueueSendClaimToken() {
+  return require('crypto').randomUUID().replace(/^(.{14})./, '$18');
+}
+function isQueueSendClaimToken(token) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-/i.test(String(token || ''));
+}
+
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
 // The stale-claim review hold, read back from the park above: a row parked
@@ -226,7 +253,15 @@ function assertInvoiceNotWithdrawnFromCustomer(invoice) {
 
 function assertInvoiceVoidable(currentStatus) {
   if (currentStatus === 'paid') {
-    throw new Error('Cannot void a paid invoice — issue a refund instead');
+    const err = new Error('Cannot void a paid invoice — issue a refund instead');
+    // Codex round-3 audit P0 follow-up: tagged so a caller with its OWN
+    // "genuinely unsettled" requirement (e.g. voidInvoice's
+    // requireUnsettled option, termite-annual-renewal-charge.js's grace
+    // lapse) can classify this refusal as a DURABLE settlement without
+    // string-matching the message — purely additive; every existing
+    // caller is unaffected.
+    err.code = 'INVOICE_ALREADY_PAID';
+    throw err;
   }
   // 'prepaid' IS voidable: the void path returns the applied account credit to
   // the customer's balance (restoreAccountCreditForVoidedInvoice), so it is no
@@ -234,7 +269,9 @@ function assertInvoiceVoidable(currentStatus) {
   // are caught by the in-flight/paid guards above and the void path's own
   // payment_recorded_at check.)
   if (currentStatus === 'processing') {
-    throw new Error('Cannot void an invoice with a payment in flight — wait for it to settle, then refund if needed');
+    const err = new Error('Cannot void an invoice with a payment in flight — wait for it to settle, then refund if needed');
+    err.code = 'INVOICE_PAYMENT_IN_FLIGHT';
+    throw err;
   }
   // 'sending' is a live send claim: the provider call may still be in
   // flight, and its finalize accepts draft/scheduled/sending rows — voiding
@@ -242,7 +279,9 @@ function assertInvoiceVoidable(currentStatus) {
   // deliver the stale pre-void message and flip the restored draft back to
   // sent. The claim clears in seconds; refuse and retry (Codex #3493 r10).
   if (currentStatus === 'sending') {
-    throw new Error('Cannot void this invoice — a send is already in progress; wait a moment and retry');
+    const err = new Error('Cannot void this invoice — a send is already in progress; wait a moment and retry');
+    err.code = 'INVOICE_SEND_IN_PROGRESS';
+    throw err;
   }
 }
 
@@ -258,11 +297,35 @@ function formatCardLine(brand, last4) {
   return ` (${b.charAt(0).toUpperCase() + b.slice(1)} ending ${last4})`;
 }
 
+// A collection-fence throw that means "money may already be moving or owed
+// reconciliation on this invoice" (an in-flight or ambiguous saved-card
+// attempt, an orphan charge, a received deposit awaiting settlement) — as
+// opposed to an unexpected failure (a DB error), which proves nothing either
+// way. Customer-dunning callers exclude/skip on the former and HOLD on the
+// latter, so the two must be told apart. Codes are the ones
+// stripe.assertNoInvoiceChargeReconciliationPending and
+// estimate-deposits.assertInvoiceDepositSettlementReady throw.
+const COLLECTION_PENDING_FENCE_CODES = Object.freeze([
+  'STRIPE_CHARGE_IN_PROGRESS',
+  'STRIPE_AMBIGUOUS_OUTCOME',
+  'STRIPE_CHARGED_DB_FAILED',
+  'DEPOSIT_RECONCILIATION_REQUIRED',
+]);
+function isCollectionPendingFenceError(err) {
+  if (!err) return false;
+  return COLLECTION_PENDING_FENCE_CODES.includes(err.code) || err.reconciliationRequired === true;
+}
+
 module.exports = {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
+  BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+  SUMMARY_TEXT_CARRIED_ERROR,
+  SUMMARY_TEXT_PLANNED_ERROR,
+  newQueueSendClaimToken,
+  isQueueSendClaimToken,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,
@@ -278,4 +341,6 @@ module.exports = {
   invoiceWithdrawnFromCustomer,
   invoiceAmountDue,
   formatCardLine,
+  COLLECTION_PENDING_FENCE_CODES,
+  isCollectionPendingFenceError,
 };

@@ -39,6 +39,13 @@ beforeEach(() => {
 });
 
 describe('composeRescheduleIntentDigest', () => {
+  test('itemKeys carry the visit outcome, so armed -> COMPLETED on the same flag is a new key', () => {
+    const armed = composeRescheduleIntentDigest([flag({ visit_status: 'confirmed', total_count: 1 })]);
+    const done = composeRescheduleIntentDigest([flag({ visit_status: 'completed', total_count: 1 })]);
+    expect(armed.itemKeys).toEqual(['f1:confirmed']);
+    expect(done.itemKeys).toEqual(['f1:completed']);
+  });
+
   test('no flags composes nothing', () => {
     expect(composeRescheduleIntentDigest([])).toBeNull();
   });
@@ -59,6 +66,14 @@ describe('composeRescheduleIntentDigest', () => {
   test('unparseable snapshot degrades to empty excerpt, not a throw', () => {
     const composed = composeRescheduleIntentDigest([flag({ input_snapshot: '{broken' })]);
     expect(composed.count).toBe(1);
+  });
+
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`.
+  test('headline/summary give the owner-facing short form', () => {
+    const composed = composeRescheduleIntentDigest([flag(), flag({ id: 'f2' })]);
+    expect(composed.headline).toBe('Schedule — 2 reschedule texts not applied');
+    expect(composed.summary).toBe('Reply or move each visit — automation runs them as booked.');
   });
 });
 

@@ -74,6 +74,7 @@ const {
   resolveBillingLane,
   predictCompletionBilling,
   monthlyDuesCollected,
+  perApplicationCompletionVoidHold,
 } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { customerOnAutopay } = require('./autopay-eligibility');
@@ -524,6 +525,29 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     inputs.annualCoverageLookupFailed = Boolean(coverageProbe.error);
   }
   inputs.annualCoverageValidated = annualCoverageValidated;
+  // Owner ruling (round 13, codex pre-push P2): "propagate the new void
+  // hold to billing projections" — predictCompletionBilling below has no
+  // sibling-coverage awareness at all, so an unpriced, estimate-linked
+  // per_application visit whose combined invoice was voided with no live
+  // replacement (billing-lane.js's REFUSE AFTER A VOID guard, which already
+  // holds Charge Now for it) would otherwise still project a positive
+  // 'invoice'/'auto_charge' amount here. One shared, read-only check
+  // (perApplicationCompletionVoidHold) so this can never drift from the
+  // Charge Now guard or from annual-prepay-renewals.js's own card-expiry
+  // projection, which reuses the SAME helper. Keyed on the VISIT's shape
+  // only, never the customer's current (mutable) billing_mode — completion
+  // parks the same visit whatever lane the customer sits in today (Codex
+  // r12 P2).
+  const perApplicationVoidHoldProbe = await probe('per_application void hold', unavailable, () => perApplicationCompletionVoidHold({
+    isCallback: visit.is_callback === true,
+    serviceType: visit.service_type,
+    svc: visit,
+    dbConn: knex,
+  }));
+  // Read-only projection (like the annual-coverage lookup just above): a
+  // lookup failure here fails toward null — the ordinary prediction stands
+  // — never toward inventing a hold this visit doesn't actually have.
+  inputs.perApplicationVoidHold = perApplicationVoidHoldProbe.error ? null : (perApplicationVoidHoldProbe.value || null);
   let completionAutopayChargeEnabled = false;
   try {
     completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
@@ -559,11 +583,27 @@ function deriveBillingExpectation(inputs) {
   if (visit.is_callback === true) return { kind: 'no_charge', why: 'callback', ruleSource: 'visit_flag' };
   if (isAlwaysFreeServiceType(visit.service_type)) return { kind: 'no_charge', why: 'always_free_service_type', ruleSource: 'visit_flag' };
   if (!customer || !lane) return null;
+  // Owner ruling (round 13, codex pre-push P2) — resolved async in
+  // loadCloseoutInputs via the SAME shared helper (billing-lane.js's
+  // perApplicationCompletionVoidHold) the Charge Now guard and
+  // annual-prepay-renewals.js's card-expiry projection both use, so all
+  // three can never disagree: predictCompletionBilling below has no
+  // sibling-coverage awareness at all and would otherwise still project a
+  // positive invoice/auto_charge amount for a charge completion actually
+  // holds for manual review.
+  if (inputs.perApplicationVoidHold) {
+    return {
+      kind: 'sibling_needs_review', amount: null, conflictStampedPrice: false,
+      why: 'combined_invoice_voided', ruleSource: 'sibling_coverage', laneSource: lane.source,
+      voidedInvoiceId: inputs.perApplicationVoidHold.id || null,
+    };
+  }
   const prediction = predictCompletionBilling({
     lane: lane.mode,
     billingMode: customer.billing_mode || null,
     autopayActive: inputs.autopayActive === true,
     estimatedPrice: visit.estimated_price != null ? Number(visit.estimated_price) : null,
+    primaryLinePrice: visit.primary_line_price,
     monthlyRate: customer.monthly_rate,
     perApplicationFee: customer.per_application_fee,
     isRecurring: visit.is_recurring === true,
@@ -1126,6 +1166,10 @@ function deriveCloseoutFacts(inputs) {
     contradictions,
     packet,
     posture,
+    // The record the report + reportDelivery facts were read from (the one
+    // carrying the report artifact, else the primary record) — a repair of
+    // those facts must act on this record, never a sibling.
+    reportRecordId: tokenRecord?.id || null,
     billing: {
       lane: inputs.lane?.mode || null,
       laneSource: inputs.lane?.source || null,
@@ -1214,6 +1258,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
       posture: derived.posture,
     } : null,
     packet: derived.packet,
+    reportRecordId: derived.reportRecordId,
     visitReRead: inputs.visitReRead || null,
     requirements: requirements ? {
       ...requirements,

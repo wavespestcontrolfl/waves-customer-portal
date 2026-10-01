@@ -35,6 +35,25 @@ const COMMERCIAL_TERMS = [
   'bed bug',
   'exterminator',
 ];
+// Tokens that say WHERE or WHAT KIND of page something is, not what it is
+// about. An anchor made only of these ("Southwest Florida homes", "local pest
+// control", "lawn care in Bradenton") promises the reader a generic page, so
+// it must not point at a page whose subject is something narrower (spiders,
+// an Orkin comparison, weed control). See anchorNamesTargetSubject.
+const GENERIC_SUBJECT_TOKENS = new Set([
+  // geography
+  'florida', 'swfl', 'southwest', 'south', 'west', 'north', 'port', 'county',
+  'sarasota', 'bradenton', 'venice', 'manatee', 'lakewood', 'ranch', 'parrish',
+  'palmetto', 'ellenton', 'osprey', 'nokomis', 'englewood', 'punta', 'gorda',
+  'charlotte', 'myakka', 'siesta', 'longboat', 'anna', 'maria', 'city',
+  'area', 'local', 'near', 'nearby',
+  // page kind / service category
+  'pest', 'pests', 'control', 'service', 'services', 'company', 'companies',
+  'exterminator', 'exterminators', 'treatment', 'treatments', 'lawn', 'care',
+  'yard', 'home', 'homes', 'house', 'houses', 'homeowner', 'homeowners',
+  'residential', 'commercial', 'professional', 'best', 'guide', 'tips',
+  'help', 'problem', 'problems', 'common', 'waves',
+]);
 const STOPWORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'can', 'for', 'from',
   'how', 'in', 'is', 'it', 'of', 'on', 'or', 'our', 'the', 'this', 'to',
@@ -260,6 +279,9 @@ function evaluateLinkOpportunity({ source = {}, target = {}, anchor_text = '', c
   });
 
   const issues = [...pair.issues, ...anchor.issues];
+  if (anchor_text && !anchorNamesTargetSubject(anchor_text, target)) {
+    issues.push(issue('anchor_not_target_specific', 'Anchor does not name the target page\'s subject.'));
+  }
   if (relevance < minRelevance) {
     issues.push(issue('topical_relevance_low', `Topical relevance ${relevance} below ${minRelevance}.`));
   }
@@ -278,6 +300,41 @@ function evaluateLinkOpportunity({ source = {}, target = {}, anchor_text = '', c
     target_url: pair.target_url,
     issues,
   };
+}
+
+// The subject tokens of a target: its topic, keyword and URL slug with the
+// geographic / page-kind words removed. Empty for a pure category or city hub
+// (/pest-control-sarasota-fl/), where a generic anchor IS the right anchor.
+function targetSubjectTokens(target = {}) {
+  const slug = String(normalizeInternalUrl(target.url || target.canonical_url) || '').replace(/[/-]+/g, ' ');
+  const tokens = meaningfulTokens([target.topic, target.keyword, slug].filter(Boolean).join(' '));
+  const subject = new Set();
+  for (const token of tokens) {
+    const stem = singular(token);
+    if (/^\d+$/.test(stem) || stem === 'fl' || GENERIC_SUBJECT_TOKENS.has(token) || GENERIC_SUBJECT_TOKENS.has(stem)) continue;
+    subject.add(stem);
+  }
+  return subject;
+}
+
+function anchorNamesTargetSubject(anchorText, target = {}) {
+  const subject = targetSubjectTokens(target);
+  if (!subject.size) return true;
+  for (const token of meaningfulTokens(anchorText)) {
+    if (subject.has(singular(token))) return true;
+  }
+  return false;
+}
+
+const IRREGULAR_SINGULARS = { mice: 'mouse', lice: 'louse', geese: 'goose', larvae: 'larva', pupae: 'pupa' };
+
+// Plural → singular for subject comparison, applied to BOTH sides, so
+// "mosquitoes"/"mosquito", "flies"/"fly", "mice"/"mouse" compare equal.
+function singular(token) {
+  if (IRREGULAR_SINGULARS[token]) return IRREGULAR_SINGULARS[token];
+  if (token.length > 4 && token.endsWith('ies')) return `${token.slice(0, -3)}y`;
+  if (token.length > 4 && /(?:oes|ches|shes|sses|xes|zes)$/.test(token)) return token.slice(0, -2);
+  return token.length > 3 && token.endsWith('s') && !token.endsWith('ss') ? token.slice(0, -1) : token;
 }
 
 function paragraphHash(text) {
@@ -327,6 +384,8 @@ function round4(value) {
 
 module.exports = {
   ALLOWED_HOSTS,
+  anchorNamesTargetSubject,
+  targetSubjectTokens,
   GENERIC_ANCHORS,
   normalizeInternalUrl,
   urlsEquivalent,

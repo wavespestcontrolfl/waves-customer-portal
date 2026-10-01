@@ -277,6 +277,40 @@ describe('structural denials', () => {
     expect(result.denialReasons).toEqual([]);
   });
 
+  test('sms keeps its allowed decision but exposes a dropped-invoice snapshot as incomplete', async () => {
+    armAllowedBaseline();
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => {
+      opts.onResolveFailure(); // a second candidate could not be proven self-pay
+      return [invoiceRow()];
+    });
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'sms', purpose: 'balance_reminder', now: WED_11AM_EDT,
+    });
+    expect(result).toMatchObject({
+      allowed: true,
+      eligibleInvoiceIds: ['inv-1'],
+      balanceIncomplete: 'payer resolve failed',
+    });
+    expect(result.denialReasons).toEqual([]);
+  });
+
+  test('a truncated empty invoice snapshot remains visible on an allowed dues-only verdict', async () => {
+    armAllowedBaseline({ invoices: [] });
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => {
+      opts.onTruncation();
+      return [];
+    });
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'email', purpose: 'balance_reminder', offLedgerBalanceCents: 12800, now: WED_11AM_EDT,
+    });
+    expect(result).toMatchObject({
+      allowed: true,
+      eligibleInvoiceIds: [],
+      balanceIncomplete: 'candidate bound hit',
+    });
+    expect(result.denialReasons).toEqual([]);
+  });
+
   test('dues context is NOT a bypass: zero dues, voice channel, and late_payment purpose all still require an invoice', async () => {
     armAllowedBaseline({ invoices: [] });
     const zeroDues = await ContactPolicy.evaluate('cust-1', {
@@ -339,6 +373,7 @@ describe('structural denials', () => {
     const result = await evalVoice();
     expect(result.allowed).toBe(false);
     expect(result.denialReasons).toEqual(['policy_evaluation_error']);
+    expect(result.balanceIncomplete).toBe('policy evaluation failed');
   });
 
   test('FAIL CLOSED: an open-balance loader rejection is a denial', async () => {
@@ -392,6 +427,42 @@ describe('flag matrix — each flag vs each channel', () => {
       });
       expect(result.denialReasons).toContain('flag_mystery_flag');
     }
+  });
+
+  // Round-11 P2: a trusted hold exemption (rail-guard holdExempt 'customer' / 'operator') passes
+  // ignoreDisputeHold, which skips ONLY an active DISPUTE collection_hold row.
+  describe('ignoreDisputeHold (trusted exemption consult)', () => {
+    const DISPUTE = 'dispute on call: synthetic billing question';
+    const holdRow = (reason, flag = 'collection_hold') => ({ id: 'flag-1', customer_id: 'cust-1', flag, reason, released_at: null });
+    const consult = (channel, ignoreDisputeHold) => ContactPolicy.evaluate('cust-1', {
+      channel, purpose: 'late_payment', now: WED_11AM_EDT, ...(ignoreDisputeHold ? { ignoreDisputeHold: true } : {}),
+    });
+
+    test.each(['sms', 'email', 'push', 'voice', 'manual_call'])('a dispute-prefixed hold denies %s by default but is ignored on an exempt consult', async (channel) => {
+      armAllowedBaseline({ flags: [holdRow(DISPUTE)] });
+      expect((await consult(channel, false)).denialReasons).toContain('flag_collection_hold');
+      armAllowedBaseline({ flags: [holdRow(DISPUTE)] });
+      expect((await consult(channel, true)).denialReasons).not.toContain('flag_collection_hold');
+    });
+
+    test('a fallback (wrong-number / wrong-party) collection_hold still blocks an exempt consult', async () => {
+      for (const reason of ['wrong-number report - synthetic', 'wrong-party answer - synthetic', null, '']) {
+        armAllowedBaseline({ flags: [holdRow(reason)] });
+        expect((await consult('sms', true)).denialReasons).toContain('flag_collection_hold');
+      }
+    });
+
+    test('a dispute row still carrying an embedded fallback hold keeps blocking (the fallback stands)', async () => {
+      armAllowedBaseline({ flags: [holdRow(`${DISPUTE} [earlier hold: wrong-number report - synthetic]`)] });
+      expect((await consult('sms', true)).denialReasons).toContain('flag_collection_hold');
+    });
+
+    test.each(['do_not_collect', 'attorney_represented', 'bankruptcy', 'do_not_text'])('every other flag (%s) still blocks an exempt consult, even beside an ignored dispute hold', async (flag) => {
+      armAllowedBaseline({ flags: [holdRow(DISPUTE), holdRow('synthetic', flag)] });
+      const result = await consult('sms', true);
+      expect(result.denialReasons).toContain(`flag_${flag}`);
+      expect(result.denialReasons).not.toContain('flag_collection_hold');
+    });
   });
 
   test('active holds are surfaced on the result', async () => {

@@ -381,20 +381,16 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
   const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
   const leadEmail = String(estimate.customer_email || '').trim();
 
-  // email_enabled === false is the portal-wide email opt-out — the
-  // transactional_required stream bypasses suppression-group filtering, so
-  // it must be honored here (same check the no-show fee receipt does).
-  const emailOptOut = prefs?.email_enabled === false;
   // Deliverability of the email leg, resolved up-front with the SAME
   // recipient sources the email sender uses — an email-only channel whose
-  // email can never deliver (portal-wide opt-out / no address on file) must
-  // fall back to the text, mirroring the consent gate's undeliverable-email
-  // SMS fallback. Stale email-only rows reach this path even though the
-  // portal UI now locks the dropdowns (direct writes, removed emails).
+  // email can never deliver (no address on file) must fall back to the
+  // text, mirroring the consent gate's undeliverable-email SMS fallback. The
+  // portal-wide email switch does not make it undeliverable: payment emails
+  // cannot be turned off (owner ruling 2026-09-26).
   const emailRecipient = customer
     ? (require('./customer-contact').getReceiptEmailRecipients(customer, prefs || {})[0]?.email || '')
     : leadEmail;
-  const emailUsable = !emailOptOut && !!emailRecipient;
+  const emailUsable = !!emailRecipient;
   const explicitChannels = estimate.customer_id ? explicitBillingChannels(prefs || {}, 'payment_receipt') : null;
   const wantSms = estimate.customer_id
     ? (explicitChannels
@@ -648,6 +644,8 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
       recipientId: estimate.customer_id || null,
       triggerEventId: `deposit_receipt:${paymentIntentId}`,
       idempotencyKey: `deposit_receipt:${paymentIntentId}`,
+      // Provenance only (email_messages.estimate_id); the annual-offer guard is unchanged.
+      linkEstimateId: estimate.id,
       categories: ['deposit_receipt'],
       // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydp, over-blocking):
       // the deposit is owed regardless of the annual offer's own state — a
@@ -2101,11 +2099,10 @@ async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = n
         return { sent: false, reason: 'prefs_lookup_failed' };
       }
     }
-    // payment_receipt=false is the full every-channel kill switch; the
-    // portal-wide email opt-out is honored the same way the immediate email
-    // leg honors it.
+    // payment_receipt=false is the full every-channel kill switch. The
+    // portal-wide email switch never stops a payment email (owner ruling
+    // 2026-09-26).
     if (prefs?.payment_receipt === false) return { sent: false, reason: 'receipt_opted_out' };
-    if (prefs?.email_enabled === false) return { sent: false, reason: 'email_opted_out' };
 
     // The queued row names the exact deposit it was receipting — a multi-
     // deposit estimate (top-ups) must not have its OLDER queued receipt

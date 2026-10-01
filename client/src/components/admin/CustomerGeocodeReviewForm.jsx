@@ -55,7 +55,7 @@ function initialDraft(record) {
   };
 }
 
-function GooglePinPicker({ latitude, longitude, onChange }) {
+function GooglePinPicker({ latitude, longitude, disabled, onChange }) {
   const { isLoaded, loadError } = useJsApiLoader({
     id: "google-map-script",
     googleMapsApiKey: MAPS_KEY,
@@ -72,14 +72,14 @@ function GooglePinPicker({ latitude, longitude, onChange }) {
         mapContainerStyle={{ width: "100%", height: "100%" }}
         center={point}
         zoom={hasPoint ? 18 : 10}
-        onClick={(event) => onChange(event.latLng.lat(), event.latLng.lng())}
+        onClick={(event) => { if (!disabled) onChange(event.latLng.lat(), event.latLng.lng()); }}
         options={{ streetViewControl: false, mapTypeControl: false, fullscreenControl: false }}
       >
         {hasPoint && (
           <Marker
             position={point}
-            draggable
-            onDragEnd={(event) => onChange(event.latLng.lat(), event.latLng.lng())}
+            draggable={!disabled}
+            onDragEnd={(event) => { if (!disabled) onChange(event.latLng.lat(), event.latLng.lng()); }}
           />
         )}
       </GoogleMap>
@@ -93,6 +93,7 @@ export default function CustomerGeocodeReviewForm({
   error,
   conflicted,
   unavailable,
+  cancelDisabled,
   onAcknowledgeConflict,
   onResolve,
   onCancel,
@@ -129,25 +130,25 @@ export default function CustomerGeocodeReviewForm({
     <div className="mt-3 pt-3 border-t border-hairline border-zinc-200 space-y-3">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <label className="sm:col-span-2 text-14 text-zinc-900">Address
-          <Input aria-label="Address" value={draft.address_line1} onChange={(event) => set("address_line1", event.target.value)} />
+          <Input aria-label="Address" value={draft.address_line1} disabled={saving} onChange={(event) => set("address_line1", event.target.value)} />
         </label>
         <label className="sm:col-span-2 text-14 text-zinc-900">Address line 2
-          <Input aria-label="Address line 2" value={draft.address_line2} onChange={(event) => set("address_line2", event.target.value)} />
+          <Input aria-label="Address line 2" value={draft.address_line2} disabled={saving} onChange={(event) => set("address_line2", event.target.value)} />
         </label>
         <label className="text-14 text-zinc-900">City
-          <Input aria-label="City" value={draft.city} onChange={(event) => set("city", event.target.value)} />
+          <Input aria-label="City" value={draft.city} disabled={saving} onChange={(event) => set("city", event.target.value)} />
         </label>
         <div className="grid grid-cols-2 gap-2">
           <label className="text-14 text-zinc-900">State
-            <Input aria-label="State" value={draft.state} onChange={(event) => set("state", event.target.value)} />
+            <Input aria-label="State" value={draft.state} disabled={saving} onChange={(event) => set("state", event.target.value)} />
           </label>
           <label className="text-14 text-zinc-900">ZIP
-            <Input aria-label="ZIP" value={draft.zip} onChange={(event) => set("zip", event.target.value)} />
+            <Input aria-label="ZIP" value={draft.zip} disabled={saving} onChange={(event) => set("zip", event.target.value)} />
           </label>
         </div>
       </div>
       {MAPS_KEY ? (
-        <GooglePinPicker latitude={draft.latitude} longitude={draft.longitude} onChange={(lat, lng) => {
+        <GooglePinPicker latitude={draft.latitude} longitude={draft.longitude} disabled={saving} onChange={(lat, lng) => {
           setDraft((current) => ({ ...current, latitude: lat.toFixed(7), longitude: lng.toFixed(7) }));
         }} />
       ) : (
@@ -158,23 +159,23 @@ export default function CustomerGeocodeReviewForm({
       )}
       <div className="grid grid-cols-2 gap-2">
         <label className="text-14 text-zinc-900">Latitude
-          <Input aria-label="Latitude" inputMode="decimal" value={draft.latitude} onChange={(event) => set("latitude", event.target.value)} />
+          <Input aria-label="Latitude" inputMode="decimal" value={draft.latitude} disabled={saving} onChange={(event) => set("latitude", event.target.value)} />
         </label>
         <label className="text-14 text-zinc-900">Longitude
-          <Input aria-label="Longitude" inputMode="decimal" value={draft.longitude} onChange={(event) => set("longitude", event.target.value)} />
+          <Input aria-label="Longitude" inputMode="decimal" value={draft.longitude} disabled={saving} onChange={(event) => set("longitude", event.target.value)} />
         </label>
       </div>
       <label className="block text-14 text-zinc-900">Confirmation source
-        <Select aria-label="Confirmation source" value={draft.source} onChange={(event) => set("source", event.target.value)}>
+        <Select aria-label="Confirmation source" value={draft.source} disabled={saving} onChange={(event) => set("source", event.target.value)}>
           <option value="customer_confirmation">Customer confirmation</option>
           <option value="county_records">County records</option>
           <option value="site_visit">Site visit</option>
         </Select>
       </label>
       <label className="block text-14 text-zinc-900">Evidence
-        <Textarea aria-label="Evidence" rows={2} value={draft.evidence} onChange={(event) => set("evidence", event.target.value)} placeholder="What confirms this primary service location?" />
+        <Textarea aria-label="Evidence" rows={2} value={draft.evidence} disabled={saving} onChange={(event) => set("evidence", event.target.value)} placeholder="What confirms this primary service location?" />
       </label>
-      <Checkbox id={`geocode-confirm-${record.customer.id}`} checked={draft.confirmed} onChange={(event) => set("confirmed", event.target.checked)} label="I confirmed this is the primary service location" />
+      <Checkbox id={`geocode-confirm-${record.customer.id}`} checked={draft.confirmed} disabled={saving} onChange={(event) => set("confirmed", event.target.checked)} label="I confirmed this is the primary service location" />
       {error && <div role="alert" className="text-14 text-alert-fg">{error}</div>}
       {conflicted && !unavailable && (
         <div className="rounded-sm border-hairline border-zinc-300 bg-zinc-50 p-3 text-14 text-zinc-900">
@@ -200,7 +201,7 @@ export default function CustomerGeocodeReviewForm({
         {retryAvailable && (
           <Button variant="secondary" onClick={() => onResolve({ revision: record.revision, action: "retry" })} disabled={saving || conflicted || unavailable || addressChanged}>Retry saved address</Button>
         )}
-        <Button variant="secondary" onClick={onCancel} disabled={saving}>Cancel</Button>
+        <Button variant="secondary" onClick={onCancel} disabled={cancelDisabled}>Cancel</Button>
       </div>
     </div>
   );

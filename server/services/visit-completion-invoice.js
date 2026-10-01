@@ -85,6 +85,10 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
     perApplicationBilling: customer.billing_mode === 'per_application',
     perApplicationFee: customer.per_application_fee, monthlyRate: customer.monthly_rate,
     billingMode: customer.billing_mode,
+    // Codex round 4 P1 follow-through: member is `s.*` off scheduled_services,
+    // so primary_line_price is on the row — pass it or a fully-discounted $0
+    // packet member falls back to the acceptance fee here too.
+    primaryLinePrice: member.primary_line_price,
   });
   const eligible = require('./complete-scheduled-service').shouldAutoInvoiceCompletion({
     invoiceAmount: amount, createInvoiceOnComplete: member.create_invoice_on_complete,

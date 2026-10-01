@@ -38,7 +38,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('./pest-pressure/st
 const { pestPressureConfigAllowsTechnicianRating } = require('./pest-pressure/technician-rating-gate');
 const { isValidRateUnit } = require('./inventory-units');
 const { completionSuppliesOwedMarker } = require('./supplies-consumption');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
 
@@ -118,10 +118,121 @@ async function resolveEligibility(serviceId, knex = db) {
   return { ok: true, svc, profile, eligible };
 }
 
-/** Build the data the recap modal needs: service info, timeline, catalog, prior note. */
-async function buildRecapContext(serviceId, knex = db) {
+// "Used most on <line> visits" in the Fast Complete product picker: the
+// active catalog products on the most completed visits of the visit's
+// service line over the last 90 ET calendar days (today included).
+const COMMON_PRODUCTS_WINDOW_DAYS = 90;
+const COMMON_PRODUCTS_LIMIT = 8;
+// A suggestion list must never hold up the context; the query is cancelled
+// server-side past this and the list comes back empty.
+const COMMON_PRODUCTS_TIMEOUT_MS = 1500;
+
+// One round trip, at most COMMON_PRODUCTS_LIMIT rows. The inner join to
+// products_catalog drops unlinked rows (product_id NULL); only active
+// products count. service_date is a DATE holding the ET day, so the
+// bounds are ET calendar-day strings. The usual unit is the amount unit
+// on the most rows (ties: the more recently used unit, then alphabetical);
+// a per-area rate unit ("oz/1000sf", which the completion writer can store
+// when no amount unit was sent) is never an amount unit. The usual amount
+// is the median positive total recorded in that unit.
+const COMMON_PRODUCTS_SQL = `
+  WITH window_rows AS (
+    SELECT sp.product_id,
+           pc.name AS product_name,
+           sr.id AS service_record_id,
+           sr.service_date,
+           NULLIF(LOWER(BTRIM(sp.amount_unit)), '') AS unit,
+           sp.total_amount
+      FROM service_products sp
+      JOIN service_records sr ON sr.id = sp.service_record_id
+      JOIN products_catalog pc ON pc.id = sp.product_id
+     WHERE pc.active = true
+       AND sr.status = 'completed'
+       AND sr.service_line = ?
+       AND sr.service_date BETWEEN ?::date AND ?::date
+  ),
+  top_products AS (
+    SELECT product_id, product_name, COUNT(DISTINCT service_record_id)::int AS visits
+      FROM window_rows
+     GROUP BY product_id, product_name
+     ORDER BY visits DESC, product_name ASC, product_id ASC
+     LIMIT ?
+  ),
+  usual_units AS (
+    SELECT DISTINCT ON (product_id) product_id, unit
+      FROM window_rows
+     WHERE unit IS NOT NULL
+       AND strpos(unit, '/') = 0
+       AND product_id IN (SELECT product_id FROM top_products)
+     GROUP BY product_id, unit
+     ORDER BY product_id, COUNT(*) DESC, MAX(service_date) DESC, unit ASC
+  )
+  SELECT t.product_id,
+         t.visits,
+         u.unit AS usual_unit,
+         (SELECT ROUND((percentile_cont(0.5) WITHIN GROUP (ORDER BY w.total_amount))::numeric, 3)
+            FROM window_rows w
+           WHERE w.product_id = t.product_id
+             AND w.unit = u.unit
+             AND w.total_amount > 0) AS usual_amount
+    FROM top_products t
+    LEFT JOIN usual_units u ON u.product_id = t.product_id
+   ORDER BY t.visits DESC, t.product_name ASC, t.product_id ASC
+`;
+
+// pg returns numeric/decimal columns as strings.
+function numberOrNull(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * The products used most on this visit's service line (see
+ * COMMON_PRODUCTS_SQL). The line resolves as the completion path stamps
+ * service_records.service_line: detectServiceLine(service_type). A visit
+ * with no type has no line to learn from, so it gets none. Never rejects:
+ * any failure is one warn and an empty list.
+ */
+async function loadCommonProducts(svc, knex) {
+  let serviceLine = null;
+  try {
+    if (typeof svc.service_type !== 'string' || !svc.service_type.trim()) return [];
+    serviceLine = detectServiceLine(svc.service_type);
+    const now = new Date();
+    const result = await knex
+      .raw(COMMON_PRODUCTS_SQL, [
+        serviceLine,
+        etDateString(addETDays(now, -(COMMON_PRODUCTS_WINDOW_DAYS - 1))),
+        etDateString(now),
+        COMMON_PRODUCTS_LIMIT,
+      ])
+      .timeout(COMMON_PRODUCTS_TIMEOUT_MS, { cancel: true });
+    return (result?.rows || []).map((row) => ({
+      productId: String(row.product_id),
+      visits: Number(row.visits),
+      usualUnit: row.usual_unit || null,
+      usualAmount: numberOrNull(row.usual_amount),
+    }));
+  } catch (err) {
+    // No driver message: it can echo SQL and bound values.
+    logger.warn(`[pest-recap] common products unavailable for ${svc?.id} (line ${serviceLine}): ${err?.code || err?.name || 'Error'}`);
+    return [];
+  }
+}
+
+/**
+ * Build the data the recap modal needs: service info, timeline, catalog,
+ * prior note. `includeCommonProducts` adds the Fast Complete picker's
+ * most-used list; only that sheet asks for it, so the recap modal (and the
+ * sheet's stock re-read) never pay for the aggregate.
+ */
+async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
+
+  // Started first so the aggregate overlaps the reads below.
+  const commonProductsLoad = includeCommonProducts ? loadCommonProducts(svc, knex) : null;
 
   const timeline = await knex('job_status_history')
     .where({ job_id: serviceId })
@@ -149,7 +260,12 @@ async function buildRecapContext(serviceId, knex = db) {
       // (codex P1 r19) — per-basis ceilings come from the display band.
       'max_label_rate_per_1000',
       'application_method',
+      // Fast Complete product picker: the short label, stock on hand for
+      // its "0 in stock" warning, and the formulation that names a gel bait
+      // its name doesn't (Vendetta Plus), so it is weighed in grams.
+      'display_name', 'inventory_unit', 'inventory_on_hand', 'formulation',
     )
+    .then((rows) => rows.map((row) => ({ ...row, inventory_on_hand: numberOrNull(row.inventory_on_hand) })))
     .catch(() => []);
 
   // A FAILED lookup is not "no record" (codex P1 r15): reporting null on
@@ -195,6 +311,9 @@ async function buildRecapContext(serviceId, knex = db) {
       })
     : [];
 
+  // null when the caller did not ask for the list.
+  const commonProducts = await commonProductsLoad;
+
   return {
     ok: true,
     eligible,
@@ -220,9 +339,14 @@ async function buildRecapContext(serviceId, knex = db) {
       }),
       hasPhone: !!svc.cust_phone,
       category: profile?.category || null,
+      // The live completion profile key, so a client routed from a stale
+      // schedule row (the tech Fast Complete sheet) can confirm this is
+      // still the visit type it was opened for.
+      serviceKey: profile?.serviceKey || null,
     },
     timeline,
     products,
+    ...(commonProducts && { commonProducts }),
     existingRecord: existingRecord
       ? { ...existingRecord, products: existingProducts, productsLoadFailed }
       : null,
@@ -370,6 +494,8 @@ async function submitRecap({
   // Set under the lock if the visit can't be recapped (cancelled/skipped);
   // the transaction aborts having written nothing and we return ok:false.
   let rejectReason = null;
+  // True when THIS submit moved the visit to completed (a performed completion).
+  let completedHere = false;
   // Set under the lock if the existing record shows the visit was NOT performed
   // (incomplete / inspection-only / customer-declined) — gates the referral credit.
   let recapPriorNonPerformed = false;
@@ -477,6 +603,7 @@ async function submitRecap({
         transitionedBy,
         trx,
       });
+      completedHere = true;
     }
     // 1b. A grouped row completing through this legacy path dissolves its
     //     open packet-less visit IN THIS TRANSACTION (codex #3590 r13):
@@ -527,6 +654,14 @@ async function submitRecap({
         client_pest_rating: clientPestRating,
         ...(serviceRecordCols.client_pest_rating_source ? { client_pest_rating_source: 'technician' } : {}),
         ...(serviceRecordCols.client_pest_rating_at ? { client_pest_rating_at: new Date() } : {}),
+        // Owner ruling 2026-09-29: a rating submitted through Recap is
+        // always an explicit staff/tech action — this form has no
+        // first-visit-default concept — so it always clears (or never
+        // sets) the completion form's default flag. Without this a recap
+        // that replaces a completion's untouched first-visit 5 with the
+        // tech's own chosen rating would leave the row wrongly excluded
+        // from email-division's activity averages.
+        ...(serviceRecordCols.client_pest_rating_defaulted ? { client_pest_rating_defaulted: false } : {}),
       }
       : {};
     const existing = await trx('service_records')
@@ -659,7 +794,12 @@ async function submitRecap({
     completionSmsAlreadySent = existingNotes.completionSmsStatus === 'sent'
       || !!existingNotes.sentSmsBody
       || completionSmsSendingFresh;
-    const alreadyTexted = !!existing?.recap_sms_sent_at || completionSmsAlreadySent;
+    // Fast Complete's fixed re-service text is frozen onto the record at
+    // insert (completionSmsRecapMode), before /complete writes 'sending':
+    // that record's one completion text belongs to /complete, so a recap
+    // landing in between must not claim and send a second wording.
+    const fixedReserviceText = existingNotes.completionSmsRecapMode === require('./reservice-fixed-recap').MODE;
+    const alreadyTexted = !!existing?.recap_sms_sent_at || completionSmsAlreadySent || fixedReserviceText;
     willSendSms = wantSms && !alreadyTexted;
     const smsClaim = willSendSms ? { recap_sms_sent_at: new Date() } : {};
 
@@ -1242,6 +1382,15 @@ async function submitRecap({
     }
   }
 
+  // A recap is a PERFORMED completion: when it completed a street-level address hold's visit, the shared
+  // transition stamped the field confirmation, and the hold is released here (before the recap text, so
+  // the recap is no longer a held message). A no-op for every other visit; best-effort — an unreleased hold
+  // keeps the recap held (its claim is released below) and the lazy activation / sweep retry the release.
+  if (completedHere) {
+    const holdReleased = await require('./outbound-review-confirm').releaseStreetLevelHoldForPerformedCompletion(serviceId, { technicianId: transitionedBy }, 'pest-recap');
+    if (holdReleased === false) logger.warn(`[pest-recap] street-level hold for ${serviceId} was not released; the recap text stays held`);
+  }
+
   // 4. Customer-facing track_state -> complete (best-effort, post-trx).
   let trackCompleted = false;
   try {
@@ -1317,7 +1466,8 @@ async function submitRecap({
         purpose: 'service_completion',
         customerId: svc.customer_id,
         identityTrustLevel: 'admin_operator',
-        metadata: { original_message_type: 'pest_recap', service_record_id: recordId },
+        // scheduled_service_id lets the shared send step hold the recap while an address hold is live.
+        metadata: { original_message_type: 'pest_recap', service_record_id: recordId, scheduled_service_id: serviceId },
       });
       smsSent = !(msg?.blocked || msg?.sent === false);
       if (!smsSent) smsError = msg?.code || msg?.reason || 'blocked';
@@ -1419,4 +1569,6 @@ module.exports = {
   buildRecapContext,
   draftRecapMessage,
   submitRecap,
+  // Shared with completeScheduledService's expectedVisit guard.
+  recapVisitIdentityChanged,
 };

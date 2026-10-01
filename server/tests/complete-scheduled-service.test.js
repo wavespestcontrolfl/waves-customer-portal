@@ -684,6 +684,29 @@ describe('assignment drift is re-checked on the record transaction\'s locked row
   });
 });
 
+describe('expectedVisit identity is re-checked on the record transaction\'s locked row', () => {
+  // The tech Fast Complete sheet sends the visit identity its form was built
+  // against; a visit moved to another customer/property, reclassified or
+  // rescheduled after it loaded must not take that form's treatment record.
+  const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+  const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+  const checkAt = source.indexOf("require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)");
+
+  test('the check compares the LOCKED row, using the recap path\'s identity comparison', () => {
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(checkAt).toBeGreaterThan(lockAt);
+    expect(typeof require('../services/pest-recap').recapVisitIdentityChanged).toBe('function');
+  });
+
+  test('the record transaction\'s catch releases the claim and answers 409 visit_identity_changed', () => {
+    const catchAt = source.indexOf("if (err && err.code === 'visit_identity_changed') {");
+    expect(catchAt).toBeGreaterThan(checkAt);
+    const handler = source.slice(catchAt, source.indexOf("if (err && err.code === 'issued_visit_rescheduled') {", catchAt));
+    expect(handler).toContain('markCompletionAttemptFailed(completionAttempt, err, db)');
+    expect(handler).toContain("code: 'visit_identity_changed'");
+  });
+});
+
 test('packet fields in the submitted form cannot grant packet ownership', async () => {
   service.visit_id = '00000000-0000-4000-8000-000000000105';
   const result = await complete({ packetRecord: { itemId: SERVICE_ID }, visitPacketId: SERVICE_ID });
@@ -866,6 +889,14 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     expect(noticeBlock).toMatch(/const failResult = throwIfDeliveryUnverified\(await sendCustomerMessage\(\{/);
   });
 
+  test('the decline notice threads the rendered template key (payment_failed) into the send metadata', () => {
+    expect(noticeBlock).toMatch(/templateKey: 'payment_failed'/);
+  });
+
+  test('the completion SMS threads sentSmsType — whichever of the report/invoice/paid/prepaid/service_complete rungs actually rendered — as templateKey', () => {
+    expect(source).toMatch(/const smsMetadata = \{ original_message_type: sentSmsType,.*templateKey: sentSmsType \};/);
+  });
+
   test('restoreSendClaim is called through ONE shared, checked helper — never an unchecked bare await (Codex pre-push P1, round 1 of the owner\'s audit)', () => {
     // restoreSendClaim catches its own DB errors and resolves false rather
     // than throwing — an unchecked await would silently treat a transient
@@ -938,6 +969,14 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     );
   });
 
+  test('a replayed decline bell finalizes with its original time and no fresh invoice activity', () => {
+    expect(noticeBlock).toMatch(/noticeLegs = \(failResult\.channelResults \|\| failResult\.deduped === true\)\s*&& require\('\.\/messaging\/billing-prior-delivery'\)\.settledLegTimes\(failResult\)/);
+    expect(noticeBlock).toMatch(/noticeSentAt = failResult\.deduped \? noticeLegs\?\.eventAt : new Date\(\)/);
+    expect(noticeBlock).toMatch(/paymentFailedNoticeSentAt =\s*noticeSentAt\?\.toISOString\(\) \|\| recordStructuredNotes\.paymentFailedNoticeSentAt/);
+    expect(noticeBlock).toMatch(/sms: noticeLegs \? noticeLegs\.smsAccepted : true,\s*email: noticeLegs\?\.emailAccepted \|\| false/);
+    expect(noticeBlock).toMatch(/claimToken: declineSendClaim\.invoice\.send_claim_token,\s*deduped: failResult\.deduped === true,\s*eventVisibleAt: noticeSentAt,\s*smsEventVisibleAt: noticeLegs\?\.smsAccepted && !noticeLegs\.freshSms \? noticeLegs\.smsAt : undefined,\s*emailEventVisibleAt: noticeLegs\?\.emailAccepted && !noticeLegs\.freshEmail \? noticeLegs\.emailAt : undefined/);
+  });
+
   test('markDeliverySent itself requires and releases a passed claimToken atomically, in ONE merged decision, and never finalizes a row it does not own', () => {
     const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
     const fnAt = invoiceSource.indexOf('async markDeliverySent(');
@@ -988,6 +1027,6 @@ test('the autopay decline notice persists every shared replay hold, including a 
   // No functional harness reaches this branch; pin that it uses the shared
   // hold set rather than a copied list that would drop new hold codes.
   const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
-  expect(source).toMatch(/!failResult\.sent && require\('\.\/messaging\/billing-channel-routing'\)\.REPLAY_HOLD_CODES\.includes\(failResult\.code\) && failResult\.deferred && failResult\.nextAllowedAt/);
+  expect(source).toMatch(/!failResult\.sent && !heldAtBoundary && require\('\.\/messaging\/billing-channel-routing'\)\.REPLAY_HOLD_CODES\.includes\(failResult\.code\) && failResult\.deferred && failResult\.nextAllowedAt/);
   expect(require('../services/messaging/billing-channel-routing').REPLAY_HOLD_CODES).toContain('BILLING_PREFERENCES_CHANGED');
 });

@@ -16,6 +16,10 @@
  * Pure + best-effort: returns null when there's nothing to reconcile.
  */
 
+const { aftercareCustomerTask, hasCreditableWaterIn, normalizeLawnAftercare } = require('./lawn-aftercare');
+const { deriveLawnLead } = require('./lawn-report-lead');
+const { lawnReportLeadLive } = require('../../config/feature-gates');
+
 // Customer-facing lead extraction for the today's-result hero. Unlike
 // firstSentence (whose callers want a short excerpt and tolerate a "…"),
 // the hero must be a COMPLETE sentence: the boundary logic skips periods
@@ -391,9 +395,28 @@ const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bpos
 // (codex P2 r23).
 const UNRESOLVED_TAIL_RE = /\b(?:can(?:not|['’]t)|can\s+not|could(?:n['’]t|\s+not)|won['’]t|will\s+not|would(?:n['’]t|\s+not))\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b|\b(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}ruled\s+out\b|\b(?:remains?|is|are|stays?)\s+(?:still\s+|a\s+)?possib/i;
 
-function replaceDroughtHypothesis(text) {
+// `protect`, when given and present verbatim in `text`, is carved out before
+// the sweep runs and spliced back in untouched: a credited watering-in
+// instruction (e.g. "Water in drought-stressed areas with 0.25 inches
+// today.") can itself contain a drought phrase, and promoting that exact
+// instruction into snapshot/insight customerAction (lawn-report-v2.js)
+// exposed it to this same rewrite — turning the label-backed wording into
+// generic coverage copy while the Aftercare/follow-up sections (which never
+// route through here) kept the original instruction, so the hero disagreed
+// with the rest of the report (codex P1 #5033 r8). Only the text AROUND the
+// protected instruction is still eligible for the rewrite.
+function replaceDroughtHypothesis(text, protect) {
   const t = String(text || '');
   if (!t) return null;
+  if (protect && t.includes(protect)) {
+    const idx = t.indexOf(protect);
+    const before = t.slice(0, idx);
+    const after = t.slice(idx + protect.length);
+    const beforeOut = replaceDroughtHypothesis(before);
+    const afterOut = replaceDroughtHypothesis(after);
+    if (beforeOut == null && afterOut == null) return null;
+    return `${beforeOut != null ? beforeOut : before}${protect}${afterOut != null ? afterOut : after}`;
+  }
   let changed = false;
   const out = t.split(SENTENCE_SPLIT_RE).map((sentence) => {
     // A sentence qualifies via the stress-signal cues OR because it IS the
@@ -615,6 +638,15 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   // Prose can only refine an established drought finding; high rain cannot
   // turn an absent/unknown structured finding into a sprinkler diagnosis.
   const reconcileDrought = rainWellAboveTarget && reportV2.water?.droughtSignal === true;
+  // The exact recorded instruction a CREDITED watering-in promotes into
+  // customerAction (lawn-report-v2.js aftercareTask) — protected verbatim
+  // from the drought rewrite below (codex P1 #5033 r8). Not the review/hold
+  // confirmation copy: those never quote the raw label text, so they carry
+  // no drought phrase to protect.
+  const aftercareForReconcile = lawnPass ? normalizeLawnAftercare(reportV2.aftercare) : null;
+  const creditedAftercareTask = lawnPass && hasCreditableWaterIn(aftercareForReconcile, reportV2.water?.weekPlan)
+    ? aftercareCustomerTask(aftercareForReconcile, reportV2.water?.weekPlan)
+    : null;
   let insights = rawInsights;
   let photoSummary = null;
   let snapshot = null;
@@ -634,7 +666,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
       // "Next visit" row (codex P2 #3197 r1: a bare `nextVisit` left the
       // visible line saying drought while the rest was reconciled).
       for (const f of ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan']) {
-        const replaced = replaceDroughtHypothesis(i && i[f]);
+        const replaced = replaceDroughtHypothesis(i && i[f], f === 'customerAction' ? creditedAftercareTask : undefined);
         if (replaced) { fields[f] = replaced; touched = true; }
       }
       return touched ? { ...i, ...fields } : i;
@@ -651,7 +683,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
       const fields = {};
       let touched = false;
       for (const f of ['statusHeadline', 'scoreExplanation', 'rootCause', 'mainWatch', 'wavesNext', 'customerAction']) {
-        const replaced = replaceDroughtHypothesis(snap[f]);
+        const replaced = replaceDroughtHypothesis(snap[f], f === 'customerAction' ? creditedAftercareTask : undefined);
         if (replaced) { fields[f] = replaced; touched = true; }
       }
       if (Array.isArray(snap.watching)) {
@@ -688,7 +720,11 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
       scheduled: true,
       headline: 'Follow-up already planned',
       reason: firstSentence(focus) || 'We’ll recheck the areas we flagged and compare them against today’s photos.',
-      customerAction: 'No action is needed from you before then unless the area changes quickly.',
+      // Scoped to the visit's own plan week — a reopened report's follow-up
+      // card must never promote a historical confirmation/credit as though
+      // it were this visit's task (codex P2 #5033 r7).
+      customerAction: aftercareCustomerTask(normalizeLawnAftercare(reportV2?.aftercare), reportV2?.water?.weekPlan)
+        || 'No action is needed from you before then unless the area changes quickly.',
     };
   }
 
@@ -812,15 +848,8 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   };
 }
 
-/**
- * Apply reconcileLawnReport's fixes onto an assembled report payload in
- * place. Shared by the public route AND the queued PDF renderer — the queue
- * builds its payload directly and renders under the deterministic storage
- * key, so a queue render without this pass would bake the pre-reconciliation
- * copy into the cache and the direct route would then serve it as current
- * (codex P2 #3197 r6). Best-effort: any throw leaves the payload untouched.
- */
-function applyLawnReportReconciliation(data, dynamicContext = null) {
+// reconcileLawnReport's fixes applied onto the payload in place (best-effort).
+function applyReconciliationFixes(data, dynamicContext) {
   if (!data || !data.reportV2) return data;
   try {
     const fix = reconcileLawnReport({
@@ -849,6 +878,30 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
       dynamicContext.reentry = { ...dynamicContext.reentry, petAdvisory: fix.reentry.petAdvisory };
     }
   } catch { /* reconciliation is best-effort — never block the report */ }
+  return data;
+}
+
+/**
+ * Apply reconcileLawnReport's fixes onto an assembled report payload in
+ * place. Shared by the public route AND the queued PDF renderer — the queue
+ * builds its payload directly and renders under the deterministic storage
+ * key, so a queue render without this pass would bake the pre-reconciliation
+ * copy into the cache and the direct route would then serve it as current
+ * (codex P2 #3197 r6). Best-effort: any throw leaves the payload untouched.
+ */
+function applyLawnReportReconciliation(data, dynamicContext = null) {
+  applyReconciliationFixes(data, dynamicContext);
+  // The lead (GATE_LAWN_REPORT_LEAD) is derived from the FINAL reconciled
+  // strings, so it runs after the fixes above and even when
+  // reconcileLawnReport returned null. Lawn only: the reportV2 slot also
+  // carries tree & shrub payloads, which never get a lead. Its own try/catch —
+  // a lead failure leaves the payload exactly as reconciled.
+  if (data && data.reportV2 && data.serviceLine === 'lawn' && lawnReportLeadLive()) {
+    try {
+      const lead = deriveLawnLead(data.reportV2);
+      if (lead) data.reportV2 = { ...data.reportV2, lead };
+    } catch { /* the lead is best-effort — the report renders without it */ }
+  }
   return data;
 }
 

@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect } from "react";
 import { Button } from "../ui";
+import useSpeechDictation from "../../hooks/useSpeechDictation";
 
 /**
  * DictationButton — small Web Speech API mic that transcribes speech to text.
@@ -15,7 +16,43 @@ import { Button } from "../ui";
  *   palette         optional — { accent, muted, red, card } for theming
  *   title           optional — accessible label / tooltip (default "Dictate")
  *   size            optional — button diameter in px (default 30)
+ *   uploadServiceId optional — the visit's id; where SpeechRecognition is
+ *                   missing, the hook records a clip and sends it for server
+ *                   transcription instead (GATE_TECH_DICTATION_UPLOAD)
+ *   onPendingChange optional — told true from the mic tap until a recorded
+ *                   clip is taken and transcribed (the upload path only),
+ *                   so the caller can hold a save until the words arrive
  */
+function micLabel({ uploading, listening, title }) {
+  if (uploading) return "Transcribing";
+  return listening ? "Stop dictation" : title;
+}
+
+function legacyMicStyle({ size, listening, palette }) {
+  const {
+    accent = "#0ea5e9",
+    muted = "#94a3b8",
+    red = "#ef4444",
+    card = "#ffffff",
+  } = palette || {};
+  return {
+    width: size,
+    height: size,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "50%",
+    border: `1px solid ${listening ? red : muted}`,
+    background: listening ? red : card,
+    color: listening ? "#fff" : accent,
+    cursor: "pointer",
+    padding: 0,
+    boxShadow: listening ? `0 0 0 4px ${red}33` : "none",
+    transition: "background 0.15s, box-shadow 0.15s",
+    flex: "0 0 auto",
+  };
+}
+
 export default function DictationButton({
   onAppend,
   palette,
@@ -23,111 +60,51 @@ export default function DictationButton({
   size = 30,
   presentation = "legacy",
   disabled = false,
+  uploadServiceId,
+  onPendingChange,
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const [listening, setListening] = useState(false);
-  const [supported, setSupported] = useState(true);
-  const recognitionRef = useRef(null);
-  const onAppendRef = useRef(onAppend);
-  onAppendRef.current = onAppend;
+  const { listening, supported, toggle, cancel, mode, starting, uploading } = useSpeechDictation(onAppend, { uploadServiceId });
 
+  // A recorded clip has no transcript until it is stopped and transcribed;
+  // a save in that window would go out without it. The window opens at the
+  // tap: while the phone is still asking for the mic, a save would miss the
+  // clip and anything opened over the sheet would sit on a live recording.
+  // (Live speech recognition stops itself when another button is pressed,
+  // so it never holds a save.)
+  const pending = mode === "upload" && (starting || listening || uploading);
+  // Unmounting abandons a clip still in flight (the hook stops the recorder
+  // and drops a late transcript), so nothing is pending once the mic is gone.
   useEffect(() => {
-    const SR =
-      typeof window !== "undefined"
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : null;
-    setSupported(!!SR);
-    return () => {
-      try {
-        recognitionRef.current?.stop();
-      } catch {
-        /* already stopped */
-      }
-    };
-  }, []);
+    onPendingChange?.(pending);
+    return () => onPendingChange?.(false);
+  }, [pending, onPendingChange]);
 
-  const toggle = () => {
-    const SR =
-      typeof window !== "undefined"
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : null;
-    if (!SR) return;
-    if (listening && recognitionRef.current) {
-      recognitionRef.current.stop();
-      return;
-    }
-    const rec = new SR();
-    rec.continuous = true;
-    rec.interimResults = false;
-    rec.lang = "en-US";
-    rec.onresult = (ev) => {
-      let append = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
-      }
-      if (append.trim()) onAppendRef.current?.(append.trim());
-    };
-    rec.onerror = (e) => {
-      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-        alert(
-          "Microphone access is blocked. Allow mic permission for this site, or use the keyboard mic on your phone.",
-        );
-      }
-      setListening(false);
-    };
-    rec.onend = () => {
-      setListening(false);
-      recognitionRef.current = null;
-    };
-    recognitionRef.current = rec;
-    try {
-      rec.start();
-      setListening(true);
-    } catch {
-      /* start can throw if already running */
-    }
-  };
+  // A consumer disables the mic while it is busy (e.g. an AI rewrite of the
+  // same field). Dictation keeps listening through pauses, and a disabled
+  // button can't be tapped to stop it, so disabling it ends the session and
+  // drops a result still in flight.
+  useEffect(() => {
+    if (disabled && listening) cancel();
+  }, [disabled, listening, cancel]);
 
   if (!supported) return null;
 
-  const {
-    accent = "#0ea5e9",
-    muted = "#94a3b8",
-    red = "#ef4444",
-    card = "#ffffff",
-  } = palette || {};
+  const label = micLabel({ uploading, listening, title });
 
   return (
     <Control
       type="button"
       onClick={toggle}
-      disabled={disabled}
-      title={listening ? "Stop dictation" : title}
-      aria-label={listening ? "Stop dictation" : title}
+      disabled={disabled || uploading}
+      aria-busy={uploading || undefined}
+      title={label}
+      aria-label={label}
       aria-pressed={listening}
       variant={migrated ? (listening ? "danger" : "secondary") : undefined}
       className={migrated ? "min-w-11 !p-0" : undefined}
-      style={
-        migrated
-          ? undefined
-          : {
-              width: size,
-              height: size,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: "50%",
-              border: `1px solid ${listening ? red : muted}`,
-              background: listening ? red : card,
-              color: listening ? "#fff" : accent,
-              cursor: "pointer",
-              padding: 0,
-              boxShadow: listening ? `0 0 0 4px ${red}33` : "none",
-              transition: "background 0.15s, box-shadow 0.15s",
-              flex: "0 0 auto",
-            }
-      }
+      style={migrated ? undefined : legacyMicStyle({ size, listening, palette })}
     >
       <svg
         width={Math.round(size * 0.52)}

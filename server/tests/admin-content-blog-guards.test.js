@@ -333,6 +333,14 @@ describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invis
     expect(claimWrites[claimWrites.length - 1]).toBeNull();
   });
 
+  test('a final-text comparison rejection (hero / body-image alt) is the author\'s to fix: 400, not 500 (#5146 r11)', async () => {
+    setupDb();
+    tableState.post = { id: POST_ID, status: 'draft', publish_claimed_at: null };
+    AstroPublisher.publishAstro.mockRejectedValue(Object.assign(new Error('final text fails the comparison gate: P0 COMPARISON_DISPARAGEMENT'), { code: 'BLOG_OWNER_LIST_BLOCKED' }));
+    const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(400);
+  });
+
   test('DELETE refuses a mid-publish claimed row (scheduler marker or manual claim)', async () => {
     const calls = setupDb();
     tableState.post = { id: POST_ID, status: 'queued', astro_status: null, publish_status: 'publishing' };
@@ -381,7 +389,8 @@ describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invis
     AstroPublisher.publishAstro.mockResolvedValue({ pr_number: 13 });
     const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
     expect(r.statusCode).toBe(200);
-    expect(AstroPublisher.publishAstro).toHaveBeenCalledWith(POST_ID);
+    // An admin click is a human publish: the owner-list chokepoint defers to it.
+    expect(AstroPublisher.publishAstro).toHaveBeenCalledWith(POST_ID, { humanApproved: true });
   });
 
   test('PUT refuses a mid-publish row and CAS-guards against a concurrent status flip', async () => {

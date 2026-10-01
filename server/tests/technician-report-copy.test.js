@@ -30,7 +30,6 @@ const {
 const {
   buildTodaysResult,
   buildTypedReportSnapshot,
-  NEXT_STEP_CHIPS,
 } = require('../services/service-report/activity-indicators');
 
 const AI_REPORT = [
@@ -698,26 +697,24 @@ describe('summaryCopySignature — PDF cache-key component', () => {
 });
 
 describe('typed snapshot — technician report body in the generic tail compositions', () => {
-  const chips = ['Monitor activity'];
-  const chipSentence = NEXT_STEP_CHIPS['Monitor activity'];
-
-  test('one-time pest default branch: body is the reviewed report + next step, headline stays deterministic', () => {
+  test('one-time pest default branch: body is the reviewed report alone, headline stays deterministic', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'one_time_pest_treatment',
       values: { activity_level: 'Moderate' },
-      nextStepChips: chips,
       serviceLabel: 'Pest Control Re-Service',
       technicianReportBody: AI_BODY,
     });
     // No trailing period — headlines aren't sentences (owner 2026-07-21).
     expect(snapshot.todaysResult.headline).toBe('Pest Control Re-Service completed today');
-    expect(snapshot.todaysResult.body).toBe(`${AI_BODY} ${chipSentence}`);
+    // Next-step chip picker retired (owner ruling 2026-09-27) — the body is
+    // the reviewed report alone, with no trailing chip-derived sentence.
+    expect(snapshot.todaysResult.body).toBe(AI_BODY);
     expect(snapshot.todaysResult.bodySource).toBe('technician_report');
     // v5: every gauge lane plus the knockdown and one-time mosquito story
     // branches joined the technician-report lane (owner 2026-08-11 — the
     // cockroach report dropped the generated copy). v4 added rodent
     // trapping + the declared setup/re-check composition (#3159).
-    expect(snapshot.summaryTemplateVersion).toBe(6);
+    expect(snapshot.summaryTemplateVersion).toBe(7);
   });
 
   test('one-time pest zero state keeps the template body — a body drafted pre-zero-flip must not contradict the headline (Codex P2)', () => {
@@ -725,7 +722,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'one_time_pest_treatment',
       reportTypeLabel: 'Pest Control Re-Service Summary',
       values: { activity_level: 'None observed' },
-      chips,
       technicianReportBody: AI_BODY,
     });
     expect(result.headline).toBe('No active signs of pest activity observed today.');
@@ -737,10 +733,9 @@ describe('typed snapshot — technician report body in the generic tail composit
     const snapshot = buildTypedReportSnapshot({
       projectType: 'one_time_pest_treatment',
       values: { activity_level: 'Moderate' },
-      nextStepChips: chips,
       serviceLabel: 'Pest Control Re-Service',
     });
-    expect(snapshot.todaysResult.body).toBe(`We completed the scheduled service. ${chipSentence}`);
+    expect(snapshot.todaysResult.body).toBe('We completed the scheduled service.');
     expect(snapshot.todaysResult).not.toHaveProperty('bodySource');
   });
 
@@ -748,7 +743,6 @@ describe('typed snapshot — technician report body in the generic tail composit
     const snapshot = buildTypedReportSnapshot({
       projectType: 'one_time_pest_treatment',
       values: { activity_level: 'Moderate', treatment_performed: 'Spot treated the kitchen.' },
-      nextStepChips: chips,
       technicianReportBody: AI_BODY,
     });
     expect(snapshot.todaysResult.body.startsWith(AI_BODY)).toBe(true);
@@ -763,7 +757,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Moderate' },
-      chips,
       activity: { score: 3 },
       visitSequence: 1,
       technicianReportBody: AI_BODY,
@@ -778,7 +771,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'None observed' },
-      chips,
       activity: { score: 0 },
       visitSequence: 1,
       technicianReportBody: AI_BODY,
@@ -792,7 +784,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'termite_treatment',
       reportTypeLabel: 'Termite Pretreatment Summary',
       values: { termite_activity: 'Suspected activity' },
-      chips,
       activity: { score: 2 },
       visitSequence: 1,
       technicianReportBody: AI_BODY,
@@ -806,7 +797,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'palmetto_roach_knockdown',
       reportTypeLabel: 'Large-Roach Knockdown Summary',
       values: { activity_level: 'Moderate' },
-      chips,
       activity: { score: 3 },
       visitSequence: 1,
       technicianReportBody: AI_BODY,
@@ -828,7 +818,6 @@ describe('typed snapshot — technician report body in the generic tail composit
         followup_required: 'Yes',
         followup_window: '10–14 days',
       },
-      chips,
       activity: { score: 4 },
       visitSequence: 1,
       technicianReportBody: AI_BODY,
@@ -845,7 +834,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'palmetto_roach_knockdown',
       reportTypeLabel: 'Large-Roach Knockdown Summary',
       values: { activity_level: 'None observed' },
-      chips,
       activity: { score: 0 },
       visitSequence: 1,
       technicianReportBody: AI_BODY,
@@ -859,12 +847,13 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'mosquito_event',
       reportTypeLabel: 'Mosquito Treatment Summary',
       values: { activity_level: 'Light' },
-      chips,
       visitSequence: 1,
       technicianReportBody: AI_BODY,
     });
     expect(result.headline).toBe('Mosquito activity was light today.');
-    expect(result.body).toBe(`${AI_BODY} ${chipSentence}`);
+    // Next-step chip picker retired (owner ruling 2026-09-27) — no trailing
+    // chip-derived sentence.
+    expect(result.body).toBe(AI_BODY);
     expect(result.bodySource).toBe('technician_report');
   });
 
@@ -873,7 +862,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'mosquito_event',
       reportTypeLabel: 'Mosquito Treatment Summary',
       values: { activity_level: 'None observed' },
-      chips,
       visitSequence: 1,
       technicianReportBody: AI_BODY,
     });
@@ -892,7 +880,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Low' },
-      chips,
       activity: { score: 1 },
       visitSequence: 1,
       technicianReportBody: HEAVY_DRAFT,
@@ -908,7 +895,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Heavy' },
-      chips,
       activity: { score: 4 },
       visitSequence: 1,
       technicianReportBody: HEAVY_DRAFT,
@@ -920,7 +906,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Moderate' },
-      chips,
       activity: { score: 3 },
       visitSequence: 1,
       technicianReportBody: HEAVY_DRAFT,
@@ -933,7 +918,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Low' },
-      chips,
       activity: { score: 1 },
       visitSequence: 1,
       technicianReportBody: 'Cockroach activity was heavy today and can continue between visits without treatment. '
@@ -948,7 +932,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Low' },
-      chips,
       activity: { score: 1 },
       visitSequence: 1,
       // 'may' governs "decrease", not the heavy claim — the stale Heavy
@@ -964,7 +947,6 @@ describe('typed snapshot — technician report body in the generic tail composit
     const base = {
       projectType: 'termite_bait_station',
       reportTypeLabel: 'Termite Bait Station Summary',
-      chips,
       activity: { score: 2 },
       visitSequence: 2,
     };
@@ -1018,7 +1000,6 @@ describe('typed snapshot — technician report body in the generic tail composit
     const base = {
       projectType: 'termite_bait_station',
       reportTypeLabel: 'Termite Bait Station Summary',
-      chips,
       activity: { score: 2 },
       visitSequence: 2,
     };
@@ -1220,7 +1201,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Low' },
-      chips,
       activity: { score: 1 },
       visitSequence: 1,
     };
@@ -1239,7 +1219,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Low' },
-      chips,
       activity: { score: 1 },
       visitSequence: 1,
       technicianReportBody: 'Without continued treatment, activity may become heavy again. '
@@ -1253,7 +1232,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Low' },
-      chips,
       activity: { score: 1 },
       visitSequence: 1,
       technicianReportBody: 'Activity was heavy at our last visit and has dropped sharply. '
@@ -1267,7 +1245,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'cockroach',
       reportTypeLabel: 'Cockroach Treatment Summary',
       values: { activity_level: 'Low' },
-      chips,
       activity: { score: 1 },
       visitSequence: 1,
       technicianReportBody: HEAVY_DRAFT,
@@ -1282,7 +1259,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'palmetto_roach_knockdown',
       reportTypeLabel: 'Large-Roach Knockdown Summary',
       values: { activity_level: 'Low' },
-      chips,
       activity: { score: 1 },
       visitSequence: 1,
       technicianReportBody: 'Roach activity was severe around the garage today. We treated the exterior.',
@@ -1296,7 +1272,6 @@ describe('typed snapshot — technician report body in the generic tail composit
       projectType: 'mosquito_event',
       reportTypeLabel: 'Mosquito Treatment Summary',
       values: { activity_level: 'Light' },
-      chips,
       visitSequence: 1,
       technicianReportBody: 'Mosquito activity was heavy near the beds. We applied a barrier treatment.',
     });
@@ -1318,7 +1293,6 @@ describe('typed snapshot — technician report body in the generic tail composit
         exclusion_areas: 'Garage',
         remaining_concerns: 'No remaining concerns observed',
       },
-      chips: [],
       technicianReportBody: AI_BODY,
     });
     expect(result.headline).toBe('Exclusion repairs were completed to reduce rodent access and help prevent re-entry.');

@@ -693,8 +693,12 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     // (round-24 P2).
     // On a clock taken NOW, not the tick's: the check is about what is true
     // at the moment the push leaves (round-24 P1).
-    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now: new Date() })) await techNotices.pushTrackingNotice(notice);');
-    expect(detector).toContain('async function stillOverdue(conn, notice, { now = new Date() } = {}) {');
+    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now: new Date() })) {');
+    expect(detector).toContain('async function stillOverdue(conn, notice, { now = new Date(), lock = true, rethrow = false } = {}) {');
+    // Asked again at each device's provider boundary, as a plain read (no
+    // stop lock or FOR UPDATE mid-send) — codex #5421 P1.
+    expect(detector).toContain('checkCurrent: (recheckConn) => stillOverdue(recheckConn, notice, { now: new Date(), lock: false, rethrow: true }),');
+    expect(detector).toContain('if (lock) await require(\'./visit-groups\').lockStopForRow(trx, serviceId);');
     // And a tech's own dismissal clears any supersession stamp the sweep
     // wrote in the meantime, or the next cycle resurrects the card it cleared.
     const route = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'tech-notifications.js'), 'utf8');
@@ -1503,10 +1507,20 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
     expect(event.metadata).toMatchObject({ start_at: null, series_move_id: 'move-7' });
     // The sender allows that path only for the series confirmation.
     const sender = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
-    expect(sender).toContain('if (!knownSlot && !seriesMoveId) return;');
+    expect(sender).toContain('if (!knownSlot && !seriesMoveId && !windowUnknown) return;');
     // Stop-wide copy keeps that identity in the fallback, or the siblings
     // stay on their pre-move windows (round-26 P1).
     expect(sender).toContain('stopWide: !!sendInput.metadata?.notificationEventKey,');
+  });
+
+  // A single notice that quoted no window (a windowless reschedule: "at a
+  // time we'll confirm") is the same honest record: an UNKNOWN window, so
+  // the visit is not left on its older one.
+  test('a notice that quoted no window records an unknown-window promise', async () => {
+    expect(await recordSentWindowFallback({ visitId: 'visit-1', startAtMs: null, windowUnknown: true })).toBe(true);
+    const [[event]] = recordAuditEvent.mock.calls;
+    expect(event.metadata).toMatchObject({ start_at: null, fallback_reason: 'messaging_audit_unavailable' });
+    expect(event.metadata.series_move_id).toBeUndefined();
   });
 
   test('it never throws into the send path', async () => {

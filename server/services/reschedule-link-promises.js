@@ -502,20 +502,33 @@ function narrowBySubject(candidates, subject) {
 // duplicate, narrower allowlist here parked a link the customer could
 // already use the page for (codex #4293 P1 r8). Group membership and the
 // token stay here; eligibility() alone decides status AND missed-vs-past.
-// Self-serve notice window (owner ruling 2026-09-23): the public page now
-// refuses to MOVE a visit that itself starts within SELF_SERVE_NOTICE_HOURS
+// Self-serve MOVE notice window (owner ruling 2026-09-23; split from the
+// book window 2026-09-28, SELF_SERVE_MOVE_NOTICE_HOURS): the public page now
+// refuses to MOVE a visit that itself starts within the move notice window
 // (missed visits exempt — they are being rebooked), so a promised link for
 // such a visit would land on a page that says "call us". Sending that link is
 // a self-serve act, distinct from the exempt voice BOOKING; park it for the
 // office instead. Same predicate reschedule-public.js layers over
 // eligibilityAsync (withSelfServeNotice), kept out of the shared eligibility
 // module the voice-agent surfaces also read.
+//
+// Shared with reschedule-link.js (buildRescheduleLink, codex/plan C3/C6):
+// true when an otherwise self-serviceable visit (eligibility().ok, and not a
+// missed-visit rebook — that customer is picking a NEW time, not moving a
+// visit off its own too-soon start) currently starts inside the self-serve
+// MOVE notice window, so a "reschedule online" link/CTA for it would land on
+// a page that refuses the move. `verdict` is the caller's own
+// `eligibility(visit, now)` result, so this never recomputes it.
+function tooSoonToSelfServeMove(visit, verdict, now) {
+  if (!verdict.ok || verdict.missed) return false;
+  return require('./scheduling/self-serve-notice').visitInsideMoveNoticeWindow(visit, now);
+}
+
 function visitNotSelfServiceReason(visit, now) {
   if (!visit.reschedule_token || (visit.visit_id && visit.follow_through_group_eligible !== true)) return 'visit_not_self_service';
   const verdict = require('./reschedule-eligibility').eligibility(visit, now);
   if (verdict.ok) {
-    const { visitInsideNoticeWindow } = require('./scheduling/self-serve-notice');
-    if (!verdict.missed && visitInsideNoticeWindow(visit, now)) return 'visit_not_self_service';
+    if (tooSoonToSelfServeMove(visit, verdict, now)) return 'visit_not_self_service';
     return null;
   }
   return verdict.reason === 'past' ? 'visit_elapsed' : 'visit_not_self_service';
@@ -1527,6 +1540,21 @@ async function dispatch(conn, row, context, { now, clock, send, buildLink, rende
       // attempt fences until that request returns, so an office verdict or
       // replacement recording cannot cancel a checked attempt mid-handoff.
       withSmsHandoff: (handoff) => conn.transaction(async (trx) => {
+        // codex #5018 pre-push P1 (round 2) added a `customers` FOR SHARE
+        // lock here, BEFORE call_log, to fix a lock-order inversion against
+        // a concurrent reprocess claim (customers FOR UPDATE, then
+        // call_log): dispatch()'s sms_log insert, unconditionally inside
+        // this handoff's own transaction at the time, took a KEY SHARE on
+        // `customers` through its FK at the very end, the opposite order.
+        // The structural fix (post-r7) made that insert OPT-IN
+        // (`logInHandoff`), and this lane never opts in — reschedule links
+        // are not one of the callers whose evidence must commit before a
+        // lock releases, so the insert now runs post-handoff, on the plain
+        // db, outside any transaction, exactly like every other non-opt-in
+        // caller (see twilio.js's dispatch()). With no in-transaction FK
+        // lock on `customers` left to invert against, the customers-first
+        // lock this fix added has nothing left to fix — removed rather than
+        // kept as dead defensive code (CLAUDE.md: remove superseded code).
         await lockTriageCall(trx, row.related_call_log_id);
         // The recording processor may advance call_log without this advisory
         // lock. Its generation/transcript must stay fixed while the source
@@ -1857,10 +1885,11 @@ async function acquireSendLock(connection, customerId, held) {
 // was written for (local codex audit P1). An unpooled connection's own
 // error/end/close events are the authority instead — and listening for 'error'
 // also keeps a dead raw connection from taking the process down with it.
+// Codex #4971 r15 P1: lifted into raw-connection-slots.js so the
+// parent-decision lock session (annual-prepay-renewals.js) shares this exact
+// mechanism instead of a second copy.
 function trackInterlockLoss(connection, held) {
-  if (typeof connection?.on !== 'function') return;
-  const lost = () => { held.lost = true; };
-  for (const event of ['error', 'end', 'close']) connection.on(event, lost);
+  require('./raw-connection-slots').trackConnectionLoss(connection, held);
 }
 
 // The interlock runs OUTSIDE the pool, so it has to be bounded in both time
@@ -1871,53 +1900,20 @@ function trackInterlockLoss(connection, held) {
 // the caller decides whether that is a retry or an ordinary send.
 const INTERLOCK_CONNECT_MS = 5000;
 const MAX_OPEN_INTERLOCKS = 4;
-let openInterlocks = 0;
+// The cap + connect-timeout mechanism itself is shared (raw-connection-slots.js,
+// lifted from here) — the renewal gate's session lock uses the same one.
+const interlockSlots = require('./raw-connection-slots').rawConnectionSlots({
+  max: MAX_OPEN_INTERLOCKS,
+  connectMs: INTERLOCK_CONNECT_MS,
+  logPrefix: '[reschedule-link-promises] send interlock',
+});
 
-async function openInterlockConnection() {
-  if (openInterlocks >= MAX_OPEN_INTERLOCKS) {
-    require('./logger').warn(`[reschedule-link-promises] send interlock at its connection cap (${MAX_OPEN_INTERLOCKS})`);
-    return null;
-  }
-  openInterlocks += 1;
-  let timer = null;
-  let opening = null;
-  try {
-    opening = Promise.resolve(db.client.acquireRawConnection());
-    return await Promise.race([
-      opening,
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('interlock connect timed out')), INTERLOCK_CONNECT_MS); }),
-    ]);
-  } catch (err) {
-    if (err.message === 'interlock connect timed out') {
-      // The timer winning the race proves nothing about the underlying
-      // connect — it is still in flight, and freeing the slot on the timer
-      // alone (as an earlier round did) let a burst of slow connects each
-      // release their slot while the real sockets stayed open underneath,
-      // so the cap no longer bounded the true number of concurrent raw
-      // connections (codex #4293 P1 r8). Keep the slot counted until the
-      // attempt actually settles: a late-arriving connection is destroyed —
-      // ITS destroy, not this timeout, is what frees the slot — and a late
-      // rejection (the connect failed on its own after all) frees it
-      // directly, with nothing left to destroy.
-      opening.then((late) => closeInterlockConnection(late), () => { openInterlocks -= 1; });
-    } else {
-      // acquireRawConnection() itself rejected before the timer ever fired —
-      // the attempt is already over, with nothing left to wait for.
-      openInterlocks -= 1;
-    }
-    require('./logger').warn(`[reschedule-link-promises] send interlock connection unavailable (${err.code || err.name || 'error'})`);
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+function openInterlockConnection() {
+  return interlockSlots.acquire();
 }
 
-async function closeInterlockConnection(connection, counted = true) {
-  if (counted) openInterlocks -= 1;
-  if (!connection) return;
-  await db.client.destroyRawConnection(connection).catch((err) => {
-    require('./logger').warn(`[reschedule-link-promises] send interlock close failed (${err.code || err.name || 'error'})`);
-  });
+function closeInterlockConnection(connection, counted = true) {
+  return interlockSlots.release(connection, counted);
 }
 
 const LOCK_BUSY = Object.freeze({ sent: false, blocked: true, retryable: true, code: 'LINK_LOCK_BUSY',
@@ -2164,4 +2160,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isPromisedFloor, promisedFloorAt };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isPromisedFloor, promisedFloorAt, tooSoonToSelfServeMove };

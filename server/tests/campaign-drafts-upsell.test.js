@@ -43,6 +43,8 @@ function makeBuilder(table, cfg = {}) {
   for (const m of [
     'join', 'leftJoin', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot',
     'orWhere', 'orWhereNull', 'orderBy', 'select', 'groupBy', 'limit',
+    // The shared gate's durable renewal-contact check (Codex #4971 r4 P2).
+    'whereRaw', 'orWhereExists', 'from',
   ]) b[m] = jest.fn(() => b);
   b.where = jest.fn((arg) => {
     if (typeof arg === 'function') arg.call(b, b);

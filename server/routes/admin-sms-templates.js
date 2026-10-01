@@ -32,6 +32,45 @@ function parseTemplateVariables(value) {
   }
 }
 
+// Owner report 2026-09-28: a day-before reminder read "Waves Waves Assessment:
+// tomorrow, …" and a confirmation read "Your Waves Assessment with Waves is
+// booked" — the body already says "Waves" once, and the substituted
+// service-name value ALSO carries the brand because some catalog services
+// are literally named "Waves Assessment" / "Waves Pest Control Appointment
+// Service". Strip a LEADING "Waves " from those values (start of string, or
+// right after a join like "& " / ", " / ", and " / " and ") ONLY when the
+// body's own literal text (placeholders removed) already says "Waves" as a
+// whole word — never touch a body that doesn't say it, and never touch a
+// value that is exactly "Waves" (nothing would be left to show). Matched
+// case-sensitively so "WaveGuard" and the lowercase wavespestcontrol.com
+// domain never count as the brand already being said.
+const SERVICE_NAME_VAR_KEYS = Object.freeze([
+  'service_type', 'service', 'service_label', 'service_name',
+  'project_type', 'prep_label', 'renewal_label',
+]);
+const BODY_LITERAL_WAVES_RE = /\bWaves\b/;
+const LEADING_BRAND_JOIN_RE = /(^|& |, and | and |, )Waves\s+/g;
+
+function bodyAlreadySaysWaves(body) {
+  const literal = String(body || '').replace(/\{[a-zA-Z][a-zA-Z0-9_]*\}/g, '');
+  return BODY_LITERAL_WAVES_RE.test(literal);
+}
+
+// Applied to the already-formatted vars map (formatSmsTemplateVars output),
+// right before the substitution loop, so both getTemplate and the admin
+// preview route dedupe the same way from the same call site shape.
+function dedupeBrandInServiceVars(body, formattedVars) {
+  if (!bodyAlreadySaysWaves(body)) return formattedVars;
+  const out = { ...formattedVars };
+  for (const key of SERVICE_NAME_VAR_KEYS) {
+    const val = out[key];
+    if (typeof val === 'string' && val !== 'Waves' && val.includes('Waves')) {
+      out[key] = val.replace(LEADING_BRAND_JOIN_RE, '$1');
+    }
+  }
+  return out;
+}
+
 function extractTemplatePlaceholders(body) {
   const placeholders = new Set();
   const re = /\{([a-zA-Z][a-zA-Z0-9_]*)\}/g;
@@ -92,6 +131,15 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // Codex P2). buildLeadConsultationSmsLine passes this same requiredVars
   // list to getTemplate at render time.
   lead_consultation_link: Object.freeze(['consultation_url']),
+  // Missed-call text-back: "call back anytime at <the line they dialed>" is
+  // the one fact the text carries; missed-call-text-back.js passes this same
+  // list to getTemplate at render time.
+  missed_call_text_back: Object.freeze(['callback_clause']),
+  // Lawn watering text: the frozen watering lines ARE the message. A body
+  // edited to drop {watering_lines} would otherwise render as a bare lead-in
+  // with no instruction; lawn-watering-sms.js passes this same requiredVars
+  // list to getTemplate at render time.
+  lawn_watering_instruction: Object.freeze(['watering_lines']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {
@@ -300,7 +348,8 @@ router.post('/preview', async (req, res) => {
     const template = await db('sms_templates').where({ id: templateId }).first();
     if (!template) return res.status(404).json({ error: 'Template not found' });
     let preview = template.body;
-    for (const [key, val] of Object.entries(formatSmsTemplateVars(sampleData || {}))) {
+    const previewVars = dedupeBrandInServiceVars(template.body, formatSmsTemplateVars(sampleData || {}));
+    for (const [key, val] of Object.entries(previewVars)) {
       preview = preview.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
     }
     res.json({ preview, originalLength: template.body.length, previewLength: preview.length });
@@ -435,14 +484,17 @@ const MSG_TYPE_TO_TEMPLATE = {
 };
 
 // ── Template helper for services — check if a template is enabled before sending ──
-router.isTemplateActive = async function(messageType) {
+// `database`: a caller holding an open transaction reads on it (never a second
+// pool connection). `requireRow`: a missing row is NOT sendable, as getTemplate
+// reads it (the provider's kill-switch check keeps missing = active).
+router.isTemplateActive = async function(messageType, { database = db, requireRow = false } = {}) {
   try {
-    if (!(await db.schema.hasTable('sms_templates'))) return true;
+    if (!(await database.schema.hasTable('sms_templates'))) return !requireRow;
     const templateKey = MSG_TYPE_TO_TEMPLATE[messageType] || messageType;
-    const t = await db('sms_templates').where({ template_key: templateKey }).first();
-    if (!t) return true; // template not in DB = active by default
+    const t = await database('sms_templates').where({ template_key: templateKey }).first();
+    if (!t) return !requireRow; // template not in DB = active by default
     return t.is_active !== false;
-  } catch { return true; }
+  } catch { return !requireRow; }
 };
 
 // Get template body by key (returns null if disabled)
@@ -494,7 +546,8 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
         return null;
       }
     }
-    for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {
+    const renderVars = dedupeBrandInServiceVars(body, formatSmsTemplateVars(vars));
+    for (const [key, val] of Object.entries(renderVars)) {
       // Function-form replacement: a STRING replacement treats `$$`/`$&`
       // (and `$n` when the pattern captures) as substitution tokens, so a
       // variable carrying a dollar amount (the card-hold fee disclosure —

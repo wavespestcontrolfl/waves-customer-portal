@@ -14,9 +14,16 @@ import {
   PestStatusHero,
   PestPrimaryMove,
   PestCustomerConcern,
+  PestRainExpectation,
+  PestSpiderExpectation,
+  PestWhatToExpect,
 } from './PestReportV2';
-export default function PestReportV2Section({ data, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null }) {
+import { reportSectionsForText } from '../ReportSections';
+export default function PestReportV2Section({ data, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null, reportSections = null, nextVisitLabel = null }) {
   if (!data) return null;
+  // The four-section report carries its own "What to expect"; the card would
+  // say the same thing twice.
+  const reportSectionsShown = Boolean(reportSectionsForText(reportSections, data.aiSummary?.body));
   return (
     // No inset: cards align edge-to-edge with the report's .sr-section cards — the
     // old maxWidth + side padding rendered this block 32px narrower than every other
@@ -31,6 +38,8 @@ export default function PestReportV2Section({ data, token = null, mode = 'live',
         mode={mode}
         tracedMap={tracedMap}
         pressureTrendSlot={pressureTrendSlot}
+        reportSections={reportSections}
+        nextVisitLabel={nextVisitLabel}
       />
       {/* Only a recorded treatment map belongs in the hero. Older payloads
           may still carry defense rows; they no longer create a schematic. */}
@@ -41,6 +50,12 @@ export default function PestReportV2Section({ data, token = null, mode = 'live',
       {/* Bug files, seasonal outlook, and the WaveGuard receipt were removed from
           the composed section (owner 2026-07-09) — the components remain exported
           from PestReportV2 for any future re-mount. */}
+      {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark) —
+          data.expectations is absent whenever the gate is off or the visit has
+          no relevant facts, so these three render nothing by default. */}
+      {data.expectations?.rain ? <PestRainExpectation rain={data.expectations.rain} /> : null}
+      {data.expectations?.spiders ? <PestSpiderExpectation spiders={data.expectations.spiders} /> : null}
+      {data.expectations?.whatToExpect && !reportSectionsShown ? <PestWhatToExpect whatToExpect={data.expectations.whatToExpect} /> : null}
     </div>
   );
 }

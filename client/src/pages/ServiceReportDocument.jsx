@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
-import { epaReg, isProductApplication } from '../lib/product-application';
+import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
+import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -250,7 +252,7 @@ const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 // that consolidation necessary; this local pass stays as a backstop for any
 // path that reaches the document without going through that boundary, and
 // must never become the primary enforcement point again.
-function sanitizeReentryCopy(value) {
+export function sanitizeReentryCopy(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
@@ -308,6 +310,21 @@ function InfoRow({ label, children }) {
     <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '1.5px 0', minWidth: 0 }}>
       <Label>{label}</Label>
       <span style={{ color: INK, fontSize: 11.5, lineHeight: 1.35, minWidth: 0, overflowWrap: 'anywhere' }}>{children}</span>
+    </div>
+  );
+}
+
+// titled: the standalone block already heads it "Poison Control".
+// showApplicator: the visit recorded an actual application.
+function DocPoisonControl({ data, listsProducts = false, titled = false, showApplicator = false }) {
+  const applicator = showApplicator ? applicatorIdLine(data.technicianName, data.applicatorFdacsId) : null;
+  return (
+    <div className="doc-keep" data-testid="doc-poison-control" style={{ margin: '8px 0 0', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
+      <p style={{ margin: 0 }}>
+        {!titled && <><strong style={{ color: INK, fontWeight: 700 }}>Poison Control:</strong>{' '}</>}
+        <PoisonControlCopy listsProducts={listsProducts} linkStyle={{ color: INK, fontWeight: 700 }} />
+      </p>
+      {applicator && <p style={{ margin: '2px 0 0', color: INK, fontWeight: 600 }}>{applicator}</p>}
     </div>
   );
 }
@@ -593,6 +610,10 @@ export default function ServiceReportDocument({ data, token }) {
   const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
+  // The four-section report carries its own "What to expect": the separate
+  // block below would print the same thing twice (as the live pest
+  // dashboard already suppresses it).
+  const summarySectionsShown = summaryParagraphs.some((paragraph) => reportSectionsForText(data.reportSections, paragraph));
   if (reservice) {
     // Same precedence as the web hero (smartStatusSummary): an honest
     // warning — cockroach/termite V2 status, a Pest V2 "recommended"/
@@ -758,18 +779,35 @@ export default function ServiceReportDocument({ data, token }) {
   // inspection-only lawn visit claims a treatment that didn't happen (5th
   // variant of this class: defaults read as evidence).
   if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
+  // A visit with a server watering instruction (banner: hold / water-in) prints
+  // it ONCE, through aftercare.watering above. The hero task, follow-up and
+  // insight actions restate banner lines verbatim (a hold-then-water-in hero
+  // carries both steps, and the water-in step alone once the hold ends), so
+  // every banner line is stripped from them (any other advice stays).
+  // Stripped sentence by sentence: the banner composes a plan sentence onto a
+  // frozen line (partial credit), so the frozen sentence alone must go too.
+  const bannerSentences = hasActualTreatment
+    && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
+    ? (data.reportV2.banner.lines || [])
+      .filter((line) => typeof line === 'string' && line)
+      .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])
+      .sort((a, b) => b.length - a.length) : [];
+  const pushAction = (text) => {
+    if (!bannerSentences.length) { pushRec(text); return; }
+    pushRec(bannerSentences.reduce((acc, line) => acc.split(line).join(' '), String(text || '')).replace(/\s+/g, ' '));
+  };
   pushRec(v2NextMove);
   pushRec(termiteNextMove);
   // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
   // snapshot.customerAction and per-insight customerAction; omitting it drops
   // required actions (e.g. correcting irrigation) from the artifact.
-  pushRec(v2?.snapshot?.customerAction);
-  pushRec(v2?.followUp?.customerAction);
+  pushAction(v2?.snapshot?.customerAction);
+  pushAction(v2?.followUp?.customerAction);
   // wavesNext is what WAVES will do next (future tense, never the past-tense
   // wavesAction) — a commitment, so it belongs in the permanent record.
   pushRec(v2?.snapshot?.wavesNext
     || (Array.isArray(v2?.insights) ? v2.insights : []).map((i) => i?.nextVisitPlan).find(Boolean));
-  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushRec(insight?.customerAction));
+  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushAction(insight?.customerAction));
   pushRec(v2?.mowing?.recommendation);
 
   // "(3 of 5 — baseline recorded today)" / "(3 of 5)" / " — baseline
@@ -981,8 +1019,16 @@ export default function ServiceReportDocument({ data, token }) {
         {summaryParagraphs.length > 0 && (
           <div className="doc-keep">
             <SectionHeader>Summary of today&apos;s service</SectionHeader>
+            {/* The four-section report prints with its titles; any other
+                paragraph prints as before. */}
             {summaryParagraphs.map((paragraph) => (
-              <p key={paragraph} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{paragraph}</p>
+              <ReportText
+                key={paragraph}
+                text={paragraph}
+                sections={data.reportSections}
+                style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+              />
             ))}
           </div>
         )}
@@ -1006,6 +1052,40 @@ export default function ServiceReportDocument({ data, token }) {
             {concern.nextStep && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{concern.nextStep}</p>
             )}
+          </div>
+        )}
+
+        {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
+            pestV2.expectations is built server-side (pest-report-v2.js) with
+            forecastHeavyRain always false for this render (mode !== 'live'
+            in reports-public.js) — the NWS forecast piece never reaches a
+            permanent PDF; everything here is already PDF-safe as delivered. */}
+        {pestV2?.expectations?.rain?.lines?.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>Rain and your treatment</SectionHeader>
+            {pestV2.expectations.rain.lines.map((line) => (
+              <p key={line} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{line}</p>
+            ))}
+          </div>
+        )}
+        {pestV2?.expectations?.spiders?.expectation && (
+          <div className="doc-keep">
+            <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
+            {pestV2.expectations.spiders.whatWeDid && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.whatWeDid}</p>
+            )}
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.expectation}</p>
+            {pestV2.expectations.spiders.nextStep && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.nextStep}</p>
+            )}
+          </div>
+        )}
+        {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && !summarySectionsShown && (
+          <div className="doc-keep">
+            <SectionHeader>What to expect</SectionHeader>
+            {pestV2.expectations.whatToExpect.lines.map((line) => (
+              <Bullet key={line}>{line}</Bullet>
+            ))}
           </div>
         )}
 
@@ -1244,6 +1324,17 @@ export default function ServiceReportDocument({ data, token }) {
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}
+                            {/* Owner-approved product wording
+                                (GATE_REPORT_PRODUCT_COPY, 2026-09-28) is
+                                LIVE-VIEW ONLY (codex P1 2026-09-28): the
+                                server strips `report_copy` from every
+                                pdf/static/sms_preview payload before it
+                                reaches this document (the PDF cache key
+                                doesn't vary on the gate), so there is
+                                nothing to render here — see
+                                stripLiveOnlyReportProductCopy in
+                                report-data.js and ReportViewPage.jsx for the
+                                live-view rendering of this field. */}
                             {/* Legacy lawn reports (no reportV2) carry approved
                                 watering-in guidance ONLY here — dropping it
                                 loses a required instruction. */}
@@ -1257,6 +1348,22 @@ export default function ServiceReportDocument({ data, token }) {
                   );
               })}
             </table>
+            {/* Same gate as the web section: only a visit that applied a
+                product prints Poison Control. The tel: link stays tappable
+                in the PDF. */}
+            <DocPoisonControl data={data} listsProducts showApplicator />
+          </div>
+        )}
+
+        {/* No product rows, yet something went down (the server's
+            applicationMade verdict, an unknown verdict — null, fail toward
+            the safety line — or rodenticide in bait stations): Poison
+            Control prints on its own, mirroring the web report. The
+            applicator is named only on real application evidence. */}
+        {appliedProducts.length === 0 && (data.applicationMade === true || data.applicationMade === null || reportHasRodenticide(data)) && (
+          <div className="doc-keep">
+            <SectionHeader>Poison Control</SectionHeader>
+            <DocPoisonControl data={data} titled showApplicator={data.applicationMade === true} />
           </div>
         )}
 
@@ -1524,18 +1631,35 @@ export default function ServiceReportDocument({ data, token }) {
                 result prints in the Station protection row above, so the
                 frozen headline/body stay out (sole-summary rule). */}
             {!(termiteV2Companion && companion.type === 'termite_bait_station') && companion.todaysResult?.headline && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-                {String(companion.todaysResult.headline).replace(/\.$/, '')}.
-                {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
-              </p>
+              reportSectionsForText(data.reportSections, companion.todaysResult.body) ? (
+                <>
+                  <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                    {String(companion.todaysResult.headline).replace(/\.$/, '')}.
+                  </p>
+                  <ReportText
+                    text={companion.todaysResult.body}
+                    sections={data.reportSections}
+                    style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                    titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+                  />
+                </>
+              ) : (
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                  {String(companion.todaysResult.headline).replace(/\.$/, '')}.
+                  {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
+                </p>
+              )
             )}
             {/* …but the companion's ACCEPTED narrative (the dashboard's
                 aiSummary) still prints here — the suppressed body was its
                 only PDF surface (codex P2 #3600 r28). */}
             {termiteV2Companion && companion.type === 'termite_bait_station' && cleanVisitSummary(termiteV2?.aiSummary?.body || '') && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-                {cleanVisitSummary(termiteV2.aiSummary.body)}
-              </p>
+              <ReportText
+                text={cleanVisitSummary(termiteV2.aiSummary.body)}
+                sections={data.reportSections}
+                style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+              />
             )}
             {/* Same containment rule TodaysResultCard uses: the snapshot
                 builder usually folds nextStep into the body, so only print it
@@ -1599,6 +1723,13 @@ export default function ServiceReportDocument({ data, token }) {
                 autodetection is optional, and this is the only route to the
                 analysis this record intentionally omits */}
             <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+            <br />
+            {/* Owner ask 2026-09-28: every record of service links to the
+                public Products & Safety page. The footer prints on every
+                record, product rows or not; the URL shows in full so a
+                printed copy carries it. */}
+            Every product we use and our safety protocol:{' '}
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: NAVY, textDecoration: 'underline' }}>{WAVES_PRODUCTS_SAFETY_URL}</a>
             <br />
             This report is provided for your records. This is not an invoice.
             {/* Claim tamper-evidence only when photos are actually displayed

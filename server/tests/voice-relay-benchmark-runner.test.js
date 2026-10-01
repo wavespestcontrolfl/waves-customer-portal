@@ -43,6 +43,18 @@ function stubChild(responses) {
 
 const CONDITION = { id: 'current-block', env: {} };
 
+// runBenchmark refuses to start without ANTHROPIC_API_KEY (the current-*
+// baselines always run Anthropic). Every test here runs stubbed children, so
+// a placeholder key stands in; the preflight's own test deletes it.
+let SAVED_ANTHROPIC_KEY;
+beforeEach(() => {
+  SAVED_ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+});
+afterEach(() => {
+  if (SAVED_ANTHROPIC_KEY === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = SAVED_ANTHROPIC_KEY;
+});
+
 describe('runOnce — a completed run vs. an inconclusive one vs. a real crash', () => {
   test('status "pass" (exit 0) is a completed run', async () => {
     const execFileImpl = stubChild([{
@@ -575,6 +587,112 @@ describe('summarizeCondition — latency: first-attempt vs. total-run, aggregate
   });
 });
 
+describe('summarizeCondition — real per-round usage (cache-hit logging, this PR), never the old cacheHypothesis guess', () => {
+  test('sums input/output/cache tokens across every attempt of every run in the condition, and computes a real cacheHitRate', () => {
+    const runs = [
+      {
+        // Non-retried run: one attempt, usage carried on its own summary.
+        condition: 'x', ranOk: true, inconclusive: false,
+        result: {
+          summary: { scenarios: 2, passed: 2, usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 0, cache_write_tokens: 500, rounds: 1, cacheReadRounds: 0 } },
+          attempts: [{ status: 'pass', summary: { scenarios: 2, passed: 2, usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 0, cache_write_tokens: 500, rounds: 1, cacheReadRounds: 0 } } }],
+        },
+      },
+      {
+        // Retried run: BOTH attempts' usage counts (real spend, not just the
+        // selected finalAttempt) — same rule as durationMs above.
+        condition: 'x', ranOk: true, inconclusive: false,
+        result: {
+          summary: { scenarios: 2, passed: 2, usage: { input_tokens: 90, output_tokens: 15, cached_input_tokens: 500, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 1 } },
+          attempts: [
+            { status: 'fail', summary: { scenarios: 2, passed: 1, usage: { input_tokens: 80, output_tokens: 10, cached_input_tokens: 0, cache_write_tokens: 500, rounds: 1, cacheReadRounds: 0 } } },
+            { status: 'pass', summary: { scenarios: 2, passed: 2, usage: { input_tokens: 90, output_tokens: 15, cached_input_tokens: 500, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 1 } } },
+          ],
+        },
+      },
+    ];
+    const s = summarizeCondition('x', runs);
+    // 100 + 80 + 90 = 270; 20 + 10 + 15 = 45; cache read 0 + 0 + 500 = 500;
+    // cache write 500 + 500 + 0 = 1000 — every attempt of every run, summed.
+    expect(s.usage.inputTokens).toBe(270);
+    expect(s.usage.outputTokens).toBe(45);
+    expect(s.usage.cachedInputTokens).toBe(500);
+    expect(s.usage.cacheWriteTokens).toBe(1000);
+    expect(s.usage.rounds).toBe(3);
+    expect(s.usage.cacheReadRounds).toBe(1);
+    expect(s.usage.cacheHitRate).toBeCloseTo(1 / 3);
+    // No rejected rounds anywhere: the totals are complete.
+    expect(s.usage.incompleteRounds).toBe(0);
+    expect(s.usage.complete).toBe(true);
+  });
+
+  // PR #4946 review (r9): a rejected model round (timeout/abort) spent tokens
+  // no usage block reports — the condition's totals must say they are a lower
+  // bound instead of reading artificially cheaper.
+  test('rejected rounds in any attempt mark the condition\'s usage incomplete', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 1, passed: 1, usage: { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 0 } },
+        attempts: [
+          { status: 'fail', summary: { scenarios: 1, passed: 0, usage: { input_tokens: 40, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 2 } } },
+          { status: 'pass', summary: { scenarios: 1, passed: 1, usage: { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 0 } } },
+        ],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.usage.incompleteRounds).toBe(2);
+    expect(s.usage.complete).toBe(false);
+  });
+
+  // Codex pre-push on #4946: a run whose telemetry never arrived (crashed,
+  // killed, inconclusive) spent tokens the totals cannot count — even an
+  // entirely crashed condition must not read as complete.
+  test('a run without usage telemetry marks the condition incomplete', () => {
+    const ok = {
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 1, passed: 1, usage: { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 0 } },
+        attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1, usage: { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 1, cacheReadRounds: 0, incompleteRounds: 0 } } }],
+      },
+    };
+    const crashed = { condition: 'x', ranOk: false, inconclusive: false, crashError: 'child timed out', result: null };
+    expect(summarizeCondition('x', [ok]).usage.complete).toBe(true);
+    const s = summarizeCondition('x', [ok, crashed]);
+    expect(s.usage.missingTelemetryRuns).toBe(1);
+    expect(s.usage.complete).toBe(false);
+    const allCrashed = summarizeCondition('x', [crashed]);
+    expect(allCrashed.usage.inputTokens).toBe(0);
+    expect(allCrashed.usage.complete).toBe(false);
+  });
+
+  // Codex r10 on #4946: the usage container always exists, so completed
+  // model rounds that carried NO usage block are missing telemetry too.
+  test('successful model rounds without usage blocks mark the condition incomplete', () => {
+    const uninstrumented = {
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 1, passed: 1, modelRounds: 2, usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 } },
+        attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1, modelRounds: 2, usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 } } }],
+      },
+    };
+    const s = summarizeCondition('x', [uninstrumented]);
+    expect(s.usage.missingTelemetryRuns).toBe(1);
+    expect(s.usage.complete).toBe(false);
+  });
+
+  test('no usage anywhere (an older/mocked result summary) reports zero counts and a null — never NaN or a false zero — cacheHitRate', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: { summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.usage.inputTokens).toBe(0);
+    expect(s.usage.rounds).toBe(0);
+    expect(s.usage.cacheHitRate).toBeNull();
+  });
+});
+
 describe('rotateConditions — Williams (balanced Latin square) design for the 4 conditions', () => {
   const conditions = buildConditions('claude-haiku-4-5-20251001');
   // Natural order (buildConditions): 0=current-block, 1=current-stream,
@@ -685,6 +803,15 @@ describe('runBenchmark — required --candidate-model and the benchmark-level ex
       execFileImpl,
     });
     expect(outPath).toBe(target);
+  });
+
+  test('a writable directory is rejected before any paid child runs', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', `--out=${require('os').tmpdir()}`],
+      execFileImpl,
+    })).rejects.toThrow(/output must be a regular file/);
+    expect(execFileImpl).not.toHaveBeenCalled();
   });
 
   test('a fully clean run (every condition pass, no retries, no crashes) reports exitCode 0', async () => {
@@ -918,15 +1045,132 @@ describe('assertOnlyHasIds / runBenchmark — --only must name at least one real
     expect(() => assertOnlyHasIds({})).not.toThrow();
   });
 
+  test.each(['spanish-eta-typo', 'booking-happy-path,spanish-eta-typo'])('unknown scenario IDs in --only=%s fail before any child runs', async (only) => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', `--only=${only}`],
+      execFileImpl,
+    })).rejects.toThrow(/unknown scenario id\(s\): spanish-eta-typo/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
   test('a real --only value with extra commas/whitespace around real ids is accepted', async () => {
     const execFileImpl = stubChild([{
       code: 0,
       stdout: JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }),
     }]);
     await expect(runBenchmark({
-      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--only= booking-happy-path , slot-gone '],
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--only= booking-happy-path , slot-gone , spanish-eta-matched-attested '],
       execFileImpl,
     })).resolves.toBeDefined();
+  });
+});
+
+describe('OpenAI candidates — GATE_VOICE_RELAY_OPENAI wiring', () => {
+  const OPENAI_CANDIDATE = 'gpt-6-sol'; // voice-eligible (MODEL_CATALOG `voice` entry)
+  const NON_VOICE_OPENAI = 'gpt-5.6-sol'; // openai, but no `voice` entry
+  let savedKey;
+  let savedGate;
+
+  beforeEach(() => {
+    savedKey = process.env.OPENAI_API_KEY;
+    savedGate = process.env.GATE_VOICE_RELAY_OPENAI;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.GATE_VOICE_RELAY_OPENAI;
+  });
+
+  afterEach(() => {
+    if (savedKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = savedKey;
+    if (savedGate === undefined) delete process.env.GATE_VOICE_RELAY_OPENAI; else process.env.GATE_VOICE_RELAY_OPENAI = savedGate;
+  });
+
+  test('buildConditions sets GATE_VOICE_RELAY_OPENAI=true on ONLY the two candidate-* conditions for an openai candidate', () => {
+    const conditions = buildConditions(OPENAI_CANDIDATE, 'openai');
+    expect(conditions.find((c) => c.id === 'current-block').env).toEqual({});
+    expect(conditions.find((c) => c.id === 'current-stream').env).toEqual({ VOICE_RELAY_RENDERER: 'stream' });
+    expect(conditions.find((c) => c.id === 'candidate-block').env).toEqual({ VOICE_RELAY_INBOUND_MODEL: OPENAI_CANDIDATE, GATE_VOICE_RELAY_OPENAI: 'true' });
+    expect(conditions.find((c) => c.id === 'candidate-stream').env).toEqual({ VOICE_RELAY_INBOUND_MODEL: OPENAI_CANDIDATE, GATE_VOICE_RELAY_OPENAI: 'true', VOICE_RELAY_RENDERER: 'stream' });
+  });
+
+  test('buildConditions never sets the gate for an anthropic candidate (unchanged behavior)', () => {
+    const conditions = buildConditions('claude-haiku-4-5-20251001', 'anthropic');
+    for (const c of conditions) expect(c.env).not.toHaveProperty('GATE_VOICE_RELAY_OPENAI');
+  });
+
+  // Codex r13 P2: the current-* baselines always run Anthropic — without its
+  // key an OpenAI candidate would spend on calls with nothing to compare.
+  test.each(['gpt-6-sol', 'claude-haiku-4-5-20251001'])('rejects %s with no ANTHROPIC_API_KEY, before any child process runs', async (model) => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    delete process.env.ANTHROPIC_API_KEY;
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: [`--candidate-model=${model}`, '--trials=1'], execFileImpl }))
+      .rejects.toThrow(/ANTHROPIC_API_KEY is not set/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('rejects an OpenAI candidate with no OPENAI_API_KEY, before any child process runs', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: [`--candidate-model=${OPENAI_CANDIDATE}`, '--trials=1'], execFileImpl }))
+      .rejects.toThrow(/OPENAI_API_KEY is not set/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('rejects a non-voice-eligible OpenAI id even with OPENAI_API_KEY set', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: [`--candidate-model=${NON_VOICE_OPENAI}`, '--trials=1'], execFileImpl }))
+      .rejects.toThrow(/not an allowlisted model id/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('an OpenAI candidate with OPENAI_API_KEY set runs, gating ONLY the candidate-* children, and never mutates this process\'s own env', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const seenEnvs = [];
+    const execFileImpl = (file, args, opts, cb) => {
+      seenEnvs.push({ model: opts.env.VOICE_RELAY_INBOUND_MODEL, gate: opts.env.GATE_VOICE_RELAY_OPENAI });
+      cb(null, JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }), '');
+    };
+    const { exitCode } = await runBenchmark({ argv: [`--candidate-model=${OPENAI_CANDIDATE}`, '--trials=1'], execFileImpl });
+    expect(exitCode).toBe(0);
+    const currentEnvs = seenEnvs.filter((e) => !e.model);
+    const candidateEnvs = seenEnvs.filter((e) => e.model === OPENAI_CANDIDATE);
+    expect(currentEnvs).toHaveLength(2);
+    expect(candidateEnvs).toHaveLength(2);
+    for (const e of currentEnvs) expect(e.gate).toBe(''); // leak-guarded, never inherited
+    for (const e of candidateEnvs) expect(e.gate).toBe('true');
+    // This file's own header rule: never mutate this process's own env.
+    expect(process.env.GATE_VOICE_RELAY_OPENAI).toBeUndefined();
+  });
+});
+
+describe('thinking-always-on Anthropic candidates (Opus 5.5+) — no gate needed', () => {
+  const OPUS_55 = 'claude-opus-5-5';
+  let savedAnthropicKey;
+
+  beforeEach(() => {
+    savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  });
+
+  afterEach(() => {
+    if (savedAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = savedAnthropicKey;
+  });
+
+  test('buildConditions never sets GATE_VOICE_RELAY_OPENAI for it — plain Anthropic, just a different request shape', () => {
+    const conditions = buildConditions(OPUS_55, 'anthropic');
+    expect(conditions.find((c) => c.id === 'candidate-block').env).toEqual({ VOICE_RELAY_INBOUND_MODEL: OPUS_55 });
+    for (const c of conditions) expect(c.env).not.toHaveProperty('GATE_VOICE_RELAY_OPENAI');
+  });
+
+  test('is accepted by the allowlist check even though it is EXCLUDED from ALLOWED_OVERRIDE_MODEL_IDS', () => {
+    const { ALLOWED_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+    expect(ALLOWED_OVERRIDE_MODEL_IDS.has(OPUS_55)).toBe(false);
+    expect(ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS.has(OPUS_55)).toBe(true);
+    const execFileImpl = (file, args, opts, cb) => {
+      cb(null, JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }), '');
+    };
+    return expect(runBenchmark({ argv: [`--candidate-model=${OPUS_55}`, '--trials=1'], execFileImpl }))
+      .resolves.toMatchObject({ exitCode: 0 });
   });
 });
 
@@ -934,13 +1178,16 @@ describe('CHILD_TIMEOUT_MS — a ceiling compatible with the eval harness\'s own
   // Each child this runner spawns IS a full run-voice-relay-eval.js
   // invocation (the shipped fixture, its own retry-once wrapper, and
   // --judge's chains) — exactly the run server/services/eval/
-  // voice-relay-replay.js's own CHILD_TIMEOUT_MS (8h) is derived to bound.
-  // Mirrored as a literal, not required directly (see this file's own
-  // comment on the constant), so this test is what actually pins the two
-  // numbers together — a future change to one without the other fails here.
+  // voice-relay-replay.js's own CHILD_TIMEOUT_MS (12h, bumped from 10h by
+  // Codex round-2 P2: the corrected judge-chain math — ceil(45/4) = 12
+  // four-minute batches, not 45 minutes rounded down — puts the retry pair's
+  // worst case at 10h16m, which the prior 10h ceiling undercut). Mirrored as
+  // a literal, not required directly (see this file's own comment on the
+  // constant), so this test is what actually pins the two numbers together —
+  // a future change to one without the other fails here.
   test('mirrors voice-relay-replay.js\'s own CHILD_TIMEOUT_MS exactly', () => {
     const { _internals } = require('../services/eval/voice-relay-replay');
     expect(CHILD_TIMEOUT_MS).toBe(_internals.CHILD_TIMEOUT_MS);
-    expect(CHILD_TIMEOUT_MS).toBe(8 * 60 * 60 * 1000);
+    expect(CHILD_TIMEOUT_MS).toBe(12 * 60 * 60 * 1000);
   });
 });

@@ -4,13 +4,24 @@
 // plural/inflected variants, asserting the answer CATEGORY — not just that
 // the assistant returns something.
 //
-// Chip sources (kept in sync manually — see the comments at each list):
-//   - project: server/services/project-report-assistant.js projectReportAskPrompts()
-//     / client/src/components/report/ProjectReportEngage.jsx PROMPTS
-//   - service: client/src/pages/ReportViewPage.jsx reportAskPrompts()
+// Chip sources:
+//   - project: shared/project-report-ask-prompts.json — imported directly by
+//     this suite, by project-report-assistant.js's projectReportAskPrompts(),
+//     and by client/src/components/report/ProjectReportEngage.jsx, so the
+//     three can never drift apart.
+//   - service: client/src/pages/ReportViewPage.jsx reportAskPrompts() returns
+//     a computed list (no fixed literal to import) — every text it can
+//     produce is retyped below and kept in sync with that function by hand;
+//     see the "Non-lawn shipped chips" / "Lawn V2 insight chips" sections.
 
 const { answerProjectReportQuestion } = require('../services/project-report-assistant');
 const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
+// AW-06: import the same shared chip list ProjectReportEngage.jsx ships and
+// project-report-assistant.js whitelists — enumerating from the source
+// instead of a hand-retyped list means a chip added, removed, or reworded
+// here is a chip this suite is already exercising, not one an editor forgot
+// to also update in the test.
+const PROJECT_REPORT_ASK_PROMPTS = require('../../shared/project-report-ask-prompts.json');
 
 describe('project report — every shipped chip answers its own category (AW-06)', () => {
   const project = {
@@ -24,14 +35,29 @@ describe('project report — every shipped chip answers its own category (AW-06)
   };
   const payload = {};
 
-  // Each shipped chip, its bound intent (projectReportAskPrompts()), and a
-  // signature that proves the CATEGORY of the answer.
-  test.each([
-    ['What did you find?', 'findings', /Activity at the rear wall/i],
-    ['What was treated?', 'treatment', /Exterior perimeter/i],
-    ['What should I do next?', 'recommendations', /Seal the gap at the rear wall/i],
-    ['When is my next visit?', 'next_visit', /Nothing further is scheduled|scheduled for/i],
-  ])('chip "%s" (intent=%s) answers the right category via explicit intent AND free-text', (question, intent, expected) => {
+  // The CATEGORY signature each intent's answer must carry, derived from the
+  // chip's own wording (a "findings" chip must answer with what was found,
+  // etc.) — independent of the shipped chip list so a chip added or reworded
+  // in shared/project-report-ask-prompts.json is exercised here without also
+  // hand-editing a parallel [question, intent, expected] table.
+  const PROJECT_INTENT_SIGNATURE = {
+    findings: /Activity at the rear wall/i,
+    treatment: /Exterior perimeter/i,
+    recommendations: /Seal the gap at the rear wall/i,
+    next_visit: /Nothing further is scheduled|scheduled for/i,
+  };
+
+  test('every shipped chip has a known category signature (a new/reworded chip must be added here too)', () => {
+    PROJECT_REPORT_ASK_PROMPTS.forEach((prompt) => {
+      expect(PROJECT_INTENT_SIGNATURE[prompt.intent]).toBeDefined();
+    });
+  });
+
+  // Every shipped chip, its bound intent (shared/project-report-ask-prompts.json
+  // — the same file ProjectReportEngage.jsx and project-report-assistant.js
+  // import), and the signature that proves the CATEGORY of the answer.
+  test.each(PROJECT_REPORT_ASK_PROMPTS.map((prompt) => [prompt.text, prompt.intent, PROJECT_INTENT_SIGNATURE[prompt.intent]]))(
+    'chip "%s" (intent=%s) answers the right category via explicit intent AND free-text', (question, intent, expected) => {
     // Chip click: server honors the explicit intent.
     expect(answerProjectReportQuestion({ question, project, payload, intent })).toMatch(expected);
     // Typed question, no intent sent (older client / free typing): the
@@ -178,6 +204,34 @@ describe('project report — every shipped chip answers its own category (AW-06)
     const answer = answerProjectReportQuestion({ question, project, payload });
     expect(answer).toMatch(/Activity at the rear wall/i);
     expect(answer).not.toMatch(/^Areas treated: Exterior perimeter/i);
+  });
+
+  // AW-06 (Answer usefulness — line breaks): this project fixture records
+  // TWO matching fields for both findings and treatment (findings_observed +
+  // areas_treated; areas_treated + products_used) — the answer is a list of
+  // recorded facts, not one sentence, and must join them with "\n" so the
+  // client can render each on its own line instead of a run-on paragraph.
+  test('a multi-fact findings answer joins recorded facts with "\\n", one per line', () => {
+    const answer = answerProjectReportQuestion({ question: 'What did you find?', project, payload, intent: 'findings' });
+    expect(answer.split('\n')).toEqual([
+      'Findings observed: Activity at the rear wall.',
+      'Areas treated: Exterior perimeter.',
+    ]);
+  });
+
+  test('a multi-fact treatment answer joins recorded facts with "\\n", one per line', () => {
+    const answer = answerProjectReportQuestion({ question: 'What was treated?', project, payload, intent: 'treatment' });
+    expect(answer.split('\n')).toEqual([
+      'Areas treated: Exterior perimeter.',
+      'Products used: Synthetic bait.',
+    ]);
+  });
+
+  test('a single-fact answer has no "\\n" (nothing to separate)', () => {
+    const singleFactProject = { ...project, findings: { findings_observed: 'Activity at the rear wall' } };
+    const answer = answerProjectReportQuestion({ question: 'What did you find?', project: singleFactProject, payload, intent: 'findings' });
+    expect(answer).toBe('Findings observed: Activity at the rear wall.');
+    expect(answer).not.toContain('\n');
   });
 });
 

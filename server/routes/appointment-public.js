@@ -17,25 +17,34 @@
  *
  * GET  /:token               — appointment summary (see payload notes below).
  * GET  /:token/calendar.ics  — the same visit as a calendar file.
- * POST /:token/confirm       — marks a pending visit confirmed. The ONLY
- *   write here, and a deliberately tiny one: status pending -> confirmed
- *   plus a job_status_history row. It never touches date/window/tech and
- *   never sends anything — customer comms stay owner-driven, and a
- *   confirmation that texted the customer back would be noise.
+ * POST /:token/confirm       — marks a pending visit confirmed. A
+ *   deliberately tiny write: status pending -> confirmed plus a
+ *   job_status_history row. It never touches date/window/tech and never
+ *   sends anything — customer comms stay owner-driven, and a confirmation
+ *   that texted the customer back would be noise.
+ * POST /:token/photos        — GATE_VISIT_PREP_PHOTOS (dark server
+ *   foundation). Attaches up to 3 photos + a short note to THIS visit
+ *   (services/visit-prep.js owns storage/caps/dedupe). Same tiny-write
+ *   spirit as confirm: it never touches scheduled_services status, date,
+ *   window or tech, and sends nothing to anyone. See the handler below for
+ *   the full guard order.
  *
  * Dark until the owner flips GATE_APPOINTMENT_PAGE: every route 404s, so
  * the page is unreachable even by token until the templates that link it
- * are live. Kill switch = unset the var.
+ * are live. Kill switch = unset the var. The photos route additionally
+ * needs GATE_VISIT_PREP_PHOTOS.
  */
 
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const multer = require('multer');
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, visitPrepPhotosLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
-const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, addETDays, formatETDate } = require('../utils/datetime-et');
+const NotificationService = require('../services/notification-service');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql } = require('../services/stamped-address');
@@ -45,6 +54,11 @@ const {
   ARRIVAL_WINDOW_MINUTES,
 } = require('../utils/sms-time-format');
 const { calendarIcsAvailable, groupedStopEndsAt, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
+const { visitInsideMoveNoticeWindow } = require('../services/scheduling/self-serve-notice');
+const { visitTimeElapsed } = require('../services/reschedule-eligibility');
+const visitPrep = require('../services/visit-prep');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const { recordPageView } = require('../services/customer-page-views');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -92,16 +106,14 @@ const UPCOMING_STATUSES = new Set(['pending', 'confirmed']);
 // rows) stay office-owned until reviewed — the customer must not be able to
 // self-confirm them from this token page any more than from the logged-in
 // portal. Shared invariant with routes/schedule.js.
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned } = require('../services/call-booking-source-actions');
 
 // A call-created booking the office hasn't reviewed: still 'pending',
 // dispatch-owned, and never customer-confirmed. Shared by the confirmable
 // flag and the rescheduleToken suppression so the page can neither confirm
 // nor reschedule a visit the authenticated routes hide (codex #3429 r3 P2).
 function dispatchOwnedUnreviewed(svc) {
-  return DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
-    && String(svc.status || '').toLowerCase() === 'pending'
-    && !svc.customer_confirmed;
+  return isUnreviewedDispatchOwned(svc);
 }
 
 function gateOpen() {
@@ -166,14 +178,23 @@ function pageState(svc, now = new Date()) {
   // Past the quoted arrival window with no terminal status = the visit came
   // and went; don't show a "your visit is tomorrow" card for it.
   const date = apptDateStr(svc.scheduled_date);
-  const start = hhmm(svc.window_start);
-  if (date) {
-    const endsAt = start
-      ? new Date(parseETDateTime(`${date}T${start}`).getTime() + ARRIVAL_PROMISE_MINUTES * 60000)
-      : parseETDateTime(`${date}T23:59`);
-    if (endsAt && endsAt < now) return { state: 'past' };
+  if (!date) return { state: 'upcoming' };
+  if (!hhmm(svc.window_start)) {
+    // Windowless: stays live through the end of its own calendar day — no
+    // arrival-promise instant to compare against.
+    const endsAt = parseETDateTime(`${date}T23:59`);
+    return { state: endsAt && endsAt < now ? 'past' : 'upcoming' };
   }
-  return { state: 'upcoming' };
+  // A window_start is present: defer to the SAME "has this visit's time
+  // passed" rule reschedule-eligibility.js applies (visitTimeElapsed —
+  // codex + independent-reviewer finding on PR #5308). This used to
+  // compute window_start+2h only, which could disagree with that rule for
+  // a long job (e.g. 06:00-10:00 viewed at 09:00): this page would call the
+  // visit "past" and offer a "Pick a new time" link, while
+  // reschedule-eligibility.js still called it upcoming-and-not-missed —
+  // reschedule-public.js then refuses the move (too soon, inside the
+  // notice window) and the link dead-ends.
+  return { state: visitTimeElapsed(svc, now) ? 'past' : 'upcoming' };
 }
 
 
@@ -207,16 +228,22 @@ function confirmRaceVerdict(row) {
   return confirmed && !!row?.customer_confirmed ? 'idempotent_success' : 'changed';
 }
 
-async function loadByToken(token) {
-  return db('scheduled_services as s')
+// `conn` defaults to the global pool for every existing caller (the GET
+// page, calendar.ics, confirm); visit-prep.js's late recheck passes its own
+// transaction instead (Finding 1, pre-push audit) — a locked writer must
+// never wait on the global pool for a connection while it already holds
+// one plus the stop's advisory lock, or concurrent uploads can exhaust the
+// pool with every lock holder stuck waiting on its own recheck.
+async function loadByToken(token, conn = db) {
+  return conn('scheduled_services as s')
     .where('s.reschedule_token', token)
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .leftJoin('technicians as t', 's.technician_id', 't.id')
     .first(
       's.id', 's.customer_id', 's.technician_id', 's.status', 's.scheduled_date',
       's.window_start', 's.window_end', 's.service_type', 's.is_recurring',
-      's.recurring_parent_id', 's.reschedule_token', 's.visit_id',
-      's.source_action', 's.customer_confirmed',
+      's.recurring_parent_id', 's.recurring_pattern', 's.reschedule_token', 's.visit_id',
+      's.source_action', 's.customer_confirmed', 's.property_id',
       // c.first_name is deliberately NOT selected — see the payload comment:
       // this token is shared with whoever the notification reached, so the
       // account holder's name must not travel with it.
@@ -228,8 +255,8 @@ async function loadByToken(token) {
       't.name as tech_name',
       't.photo_url as tech_photo_url',
       't.photo_s3_key as tech_photo_s3_key',
-      db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
-      db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
+      conn.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
+      conn.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
     );
 }
 
@@ -631,6 +658,32 @@ async function stormOutlook(svc) {
   }
 }
 
+// GATE_VISIT_PREP_PHOTOS additive summary for the GET payload. Gate off:
+// `{}` — the key is absent and the payload is byte-identical to before this
+// lane. Gate on: `{ prepPhotos }`, always present regardless of eligibility
+// (a non-'upcoming' state simply reports eligible:false) so the client can
+// show the right empty/full state instead of inferring it. Fails soft: a
+// lookup error omits the key and logs a warning rather than 500ing the page.
+async function prepPhotosField(svc, state, visitUnknown) {
+  if (!visitPrepPhotosLive()) return {};
+  try {
+    const eligibility = visitPrep.visitPrepEligibility({
+      svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+    });
+    const summary = await visitPrep.visitPrepSummary(svc);
+    return {
+      prepPhotos: {
+        eligible: eligibility.eligible,
+        photoCount: summary.photoCount,
+        photosRemaining: summary.photosRemaining,
+      },
+    };
+  } catch (err) {
+    logger.warn(`[appointment-public] prepPhotos summary failed for ${svc.id}: ${err.message}`);
+    return {};
+  }
+}
+
 router.get('/:token', async (req, res, next) => {
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -638,6 +691,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'appointment', customerId: svc.customer_id, subjectType: 'scheduled_service', subjectId: svc.id });
 
     const visitInfoRaw = await visitServicesFor(svc);
     // Unknown membership fails closed: the page can't be changed online
@@ -679,6 +734,10 @@ router.get('/:token', async (req, res, next) => {
       calendarEligible: visitUnknown ? false : calendarEligible(svc, visitInfoRaw),
       // "Look for this van" scene under the header card (GATE_VAN_SCENE).
       vanScene: isEnabled('vanScene'),
+      // GATE_VISIT_PREP_PHOTOS (dark): additive only. Gate off = key absent,
+      // payload byte-identical to before this lane. Fails soft on any
+      // lookup error — never turns a summary read into a 500'd page.
+      ...(await prepPhotosField(svc, state, visitUnknown)),
     };
     if (state !== 'upcoming') return res.json({ ...base, tech: null, plan: null, weather: null });
 
@@ -747,6 +806,14 @@ router.get('/:token', async (req, res, next) => {
         || (svc.visit_id && !visitInfo.visitUnknown
           && (await require('../services/visit-groups').frozenVisitVerdict(db, svc.visit_id)).frozen))
         ? null : svc.reschedule_token,
+      // Dead-link guard (C3/C6): the "See open times" CTA's own destination
+      // (/reschedule/:token) refuses to MOVE a visit that already starts
+      // inside the self-serve move-notice window — the same verdict
+      // buildRescheduleLink now applies before texting the link. We are
+      // already inside `state === 'upcoming'` here (a missed/past visit
+      // returned above with its own `state: 'past'`), so this is never the
+      // missed-visit recovery case — only "too soon to move, not missed".
+      canMoveOnline: !visitInsideMoveNoticeWindow(svc, new Date()),
     });
   } catch (err) {
     next(err);
@@ -1119,8 +1186,343 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
   }
 });
 
+// ── visit prep photos (GATE_VISIT_PREP_PHOTOS) ──────────────────────────────
+// Own limiter — 6/min, well under the router-wide 60/min, since a real
+// customer submits at most a couple of times per visit. Keyed by the
+// repository's /64-collapsing unauthenticated key, not express-rate-limit's
+// raw-IP default (Codex r1 P1): an IPv6 caller holding one token could
+// otherwise rotate addresses inside its subnet for a fresh bucket each time.
+const VISIT_PREP_LIMITER_OPTIONS = {
+  windowMs: 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  message: { error: 'Too many attempts. Please try again in a minute.' },
+};
+const visitPrepLimiter = rateLimit(VISIT_PREP_LIMITER_OPTIONS);
+
+// GATE_VISIT_PREP_PHOTOS + token-shape guard for the photos path. ONE
+// definition mounted twice on purpose: by server/index.js on the
+// /api/public/appointment prefix AHEAD of the shared body parsers (Codex r1
+// P0: with the parsers first, an oversized or malformed application/json
+// body to a dark or malformed photos path was answered 413/400 by the
+// parser before this 404 could run), and again as the route's own first
+// step so the router stays correct on its own. Both answer the SAME
+// generic 404 the router-level gate gives, BEFORE the route's limiter
+// (AGENTS.md: a dark GATE_* route skips its limiter so a probe never sees
+// a revealing 429). `req.path` is mount-relative in both places. Express
+// matches routes case-insensitively, so the path test is too — otherwise
+// `/<token>/PHOTOS` would reach the route (and the shared parsers) while
+// slipping past this guard (pre-push audit P0). The route takes multipart
+// only, and the shared parsers read only JSON / urlencoded bodies, so any
+// other body type 404s here too (Codex #5176 r4 P0): a well-formed but
+// unknown or ineligible token would otherwise reach those parsers before
+// loadByToken and get their 400/413 instead of the generic 404. A
+// multipart body is left for multer, which runs only after eligibility.
+const VISIT_PREP_PHOTOS_PATH_RE = /^\/([^/]+)\/photos\/?$/i;
+function visitPrepPreParserGuard(req, res, next) {
+  const match = VISIT_PREP_PHOTOS_PATH_RE.exec(req.path || '');
+  if (!match) return next();
+  if (!TOKEN_RE.test(match[1]) || !visitPrepPhotosLive() || !req.is('multipart/form-data')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return next();
+}
+
+const visitPrepUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: visitPrep.VISIT_PREP_LIMITS.maxPhotoBytes,
+    files: visitPrep.VISIT_PREP_LIMITS.photosPerSubmission,
+    fields: 6,
+    fieldSize: 2 * 1024,
+    parts: 10,
+  },
+});
+
+// The pre-multer guard's eligibility derivation, over the GLOBAL pool — the
+// same page read the GET route uses (visitServicesFor, which also resolves
+// each member's customer-facing service label through buildServiceLabel and
+// other global-pool services). This is a cheap, advisory-only read; it does
+// NOT share its query path with the locked recheck below (Finding 1,
+// pre-push audit: a locked writer reading through the global pool while it
+// already holds a connection + the stop's advisory lock can starve the pool
+// under concurrent uploads). Both paths still end in the ONE eligibility
+// RULE, `visitPrep.visitPrepEligibility({ svc, state, visitUnknown,
+// dispatchOwnedUnreviewed })` — only how `state`/`visitUnknown` are READ
+// differs: this one via the page's own visitServicesFor, the locked recheck
+// via reloadEligibleVisitPrepRow below (openMembers on the write's own
+// transaction).
+async function deriveVisitPrepEligibility(svc) {
+  const visitInfoRaw = svc.visit_id ? await visitServicesFor(svc) : {};
+  const { state } = visitInfoRaw.visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfoRaw);
+  return visitPrep.visitPrepEligibility({
+    svc,
+    state,
+    visitUnknown: visitInfoRaw.visitUnknown,
+    dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+  });
+}
+
+// The locked recheck (Finding 1): every read here runs on `trx` — the
+// SAME transaction/connection the write already holds along with the stop's
+// advisory lock — never the global pool. Reloads the row via loadByToken(…,
+// trx); for a grouped visit, reads the live member set with
+// visit-groups.js's openMembers(trx, visit_id) (the confirm path's own
+// locked-membership read, membersMatchShown, precedent) instead of
+// visitServicesFor — that helper resolves per-member service LABELS through
+// other global-pool services this recheck needs none of. The SAME pure
+// rules the page applies then decide state: fewer than 2 live members is
+// solo (exactly how visitServicesFor treats it), members no longer forming
+// ONE stop (membersOneStop) is visitUnknown, and a real stop's state comes
+// from groupedState(members) — fed through pageStateForGroup's own
+// row-state-outranks-the-group precedence, so a terminal/unknown token row
+// still wins exactly as it does on the page. Returns null when the row is
+// missing, its customer row is gone, deleted, or no longer the customer the
+// pre-check read, it is no longer the SAME row
+// `expectedId` names (this route never re-mints the token, so a mismatch
+// means something is badly wrong), or the resulting eligibility is false;
+// otherwise the current row. Passed to visit-prep.js as its `recheck(trx)` —
+// eligibility can change between the pre-multer read and the write (the
+// visit can go en route, get cancelled, or a grouped sibling can push the
+// stop's state), and this is the one place that re-proves it, on the
+// connection that already owns the lock.
+// The generic CORE of the locked recheck: given a svc row that the caller
+// has ALREADY loaded fresh on `trx` (after its own row lock + identity
+// checks — token match for the public route below, or customer-ownership
+// match for the app route in schedule.js), locks any grouped members and
+// re-derives eligibility on that fresh state. Returns the row when eligible,
+// else null. Exported so schedule.js's app-authenticated POST /:id/prep-photos
+// can share this exact member-lock + eligibility recheck rather than growing
+// its own copy — schedule.js requires this module directly (never the
+// reverse), so there is no cycle the way there would be pulling this logic
+// into visit-prep.js (which this route already requires).
+async function reloadEligibleVisitPrepRowCore(svc, trx) {
+  if (!svc) return null;
+  let visitUnknown = false;
+  let visitInfo = {};
+  if (svc.visit_id) {
+    const { openMembers } = require('../services/visit-groups');
+    const members = await openMembers(trx, svc.visit_id, { forUpdate: true });
+    if (members.length >= 2) {
+      if (!membersOneStop(members)) {
+        visitUnknown = true;
+      } else {
+        const { state, phase } = groupedState(members);
+        visitInfo = { visit: { state, phase } };
+      }
+    }
+  }
+  const { state } = visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfo);
+  const eligibility = visitPrep.visitPrepEligibility({
+    svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+  });
+  return eligibility.eligible ? svc : null;
+}
+
+async function reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId, trx) {
+  // The customer row FIRST (Codex r3 P1): loadByToken re-reads
+  // customers.active / deleted_at, but without a lock a deactivation or
+  // soft-delete could commit after that read and before the insert. FOR
+  // SHARE makes such an UPDATE wait for this transaction (and, unlike FOR
+  // UPDATE, never blocks unrelated inserts that merely reference the
+  // customer); taking it before the scheduled_services locks keeps the
+  // customer-then-visits order a deactivation that cancels visits uses.
+  const customer = await trx('customers').where({ id: expectedCustomerId }).forShare().first('id');
+  if (!customer) return null;
+  // ROW locks, not only the stop's advisory lock (Codex r1 P1): status
+  // writers such as transitionJobStatus update scheduled_services WITHOUT
+  // the advisory lock, so a plain read here could still race an en-route
+  // tap or a cancellation landing before the insert commits. FOR UPDATE on
+  // the token row (and, grouped, on every live member below) makes those
+  // writers wait for this transaction instead of slipping underneath it.
+  await trx('scheduled_services').where({ id: expectedId }).forUpdate().first('id');
+  const svc = await loadByToken(token, trx);
+  if (!svc || svc.customer_deleted_at) return null;
+  if (expectedId && String(svc.id) !== String(expectedId)) return null;
+  if (String(svc.customer_id) !== String(expectedCustomerId)) return null;
+
+  return reloadEligibleVisitPrepRowCore(svc, trx);
+}
+
+// Office feed item — PR 3b (customer-visit-photos scope doc §5.4 item 3,
+// §9 decision 2: "one quiet item in the notification feed that links to
+// the customer... nothing to resolve, no text to the office number").
+// Plain word for the chip topic the customer picked; visit-prep.js's TOPICS
+// enum is the validation source, this is only display copy for the bell.
+const VISIT_PREP_TOPIC_LABELS = {
+  pest: 'pest',
+  lawn: 'lawn',
+  tree_shrub: 'trees & shrubs',
+  other: 'something else',
+};
+
+// Called only after createVisitPrepSubmission's own transaction has already
+// committed a NEW submission (never a duplicate-only resubmit — the caller
+// only invokes this when result.created is true). Awaited by the route as a
+// BOUNDED best-effort step (same shape as estimate-measurement-review.js's
+// sendOfficeNotification and requests.js's own notifyAdmin call): every
+// query here is a fast local DB round trip, never a network call to a
+// push/SMS/email provider, so it can add latency but never hang the
+// response. NotificationService.notifyAdmin/create for recipientType
+// 'admin' does exactly one thing: insert a row into `notifications`. It
+// never calls PushService (sendToAdmins/sendToAdminUser are separate,
+// explicitly-called-elsewhere functions this file never touches) and never
+// calls notification-dispatcher.js or sendCustomerMessage (both
+// customer-only) — so this can never become a push, SMS, or email,
+// whatever the admin bell policy gate is set to. Category
+// 'visit_prep_photos' is on notification-bell-policy.js's
+// DEFAULT_ON_CATEGORIES, so the item is admitted into the feed even while
+// GATE_ADMIN_BELL_POLICY is on (with an owner override to silence the
+// category later from Settings -> Notifications) — never a dead letterbox.
+// Every error here is caught and logged, and the route never awaits this
+// (it runs detached), so it can neither fail nor delay the customer's
+// upload response.
+async function notifyOfficeVisitPrepSubmission(svc, topic) {
+  try {
+    // Customer's display name is read fresh here, never hardcoded or
+    // carried from loadByToken (which deliberately omits it — the token is
+    // shared with whoever received the reminder text).
+    const customer = await db('customers').where({ id: svc.customer_id }).first('first_name', 'last_name');
+    const name = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : '';
+    const dateStr = apptDateStr(svc.scheduled_date);
+    // Noon-UTC construction (same shape as estimate-public.js's own
+    // date-only -> formatETDate call) so a date-only column never reads a
+    // day early/late across a DST boundary.
+    const when = dateStr ? formatETDate(new Date(`${dateStr}T12:00:00Z`)) : 'an upcoming visit';
+    const topicLabel = VISIT_PREP_TOPIC_LABELS[topic] || null;
+    const notif = await NotificationService.notifyAdmin(
+      'visit_prep_photos',
+      'Customer sent photos for a visit',
+      `${name || 'A customer'} sent photos${topicLabel ? ` about ${topicLabel}` : ''} ahead of the ${when} visit.`,
+      {
+        link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`,
+        metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id },
+      },
+    );
+    if (!notif) {
+      logger.warn(`[visit-prep] office notification insert failed for scheduled_service ${svc.id}`);
+    }
+  } catch (err) {
+    logger.warn(`[visit-prep] office notification failed for scheduled_service ${svc.id}: ${err.message}`);
+  }
+}
+
+router.post(
+  '/:token/photos',
+  visitPrepPreParserGuard,
+  visitPrepLimiter,
+  // Load the token row and prove eligibility BEFORE multer ever buffers a
+  // byte, so an ineligible request never costs the memory or the S3 round
+  // trip. This is advisory only: the write re-proves it under the stop
+  // lock. The photo CAP is deliberately NOT pre-checked here (pre-push
+  // audit P1): the cap is decided only under the lock, after dedupe, so a
+  // retry of an already-stored submission on a visit that is now full still
+  // answers the idempotent 200 instead of a misleading "limit reached".
+  async (req, res, next) => {
+    try {
+      const svc = await loadByToken(req.params.token);
+      if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+
+      // Ineligible answers the SAME generic 404 as an unknown or malformed
+      // token (Codex r1 P0, AGENTS.md public-token baseline): a valid
+      // bearer token for a past, inactive, one-time, or office-owned visit
+      // must not be distinguishable from no token at all. The page (GET)
+      // already tells a legitimate holder whether photos can be added.
+      const eligibility = await deriveVisitPrepEligibility(svc);
+      if (!eligibility.eligible) return res.status(404).json({ error: 'Not found' });
+
+      req.visitPrepSvc = svc;
+      return next();
+    } catch (err) {
+      return next(err);
+    }
+  },
+  // Multer runs ONLY now — every prior guard has already refused a 404/409
+  // request without touching the multipart body.
+  (req, res, next) => {
+    visitPrepUpload.array('photos', visitPrep.VISIT_PREP_LIMITS.photosPerSubmission)(req, res, (err) => {
+      if (!err) return next();
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Each photo must be 5 MB or smaller.' });
+      }
+      return res.status(400).json({ error: 'Could not read the uploaded photos.' });
+    });
+  },
+  async (req, res, next) => {
+    const token = req.params.token;
+    const expectedId = req.visitPrepSvc.id;
+    const expectedCustomerId = req.visitPrepSvc.customer_id;
+    try {
+      const result = await visitPrep.createVisitPrepSubmission({
+        svc: req.visitPrepSvc,
+        files: req.files || [],
+        note: req.body?.note,
+        topic: req.body?.topic,
+        locationOnProperty: req.body?.locationOnProperty,
+        entry: 'appointment_page',
+        // Re-proves eligibility on FRESH state under visit-prep.js's stop
+        // lock — the write's actual authority, not this pre-check. Called
+        // with the write's own transaction (Finding 1) — never the global
+        // pool.
+        recheck: (trx) => reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId, trx),
+      });
+      // Office feed item — ONE per NEW submission, never a duplicate-only
+      // resubmit (result.created is false for those). The write already
+      // committed inside createVisitPrepSubmission; the feed item is
+      // DETACHED, never awaited (Codex #5242 r2 P2): its customer read and
+      // insert carry no statement timeout, so a stalled connection or lock
+      // must not hold the customer's already-committed upload response
+      // open. The function catches and logs every failure itself (see it
+      // for exactly how this stays in-app-feed-only), so nothing here can
+      // reject unhandled.
+      //
+      // Built from result.svc — the RECHECKED row createVisitPrepSubmission
+      // now returns (Codex r1 P2) — never req.visitPrepSvc, the stale
+      // pre-lock read: a reschedule landing between the pre-lock read and
+      // the locked write must not leave the feed item naming the OLD date.
+      // Guaranteed present whenever result.created is true (persistLocked
+      // never reaches created:true without a non-null recheck() row).
+      if (result.created) {
+        void notifyOfficeVisitPrepSubmission(result.svc, req.body?.topic);
+      }
+      // Never photo URLs/keys, the note, or any customer identity — the
+      // token is shared with whoever received the visit text, and nothing
+      // submitted through it is ever shown back.
+      return res.status(result.created ? 201 : 200).json({
+        ok: true,
+        prepPhotos: {
+          eligible: true,
+          photoCount: result.summary.photoCount,
+          photosRemaining: result.summary.photosRemaining,
+          // NEW photos THIS request stored (the stop-wide counts above can
+          // also include another holder's upload): the page's "N photos
+          // sent" line reads this, never a before/after difference.
+          photosAdded: result.stored,
+        },
+      });
+    } catch (err) {
+      // Only OUR OWN errors (visitPrep.js's prepError, marked `visitPrep`)
+      // are echoed to an anonymous caller — a library error that happens to
+      // carry a statusCode must never leak its message here.
+      if (err && err.visitPrep) {
+        // A locked-recheck refusal is the same generic 404 as the pre-check's.
+        if (err.statusCode === 404) return res.status(404).json({ error: 'Not found' });
+        return res.status(err.statusCode).json({ error: err.message, code: err.code });
+      }
+      return next(err);
+    }
+  },
+);
+
 router._test = {
   pageState,
+  prepPhotosField,
+  deriveVisitPrepEligibility,
+  reloadEligibleVisitPrepRow,
+  visitPrepPreParserGuard,
+  VISIT_PREP_LIMITER_OPTIONS,
   confirmRaceVerdict,
   icsEscape,
   icsFold,
@@ -1147,9 +1549,13 @@ router._test = {
   pageStateForGroup,
   memberServiceLabel,
   confirmedRowStillShown,
+  notifyOfficeVisitPrepSubmission,
+  VISIT_PREP_TOPIC_LABELS,
 };
 
 module.exports = router;
+// Mounted by server/index.js ahead of the shared body parsers (see the guard's comment).
+module.exports.visitPrepPreParserGuard = visitPrepPreParserGuard;
 // The page's own state predicate — the composer's visit picks skip what it
 // renders as 'past' (GH Codex #3844 r10).
 module.exports.pageState = pageState;
@@ -1163,3 +1569,12 @@ module.exports.pageStateForVisit = async function pageStateForVisit(svc, now = n
   const info = svc?.visit_id ? await visitServicesFor(svc) : {};
   return info.visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, info, now);
 };
+// Visit-prep photos (customer-visit-photos-scope-20260928.md PR 4, "app
+// entry"): schedule.js's customer-authenticated POST /:id/prep-photos
+// requires this module directly (never the reverse) to reuse the SAME
+// eligibility derivation, multer config, locked-recheck core, and office
+// feed item as the public token route — never a second copy of any of them.
+module.exports.deriveVisitPrepEligibility = deriveVisitPrepEligibility;
+module.exports.reloadEligibleVisitPrepRowCore = reloadEligibleVisitPrepRowCore;
+module.exports.visitPrepUpload = visitPrepUpload;
+module.exports.notifyOfficeVisitPrepSubmission = notifyOfficeVisitPrepSubmission;

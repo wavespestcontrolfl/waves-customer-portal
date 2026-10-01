@@ -43,7 +43,17 @@ function stripThinkingBlocks(response) {
 // records inside callOpenAI.
 // `laneId` labels the call-ledger rows of BOTH legs — the option
 // dispatchWithFallback's payload takes — and never reaches the wire.
-async function createDeepMessage(client, { laneId, ...params } = {}, options = {}) {
+// `effort` is a per-call output_config.effort request (same style as
+// laneId): wireParams applies it only on the raw (non-jsonSchema) path, and
+// only when the model actually serving the request accepts that exact level
+// (anthropic-wire.js's anthropicEffortFor) — callers don't know in advance
+// whether DEEP, the FLAGSHIP refusal fallback, or an env override is
+// serving, so this must never be sent as a bare output_config that a
+// non-capable model would 400 on. Unset or unsupported falls back to the
+// pinned MODEL_ANTHROPIC_EFFORT exactly as before; a caller's own explicit
+// output_config still wins (unchanged). The OpenAI backup leg has no effort
+// concept and ignores it.
+async function createDeepMessage(client, { laneId, effort, ...params } = {}, options = {}) {
   if (options.jsonSchema) {
     const basePolicy = MODELS.TEXT_POLICIES.deepAnalysis;
     const policy = params.model
@@ -65,7 +75,7 @@ async function createDeepMessage(client, { laneId, ...params } = {}, options = {
       temperature: params.temperature,
     }, { validate });
   }
-  const run = () => agentContext.withChain(() => createDeepMessageInChain(client, params));
+  const run = () => agentContext.withChain(() => createDeepMessageInChain(client, params, effort));
   return laneId ? agentContext.runInLane(laneId, run) : run();
 }
 
@@ -94,21 +104,24 @@ function withSystemCache(params) {
 // The wire request: the cap clears always-on thinking and the effort pin is
 // a default a caller's own effort overrides (both via anthropic-wire.js, so
 // an Opus 5.5 flip keeps DEEP lanes sized and at the pinned depth).
-function wireParams(params, model) {
+// `requestedEffort` (the createDeepMessage `effort` option) wins over the
+// pin when the served model accepts that exact level; a caller's own
+// output_config.effort still wins over both (spread last, unchanged).
+function wireParams(params, model, requestedEffort) {
   const rest = withSystemCache(params);
   const maxTokens = anthropicMaxTokens(model, rest.max_tokens);
   const req = { ...rest, model, ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }) };
-  const effort = anthropicEffortFor(model);
+  const effort = anthropicEffortFor(model, requestedEffort);
   if (effort) req.output_config = { effort, ...(rest.output_config || {}) };
   return req;
 }
 
-async function createDeepMessageInChain(client, params) {
+async function createDeepMessageInChain(client, params, effort) {
   const model = params.model || MODELS.DEEP;
   const startedAt = Date.now();
   let response;
   try {
-    response = await ledgerCall('anthropic', model, () => client.messages.create(wireParams(params, model)), {
+    response = await ledgerCall('anthropic', model, () => client.messages.create(wireParams(params, model, effort)), {
       trace: { system: systemText(params.system) || null, prompt: messageText(params.messages) || null },
     });
   } catch (err) {

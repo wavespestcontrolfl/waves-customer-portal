@@ -163,6 +163,10 @@ describe('live-webhook gratitude drafter boundary', () => {
       missing_info: null,
       verify: { passes: 1, converged: true },
       voice_profile_version: null,
+      // Codex P2 (open-times send-time recheck): always stamped, null when
+      // this draft never fetched/quoted an OPEN TIMES section — a gratitude
+      // reply never does.
+      open_times_snapshot: null,
       gratitude: {
         source: 'live_webhook',
         policy_version: result.GRATITUDE_POLICY_VERSION,

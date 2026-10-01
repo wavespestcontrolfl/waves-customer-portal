@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const {
   GetObjectCommand,
   HeadObjectCommand,
@@ -9,6 +10,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const { detectServiceLine } = require('./service-line-configs');
+const { resolveApplicatorFdacsId } = require('./report-data');
+const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
+const { formatTechnicianForCustomer } = require('../../utils/technician-name');
 
 const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
 const MIN_EXPECTED_REPORT_BYTES = 50000;
@@ -50,7 +54,22 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // finding rows for PDF rendering. Cached p8 PDFs can omit those governed
 // observations, so every line re-renders on next open.
 // Supersedes p8, whose bust it subsumes.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p9-structured-observations-20260926';
+// p10: the document now prints the Poison Control line and the applicator's
+// FDACS ID card number on reports that applied product (owner ruling
+// 2026-09-26, F.S. 482.2265(1)(b)). Cached p9 objects carry neither line, so
+// they re-render on next open. Supersedes p9, whose bust it subsumes.
+// p11: every record's footer now links to the public Products & Safety page
+// (owner 2026-09-28). Cached p10 objects lack the line, so they re-render on
+// next open. Supersedes p10, whose bust it subsumes.
+// p12: the lawn PDF prints the watering banner's one watering line
+// (GATE_LAWN_WATERING_RULE) and drops the duplicate hero task for hold /
+// water-in visits. Cached p11 objects carry the old list, so they re-render on
+// next open. Supersedes p11, whose bust it subsumes.
+// p13: the lawn PDF no longer prints the stock "No additional observations from
+// the photo review." line under the service photos (photoSummary is null for
+// that placeholder). Cached p12 objects still carry it, so they re-render on
+// next open. Supersedes p12, whose bust it subsumes.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p13-lawn-dead-fields-20261001';
 
 const s3 = new S3Client({
   region: config.s3?.region,
@@ -141,6 +160,58 @@ function reentryAdjustedPdfSignature(service) {
     return Number.isFinite(rev) && rev > 0 ? `-rer${rev}` : '';
   } catch {
     return '';
+  }
+}
+
+// Applicator key component (Poison Control lane, codex r2+r3 on #5032).
+// The document prints "Applicator: <technicianName> · FDACS ID card #<id>"
+// (applicatorIdLine), so the key signs that exact pair — a corrected name
+// or license must re-render a cached PDF. '' when no ID prints, so an
+// ordinary record's key is unchanged. Hashed: the key rides download logs.
+function applicatorLinePdfSignature(technicianName, fdacsId) {
+  const id = String(fdacsId || '').trim();
+  if (!id) return '';
+  const name = String(technicianName || '').trim();
+  return `-ap${crypto.createHash('sha1').update(`${name}|${id}`).digest('hex').slice(0, 8)}`;
+}
+
+// STORE side: the pair the render's own payload carried — never a re-read,
+// so a license edit landing mid-render can't key old content as new (same
+// contract as treatmentNarrativeRenderedSignature).
+function applicatorRenderedPdfSignature(data) {
+  return applicatorLinePdfSignature(data?.technicianName, data?.applicatorFdacsId);
+}
+
+// LOOKUP side: the same pair re-derived from the record by ONE loader every
+// expected-key site calls, so no caller's row shape can drift from the
+// payload's (codex r3: the queue's minimal row had no license fields and
+// never matched). Mirrors report-data: technician join, identity-snapshot
+// overlay, formatTechnicianForCustomer, resolveApplicatorFdacsId.
+async function applicatorIdentityPdfSignature(serviceRecordId, knex = db) {
+  try {
+    if (!serviceRecordId) return '';
+    const row = await knex('service_records')
+      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+      .where('service_records.id', serviceRecordId)
+      .first(
+        'service_records.service_date',
+        'service_records.service_data',
+        'technicians.name as technician_name',
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry',
+      );
+    if (!row) return '';
+    const service = applyReportIdentitySnapshot(row);
+    return applicatorLinePdfSignature(
+      formatTechnicianForCustomer({
+        name: service.technician_name,
+        first_name: service.technician_first_name,
+        last_name: service.technician_last_name,
+      }),
+      resolveApplicatorFdacsId(service.technician_fdacs_id, service.technician_license_expiry, service.service_date),
+    );
+  } catch {
+    return ''; // an unreadable lookup misses the cache and re-renders
   }
 }
 
@@ -255,4 +326,6 @@ module.exports = {
   timeOnSiteAdjustedPdfSignature,
   reentryAdjustedPdfSignature,
   treeShrubReviewPdfSignature,
+  applicatorIdentityPdfSignature,
+  applicatorRenderedPdfSignature,
 };

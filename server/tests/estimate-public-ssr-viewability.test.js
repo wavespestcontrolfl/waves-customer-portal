@@ -43,6 +43,7 @@ function makeReq(path) {
   return {
     params: { token: 'tok-ssr-gate' },
     path,
+    originalUrl: path,
     query: {},
     headers: {},
     get: () => '',
@@ -144,6 +145,44 @@ describe('handleEstimateView — SSR viewability gate', () => {
     );
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.sent).toBe(false);
+  });
+
+  // Missing-contact capture lives only in the React accept card (codex
+  // #5102 r1 P0): an accept-active legacy (v1) row with a contact gap must
+  // never get the server-HTML page that cannot ask for it.
+  test('accept-active v1 row missing a last name is forced to the React view on the /estimate/ mount', async () => {
+    const { res, next } = await runView(
+      { status: 'sent', expires_at: FUTURE, use_v2_view: false, sent_at: PAST, customer_name: 'Pat' },
+      ESTIMATE_MOUNT,
+    );
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.sent).toBe(false);
+  });
+
+  test('accept-active v1 row missing an email redirects the /api/estimates mount to the React URL', async () => {
+    const { res, next } = await runView(
+      { status: 'sent', expires_at: FUTURE, use_v2_view: false, sent_at: PAST, customer_email: null, token: 'tok-ssr-gate' },
+      API_MOUNT,
+    );
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(302);
+    expect(res.redirectUrl).toBe('/estimate/tok-ssr-gate');
+  });
+
+  test('a failed contact-gap lookup fails CLOSED toward the React view', async () => {
+    mockDb.mockImplementation((table) => (table === 'customers'
+      ? { where: () => ({ first: async () => { throw new Error('lookup boom'); } }) }
+      : { where: () => ({ first: async () => currentRow }) }));
+    try {
+      const { res, next } = await runView(
+        { status: 'sent', expires_at: FUTURE, use_v2_view: false, sent_at: PAST, customer_id: 'cust-x' },
+        ESTIMATE_MOUNT,
+      );
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(res.sent).toBe(false);
+    } finally {
+      mockDb.mockImplementation(() => ({ where: () => ({ first: async () => currentRow }) }));
+    }
   });
 
   test('unknown token still gets the generic not-found shell', async () => {

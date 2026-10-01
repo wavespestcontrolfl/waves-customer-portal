@@ -82,7 +82,16 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
     expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: veryOld })).toBe(true);
   });
 
-  test('false for an ordinary sending row without the marker', () => {
+  test('a billing Text-leg claim is a synthetic placeholder: hidden while sending at any age, never review-ask evidence', () => {
+    const veryOld = new Date(Date.now() - 30 * 24 * 3600000);
+    const metadata = { billing_text_leg_claim: true, billingDeliveryLeg: 'sms', notificationEventKey: 'k' };
+    expect(isUnresolvedSendReservation({ status: 'sending', metadata, created_at: new Date() })).toBe(true);
+    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { ...metadata, acceptedProviderMessageId: 'SMx' }, created_at: veryOld })).toBe(true);
+    expect(isUnresolvedSendReservation({ status: 'sending', metadata: JSON.stringify(metadata), created_at: veryOld })).toBe(true);
+    expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata })).toBe(false);
+  });
+
+    test('false for an ordinary sending row without the marker', () => {
     expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: {} })).toBe(false);
     expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: null })).toBe(false);
   });
@@ -109,7 +118,13 @@ describe('excludeUnresolvedSendReservations — SQL-level exclusion', () => {
     expect(sql).not.toContain('72 hours');
   });
 
-  test('qualifies an aliased/joined table when given', () => {
+  test('hides a billing Text-leg claim while sending, at any age', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const { sql } = excludeUnresolvedSendReservations(knex('sms_log')).toSQL();
+    expect(sql).toContain("sms_log.metadata->>'billing_text_leg_claim'");
+  });
+
+    test('qualifies an aliased/joined table when given', () => {
     const knex = require('knex')({ client: 'pg' });
     const { sql } = excludeUnresolvedSendReservations(knex('sms_log as reply'), 'reply').toSQL();
     expect(sql).toContain("reply.status NOT IN ('sent', 'delivered')");

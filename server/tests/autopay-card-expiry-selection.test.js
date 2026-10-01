@@ -6,6 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/autopay-log', () => ({
   logAutopay: jest.fn(async () => {}),
   eventExistsRecently: jest.fn(async () => false),
+  latestExpiredCardProgress: jest.fn(async () => null),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
@@ -34,6 +35,8 @@ const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals'
 const exemptions = (customerIds = [], charged = []) => ({ customerIds: new Set(customerIds), chargeMethodIdsByCustomer: new Map(charged) });
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { eventExistsRecently } = require('../services/autopay-log');
+const { latestExpiredCardProgress } = require('../services/autopay-log');
+const { logAutopay } = require('../services/autopay-log');
 const { sendCardExpiryWarnings } = require('../services/autopay-notifications');
 
 function thenable(rows) {
@@ -83,6 +86,35 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
         payment_method_id: 'pm-cur', expiry_month: '9', expiry_year: '2026', expiry_stage: '60_day',
       }),
     }));
+  });
+
+  test('a deduped Text expiry reminder records its original acceptance time', async () => {
+    const sentAt = new Date('2026-08-20T15:00:00Z');
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb({
+      customers: [thenable([CUSTOMER])],
+      payment_methods: [thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa',
+        last_four: '4242', exp_month: '9', exp_year: '26' }])],
+    });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted',
+      deduped: true, channelResults: { sms: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt } } });
+    expect(await sendCardExpiryWarnings()).toMatchObject({ sent: 0, skipped: 1 });
+    expect(logAutopay).toHaveBeenCalledWith('c1', 'card_expiring_soon',
+      expect.objectContaining({ createdAt: sentAt, paymentMethodId: 'pm-cur' }));
+  });
+
+  test('a dispute-hold suppression of the expiry text is a WAIT: skipped, nothing stamped, no error (Codex r8 P1)', async () => {
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb({
+      customers: [thenable([CUSTOMER])],
+      payment_methods: [thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa',
+        last_four: '4242', exp_month: '9', exp_year: '26' }])],
+    });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
+    expect(await sendCardExpiryWarnings()).toMatchObject({ sent: 0, skipped: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'autopay', entryPoint: 'autopay_card_expiry_warning' }));
+    expect(logAutopay).not.toHaveBeenCalled();
+    expect(require('../services/logger').error).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -165,6 +197,65 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
     const body = require('../services/sms-template-renderer').renderSmsTemplate.mock.calls[0];
     expect(body[1]).toMatchObject({ last_four: '4242' });
     expect(body[0]).toBe('autopay_card_expired');
+  });
+
+  test('expired recurrence uses one progress row for cooldown and next stable episode', async () => {
+    const card = { id: 'pm-ptr', method_type: null, is_default: true,
+      card_brand: 'Visa', last_four: '4242', exp_month: '7', exp_year: '26' };
+    const run = async () => {
+      getChargeableAutopayMethod.mockResolvedValueOnce(false);
+      wireDb({ customers: [thenable([CUSTOMER])], payment_methods: [thenable([card])] });
+      return sendCardExpiryWarnings();
+    };
+    expect((await run()).sent).toBe(1);
+    const base = 'payment-expiry:pm-ptr:7:2026:expired';
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata.notificationEventKey).toBe(base);
+    // A provider accepted but progress logging failed. Crossing a wall-clock
+    // month does not create a new App key without a durable progress row.
+    jest.setSystemTime(new Date('2026-09-30T15:00:00Z'));
+    expect((await run()).sent).toBe(1);
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata.notificationEventKey).toBe(base);
+    latestExpiredCardProgress.mockResolvedValueOnce({ id: 41, created_at: new Date('2026-08-26T15:00:00Z') });
+    expect((await run()).sent).toBe(1);
+    const next = `${base}:after:41`;
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata.notificationEventKey).toBe(next);
+    latestExpiredCardProgress.mockResolvedValueOnce({ id: 42, created_at: new Date('2026-09-30T15:00:00Z') });
+    expect((await run()).skipped).toBe(1);
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata.notificationEventKey).toBe(next);
+    const sends = sendCustomerMessage.mock.calls.length;
+    latestExpiredCardProgress.mockResolvedValueOnce({ id: 43, created_at: null });
+    expect((await run()).skipped).toBe(1);
+    latestExpiredCardProgress.mockResolvedValueOnce({ id: 44, created_at: 'not-a-date' });
+    expect((await run()).skipped).toBe(1);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(sends);
+    expect(latestExpiredCardProgress).toHaveBeenCalledWith('c1', 'pm-ptr', '7', 2026);
+  });
+
+  test('repairing an old App acceptance keeps its original cooldown time before the next recurrence', async () => {
+    const oldAt = new Date('2026-07-20T15:00:00Z');
+    getChargeableAutopayMethod.mockResolvedValueOnce(false);
+    wireDb({ customers: [thenable([CUSTOMER])], payment_methods: [thenable([{
+      id: 'pm-ptr', method_type: null, is_default: true, card_brand: 'Visa',
+      last_four: '4242', exp_month: '7', exp_year: '26',
+    }])] });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, deduped: true,
+      channelResults: { push: { sent: true, deduped: true, deliveryOutcome: 'accepted', eventVisibleAt: oldAt } } });
+    expect((await sendCardExpiryWarnings()).skipped).toBe(1);
+    expect(logAutopay).toHaveBeenCalledWith('c1', 'card_expired',
+      expect.objectContaining({ createdAt: oldAt }));
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata.notificationEventKey)
+      .toBe('payment-expiry:pm-ptr:7:2026:expired');
+    // The repaired t0 row is already older than the 30-day cooldown. Its
+    // durable ID starts the next notice even though repair happened today.
+    latestExpiredCardProgress.mockResolvedValueOnce({ id: 45, created_at: oldAt });
+    getChargeableAutopayMethod.mockResolvedValueOnce(false);
+    wireDb({ customers: [thenable([CUSTOMER])], payment_methods: [thenable([{
+      id: 'pm-ptr', method_type: null, is_default: true, card_brand: 'Visa',
+      last_four: '4242', exp_month: '7', exp_year: '26',
+    }])] });
+    expect((await sendCardExpiryWarnings()).sent).toBe(1);
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata.notificationEventKey)
+      .toBe('payment-expiry:pm-ptr:7:2026:expired:after:45');
   });
 
   test('nothing chargeable and only bank rows → no card notice', async () => {

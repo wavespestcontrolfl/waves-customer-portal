@@ -15,6 +15,11 @@ const {
   projectTypeFreeTextKeys,
   projectTypeHasInternalFindingKeys,
 } = require('./project-types');
+// AW-06: the shipped chip list lives ONCE in shared/ so the server whitelist,
+// the client's PROMPTS (ProjectReportEngage.jsx) and the routing test that
+// enumerates every shipped chip (report-question-routing.test.js) can never
+// drift apart (client + server import the same file; nothing hand-copied).
+const PROJECT_REPORT_ASK_PROMPTS = require('../../shared/project-report-ask-prompts.json');
 
 // Internal/office-only finding keys — never in an answer. Shared with the
 // payload + narrative egress points via project-types (codex #2807).
@@ -62,8 +67,17 @@ function formatDateOnly(value) {
     .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
 }
 
-function joinAnswer(lines) {
-  return lines.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+// AW-06 (Answer usefulness): a recorded-facts answer with more than one field
+// is a LIST of facts, not one run-on sentence — join with "\n" (one fact per
+// line, each still collapsed/trimmed individually) so the client can render
+// each on its own line, matching the shape service-report/report-assistant.js
+// already uses for its multi-line answers (answerAppliedToday, answerFindings,
+// answerNextSteps). A single-field answer is unaffected either way.
+function joinAnswerLines(lines) {
+  return lines
+    .filter(Boolean)
+    .map((line) => String(line).replace(/\s+/g, ' ').trim())
+    .join('\n');
 }
 
 function answerFindings({ project, typeCfg }) {
@@ -73,9 +87,9 @@ function answerFindings({ project, typeCfg }) {
   if (!picked.length) {
     const any = Object.keys(findings).slice(0, 3);
     if (!any.length) return 'The full findings are listed on this report above.';
-    return joinAnswer(any.map((key) => `${fieldLabel(typeCfg, key)}: ${findings[key]}.`));
+    return joinAnswerLines(any.map((key) => `${fieldLabel(typeCfg, key)}: ${findings[key]}.`));
   }
-  return joinAnswer(picked.map((key) => `${fieldLabel(typeCfg, key)}: ${findings[key]}.`));
+  return joinAnswerLines(picked.map((key) => `${fieldLabel(typeCfg, key)}: ${findings[key]}.`));
 }
 
 function answerTreatment({ project, typeCfg }) {
@@ -83,7 +97,7 @@ function answerTreatment({ project, typeCfg }) {
   const keys = ['areas_treated', 'treatment_method', 'products_used', 'product_name', 'target_termite', 'linear_feet_or_stations', 'gallons_or_amount'];
   const picked = keys.filter((key) => findings[key]).slice(0, 4);
   if (!picked.length) return 'The treatment details for this project are listed on the report above.';
-  return joinAnswer(picked.map((key) => `${fieldLabel(typeCfg, key)}: ${findings[key]}.`));
+  return joinAnswerLines(picked.map((key) => `${fieldLabel(typeCfg, key)}: ${findings[key]}.`));
 }
 
 function answerNextVisit({ project, payload }) {
@@ -199,15 +213,11 @@ function answerProjectReportQuestion({ question, project, payload, intent }) {
 }
 
 // Suggested prompt chips, mirrored client-side, each paired with the
-// explicit intent the chip click sends (AW-06). Kept here so the answer
-// router and the suggestions never drift apart.
+// explicit intent the chip click sends (AW-06). Sourced from the shared JSON
+// above so the answer router, the client's chips, and the routing test's
+// enumeration never drift apart.
 function projectReportAskPrompts(project = {}) {
-  return [
-    { text: 'What did you find?', intent: 'findings' },
-    { text: 'What was treated?', intent: 'treatment' },
-    { text: 'What should I do next?', intent: 'recommendations' },
-    { text: 'When is my next visit?', intent: 'next_visit' },
-  ];
+  return PROJECT_REPORT_ASK_PROMPTS;
 }
 
 module.exports = {

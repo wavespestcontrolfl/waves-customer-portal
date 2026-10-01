@@ -26,6 +26,7 @@ const {
   dailyBatchLimit,
   firstReturnedId,
   queueInternalLinkTaskForDryRun,
+  citabilityAdvisoryMessages,
 } = _internals;
 
 const ORIGINAL_ENV = { ...process.env };
@@ -37,6 +38,22 @@ afterEach(() => {
   for (const k of Object.keys(ORIGINAL_ENV)) {
     if (k.startsWith('SHADOW_MODE_') || k.startsWith('AUTO_PUBLISH_')) process.env[k] = ORIGINAL_ENV[k];
   }
+});
+
+test('every citability soft failure is preserved as a separate advisory message', () => {
+  const soft_failures = [
+    { name: 'voice_match', reason: 'generic' },
+    { name: 'citability_named_sources', reason: 'no source' },
+    { name: 'citability_concrete_specifics', reason: 'no measurement' },
+    { name: 'citability_comparison', reason: 'no table' },
+    { name: 'citability_how_to_choose', reason: 'no criteria' },
+  ];
+  expect(citabilityAdvisoryMessages({ soft_failures })).toEqual([
+    { code: 'CITABILITY_NAMED_SOURCES', message: 'no source' },
+    { code: 'CITABILITY_CONCRETE_SPECIFICS', message: 'no measurement' },
+    { code: 'CITABILITY_COMPARISON', message: 'no table' },
+    { code: 'CITABILITY_HOW_TO_CHOOSE', message: 'no criteria' },
+  ]);
 });
 
 describe('internal-link dry-run queue helpers', () => {
@@ -86,6 +103,33 @@ describe('internal-link dry-run queue helpers', () => {
       skip_reason: null,
       failure_reason: null,
     }));
+  });
+
+  test('a replan never re-queues a link the reader check or Codex rejected', async () => {
+    const insertChain = {
+      insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([]) })) })) })),
+    };
+    const lookupChain = {
+      select: jest.fn(() => lookupChain),
+      where: jest.fn(() => lookupChain),
+      whereIn: jest.fn(() => lookupChain),
+      first: jest.fn().mockResolvedValue(undefined),
+    };
+    db.mockImplementationOnce(() => insertChain).mockImplementationOnce(() => lookupChain);
+
+    await expect(queueInternalLinkTaskForDryRun({
+      source_file: 'src/content/blog/source.md',
+      target_url: '/target/',
+      anchor_text: 'target anchor',
+    }, 'opp_new')).resolves.toBeNull();
+
+    // Render the grouped condition the lookup applied against real knex SQL.
+    const grouped = lookupChain.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    const knex = require('knex')({ client: 'pg' });
+    const sql = knex('content_internal_link_tasks').where(grouped).toString();
+    expect(sql).toContain('"skip_reason" is null');
+    expect(sql).toContain('"skip_reason" not like \'llm_judge_rejected%\'');
+    expect(sql).toContain('"skip_reason" not like \'codex_findings%\'');
   });
 
   test('does not dry-run duplicates that leave retryable state before refresh update', async () => {
@@ -862,6 +906,11 @@ describe('countsTowardTrustBuild', () => {
 });
 
 describe('isDeterministicPublishError', () => {
+  test('COMPETITOR_LINK parks: a link in the live page outside the edit fails every retry (Codex r10 on #5191)', () => {
+    const err = new Error('competitor link "https://www.orkin.com/x" in the page — publish refused');
+    err.code = 'COMPETITOR_LINK';
+    expect(isDeterministicPublishError(err)).toBe(true);
+  });
   test('BLOG_BODY_IMAGES_FAILED parks like the hero failure', () => {
     const err = new Error('autonomous blog body image 1 generation failed');
     err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -1458,6 +1507,84 @@ describe('module exports', () => {
   });
 });
 
+describe('runDaily reserved citability backfill slots', () => {
+  const originalEnv = { ...process.env };
+  afterEach(() => { process.env = { ...originalEnv }; });
+  // loadRunnerWith's queue mock (with a row-returning peek) outlives this
+  // block in the module registry; re-mock a queue with no peek so later
+  // batching tests reserve nothing.
+  afterAll(() => { loadRunnerWith({ queue: {} }); });
+
+  function batchRunner(outcomes, reserved) {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner.runNext = jest.fn();
+    for (const o of outcomes) runner.runNext.mockResolvedValueOnce(o);
+    runner.runNext.mockResolvedValue({ outcome: 'skipped_no_opportunity' });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn();
+    runner._claimableBackfillSlots = jest.fn(async () => reserved);
+    return runner;
+  }
+
+  test('the first reserved slots claim backfill rows, then the batch claims by score', async () => {
+    const done = { outcome: 'completed_pending_review', action_type: 'refresh_existing_page' };
+    const runner = batchRunner([done, done, { outcome: 'completed_pending_review', action_type: 'new_supporting_blog' }], 2);
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    expect(runner._claimableBackfillSlots).toHaveBeenCalledWith(5);
+    expect(runner.runNext.mock.calls[0][0]).toMatchObject({ bucket: 'citability_backfill' });
+    expect(runner.runNext.mock.calls[1][0]).toMatchObject({ bucket: 'citability_backfill' });
+    expect(runner.runNext.mock.calls[2][0].bucket).toBeUndefined();
+    // Reserved runs count toward the same batch of 5.
+    expect(result).toMatchObject({ count: 4, limit: 5 });
+  });
+
+  test('a reserved slot whose row was claimed away returns to the general pool', async () => {
+    const blog = { outcome: 'completed_pending_review', action_type: 'new_supporting_blog' };
+    const runner = batchRunner([{ outcome: 'skipped_no_opportunity' }, blog, blog, blog, blog, blog], 2);
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    expect(runner.runNext.mock.calls[0][0]).toMatchObject({ bucket: 'citability_backfill' });
+    // The empty reserved probe is not recorded and uses no slot; the second
+    // reservation is dropped, and all five slots go to scored work.
+    expect(runner.runNext.mock.calls.slice(1).every(([args]) => args.bucket === undefined)).toBe(true);
+    expect(runner._appendToDailyDigest).toHaveBeenCalledTimes(5);
+    expect(result).toMatchObject({ count: 5 });
+  });
+
+  test('a scoped pass (the blog catch-up) reserves nothing', async () => {
+    const runner = batchRunner([{ outcome: 'completed_pending_review', action_type: 'new_supporting_blog' }], 2);
+    await runner.runDaily({ limit: 5, actionType: 'new_supporting_blog' });
+    expect(runner._claimableBackfillSlots).not.toHaveBeenCalled();
+    expect(runner.runNext.mock.calls.every(([args]) => args.bucket === undefined)).toBe(true);
+  });
+
+  test('_claimableBackfillSlots: default 2, never the whole batch, sized by what is claimable, 0 disables', async () => {
+    const peek = jest.fn(async ({ limit }) => Array.from({ length: limit }, (_, i) => ({ id: i })));
+    const recoverStaleClaims = jest.fn(async () => 0);
+    const runner = loadRunnerWith({ queue: { peek, recoverStaleClaims } });
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(2);
+    // Stale claims from a crashed batch are recovered before sizing (Codex r1 P2).
+    expect(recoverStaleClaims.mock.invocationCallOrder[0]).toBeLessThan(peek.mock.invocationCallOrder[0]);
+    expect(peek).toHaveBeenCalledWith(expect.objectContaining({ bucket: 'citability_backfill', limit: 2 }));
+    // A failed recovery still sizes from pending rows.
+    recoverStaleClaims.mockRejectedValueOnce(new Error('lock timeout'));
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(2);
+    await expect(runner._claimableBackfillSlots(1)).resolves.toBe(0);
+    peek.mockResolvedValueOnce([{ id: 1 }]);
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(1);
+    process.env.AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS = '0';
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(0);
+    process.env.AUTONOMOUS_CONTENT_BACKFILL_DAILY_SLOTS = '9';
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(4);
+    peek.mockRejectedValueOnce(new Error('db down'));
+    await expect(runner._claimableBackfillSlots(5)).resolves.toBe(0);
+  });
+});
+
 describe('runDaily batching', () => {
   test('claims best remaining opportunities until limit or empty queue', async () => {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
@@ -1759,10 +1886,13 @@ function loadRunnerWith({
   contentGuardrails = undefined,
   comparisonTableGate = undefined,
   claimsLedgerValidator = undefined,
+  dbQuery = null,
+  dbClient = null,
 }) {
   queue.skip ||= jest.fn().mockResolvedValue(true);
   jest.resetModules();
-  const dbMock = jest.fn(() => {
+  const dbMock = jest.fn((...args) => {
+    if (dbQuery) return dbQuery(...args);
     const returning = jest.fn().mockResolvedValue([{ id: 'run_1' }]);
     const ignore = jest.fn(() => ({ returning }));
     const onConflict = jest.fn(() => ({ ignore }));
@@ -1770,6 +1900,7 @@ function loadRunnerWith({
       insert: jest.fn(() => ({ returning, onConflict })),
     };
   });
+  if (dbClient) dbMock.client = dbClient;
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   // The runner fires the owner email-approval notification via setImmediate
@@ -1921,6 +2052,30 @@ describe('protected-page guard', () => {
     // exceptions-only; only a protected-check ERROR still parks (see below).
     expect(queue.skip).toHaveBeenCalledWith('opp_protected_city_service', 'protected_page:money_page', { claimToken: claimedAt });
     expect(queue.pendingReview).not.toHaveBeenCalled();
+  });
+
+  test('add_internal_links is never blocked by target protection (the target page is not edited)', async () => {
+    const protectedPages = {
+      isProtected: jest.fn().mockResolvedValue({ protected: true, reason: 'money_page', source: 'pattern' }),
+    };
+    const runner = loadRunnerWith({ queue: { claimNext: jest.fn() }, briefBuilder: { compose: jest.fn() }, protectedPages });
+
+    expect(await runner._checkProtectedPage({
+      action_type: 'add_internal_links',
+      page_url: '/pest-control-sarasota-fl/',
+    })).toBeNull();
+    expect(await runner._checkProtectedPage(
+      { action_type: 'refresh_existing_page', page_url: '/pest-control-sarasota-fl/' },
+      { action_type: 'add_internal_links', target_url: '/pest-control-sarasota-fl/' },
+    )).toBeNull();
+    expect(protectedPages.isProtected).not.toHaveBeenCalled();
+
+    // Page-editing action types still get the guard.
+    const verdict = await runner._checkProtectedPage({
+      action_type: 'refresh_existing_page',
+      page_url: '/pest-control-sarasota-fl/',
+    });
+    expect(verdict).toMatchObject({ protected: true, reason: 'money_page' });
   });
 
   test('a thrown protected-page check fails closed and is tagged is_error (not a routine skip)', async () => {
@@ -2188,7 +2343,7 @@ describe('runNext Astro corpus loading', () => {
     }
   });
 
-  test('optional GitHub corpus load failures degrade to an empty corpus for internal-link runs', async () => {
+  test('a live internal-link run releases the claim when the corpus cannot load (retry, not "no candidates")', async () => {
     const previousAstroDir = process.env.ASTRO_REPO_DIR;
     const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
     delete process.env.ASTRO_REPO_DIR;
@@ -2203,6 +2358,7 @@ describe('runNext Astro corpus loading', () => {
           claimed_at: claimedAt,
         }),
         pendingReview: jest.fn().mockResolvedValue(true),
+        skip: jest.fn().mockResolvedValue(true),
         release: jest.fn().mockResolvedValue(true),
       };
       const briefBuilder = {
@@ -2222,15 +2378,12 @@ describe('runNext Astro corpus loading', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('internal_links_dry_run');
-      expect(result.link_tasks_queued).toBe(0);
-      expect(linkPlanner.planForTarget).toHaveBeenCalledWith(
-        expect.objectContaining({ url: '/blog/ghost-ants/' }),
-        { corpus: [], opportunityId: 'opp_links_optional_1' }
-      );
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_optional_1', 'internal_links_dry_run', { claimToken: claimedAt });
-      expect(queue.release).not.toHaveBeenCalled();
+      expect(result.outcome).toBe('failed');
+      expect(result.failure_message).toContain('GitHub token missing');
+      expect(linkPlanner.planForTarget).not.toHaveBeenCalled();
+      expect(queue.release).toHaveBeenCalledWith('opp_links_optional_1', { claimToken: claimedAt });
+      expect(queue.skip).not.toHaveBeenCalled();
+      expect(queue.pendingReview).not.toHaveBeenCalled();
     } finally {
       if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
       else process.env.ASTRO_REPO_DIR = previousAstroDir;
@@ -2288,10 +2441,10 @@ describe('runNext Astro corpus loading', () => {
       const result = await runner.runNext();
 
       expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.uniqueness_gate_result).toMatchObject({ ok: false, error: 'GitHub unavailable' });
       expect(uniquenessGate.evaluate).not.toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_required_corpus_1', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_required_corpus_1', 'gate_infrastructure_error', { claimToken: claimedAt });
     } finally {
       if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
       else process.env.ASTRO_REPO_DIR = previousAstroDir;
@@ -2359,7 +2512,34 @@ describe('runNext internal-link shadow behavior', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
-  test('opens review-only internal-link PRs when the lane is unshadowed', async () => {
+  test('a dry-run that only hit transient load failures releases the claim for retry', async () => {
+    const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    try {
+      const claimedAt = new Date('2026-05-23T05:10:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_links_transient', action_type: 'add_internal_links', claimed_at: claimedAt }),
+        complete: jest.fn(), pendingReview: jest.fn(), skip: jest.fn(),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = { compose: jest.fn().mockResolvedValue({ id: 'b', action_type: 'add_internal_links', page_type: 'internal-link', target_url: '/x/', target_keyword: 'x' }) };
+      const linkPlanner = { planForTarget: jest.fn().mockReturnValue([{ source_file: 's.md', target_url: '/x/', anchor_text: 'x' }]) };
+      const internalLinkExecutor = {
+        runDryRun: jest.fn().mockResolvedValue({ count: 1, results: [{ task_id: 'run_1', status: 'failed', failure_reason: 'GitHub 502' }] }),
+        isTransientLoadFailure: (r) => r === 'GitHub 502',
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
+      const result = await runner.runNext();
+      expect(result.outcome).toBe('deferred_gate_retry');
+      expect(queue.release).toHaveBeenCalledWith('opp_links_transient', { claimToken: claimedAt });
+      expect(queue.skip).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+      else process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = previousShadow;
+    }
+  });
+
+  test('an unshadowed run plans candidates and completes; it never opens or waits on a PR', async () => {
     const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
     try {
@@ -2404,18 +2584,21 @@ describe('runNext internal-link shadow behavior', () => {
           count: 1,
           pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88',
         }),
+        requeueTransientDryRunFailures: jest.fn(async () => 0),
       };
       const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('internal_links_pr_pending_merge');
-      expect(result.astro_pr_url).toBe('https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88');
+      // Mixed results: transient failures are requeued before completing.
+      expect(internalLinkExecutor.requeueTransientDryRunFailures).toHaveBeenCalledWith([{ task_id: 'run_1', status: 'patch_candidate' }]);
+      // Shipping is the candidate sweep's job alone (one PR path).
+      expect(result.outcome).toBe('completed_planned');
+      expect(result.astro_pr_url).toBeUndefined();
       expect(internalLinkExecutor.runDryRun).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 1 });
-      expect(internalLinkExecutor.runPrBatch).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 3 });
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_live_1', 'internal_links_pr_pending_merge', { claimToken: claimedAt });
-      expect(queue.complete).not.toHaveBeenCalled();
+      expect(internalLinkExecutor.runPrBatch).not.toHaveBeenCalled();
+      expect(queue.complete).toHaveBeenCalledWith('opp_links_live_1', expect.objectContaining({ claimToken: claimedAt }));
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
@@ -2472,6 +2655,351 @@ describe('runNext general shadow behavior', () => {
 });
 
 describe('runNext post-publish bookkeeping', () => {
+  function pageEditLockHarness(lockedRow, { unlockThrows = false, lockFree = true, resetThrows = false } = {}) {
+    const events = [];
+    const sessionSql = [];
+    const conn = {
+      query: jest.fn(async (sql) => {
+        if (/^(SET|RESET) statement_timeout/.test(sql)) {
+          sessionSql.push(sql);
+          if (resetThrows && sql.startsWith('RESET')) throw new Error('reset failed');
+          return { rows: [] };
+        }
+        if (sql.includes('unlock')) {
+          events.push('unlock');
+          if (unlockThrows) throw new Error('connection reset');
+          return { rows: [] };
+        }
+        events.push(lockFree ? 'lock' : 'lock_busy');
+        return { rows: [{ locked: lockFree }] };
+      }),
+    };
+    const client = {
+      acquireConnection: jest.fn(async () => conn),
+      releaseConnection: jest.fn(async () => { events.push('release'); }),
+      destroyRawConnection: jest.fn(async () => { events.push('destroy'); }),
+    };
+    const first = jest.fn(async () => lockedRow);
+    const query = jest.fn(() => {
+      const q = {
+        connection: jest.fn(() => q),
+        where: jest.fn(() => q),
+        whereNull: jest.fn(() => q),
+        first,
+      };
+      return q;
+    });
+    return { client, conn, events, first, query, sessionSql };
+  }
+
+  // publishRefresh runs only its GitHub write phase under the caller's
+  // commitGuard; this stand-in does the same.
+  function guardedPublishRefresh(onWrite) {
+    return jest.fn(async (_draft, _brief, opts = {}) => {
+      if (typeof opts.commitGuard !== 'function') throw new Error('backfill publish arrived without a commitGuard');
+      return opts.commitGuard(async () => onWrite());
+    });
+  }
+
+  test('rechecks citability page ownership before publisher side effects', async () => {
+    const write = jest.fn();
+    const publisher = { publishRefresh: guardedPublishRefresh(write) };
+    const queue = {
+      getById: jest.fn().mockResolvedValue({
+        id: 'opp_backfill_1',
+        bucket: 'citability_backfill',
+        status: 'claimed',
+        claim_id: 'claim-a',
+        signal_metadata: {},
+      }),
+      _internals: {
+        pageEditSuperseded: (row) => Boolean(row?.signal_metadata?.page_edit_superseded),
+      },
+    };
+    const lock = pageEditLockHarness({
+      bucket: 'citability_backfill',
+      status: 'claimed',
+      claim_id: 'claim-a',
+      claimed_at: new Date('2026-09-26T13:00:00Z'),
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+    });
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder: {},
+      publisher,
+      dbQuery: lock.query,
+      dbClient: lock.client,
+    });
+
+    await expect(runner._publishAndDistribute(
+      { body: 'stale draft' },
+      { action_type: 'refresh_existing_page' },
+      {
+        opportunity_id: 'opp_backfill_1',
+        queue_claim_id: 'claim-a',
+        queue_claimed_at: new Date('2026-09-26T13:00:00Z'),
+      },
+    )).rejects.toMatchObject({ code: 'PAGE_EDIT_SUPERSEDED' });
+    expect(lock.conn.query).toHaveBeenCalledWith('SELECT pg_try_advisory_lock(hashtext($1)) AS locked', ['opportunity_page_edit']);
+    expect(lock.events).toEqual(['lock', 'unlock', 'release']);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test('refuses a recovered stale worker whose original queue claim no longer owns the backfill row', async () => {
+    const write = jest.fn();
+    const publisher = { publishRefresh: guardedPublishRefresh(write) };
+    const queue = {
+      getById: jest.fn().mockResolvedValue({
+        id: 'opp_backfill_lost', bucket: 'citability_backfill', status: 'skipped', signal_metadata: {},
+      }),
+      _internals: { pageEditSuperseded: () => false },
+    };
+    const lock = pageEditLockHarness(null);
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder: {},
+      publisher,
+      dbQuery: lock.query,
+      dbClient: lock.client,
+    });
+
+    await expect(runner._publishAndDistribute(
+      { body: 'stale recovered draft' },
+      { action_type: 'refresh_existing_page' },
+      {
+        opportunity_id: 'opp_backfill_lost',
+        queue_claim_id: 'claim-old',
+        queue_claimed_at: new Date('2026-09-26T12:00:00Z'),
+      },
+    )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST' });
+    expect(lock.first).toHaveBeenCalledWith('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test('holds the session lock through publishing and does not lose a successful publish to unlock failure', async () => {
+    const approvalClaimedAt = new Date('2026-09-26T14:00:00Z');
+    const lock = pageEditLockHarness({
+      bucket: 'citability_backfill', status: 'claimed', claim_id: 'claim-approval',
+      claimed_at: approvalClaimedAt, signal_metadata: {},
+    }, { unlockThrows: true });
+    const publisher = {
+      publishRefresh: guardedPublishRefresh(async () => {
+        lock.events.push('publish');
+        return { status: 'no_changes' };
+      }),
+    };
+    const queue = {
+      getById: jest.fn().mockResolvedValue({
+        id: 'opp_backfill_approval', bucket: 'citability_backfill', status: 'claimed', signal_metadata: {},
+      }),
+      _internals: { pageEditSuperseded: () => false },
+    };
+    const runner = loadRunnerWith({
+      queue, briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client,
+    });
+
+    await expect(runner._publishAndDistribute(
+      { body: 'approved draft' },
+      { action_type: 'refresh_existing_page' },
+      {
+        opportunity_id: 'opp_backfill_approval',
+        queue_claim_id: 'claim-approval',
+        queue_claimed_at: approvalClaimedAt,
+      },
+    )).resolves.toMatchObject({ publish_status: 'no_changes' });
+    expect(publisher.publishRefresh).toHaveBeenCalledTimes(1);
+    // The write phase's lock, then the no-op ownership recheck's lock.
+    expect(lock.events).toEqual(['lock', 'publish', 'unlock', 'destroy', 'release', 'lock', 'unlock', 'destroy', 'release']);
+    expect(lock.conn.__knex__disposed).toMatch(/page-edit advisory unlock failed: connection reset/);
+    expect(lock.client.releaseConnection).toHaveBeenCalledWith(lock.conn);
+    expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
+  });
+
+  test('a backfill row routed to a non-refresh publisher fails closed before any write', async () => {
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const queue = {
+      getById: jest.fn().mockResolvedValue({
+        id: 'opp_backfill_new', bucket: 'citability_backfill', status: 'claimed', signal_metadata: {},
+      }),
+      _internals: { pageEditSuperseded: () => false },
+    };
+    const lock = pageEditLockHarness(null);
+    const runner = loadRunnerWith({ queue, briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client });
+
+    await expect(runner._publishAndDistribute(
+      { body: 'draft' }, { action_type: 'new_supporting_blog' },
+      { opportunity_id: 'opp_backfill_new', queue_claim_id: 'c', queue_claimed_at: new Date('2026-09-28T18:00:00Z') },
+    )).rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_NOT_REFRESH' });
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(lock.events).toEqual([]);
+  });
+
+  describe('page-edit lock bounds', () => {
+    const originalEnv = { ...process.env };
+    const originalFetch = global.fetch;
+    afterEach(() => {
+      process.env = { ...originalEnv };
+      global.fetch = originalFetch;
+    });
+
+    function backfillRun(id) {
+      return {
+        opportunity_id: id,
+        queue_claim_id: 'claim-bound',
+        queue_claimed_at: new Date('2026-09-28T18:00:00Z'),
+      };
+    }
+
+    function backfillQueue(id) {
+      return {
+        getById: jest.fn().mockResolvedValue({
+          id, bucket: 'citability_backfill', status: 'claimed', signal_metadata: {},
+        }),
+        _internals: { pageEditSuperseded: () => false },
+      };
+    }
+
+    const lockedRow = {
+      bucket: 'citability_backfill', status: 'claimed', claim_id: 'claim-bound',
+      claimed_at: new Date('2026-09-28T18:00:00Z'), signal_metadata: {},
+    };
+
+    test('gives up waiting for a busy page-edit lock and fails closed without publishing', async () => {
+      process.env.CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS = '0';
+      const lock = pageEditLockHarness(lockedRow, { lockFree: false });
+      const write = jest.fn();
+      const publisher = { publishRefresh: guardedPublishRefresh(write) };
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_lock_busy'), briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_lock_busy'),
+      )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST', message: expect.stringMatching(/timed out after 0ms/) });
+      expect(write).not.toHaveBeenCalled();
+      // Never acquired, so never unlocked; the pooled connection still goes back.
+      expect(lock.events).toEqual(['lock_busy', 'release']);
+    });
+
+    test('a backfill superseded during unlocked validation is not accepted as a no-op', async () => {
+      // publishRefresh returns no_changes without running the write guard;
+      // the page was superseded meanwhile.
+      const lock = pageEditLockHarness({
+        ...lockedRow, signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:2' } },
+      });
+      const publisher = { publishRefresh: jest.fn(async () => ({ status: 'no_changes' })) };
+      const queue = {
+        ...backfillQueue('opp_noop_superseded'),
+        _internals: { pageEditSuperseded: (row) => Boolean(row?.signal_metadata?.page_edit_superseded) },
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client });
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_noop_superseded'),
+      )).rejects.toMatchObject({ code: 'PAGE_EDIT_SUPERSEDED' });
+      expect(lock.events).toEqual(['lock', 'unlock', 'release']);
+    });
+
+    test('the acquire deadline also bounds a pool checkout that never returns', async () => {
+      process.env.CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS = '20';
+      const lock = pageEditLockHarness(lockedRow);
+      let deliver;
+      lock.client.acquireConnection = jest.fn(() => new Promise((resolve) => { deliver = resolve; }));
+      const write = jest.fn();
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_pool'), briefBuilder: {}, publisher: { publishRefresh: guardedPublishRefresh(write) },
+        dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_pool'),
+      )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST', message: expect.stringMatching(/database connection/) });
+      expect(write).not.toHaveBeenCalled();
+      // A checkout that arrives late goes straight back to the pool.
+      deliver(lock.conn);
+      await new Promise((r) => setImmediate(r));
+      expect(lock.client.releaseConnection).toHaveBeenCalledWith(lock.conn);
+      expect(lock.conn.query).not.toHaveBeenCalled();
+    });
+
+    test('bounds every statement on the lock session and resets it before the pool gets it back', async () => {
+      const lock = pageEditLockHarness(lockedRow);
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_stmt'), briefBuilder: {},
+        publisher: { publishRefresh: guardedPublishRefresh(async () => ({ status: 'pr_open', pr_url: 'u', url: 'x' })) },
+        dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_stmt'),
+      ).catch(() => {});
+      expect(lock.sessionSql).toEqual(['SET statement_timeout = 30000', 'RESET statement_timeout']);
+      expect(lock.conn.query.mock.calls[0][0]).toBe('SET statement_timeout = 30000');
+      expect(lock.client.destroyRawConnection).not.toHaveBeenCalled();
+    });
+
+    test('a session whose statement timeout cannot be reset is destroyed, not pooled', async () => {
+      const lock = pageEditLockHarness(lockedRow, { resetThrows: true });
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_reset'), briefBuilder: {},
+        publisher: { publishRefresh: guardedPublishRefresh(async () => ({ status: 'pr_open', pr_url: 'u', url: 'x' })) },
+        dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_reset'),
+      ).catch(() => {});
+      expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
+      expect(lock.conn.__knex__disposed).toMatch(/reset failed/);
+    });
+
+    test('a session that stalls configuring its statement timeout is destroyed, not pooled', async () => {
+      process.env.CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS = '20';
+      const lock = pageEditLockHarness(lockedRow);
+      lock.conn.query.mockImplementationOnce(() => new Promise(() => {}));
+      const write = jest.fn();
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_set_stall'), briefBuilder: {}, publisher: { publishRefresh: guardedPublishRefresh(write) },
+        dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_set_stall'),
+      )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST', message: expect.stringMatching(/configuring the page-edit lock session/) });
+      expect(write).not.toHaveBeenCalled();
+      expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
+    });
+
+    test('a GitHub call that outlives the hold deadline fails and the lock is still released', async () => {
+      process.env.CONTENT_PAGE_EDIT_LOCK_HOLD_MS = '30';
+      process.env.GITHUB_TOKEN = 'test-token';
+      global.fetch = jest.fn((url, init) => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason));
+      }));
+      const lock = pageEditLockHarness(lockedRow);
+      let gh = null;
+      const publisher = {
+        publishRefresh: guardedPublishRefresh(async () => {
+          lock.events.push('publish');
+          await gh.getFile('src/content/blog/x.mdx');
+          return { status: 'no_changes' };
+        }),
+      };
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_hold'), briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client,
+      });
+      // loadRunnerWith resets the module registry; take the same client
+      // instance the runner's lazy require will resolve.
+      gh = require('../services/content-astro/github-client');
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_hold'),
+      )).rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+      expect(global.fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: expect.any(Object) }));
+      expect(lock.events).toEqual(['lock', 'publish', 'unlock', 'release']);
+    });
+  });
+
   // These tests exercise publish/queue bookkeeping, not blog dedup. Blog
   // uniqueness now defaults ON (and requires a loaded corpus), so disable it
   // here to isolate the bookkeeping paths; dedup has its own coverage.
@@ -2538,14 +3066,15 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         summary: { p0: 1 },
       });
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.skip).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -2614,8 +3143,8 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         error: 'seo_completion_gate_skipped_required',
@@ -2629,7 +3158,8 @@ describe('runNext post-publish bookkeeping', () => {
         pageType: 'supporting-blog',
       }));
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.skip).toHaveBeenCalledWith('opp_seo_skipped', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_skipped', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -2691,14 +3221,15 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         summary: { p0: 1 },
       });
       expect(result.reviewer_notes).toContain('seo_completion: P0=1');
-      expect(queue.skip).toHaveBeenCalledWith('opp_seo_throw', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_throw', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
       else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
@@ -2906,6 +3437,104 @@ describe('runNext post-publish bookkeeping', () => {
       expect(queue.pendingReview).toHaveBeenCalledWith('opp_pr_1', 'astro_pr_pending_merge', { claimToken: claimedAt });
       expect(queue.complete).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('parks an unreconciled timed-out refresh write for a person instead of retrying into a duplicate PR', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+    try {
+      const claimedAt = new Date('2026-09-28T19:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_unreconciled_1', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_unreconciled_1', action_type: 'new_supporting_blog', page_type: 'blog', human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { url: '/blog/x/', title: 'X' } }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({ ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80 }),
+      };
+      const err = new Error('refresh write to content/refresh-x-abc timed out and the PR lookup failed (503)');
+      err.code = 'REFRESH_PUBLISH_UNRECONCILED';
+      const publisher = { publishOrUpdatePage: jest.fn().mockRejectedValue(err) };
+      const runner = loadRunnerWith({
+        queue, briefBuilder, dispatcher, qualityGate, publisher, indexNow: { submit: jest.fn() }, linkPlanner: {},
+      });
+
+      const result = await runner.runNext();
+
+      // finalize() reports new-blog pending reviews as skips (exceptions-only
+      // lane); the queue row itself must still be PARKED, never skipped or
+      // released, because a PR may exist.
+      expect(result.skip_reason).toBe('refresh_publish_unreconciled');
+      expect(result.reviewer_notes).toMatch(/Close any PR on that branch and delete the branch, then dismiss/);
+      expect(queue.skip).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_unreconciled_1', 'refresh_publish_unreconciled', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(queue.complete).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('still parks an unreconciled refresh write when its audit record cannot be written', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+    try {
+      const claimedAt = new Date('2026-09-28T19:30:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_unreconciled_2', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_unreconciled_2', action_type: 'new_supporting_blog', page_type: 'blog', human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { url: '/blog/y/', title: 'Y' } }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({ ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80 }),
+      };
+      const err = new Error('refresh write to content/refresh-y-def timed out and the branch could not be deleted (500)');
+      err.code = 'REFRESH_PUBLISH_UNRECONCILED';
+      const publisher = { publishOrUpdatePage: jest.fn().mockRejectedValue(err) };
+      const auditRejected = new Error('audit insert rejected');
+      const dbQuery = () => {
+        const returning = jest.fn().mockRejectedValue(auditRejected);
+        return { insert: jest.fn(() => ({ returning, onConflict: () => ({ ignore: () => ({ returning }) }) })) };
+      };
+      const runner = loadRunnerWith({
+        queue, briefBuilder, dispatcher, qualityGate, publisher, indexNow: { submit: jest.fn() }, linkPlanner: {}, dbQuery,
+      });
+
+      await expect(runner.runNext()).rejects.toBe(auditRejected);
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_unreconciled_2', 'refresh_publish_unreconciled', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(queue.skip).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
       else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
@@ -3143,9 +3772,11 @@ describe('runNext post-publish bookkeeping', () => {
 // publish path (astro PR → Codex-gated auto-merge) instead. Comparison-gate
 // FAILURES are unaffected either way.
 describe('named-competitor autopublish gate', () => {
-  const SLUG = '/pest-control/taexx-system-comparison/';
+  // A neutral slug: the publisher's final-text comparison gate scans the
+  // slug too, and "taexx" in it would name HomeTeam.
+  const SLUG = '/pest-control/in-wall-system-comparison/';
 
-  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null }) {
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null, slug = SLUG, signalMetadata = undefined, frontmatterExtra = {} }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -3153,11 +3784,13 @@ describe('named-competitor autopublish gate', () => {
         action_type: 'new_supporting_blog',
         bucket: 'operator_intercept',
         claimed_at: claimedAt,
+        ...(signalMetadata ? { signal_metadata: signalMetadata } : {}),
       }),
       complete: jest.fn().mockResolvedValue(true),
       pendingReview: jest.fn().mockResolvedValue(true),
       release: jest.fn().mockResolvedValue(true),
       skip: jest.fn().mockResolvedValue(true),
+      defer: jest.fn().mockResolvedValue(true),
     };
     const briefBuilder = {
       compose: jest.fn().mockResolvedValue({
@@ -3171,7 +3804,7 @@ describe('named-competitor autopublish gate', () => {
         // the pin path has its own coverage above.
         gsc_signal: { bucket: 'operator_intercept', intercept },
         voice_constraints: {
-          operator_brief: {
+          operator_brief: operatorBrief || {
             working_title: 'In-Wall Systems Compared for SWFL Homes',
             primary_kw: 'taexx system review',
             thesis: 'Compare in-wall systems for SWFL homes.',
@@ -3184,12 +3817,13 @@ describe('named-competitor autopublish gate', () => {
         ok: true,
         draft: {
           type: 'draft',
-          url: SLUG,
+          url: slug,
           title: 'In-Wall Systems Compared for SWFL Homes',
           frontmatter: {
-            slug: SLUG,
-            canonical: `https://www.wavespestcontrol.com${SLUG}`,
+            slug,
+            canonical: `https://www.wavespestcontrol.com${slug}`,
             title: 'In-Wall Systems Compared for SWFL Homes',
+            ...frontmatterExtra,
           },
           body: body || 'A sourced comparison of in-wall pest systems for Southwest Florida homes.',
         },
@@ -3216,8 +3850,9 @@ describe('named-competitor autopublish gate', () => {
       // same module (comparison-table-gate owns it).
       comparisonTableGate: {
         namedCompetitorAutopublishEligible: jest.requireActual('../services/content/comparison-table-gate').namedCompetitorAutopublishEligible,
+        namedCompetitorListVerdict: jest.requireActual('../services/content/comparison-table-gate').namedCompetitorListVerdict,
         ...(comparisonGate
-          || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true }) }),
+          || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }) }),
       },
     });
     return { runner, queue, claimedAt };
@@ -3252,6 +3887,215 @@ describe('named-competitor autopublish gate', () => {
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
     expect(queue.pendingReview).not.toHaveBeenCalled();
     expect(queue.skip).toHaveBeenCalled();
+  });
+
+  // Owner rulings 2026-09-27 (D2) + 2026-09-28: unattended only when every
+  // named competitor is on the owner list. These
+  // run the REAL comparison gate over synthetic drafts, with the names
+  // authorized by the (synthetic) operator brief.
+  describe('owner-approved competitor list (real comparison gate)', () => {
+    const realGate = jest.requireActual('../services/content/comparison-table-gate');
+    const prPublisher = (n) => ({ publishOrUpdatePage: jest.fn().mockResolvedValue({
+      url: `https://www.wavespestcontrol.com${SLUG}`, status: 'pr_open', live: false,
+      pr_url: `https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/${n}`,
+    }) });
+    // The publisher's commit chokepoint, run for REAL
+    // (business-name-confirmer assertOwnerListForCommit) with only the
+    // model call stubbed: `companiesFor(draft)` is what the model lists.
+    const chokepointPublisher = (n, companiesFor = () => []) => ({ publishOrUpdatePage: jest.fn(async (draft, briefArg, opts) => {
+      const confirmer = jest.requireActual('../services/content/business-name-confirmer');
+      const facts = jest.requireActual('../services/content/competitor-facts');
+      const spy = jest.spyOn(confirmer, 'extractCompanyNames').mockImplementation(async (finalDraft) => ({
+        ok: true, key: 'k', companies: companiesFor(finalDraft).map((c) => facts.findCompetitor(c)?.name || c),
+      }));
+      try {
+        await confirmer.assertOwnerListForCommit({ draft, brief: briefArg, frontmatter: draft.frontmatter, body: draft.body, humanApproved: opts?.humanApproved });
+      } finally { spy.mockRestore(); }
+      return { url: `https://www.wavespestcontrol.com${SLUG}`, status: 'pr_open', live: false, pr_url: `https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/${n}` };
+    }) });
+    const refusingPublisher = (err) => ({ publishOrUpdatePage: jest.fn().mockRejectedValue(Object.assign(new Error(err.message || 'refused'), err)) });
+    const brief = (names) => ({
+      working_title: `${names} alternatives in Sarasota`,
+      primary_kw: 'in-wall termite system review',
+      thesis: `Compare ${names} with a local SWFL provider.`,
+    });
+
+    test('approved names only (incl. the TAEXX and bare HomeTeam spellings) publish and record the names the list cleared', async () => {
+      delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
+      const publisher = chokepointPublisher(911, () => ['HomeTeam', 'Orkin']);
+      const { runner, queue } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin and HomeTeam'),
+        body: 'HomeTeam installs TAEXX tubes in new walls. Orkin offers recurring residential plans.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+      expect(result.comparison_table_result.competitors_approved_by_list).toEqual(['HomeTeam Pest Defense', 'Orkin']);
+      // The chokepoint's result on the committed text is what the poller judges.
+      expect(result.comparison_table_result.companyExtraction).toMatchObject({ ok: true, companies: ['HomeTeam Pest Defense', 'Orkin'] });
+      expect(result.comparison_table_result.namedCompetitors).toEqual(['HomeTeam Pest Defense', 'Orkin']);
+      expect(queue.skip).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['Aptive', 'Aptive offers recurring residential plans across its markets.', 'Aptive Environmental'],
+      ['Truly Nolen', 'Truly Nolen offers recurring residential plans.', 'Truly Nolen'],
+    ])('%s alone clears the owner list (owner added it 2026-09-28) and publishes', async (who, body, canonical) => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(921, () => [who]);
+      const { runner, queue } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief(who), body });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.comparison_table_result.competitors_approved_by_list).toEqual([canonical]);
+      expect(queue.skip).not.toHaveBeenCalled();
+    });
+
+    test('one name off the owner list skips as named_competitor_off_list — never published, never queued for approval', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = prPublisher(912);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin and Hughes Exterminators'),
+        body: 'Orkin offers recurring residential plans. Hughes Exterminators offers recurring residential plans too.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
+      expect(result.reviewer_notes).toMatch(/Hughes Exterminators/);
+      expect(result.comparison_table_result.competitors_approved_by_list).toBeUndefined();
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.pendingReview).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
+    });
+
+    // Companies the deterministic detection cannot see (Codex r3 on #5146):
+    // the chokepoint's extraction adds them, and any name off the six skips.
+    test.each([
+      ['a suffix-less brand ("Bug Out")', { body: 'Bug Out competes with local providers in Sarasota.' }, ['Bug Out'], 'named_competitor_off_list'],
+      // A detection-only brand in the slug is now also caught deterministically
+      // by the final-text comparison gate, which scans the slug (Codex r8).
+      ['a name only in the slug', { body: 'How to compare local termite providers before you switch.', slug: '/pest-control/hulett-alternatives/' }, ['Hulett'], 'comparison_table_failed'],
+      ['a name used both generically and as a company', { body: 'Lawn Doctor can be an informal term for a turf specialist. Lawn Doctor competes with local providers for recurring plans.' }, ['Lawn Doctor'], 'named_competitor_off_list'],
+      ['a name only in secondary_keywords', { body: 'How to compare local pest providers.', frontmatterExtra: { secondary_keywords: ['bug out alternatives sarasota'] } }, ['Bug Out'], 'named_competitor_off_list'],
+    ])('%s the model lists is refused at the commit and the run skips', async (_label, draftOpts, companies, reason) => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(915, () => companies);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, comparisonGate: realGate, intercept: false, ...draftOpts });
+
+      const result = await runner.runNext();
+
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: reason });
+      if (reason === 'named_competitor_off_list') {
+        expect(result.reviewer_notes).toContain(companies[0]);
+        expect(result.comparison_table_result.companyExtraction).toMatchObject({ companies });
+      }
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', reason, { claimToken: claimedAt });
+    });
+
+    test('deterministic names found only in the FINAL text (publisher-added) are persisted on the verdict (pre-push r11)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(920);
+      const inner = publisher.publishOrUpdatePage.getMockImplementation();
+      publisher.publishOrUpdatePage.mockImplementation(async (draft, briefArg, opts) => {
+        // The publisher adds a reused image alt naming Orkin.
+        draft.body = `${draft.body}\n\n![Orkin truck outside a Venice home](/images/blog/x/body-1.webp)`;
+        return inner(draft, briefArg, opts);
+      });
+      // Orkin is operator-authorized, so the publisher's final-text
+      // comparison gate passes it and only the name inventory changes.
+      const { runner } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief('Orkin'), body: 'How to compare local pest providers.' });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.comparison_table_result.namedCompetitors).toEqual(['Orkin']);
+    });
+
+    test('publisher-added text that fails the comparison gate refuses the commit (Codex r7)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(922, () => ['Orkin']);
+      const inner = publisher.publishOrUpdatePage.getMockImplementation();
+      publisher.publishOrUpdatePage.mockImplementation(async (draft, briefArg, opts) => {
+        draft.body = `${draft.body}\n\n![Orkin scams customers with hidden fees](/images/blog/x/body-1.webp)`;
+        return inner(draft, briefArg, opts);
+      });
+      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief('Orkin'), body: 'How to compare local pest providers.' });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'comparison_table_failed' });
+      expect(result.reviewer_notes).toMatch(/COMPARISON_DISPARAGEMENT/);
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'comparison_table_failed', { claimToken: claimedAt });
+    });
+
+    test('the model listing no company publishes an ordinary post, even with the kill switch off', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'false';
+      const publisher = chokepointPublisher(916);
+      const { runner } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate, intercept: false,
+        body: 'Biological Pest Control offers a way to reduce chemical use around Sarasota homes.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.comparison_table_result.companyExtraction).toMatchObject({ ok: true, companies: [] });
+    });
+
+    test('a company-check outage at the chokepoint defers the draft an hour — at most 3 times — and an over-long draft is skipped', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const outage = () => refusingPublisher({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true, message: 'company-name check unavailable for the final text (no_key)', extraction: { ok: false, reason: 'no_key' } });
+      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher: outage(), comparisonGate: realGate });
+      const recordRetry = jest.spyOn(runner, '_recordCompanyCheckRetry').mockResolvedValue(true);
+      const before = Date.now();
+
+      const result = await runner.runNext();
+
+      expect(recordRetry).toHaveBeenCalledWith(expect.objectContaining({ id: 'opp_named_1' }), 1, claimedAt);
+      expect(result).toMatchObject({ outcome: 'deferred_company_check', skip_reason: 'named_competitor_unverified_names' });
+      expect(result.reviewer_notes).toMatch(/no_key/);
+      expect(queue.skip).not.toHaveBeenCalled();
+      const [id, availableAt, payload] = queue.defer.mock.calls[0];
+      expect([id, payload]).toEqual(['opp_named_1', { claimToken: claimedAt }]);
+      expect(availableAt.getTime() - before).toBeGreaterThanOrEqual(59 * 60 * 1000);
+
+      // queue.defer refunds the claim attempt, so the retry count on the
+      // opportunity is what bounds an outage (pre-push r7).
+      const exhausted = namedCompetitorScenario({ publisher: outage(), comparisonGate: realGate, signalMetadata: { company_check_retries: 3 } });
+      expect(await exhausted.runner.runNext()).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_unverified_names' });
+      expect(exhausted.queue.defer).not.toHaveBeenCalled();
+      expect(exhausted.queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_unverified_names', { claimToken: exhausted.claimedAt });
+
+      const tooLong = namedCompetitorScenario({
+        publisher: refusingPublisher({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: false, message: 'company-name check unavailable for the final text (draft_too_long_for_extraction)' }),
+        comparisonGate: realGate,
+      });
+      expect(await tooLong.runner.runNext()).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_unverified_names' });
+      expect(tooLong.queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_unverified_names', { claimToken: tooLong.claimedAt });
+    });
+
+    test('kill switch off: an approved-names-only draft is skipped exactly as before (named_competitor_disabled)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'false';
+      const publisher = prPublisher(914);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin'),
+        body: 'Orkin offers recurring residential plans.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_disabled' });
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_disabled', { claimToken: claimedAt });
+    });
   });
 
   test('clean affiliate blogs publish with no trust credit, approval, or intercept marker', async () => {
@@ -3473,6 +4317,407 @@ describe('_queueHasClaimable (catch-up probe)', () => {
     });
     await expect(runner._queueHasClaimable()).resolves.toBe(true);
     expect(mockQueue.peek).toHaveBeenCalled();
+  });
+});
+
+describe('citability reconciliation after publisher-boundary failures', () => {
+  test('ownership-lock failure attempts a claim-token-fenced release without hiding a moved claim', async () => {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    const queue = { release: jest.fn().mockResolvedValue(false) };
+    const claimedAt = new Date('2026-09-27T03:00:00Z');
+
+    await expect(runner._releaseClaimAfterOwnershipLoss(queue, 'opp-lost', { claimToken: claimedAt }))
+      .resolves.toBeUndefined();
+    expect(queue.release).toHaveBeenCalledWith('opp-lost', { claimToken: claimedAt });
+  });
+
+  test('audit failure persists current-claim PR evidence before parking a citability refresh', async () => {
+    jest.resetModules();
+    const inserts = [];
+    const dbMock = jest.fn((table) => ({
+      insert: jest.fn((patch) => {
+        inserts.push({ table, patch });
+        return { returning: jest.fn().mockResolvedValue([{ id: 'run-recovery' }]) };
+      }),
+    }));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._pendingReviewClaimOrThrow = jest.fn().mockResolvedValue(undefined);
+    const claimedAt = new Date('2026-09-27T03:05:00Z');
+    const queue = {
+      getById: jest.fn().mockResolvedValue({ id: 'opp-cite', bucket: 'citability_backfill' }),
+    };
+    const run = {
+      opportunity_id: 'opp-cite', queue_claim_id: 'claim-current', action_type: 'refresh_existing_page',
+      page_type: 'blog', shadow_mode: false, astro_pr_url: 'https://github.com/waves/pull/77',
+      claimed_at: claimedAt, draft_payload: { autopublish_head_sha: 'head-77' },
+    };
+
+    await runner._parkPublishedClaimForReconciliation(
+      queue, 'opp-cite', 'astro_pr_audit_failed', { claimToken: claimedAt }, new Error('full audit rejected'), run,
+    );
+
+    expect(inserts).toEqual([expect.objectContaining({
+      table: 'autonomous_runs',
+      patch: expect.objectContaining({
+        opportunity_id: 'opp-cite', queue_claim_id: 'claim-current',
+        outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge',
+        astro_pr_url: 'https://github.com/waves/pull/77',
+      }),
+    })]);
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenCalledWith(
+      queue, 'opp-cite', 'astro_pr_pending_merge', { claimToken: claimedAt }, 'refresh_existing_page',
+      expect.objectContaining({ id: 'run-recovery', astro_pr_url: 'https://github.com/waves/pull/77' }),
+    );
+  });
+
+  test('evidence insert failure still parks the claim for reconciliation instead of leaving it claimed', async () => {
+    jest.resetModules();
+    const dbMock = jest.fn(() => ({
+      insert: jest.fn(() => ({ returning: jest.fn().mockRejectedValue(new Error('db unavailable')) })),
+    }));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._pendingReviewClaimOrThrow = jest.fn().mockResolvedValue(undefined);
+    const claimedAt = new Date('2026-09-27T03:05:00Z');
+    const queue = { getById: jest.fn().mockResolvedValue({ id: 'opp-cite', bucket: 'citability_backfill' }) };
+    const run = {
+      opportunity_id: 'opp-cite', queue_claim_id: 'claim-current', action_type: 'refresh_existing_page',
+      astro_pr_url: 'https://github.com/waves/pull/78', claimed_at: claimedAt,
+    };
+
+    await runner._parkPublishedClaimForReconciliation(
+      queue, 'opp-cite', 'astro_pr_audit_failed', { claimToken: claimedAt }, new Error('full audit rejected'), run,
+    );
+
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenCalledTimes(1);
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenCalledWith(
+      queue, 'opp-cite', 'astro_pr_audit_failed', { claimToken: claimedAt }, null,
+    );
+  });
+
+  test('a failed locked park after the PR run is recorded falls back with the run\'s own pending-merge reason', async () => {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._pendingReviewClaimOrThrow = jest.fn()
+      .mockRejectedValueOnce(new Error('page-edit lock unavailable'))
+      .mockResolvedValueOnce(undefined);
+    const claimedAt = new Date('2026-09-27T03:05:00Z');
+    const queue = { getById: jest.fn().mockResolvedValue({ id: 'opp-cite', bucket: 'citability_backfill' }) };
+    const run = {
+      id: 'run-recorded', opportunity_id: 'opp-cite', queue_claim_id: 'claim-current', action_type: 'refresh_existing_page',
+      astro_pr_url: 'https://github.com/waves/pull/79', claimed_at: claimedAt,
+    };
+
+    await runner._parkPublishedClaimForReconciliation(
+      queue, 'opp-cite', 'astro_pr_queue_transition_failed', { claimToken: claimedAt }, new Error('queue write failed'), run,
+    );
+
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenCalledTimes(2);
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenLastCalledWith(
+      queue, 'opp-cite', 'astro_pr_pending_merge', { claimToken: claimedAt }, null,
+    );
+  });
+});
+
+describe('_recordCompanyCheckRetry — claim-fenced, supersession-aware metadata merge', () => {
+  test('merges the counter into current metadata and refuses a superseded claim in the same statement', async () => {
+    jest.resetModules();
+    const calls = { where: [], whereRaw: [], update: null };
+    const q = {
+      where: jest.fn((...args) => { calls.where.push(args); return q; }),
+      whereRaw: jest.fn((sql) => { calls.whereRaw.push(sql); return q; }),
+      update: jest.fn(async (patch) => { calls.update = patch; return 1; }),
+    };
+    const dbMock = jest.fn(() => q);
+    dbMock.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const claimedAt = new Date('2026-09-28T13:00:00Z');
+
+    const ok = await new AutonomousRunner()._recordCompanyCheckRetry(
+      { id: 'opp-1', signal_metadata: { stale: 'snapshot' } }, 2, claimedAt,
+    );
+
+    expect(ok).toBe(true);
+    expect(calls.where).toEqual(expect.arrayContaining([['id', 'opp-1'], ['status', 'claimed'], ['claimed_at', claimedAt]]));
+    expect(calls.whereRaw.join(' ')).toContain("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')");
+    expect(calls.update.signal_metadata.__raw).toContain("jsonb_set(COALESCE(signal_metadata, '{}'::jsonb), ARRAY['company_check_retries']::text[]");
+    expect(calls.update.signal_metadata.bindings).toEqual([2]);
+    expect(JSON.stringify(calls.update)).not.toContain('snapshot');
+  });
+});
+
+describe('approveAndPublishNamedCompetitor — superseded in-flight approval', () => {
+  test('terminally retires both claims instead of restoring an unreviewable pending_review row', async () => {
+    jest.resetModules();
+    const updates = [];
+    const wheres = [];
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn((...args) => { wheres.push({ table, args }); return q; }),
+        whereRaw: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'autonomous_runs' ? { reviewer_notes: 'approved by owner' } : null)),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    const dbMock = jest.fn();
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+
+    const approvalClaimedAt = new Date('2026-09-27T01:30:00Z');
+    await runner._retireSupersededApprovalClaim('opp-cite', { id: 'run-cite' }, approvalClaimedAt, 'page ownership moved');
+
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'opportunity_queue',
+        patch: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+      }),
+      expect.objectContaining({
+        table: 'autonomous_runs',
+        patch: expect.objectContaining({ outcome: 'skipped_gate_fail', skip_reason: 'superseded_by_ordinary_page_edit' }),
+      }),
+    ]));
+    expect(updates.find((u) => u.table === 'autonomous_runs').patch.reviewer_notes)
+      .toContain('page ownership moved');
+    expect(wheres).toContainEqual({ table: 'opportunity_queue', args: ['claimed_at', approvalClaimedAt] });
+  });
+
+  test('an unreconciled timed-out write parks both approval records on a reason no approval accepts', async () => {
+    jest.resetModules();
+    const updates = [];
+    const wheres = [];
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn((...args) => { wheres.push({ table, args }); return q; }),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    const dbMock = jest.fn(() => { throw new Error('approval park must run inside one transaction'); });
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const approvalClaimedAt = new Date('2026-09-28T20:00:00Z');
+    const err = Object.assign(new Error('refresh write to content/refresh-z timed out and no PR was found yet'), { code: 'REFRESH_PUBLISH_UNRECONCILED' });
+
+    await new AutonomousRunner()._parkUnreconciledApproval('opp-z', { id: 'run-z' }, approvalClaimedAt, err);
+
+    const runPatch = updates.find((u) => u.table === 'autonomous_runs').patch;
+    const oppPatch = updates.find((u) => u.table === 'opportunity_queue').patch;
+    expect(runPatch).toMatchObject({ outcome: 'completed_pending_review', skip_reason: 'refresh_publish_unreconciled' });
+    expect(runPatch.reviewer_notes).toMatch(/content\/refresh-z/);
+    expect(oppPatch).toMatchObject({ status: 'pending_review', skip_reason: 'refresh_publish_unreconciled' });
+    // Only the in-flight approval claim is parked.
+    expect(wheres).toContainEqual({ table: 'autonomous_runs', args: [{ id: 'run-z', outcome: 'publishing_named_competitor' }] });
+    expect(wheres).toContainEqual({ table: 'opportunity_queue', args: ['claimed_at', approvalClaimedAt] });
+    // No approval path claims this reason, and a superseded row stays for a person.
+    const { RECONCILIATION_HOLD_REASONS } = jest.requireActual('../services/content/opportunity-queue')._internals;
+    expect(RECONCILIATION_HOLD_REASONS).toContain('refresh_publish_unreconciled');
+    expect(dbMock.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('an approval park that cannot move both records rolls back as one', async () => {
+    jest.resetModules();
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        update: jest.fn(async () => (table === 'opportunity_queue' ? 0 : 1)),
+      };
+      return q;
+    });
+    const dbMock = jest.fn();
+    let rolledBack = null;
+    dbMock.transaction = jest.fn(async (callback) => {
+      try { return await callback(trx); } catch (e) { rolledBack = e; throw e; }
+    });
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => logger);
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+
+    await expect(new AutonomousRunner()._parkUnreconciledApproval('opp-q', { id: 'run-q' }, new Date(), new Error('x')))
+      .resolves.toBeUndefined();
+    expect(rolledBack?.message).toMatch(/approval claims moved \(run 1, queue 0\)/);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/left in its publishing state for the janitor/));
+  });
+
+  test('crash recovery preserves an uncertain superseded publication for interrupted-publish reconciliation', async () => {
+    jest.resetModules();
+    const approvalClaimedAt = new Date('2026-09-27T01:30:00Z');
+    const outsideWheres = [];
+    const updates = [];
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn((...args) => { outsideWheres.push({ table, args }); return q; }),
+        whereRaw: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'autonomous_runs' ? { reviewer_notes: 'approved' } : null)),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    const dbMock = jest.fn((table) => {
+      const q = {
+        where: jest.fn((...args) => { outsideWheres.push({ table, args }); return q; }),
+        whereNull: jest.fn(() => q),
+        first: jest.fn(async () => ({ id: 'run-current', reviewer_notes: 'approved' })),
+      };
+      return q;
+    });
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+
+    const result = await runner._retireSupersededStuckApprovals([{
+      id: 'opp-cite', bucket: 'citability_backfill', claim_id: 'claim-current', claimed_at: approvalClaimedAt,
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+    }], 'crash recovery');
+
+    expect(result).toEqual({ ids: [], runs: 0, opps: 0 });
+    expect(outsideWheres).toContainEqual({ table: 'autonomous_runs', args: ['queue_claim_id', 'claim-current'] });
+    // The caller's ordinary stuck-publish path now parks both records at
+    // named_competitor_publish_interrupted. No terminal write here may hide
+    // an external PR/live side effect whose URL was not persisted.
+    expect(updates).toEqual([]);
+  });
+
+  test('crash recovery restores a persisted current-claim PR park for supersession retirement', async () => {
+    jest.resetModules();
+    const approvalClaimedAt = new Date('2026-09-27T01:35:00Z');
+    const updates = [];
+    const dbMock = jest.fn((table) => {
+      const filters = {};
+      const q = {
+        where: jest.fn((a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[a] = b; return q; }),
+        whereIn: jest.fn(() => q), whereNotNull: jest.fn(() => q), whereNull: jest.fn(() => q), whereRaw: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'autonomous_runs' && filters.outcome === 'completed_pending_review'
+          ? { id: 'run-pr', skip_reason: 'astro_pr_pending_merge', astro_pr_url: 'https://github.com/waves/pull/42' }
+          : null)),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+
+    const result = await runner._retireSupersededStuckApprovals([{
+      id: 'opp-cite', bucket: 'citability_backfill', claim_id: 'claim-current', claimed_at: approvalClaimedAt,
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:2' } },
+    }], 'crash recovery');
+
+    expect(result).toEqual({ ids: ['opp-cite'], runs: 0, opps: 1 });
+    expect(updates).toEqual([expect.objectContaining({
+      table: 'opportunity_queue',
+      patch: expect.objectContaining({ status: 'pending_review', skip_reason: 'astro_pr_pending_merge' }),
+    })]);
+    expect(updates[0].patch.status).not.toBe('skipped');
+  });
+
+  test('a superseded non-PR park atomically retires the current run and queue row', async () => {
+    jest.resetModules();
+    const claimedAt = new Date('2026-09-27T01:45:00Z');
+    const updates = [];
+    const locked = {
+      id: 'opp-cite', bucket: 'citability_backfill', status: 'claimed', claimed_at: claimedAt,
+      claim_id: 'claim-current', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+    };
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn(() => q), forUpdate: jest.fn(() => q),
+        first: jest.fn(async () => locked),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    trx.raw = jest.fn(async () => ({}));
+    const dbMock = jest.fn();
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    const queue = {
+      getById: jest.fn(async () => locked),
+      pendingReview: jest.fn(), skip: jest.fn(),
+    };
+    const run = {
+      id: 'run-current', opportunity_id: 'opp-cite', action_type: 'refresh_existing_page',
+      queue_claim_id: 'claim-current', outcome: 'completed_pending_review', skip_reason: 'gate_infrastructure_error',
+    };
+
+    await runner._pendingReviewClaimOrThrow(queue, 'opp-cite', 'gate_infrastructure_error', { claimToken: claimedAt }, 'refresh_existing_page', run);
+
+    expect(run).toMatchObject({ outcome: 'skipped_gate_fail', skip_reason: 'superseded_by_ordinary_page_edit' });
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'opportunity_queue', patch: expect.objectContaining({ status: 'skipped' }) }),
+      expect.objectContaining({ table: 'autonomous_runs', patch: expect.objectContaining({ outcome: 'skipped_gate_fail' }) }),
+    ]));
+  });
+
+  test('a superseded current-claim PR stays parked for terminal PR retirement', async () => {
+    jest.resetModules();
+    const claimedAt = new Date('2026-09-27T01:50:00Z');
+    const updates = [];
+    const locked = {
+      id: 'opp-cite-pr', bucket: 'citability_backfill', status: 'claimed', claimed_at: claimedAt,
+      claim_id: 'claim-current', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:2' } },
+    };
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn(() => q), forUpdate: jest.fn(() => q),
+        first: jest.fn(async () => locked),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    trx.raw = jest.fn(async () => ({}));
+    const dbMock = jest.fn();
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    const queue = { getById: jest.fn(async () => locked), pendingReview: jest.fn(), skip: jest.fn() };
+    const run = {
+      id: 'run-current-pr', opportunity_id: 'opp-cite-pr', action_type: 'refresh_existing_page',
+      queue_claim_id: 'claim-current', astro_pr_url: 'https://github.com/waves/pull/42',
+      outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge',
+    };
+
+    await runner._pendingReviewClaimOrThrow(
+      queue, 'opp-cite-pr', 'astro_pr_pending_merge', { claimToken: claimedAt }, 'refresh_existing_page', run,
+    );
+
+    expect(run).toMatchObject({ outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge' });
+    expect(updates).toEqual([
+      expect.objectContaining({
+        table: 'opportunity_queue',
+        patch: expect.objectContaining({ status: 'pending_review', skip_reason: 'astro_pr_pending_merge' }),
+      }),
+    ]);
+    expect(queue.pendingReview).not.toHaveBeenCalled();
   });
 });
 
@@ -3714,5 +4959,295 @@ describe('city-service protected-page paths match the brief builder (Codex P1 on
     for (const [service, slug] of Object.entries(briefMap)) {
       expect([service, servicePathSlug(service)]).toEqual([service, slug]);
     }
+  });
+});
+
+// Codex r2 on #5216 ("Classify refreshes using the retained live post
+// type"): publishRefresh ships the LIVE frontmatter, so the runner hands
+// the quality gate that live frontmatter and the gate classifies the
+// refresh by it, not by the draft.
+describe('refresh quality gate receives the live frontmatter', () => {
+  test('ctx.liveFrontmatter is the live page frontmatter on a refresh', async () => {
+    const claimedAt = new Date('2026-09-28T10:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_refresh_live_type', action_type: 'refresh_existing_page', page_url: '/pest-control/fire-ant-id/', claimed_at: claimedAt }),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_refresh_live_type',
+        action_type: 'refresh_existing_page',
+        page_type: 'refresh',
+        target_url: '/pest-control/fire-ant-id/',
+        human_review_required: false,
+      }),
+    };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { body: 'Refreshed body.', frontmatter: {} } }) };
+    const liveFm = { post_type: 'diagnostic', _astro_source_path: 'src/content/blog/pest-control/fire-ant-id.mdx', domains: [] };
+    const publisher = {
+      getLiveFrontmatter: jest.fn().mockResolvedValue(liveFm),
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live body.' }),
+      resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/pest-control/fire-ant-id.mdx' }),
+      isBlogTarget: jest.fn().mockReturnValue(true),
+    };
+    const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['verdict_box_first'], soft_failures: [], total_score: 0, min_total_score: 80 }) };
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder,
+      dispatcher,
+      publisher,
+      qualityGate,
+      factsSufficiency: { check: jest.fn().mockResolvedValue({ applicable: false }) },
+      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      uniquenessGate: { evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }), evaluateBlog: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }) },
+    });
+    await runner.runNext();
+    expect(qualityGate.evaluate).toHaveBeenCalled();
+    const [, gateBrief, ctx] = qualityGate.evaluate.mock.calls[0];
+    expect(gateBrief.action_type).toBe('refresh_existing_page');
+    expect(ctx.liveFrontmatter).toMatchObject({ post_type: 'diagnostic' });
+    expect(ctx.previousVersion).toEqual({ body: 'Live body.' });
+    expect(ctx.liveFrontmatterUnavailable).toBeUndefined();
+  });
+
+  test('the quality gate reuses gate 3c\'s live frontmatter snapshot (no read of its own)', async () => {
+    const claimedAt = new Date('2026-09-28T10:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_refresh_live_fail', action_type: 'refresh_existing_page', page_url: '/pest-control/fire-ant-id/', claimed_at: claimedAt }),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = { compose: jest.fn().mockResolvedValue({ id: 'b', action_type: 'refresh_existing_page', page_type: 'refresh', target_url: '/pest-control/fire-ant-id/', human_review_required: false }) };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { body: 'Refreshed body.', frontmatter: {} } }) };
+    const publisher = {
+      // Each read returns a distinct snapshot: the pre-session self-lint
+      // hydration (#5221) reads first, gate 3c second.
+      getLiveFrontmatter: jest.fn()
+        .mockResolvedValueOnce({ post_type: 'diagnostic', _astro_source_path: 'src/content/blog/pest-control/fire-ant-id.mdx', domains: [], _read: 'self_lint' })
+        .mockResolvedValue({ post_type: 'diagnostic', _astro_source_path: 'src/content/blog/pest-control/fire-ant-id.mdx', domains: [], _read: 'gate_3c' }),
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live body.' }),
+      resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/pest-control/fire-ant-id.mdx' }),
+      isBlogTarget: jest.fn().mockReturnValue(true),
+    };
+    const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['verdict_box_first'], soft_failures: [], total_score: 0, min_total_score: 80 }) };
+    const runner = loadRunnerWith({
+      queue, briefBuilder, dispatcher, publisher, qualityGate,
+      factsSufficiency: { check: jest.fn().mockResolvedValue({ applicable: false }) },
+      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      uniquenessGate: { evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }), evaluateBlog: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }) },
+    });
+    await runner.runNext();
+    const [, , ctx] = qualityGate.evaluate.mock.calls[0];
+    // Self-lint hydration + gate 3c; the quality gate adds no third read.
+    expect(publisher.getLiveFrontmatter).toHaveBeenCalledTimes(2);
+    expect(ctx.liveFrontmatter).toMatchObject({ post_type: 'diagnostic', _read: 'gate_3c' });
+    expect(ctx.liveFrontmatterUnavailable).toBeUndefined();
+  });
+
+  // Codex r8 on #5216: the run ledger is the durable customer-question
+  // marker — the page carries no page type of its own.
+  describe('customer-question ledger lookup', () => {
+    const withRuns = (rows, { fail = false } = {}) => {
+      const chain = { where: jest.fn(() => chain), whereNotNull: jest.fn(() => chain), select: jest.fn(() => (fail ? Promise.reject(new Error('db down')) : Promise.resolve(rows))) };
+      db.mockImplementation((table) => (table === 'autonomous_runs' ? chain : undefined));
+      return chain;
+    };
+    afterEach(() => { db.mockReset(); });
+
+    test('true when a customer-question run published this path (absolute URL vs path)', async () => {
+      const chain = withRuns([{ published_url: 'https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      const r = await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly');
+      expect(r).toBe(true);
+      expect(chain.where).toHaveBeenCalledWith('page_type', 'customer-question');
+    });
+    test('false for a path no customer-question run published', async () => {
+      withRuns([{ published_url: 'https://www.wavespestcontrol.com/pest-control/other/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBe(false);
+    });
+    // Codex r2 on #5272: two fleet domains can carry different posts at one path.
+    test('host-aware: a run on another fleet domain at the same path does not count', async () => {
+      withRuns([{ published_url: 'https://www.bradentonflpestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/')).toBe(false);
+      withRuns([{ published_url: 'https://wavespestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/')).toBe(true);
+    });
+    // Codex r3 on #5272: a relative target is the hub's page, never a
+    // wildcard across fleet domains.
+    test('a relative target matches only a hub run at that path', async () => {
+      withRuns([{ published_url: 'https://www.bradentonflpestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBe(false);
+      withRuns([{ published_url: 'https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBe(true);
+    });
+    test('null when the ledger cannot be read', async () => {
+      withRuns([], { fail: true });
+      expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBeNull();
+    });
+  });
+});
+
+// Refreshes had no in-loop self-lint (their guard options need the live
+// page), so every mechanical miss parked the run at gate 3c. The runner now
+// hydrates gate 3c's own options before the session.
+describe('W1 in-loop self-lint arms for refreshes with gate 3c options', () => {
+  const setup = (publisher) => {
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_ref', action_type: 'refresh_existing_page', page_url: '/pest-control/signs-of-termites/', claimed_at: new Date('2026-09-28T10:00:00Z') }),
+      complete: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const brief = {
+      id: 'brief_ref', opportunity_id: 'opp_ref', action_type: 'refresh_existing_page', page_type: 'refresh',
+      target_url: '/pest-control/signs-of-termites/', target_keyword: 'signs of termites', city: 'Sarasota', service: 'termite',
+      human_review_required: false,
+    };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: false, reason: 'test_stop_after_dispatch' }) };
+    const factsSufficiency = { check: jest.fn().mockResolvedValue({ applicable: true, sufficient: true, city_id: 'sarasota', service_id: 'termite', county: 'sarasota' }) };
+    const runner = loadRunnerWith({ queue, briefBuilder: { compose: jest.fn().mockResolvedValue(brief) }, dispatcher, publisher, factsSufficiency });
+    return { runner, dispatcher };
+  };
+
+  test('a refresh session gets the hydrated options: live domains, protected metaTitle, live meta, prior body', async () => {
+    const publisher = {
+      getLiveFrontmatter: jest.fn().mockResolvedValue({
+        _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md',
+        domains: ['sarasotaflpestcontrol.com'],
+        metaTitle: 'Pest Control Near Me | Sarasota',
+        metaDescription: 'Live Sarasota meta.',
+      }),
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live prior body.', word_count: 3, frontmatter: {} }),
+    };
+    const { runner, dispatcher } = setup(publisher);
+    await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toMatchObject({
+      isRefresh: true,
+      domains: ['sarasotaflpestcontrol.com'],
+      liveMetaTitle: 'Pest Control Near Me | Sarasota',
+      liveMetaDescription: 'Live Sarasota meta.',
+      priorBody: 'Live prior body.',
+      targetIsBlog: false,
+    });
+  });
+
+  test('a hydration failure disarms only the lint: the session still runs and gate 3c stays authoritative', async () => {
+    const publisher = {
+      getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md', domains: [] }),
+      loadExistingPageBody: jest.fn().mockRejectedValue(new Error('github unavailable')),
+    };
+    const { runner, dispatcher } = setup(publisher);
+    await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toBeNull();
+  });
+
+  test('the kill switch disarms the lint for refreshes too', async () => {
+    const prev = process.env.AUTONOMOUS_WRITER_SELF_LINT;
+    process.env.AUTONOMOUS_WRITER_SELF_LINT = 'false';
+    try {
+      const publisher = {
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md', domains: [] }),
+        loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live prior body.', word_count: 3, frontmatter: {} }),
+      };
+      const { runner, dispatcher } = setup(publisher);
+      await runner.runNext();
+      expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toBeNull();
+      expect(publisher.loadExistingPageBody).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.AUTONOMOUS_WRITER_SELF_LINT;
+      else process.env.AUTONOMOUS_WRITER_SELF_LINT = prev;
+    }
+  });
+});
+
+describe('citability backfill retry feedback — every gate\'s one redraft hears the completion contract', () => {
+  const BRIEF = {
+    id: 'brief_cb', action_type: 'refresh_existing_page', page_type: 'refresh', target_url: '/termite/ants/',
+    gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['named_sources'] },
+  };
+  function load(publisher) {
+    jest.dontMock('../services/content/content-quality-gate');
+    return loadRunnerWith({ queue: {}, briefBuilder: {}, dispatcher: {}, publisher });
+  }
+  function livePublisher() {
+    return {
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Experts say ants trail after rain. Wait 14 days.', frontmatter: {}, source_file: 'src/content/blog/termite/ants.mdx' }),
+      resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/termite/ants.mdx' }),
+    };
+  }
+  async function retryData(runner, run, blocking, extra = {}) {
+    const bounded = jest.spyOn(runner, '_boundedRetryOrSkip').mockResolvedValue({ outcome: 'deferred_gate_retry' });
+    await runner._gateFailRetryOrSkip({}, { id: 'opp_cb' }, run, 0, jest.fn(), {
+      claimToken: 't', skipReason: 'content_guardrails_failed', notes: 'n', blocking, ...extra,
+    });
+    return bounded.mock.calls[0][5].retryData;
+  }
+
+  test('an early-gate retry judges the draft against the live page: hard gap finding + signals', async () => {
+    const publisher = livePublisher();
+    const runner = load(publisher);
+    const data = await retryData(runner, {
+      citability_backfill_brief: BRIEF,
+      draft_payload: { title: 'Ants', body: 'Experts say ants trail after rain.' },
+    }, [{ severity: 'P1', code: 'HARDCODED_PRICE', message: 'price' }]);
+    expect(publisher.loadExistingPageBody).toHaveBeenCalledWith('/termite/ants/');
+    expect(data.findings.map((f) => f.code)).toEqual(['HARDCODED_PRICE', 'CITABILITY_BACKFILL_GAPS_CLEARED']);
+    expect(data.findings[1].message).toMatch(/^planned_gaps_unresolved:named_sources\(/);
+    // The dropped "14 days" is only visible against the live page.
+    expect(data.advisory_messages.map((m) => m.code)).toEqual(expect.arrayContaining(['CITABILITY_NAMED_SOURCES', 'CITABILITY_CONCRETE_SPECIFICS']));
+    expect(data.advisory_messages.find((m) => m.code === 'CITABILITY_CONCRETE_SPECIFICS').message).toBe('refresh_dropped_measurements_1_to_0');
+  });
+
+  test('after the quality gate ran, its own verdict is reused (no second page load)', async () => {
+    const publisher = livePublisher();
+    const runner = load(publisher);
+    const qualityResult = {
+      ok: false,
+      hard_failures: [{ name: 'citability_backfill_gaps_cleared', reason: 'citability_traits_regressed:comparison' }],
+      soft_failures: [{ name: 'citability_how_to_choose', reason: 'no_how_to_choose_section' }],
+    };
+    const advisoryMessages = citabilityAdvisoryMessages(qualityResult);
+    const data = await retryData(runner, {
+      citability_backfill_brief: BRIEF, quality_gate_result: qualityResult, draft_payload: { body: 'x' },
+    }, [{ severity: 'P1', code: 'QUALITY_GATE', message: 'failed' }], { advisoryMessages });
+    expect(publisher.loadExistingPageBody).not.toHaveBeenCalled();
+    expect(data.findings).toEqual([
+      { severity: 'P1', code: 'QUALITY_GATE', message: 'failed' },
+      { severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: 'citability_traits_regressed:comparison' },
+    ]);
+    expect(data.advisory_messages).toEqual([{ code: 'CITABILITY_HOW_TO_CHOOSE', message: 'no_how_to_choose_section' }]);
+  });
+
+  test('a cleared draft adds nothing; other runs are untouched', async () => {
+    const publisher = livePublisher();
+    const runner = load(publisher);
+    const cleared = await retryData(runner, {
+      citability_backfill_brief: BRIEF,
+      draft_payload: { body: 'Per UF/IFAS, ants trail after rain. Wait 14 days.' },
+    }, [{ severity: 'P1', code: 'HARDCODED_PRICE', message: 'price' }]);
+    expect(cleared.findings.map((f) => f.code)).toEqual(['HARDCODED_PRICE']);
+    runner._boundedRetryOrSkip.mockRestore();
+    publisher.loadExistingPageBody.mockClear();
+    const other = await retryData(runner, { draft_payload: { body: 'Experts say.' } }, [{ severity: 'P1', code: 'HARDCODED_PRICE', message: 'price' }]);
+    expect(publisher.loadExistingPageBody).not.toHaveBeenCalled();
+    expect(other).toEqual({ findings: [{ severity: 'P1', code: 'HARDCODED_PRICE', message: 'price' }], advisory_messages: [] });
+  });
+
+  test('an unreadable live page still carries the planned-gap finding (never throws)', async () => {
+    const publisher = { loadExistingPageBody: jest.fn().mockRejectedValue(new Error('github down')) };
+    const runner = load(publisher);
+    const data = await retryData(runner, {
+      citability_backfill_brief: BRIEF, draft_payload: { body: 'Experts say ants trail.' },
+    }, []);
+    expect(data.findings.map((f) => f.code)).toEqual(['CITABILITY_BACKFILL_GAPS_CLEARED']);
+  });
+
+  test('the completion finding renders as a binding redraft directive', () => {
+    const { GATE_RETRY_INSTRUCTIONS, buildRetryDirectives } = require('../services/content/gate-retry-directives');
+    expect(GATE_RETRY_INSTRUCTIONS.CITABILITY_BACKFILL_GAPS_CLEARED).toMatch(/never invent a source or a number/);
+    const lines = buildRetryDirectives({ findings: [{ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: 'planned_gaps_unresolved:comparison(structure_missing)' }] });
+    expect(lines[1]).toContain('[Gate reported: planned_gaps_unresolved:comparison(structure_missing)]');
   });
 });

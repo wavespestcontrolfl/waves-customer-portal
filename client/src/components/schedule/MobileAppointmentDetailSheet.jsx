@@ -34,6 +34,7 @@ import PrepaySwitchSheet from './PrepaySwitchSheet';
 import { useCustomerCards } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
 import { describeCardRequestState, describeCardRequestResult, canSendCardRequest } from './cardLinkStatus';
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -237,9 +238,71 @@ export default function MobileAppointmentDetailSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  // Positive-price precedence — matches completionInvoiceAmount /
+  // predictCompletionBilling (server/services/billing-lane.js), which both
+  // treat `estimatedPrice != null && Number(estimatedPrice) > 0` as "this
+  // visit has its own authoritative price," never a bare != null. A
+  // stamped 0 means the SAME server resolver already fell through to the
+  // per-application fee / rate for this row's own prediction, so a $0
+  // rawPrice must defer to the prediction exactly like a null one does
+  // (mirrors the MobileCheckoutSheet / CompletionPanel fix — codex
+  // pre-push P1).
+  const hasOwnPrice = rawPrice != null && rawPrice > 0;
+  // Sibling-covered first-application visit (a combined per-application
+  // accept): this visit is deliberately unpriced because a same-day
+  // sibling's invoice already covers it — never preview a $0 or a borrowed
+  // rate for it. `billingLane.siblingCoverage` is the ONE canonical
+  // per-visit collection verdict the server computes (owner decision —
+  // narrow + fail closed) — this sheet renders THAT and nothing else for
+  // collect/settled/review copy; `siblingCoveredInvoice` below is kept only
+  // for the sibling's service-type label / breakdown, which still ride on
+  // the naive prediction.
+  const siblingCoveredInvoice = service.billingLane?.prediction?.kind === 'covered_sibling_invoice'
+    ? service.billingLane.prediction
+    : null;
+  // Scoped to siblingCoveredInvoice (never for a 'review' verdict, rendered
+  // by its own block below) so the two never render at once.
+  const siblingCoverage = siblingCoveredInvoice
+    ? siblingCoverageCopy(service.billingLane?.siblingCoverage, {
+      siblingServiceType: siblingCoveredInvoice.siblingServiceType || null,
+    })
+    : null;
+  // A definitive 'review' verdict: the mint resolver refuses to charge this
+  // visit either way, so it must never preview a $ amount or offer Charge;
+  // the billing-lane card tells staff to resolve it on Customer 360.
+  const siblingNeedsReview = service.billingLane?.siblingCoverage?.state === 'review';
   // Callbacks (re-services) are free for recurring/WaveGuard customers — don't
   // preview the monthlyRate fallback (mirrors the completion panel + checkout).
-  const price = rawPrice != null ? rawPrice : (service.isCallback ? 0 : Number(service.monthlyRate || 0));
+  // For an unpriced visit, monthlyRate is only ever the right fallback for a
+  // monthly-membership customer — everywhere else (per_application's own
+  // acceptance fee, a plain per_visit/one_time lane, sibling-covered
+  // first-application visits…) the AUTHORITATIVE amount is the schedule
+  // payload's own billingLane.prediction, computed server-side by the exact
+  // same predictCompletionBilling / completionInvoiceAmount (billing-lane.js)
+  // completion itself uses — never re-derived locally, so this can't drift
+  // from what completion actually bills (mirrors the CompletionPanel fix;
+  // codex pre-push P1, twice: a local tier/lane guard either showed the
+  // wrong monthlyRate for a legacy inferred lane, or zeroed a real
+  // per-application fee). This also fixes the original defect: an EXPLICIT
+  // per_application/per_visit customer previewed the annual/12 equivalent
+  // (e.g. $74.70) as an unpriced visit's price, a number with no
+  // relationship to what that visit bills.
+  //
+  // The prediction's `amount` is ALREADY net of prepaidAmount for an
+  // 'invoice'/'auto_charge' kind (predictCompletionBilling subtracts it
+  // server-side), and a 'prepaid' kind's amount is what was ALREADY
+  // collected, not a new balance — so `usingUnpricedPrediction` below keeps
+  // the prepaidCovered comparison from netting the SAME prepayment a second
+  // time against a figure that's already final (codex pre-push P1:
+  // double-netting misclassified a partially-prepaid visit as fully
+  // covered, hiding a real remaining balance).
+  const predictionKind = service.billingLane?.prediction?.kind || null;
+  const usingUnpricedPrediction = !hasOwnPrice && !service.isCallback;
+  const price = hasOwnPrice
+    ? rawPrice
+    : (service.isCallback || predictionKind === 'prepaid'
+      ? 0
+      : Number(service.billingLane?.prediction?.amount) || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -255,22 +318,54 @@ export default function MobileAppointmentDetailSheet({
   const timeWindow = formatWindow(service);
   const hrs = durationHrs(service);
 
-  const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null);
+  // Membership coverage is the server's call, not this sheet's (codex
+  // round-2 P1): tier + a null/zero price used to stand in for "covered",
+  // but a tiered per_application customer can carry a real, positive
+  // invoice/auto_charge prediction for THIS unpriced row (e.g. the $97.20
+  // acceptance-fee case in SchedulePage.billing-lane-amount.test.jsx) —
+  // that heuristic zeroed the displayed total, hid "Review & checkout,"
+  // and claimed WaveGuard coverage for a visit completion and the mint
+  // endpoint both bill. `billingLane.prediction.kind` is the ONLY signal
+  // this sheet may treat as membership coverage; a tier badge with no
+  // `covered_membership` prediction is decoration, never a $0 inference.
+  const coveredByMembership = predictionKind === 'covered_membership';
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
-  const prepaidCovered = isPrepaid && prepaidAmt >= total;
+  const prepaidCovered = usingUnpricedPrediction
+    ? predictionKind === 'prepaid'
+    : (isPrepaid && prepaidAmt >= total);
   // prepaidSeriesContext is computed server-side when this visit is part of a
   // family-level prepayment (e.g. $360 covering 4 quarterly visits). Falsy on
   // a one-off prepaid visit, in which case we fall back to the original
   // single-visit "Prepaid $X via Y" copy below.
   const seriesCtx = service.prepaidSeriesContext || null;
-  const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered;
+  // Codex round 4 P2: a payer-billed prediction (kind 'payer', or the
+  // service's own billedToPayer stamp) routes AR to the third-party payer's
+  // AP inbox, never in-person collection — the server's payer guard refuses
+  // any invoice POST for it. Reading `total` alone missed this for an
+  // UNPRICED payer visit whose new server prediction supplies the
+  // acceptance fee: `price` above falls through to
+  // billingLane.prediction.amount for ANY non-callback/non-prepaid kind,
+  // 'payer' included, making `total` positive with nothing this sheet may
+  // offer to collect.
+  //
+  // codex pre-push P2 (round 15, Codex r12 finding): this used to be scoped
+  // to `!hasOwnPrice` — but the server's payer guard
+  // (admin-schedule.js POST /:id/invoice, PayerService.resolveForInvoice)
+  // refuses the mint for EVERY payer-resolved visit unconditionally, with
+  // no price check at all. A PRICED payer-billed visit previewed "Review &
+  // checkout" here (hasChargeableAmount true) and then 400'd on the tap.
+  // Suppress checkout whenever either payer signal is present, priced or
+  // not, matching the server exactly.
+  const isPayerBilled = predictionKind === 'payer' || !!service.billedToPayer;
+  const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered
+    && !siblingCoveredInvoice && !isPayerBilled && !siblingNeedsReview;
   // Fully prepay-covered visits collect nothing, so the line items and total
   // read $0.00 — the monthlyRate fallback figure looks like a bill due when
   // the customer already paid the year up front. Partially prepaid visits
   // (prepaidAmt < total) keep the real figures and the checkout path.
-  const displayBasePrice = prepaidCovered ? 0 : baseServicePrice;
-  const displayTotal = prepaidCovered ? 0 : total;
+  const displayBasePrice = (prepaidCovered || siblingCoveredInvoice || siblingNeedsReview) ? 0 : baseServicePrice;
+  const displayTotal = (prepaidCovered || siblingCoveredInvoice || siblingNeedsReview) ? 0 : total;
   // Invoice already attached to this visit (accept-minted first-visit
   // setup+application invoice, or a tech pre-mint). It's what completion /
   // Charge-now actually collects, so surface its breakdown — the per-visit
@@ -284,7 +379,16 @@ export default function MobileAppointmentDetailSheet({
   const visitInvoice = (service.billedToPayer || attachedInvoice?.payerBilled)
     ? null
     : attachedInvoice;
-  const hasOpenVisitInvoice = !!(
+  // Codex r13 P2: the server evaluates the canonical sibling-coverage
+  // verdict BEFORE reusing a visit's own attached invoice and refuses (409)
+  // every non-'none' verdict — an unpriced sibling-eligible visit with a
+  // legacy open invoice on its own row is still collected on the combined
+  // trip invoice (or held for review), never through this sheet. Without
+  // this, the own-invoice fallback below ORed "Review & checkout" back in
+  // after every sibling guard on hasChargeableAmount had removed it.
+  const siblingCoverageState = service.billingLane?.siblingCoverage?.state || 'none';
+  const siblingCoverageOverridesOwnInvoice = siblingCoverageState !== 'none';
+  const hasOpenVisitInvoice = !siblingCoverageOverridesOwnInvoice && !!(
     visitInvoice?.open && Number(visitInvoice.amountDue || 0) > 0
   );
   const hasCheckoutAmount = hasChargeableAmount || hasOpenVisitInvoice;
@@ -483,6 +587,37 @@ export default function MobileAppointmentDetailSheet({
             Covered by WaveGuard {tierLabel(tier)} — no charge needed
           </div>
         )}
+        {!coveredByMembership && !isPrepaid && siblingCoverage && !siblingCoverage.collectible && (
+          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 14 }}>
+            Covered by invoice {siblingCoveredInvoice.invoiceNumber || 'on file'}
+            {siblingCoveredInvoice.siblingServiceType ? ` on the ${siblingCoveredInvoice.siblingServiceType} visit` : ''} — no charge needed
+          </div>
+        )}
+        {/* codex round-7 P1: a covered_sibling_invoice prediction whose
+            sibling invoice is still collectible (draft/sent/overdue/…) is
+            NOT "no charge needed" — the combined trip invoice still has a
+            real balance due, and a technician must not walk off the job
+            thinking there's nothing to collect. This never mints a second
+            invoice for THIS visit (the kind/verdict stays covered) — it
+            just tells staff where to collect instead. */}
+        {!coveredByMembership && !isPrepaid && siblingCoverage && siblingCoverage.collectible && (
+          <div className="text-center mt-2" style={{ fontSize: 14, color: '#92400E' }}>
+            {siblingCoverage.detail}
+            {siblingCoverage.invoiceHref && (
+              <>
+                {' '}
+                <a href={siblingCoverage.invoiceHref} style={{ color: '#92400E', textDecoration: 'underline' }}>
+                  View invoice
+                </a>
+              </>
+            )}
+          </div>
+        )}
+        {!coveredByMembership && !isPrepaid && siblingNeedsReview && (
+          <div className="text-center mt-2" style={{ fontSize: 14, color: '#92400E' }}>
+            Combined-trip invoice needs review — resolve on Customer 360 before charging
+          </div>
+        )}
         {isPrepaid && seriesCtx && seriesCtx.totalCoveredVisits > 1 && (
           <div className="mt-3 rounded-sm border border-hairline border-zinc-200 bg-zinc-50" style={{ padding: '10px 14px' }}>
             <div className="flex items-center justify-between gap-3">
@@ -636,6 +771,19 @@ export default function MobileAppointmentDetailSheet({
               {prepaidCovered && (
                 <span className="text-ink-secondary block" style={{ fontSize: 12 }}>
                   Covered by prepay
+                </span>
+              )}
+              {!prepaidCovered && siblingCoverage && (
+                <span
+                  className={siblingCoverage.collectible ? 'block' : 'text-ink-secondary block'}
+                  style={{ fontSize: 14, color: siblingCoverage.collectible ? '#92400E' : undefined }}
+                >
+                  {siblingCoverage.short}
+                </span>
+              )}
+              {!prepaidCovered && siblingNeedsReview && (
+                <span className="block" style={{ fontSize: 14, color: '#92400E' }}>
+                  Needs review on Customer 360
                 </span>
               )}
             </span>

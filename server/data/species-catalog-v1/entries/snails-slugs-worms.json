@@ -1,0 +1,584 @@
+[
+  {
+    "slug": "garden-snails",
+    "kind": "organism",
+    "common_name": "Garden Snails",
+    "aka": [
+      "Cuban Brown Snail"
+    ],
+    "aliases": [
+      "garden snail",
+      "garden snails",
+      "cuban brown snail",
+      "zachrysia"
+    ],
+    "scientific_name": "Zachrysia provisoria / Bradybaena similaris",
+    "rank": "genus",
+    "group": "snails-slugs-worms",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Medium (1 to 1.5 inch), globe-shaped shell, smooth and shiny, dark tan to yellowish-brown, sometimes with light streaks",
+      "Found in leaf litter, mulch, and dense shrubs, most active after rain or at night",
+      "Leaves a silvery slime trail on pavement, pots and plant leaves",
+      "Rasps ragged holes in leaves and can scrape the outer bark of young, tender stems"
+    ],
+    "look_alikes": [
+      {
+        "slug": "giant-african-land-snail",
+        "difference": "Adult shell under 1.5 inches and round; giant African land snail adults reach 4 to 8 inches, but its juveniles are small, so size never rules it out",
+        "next_photo": "From a safe distance, zoom in on the shell's overall length for size.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "snail-slug-worm",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A common, slow-moving nibbler of ornamentals and citrus that's rarely a serious threat on its own, but numbers can build up in mulch and damp shrub beds. Ragged leaf holes plus slime trails on a valued plant are worth a look if they're spreading.",
+      "fact": "It tucks itself into leaf litter and closes off its shell opening with a dried mucus layer to ride out dry spells."
+    },
+    "tech_notes": "Do not rule out giant African land snail by shell size alone; juveniles are small. Compare shell shape and markings with the FDACS identification guide, photograph uncertain snails, and handle only with gloves. Reducing mulch depth and damp harborage helps alongside baiting.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.fdacs.gov/Agriculture-Industry/Pests-and-Diseases/Plant-Pests-and-Diseases/Invasive-Mollusks/Giant-African-Land-Snail",
+      "https://en.wikipedia.org/wiki/Zachrysia_provisoria"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "7751f867cbed9cd60adc42cfd570acd78501edba396af6b879cc232048249643"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "giant-african-land-snail",
+    "kind": "organism",
+    "common_name": "Giant African Land Snail",
+    "aka": [
+      "GALS"
+    ],
+    "aliases": [
+      "giant african land snail",
+      "gals",
+      "achatina fulica",
+      "lissachatina fulica"
+    ],
+    "scientific_name": "Lissachatina fulica",
+    "rank": "species",
+    "group": "snails-slugs-worms",
+    "subgroup": "regulated-land-snails",
+    "site_category": "Plant pests",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Very large, elongated conical shell, typically 4 to 8 inches long when mature, brown with darker vertical stripes",
+      "Grayish-brown to black body that extends well beyond the shell opening when moving",
+      "Leaves thick, heavy slime trails on walls, sidewalks, plants and structures",
+      "Feeds on an unusually wide range of plants and will also scrape stucco or painted surfaces for calcium"
+    ],
+    "look_alikes": [
+      {
+        "slug": "garden-snails",
+        "difference": "Adults reach 4 to 8 inches and are elongated; garden snails stay under 1.5 inches, but juveniles here are small too, so compare shell shape, not size",
+        "next_photo": "From a safe distance, zoom in on the shell's overall length for size.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "snail-slug-worm",
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": true,
+      "irritant": false
+    },
+    "safety_line": "This snail can carry a parasite that causes a rare form of meningitis in people; never touch it bare-handed, wash hands well if you do, and keep kids and pets away.",
+    "range": "rare",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": "report_fdacs"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "This is one of the most damaging invasive snails in the world and a regulated pest under an active state eradication effort, not something to treat yourself. A shell over about 4 inches on a snail in a Florida yard is worth reporting right away and not touching bare-handed.",
+      "fact": "One of Florida's most recent known populations was found in Lee County in 2022 and was declared eradicated in 2026 after a multi-year quarantine and treatment effort."
+    },
+    "tech_notes": "Do not attempt removal or treatment; if suspected, photograph in place without handling, note the exact location, and follow current state agricultural agency reporting guidance. This is a state-led quarantine/eradication matter, not a standard pest control job.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.fdacs.gov/Agriculture-Industry/Pests-and-Diseases/Plant-Pests-and-Diseases/Giant-African-Land-Snail",
+      "https://www.cdc.gov/dpdx/angiostrongyliasis/index.html"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "81b8a551bd340d2b47779e15c4dd2d6528160098b8dcd3b072d214b57903f6bf"
+    },
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "report",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "slugs",
+    "kind": "organism",
+    "common_name": "Slugs",
+    "aka": [
+      "Leatherleaf Slug"
+    ],
+    "aliases": [
+      "slug",
+      "slugs",
+      "leatherleaf slug"
+    ],
+    "scientific_name": "Leidyula floridana and others",
+    "rank": "group",
+    "group": "snails-slugs-worms",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Soft, elongated body with no visible shell, gray to brown, up to 3 to 4 inches for larger Florida species",
+      "Two tentacles on the head and a visible breathing pore along one side of the body",
+      "Leaves a shiny slime trail wherever it travels",
+      "Found under pots, mulch, boards or debris by day, feeding on tender leaves and decaying matter at night or after rain"
+    ],
+    "look_alikes": [
+      {
+        "slug": "garden-snails",
+        "difference": "Slugs have no visible shell at all; garden snails have a coiled, hard shell they can retreat into",
+        "next_photo": "A whole-body photo checking for a coiled shell on the back",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "hammerhead-flatworm",
+        "difference": "Slugs have a rounded head with two tentacles; hammerhead flatworm has a flat, fan- or hammer-shaped head, clearly wider than its body",
+        "next_photo": "From a safe distance, zoom in on the front end checking for a fan/hammer shape versus a rounded head with tentacles.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "snail-slug-worm",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Mostly a minor nuisance that chews soft new growth and seedlings overnight, easiest to confirm by the slime trail left behind. Removing damp hiding spots like boards and pots is often enough for light numbers; heavier damage on ornamentals is worth a look.",
+      "fact": "A slug's slime isn't just for gliding; it also helps it climb straight up smooth surfaces and even hang upside down."
+    },
+    "tech_notes": "Confirm slime trail and overnight feeding pattern on tender growth; reducing damp harborage (boards, dense mulch, debris) helps alongside baiting for heavier infestations.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Leidyula_floridana",
+      "https://edis.ifas.ufl.edu/publication/IN891"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated, current UF/IFAS EDIS page this session: EENY-494/IN891, \"Terrestrial Slugs of Florida\" (Capinera, rev. April 2025). It confirms Leidyula floridana specifically as tan/mottled with brown-black spots often coalescing into dorsolateral stripes, bearing a pale medial stripe; two pairs of anterior tentacles (larger upper pair with eyes) and a breathing pore (pneumostome) are confirmed as general slug anatomy shared by this species; it produces mucus/slime for locomotion and defense; it feeds on both living and decaying plant material at night; it's native to the Caribbean and south Florida, has spread to north Florida, Louisiana, Texas and northeast Mexico, and is \"normally...the most commonly encountered veronicellid in Florida\" reaching up to 12g and over 5cm (2in). This resolves the species-specific traits claim; general slug traits (tentacles, breathing pore, slime) are confirmed as accurate for this species too. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "85fce4780be123a2ea1fd2d25397c6c3ef310ae56e3fb26c87f5139818e913ac"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "hammerhead-flatworm",
+    "kind": "organism",
+    "common_name": "Hammerhead Flatworm",
+    "aka": [
+      "Shovel-headed Garden Worm"
+    ],
+    "aliases": [
+      "hammerhead flatworm",
+      "hammerhead flatworms",
+      "shovel-headed garden worm",
+      "bipalium"
+    ],
+    "scientific_name": "Bipalium kewense",
+    "rank": "species",
+    "group": "snails-slugs-worms",
+    "subgroup": "toxic-flatworms",
+    "site_category": "Occasional invaders",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Flat, ribbon-like body, sometimes 8 inches or more, tan to brown with dark stripes down its back",
+      "Distinctive broad, fan- or hammer-shaped head, clearly wider than the rest of the body",
+      "Glides slowly across soil, mulch or pavement, especially after rain, leaving a slime trail",
+      "Found hunting earthworms in garden beds and mulch, sometimes wrapped around one"
+    ],
+    "look_alikes": [
+      {
+        "slug": "slugs",
+        "difference": "Hammerhead flatworm has a flat, fan- or hammer-shaped head, clearly wider than its body; slugs have a rounded head with two visible tentacles",
+        "next_photo": "From a safe distance, zoom in on the front end checking for a fan/hammer shape versus a rounded head with tentacles.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "snail-slug-worm"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "It produces a toxin it uses on its prey; don't handle it bare-handed and keep pets from mouthing it, and wash hands well if you touch one.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "An invasive predator of earthworms rather than a plant pest, so it doesn't damage your garden directly, but it can reduce the beneficial earthworms in your soil over time. It's mainly a hand-removal situation: don't cut it up, since pieces can regrow into new worms.",
+      "fact": "It carries a toxin also found in pufferfish, which is highly unusual for a land invertebrate and is thought to help it subdue earthworms and deter predators."
+    },
+    "tech_notes": "No chemical treatment is established; if removal is requested, scoop into a sealed bag (don't cut/crush, since fragments can regenerate) rather than handling directly.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Bipalium_kewense",
+      "https://ask.ifas.ufl.edu/publication/in206",
+      "https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0100718"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Florida-commonality part confirmed this session: UF/IFAS Featured Creatures EENY-049/IN206 (\"Land Planarians, Bipalium kewense...\") documents this species as long-established and regularly encountered statewide in Florida (\"almost every month of the year, specimens...were submitted to the Nematology Bureau\"), though it gives no SWFL-county-specific density figure, so range stays 'occasional' as a reasonable statewide-common-but-locally-variable call. Tetrodotoxin production is confirmed peer-reviewed and species-specific (Stokes et al. 2014, PLOS ONE: \"Both Bipalium kewense and B. adventitium exhibited TTX\"), but that paper studies only the toxin's ecological/predatory role and does not address human or pet contact risk at all — the human/pet-safety question remains genuinely unstudied, not just unconfirmed by the sources checked, so it's kept open below rather than resolved. Resolution: safety_line and copy are limited to the mechanism-level precaution a TTX-producing invertebrate warrants (don't handle bare-handed, keep pets from mouthing it, wash hands after contact). Stokes et al. 2014 (PLOS ONE, peer-reviewed, in sources) confirms TTX production but studies only its role against earthworm prey and predators, not human or pet exposure; no such exposure study was found. No specific illness claim is made beyond this precaution. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "dc2adc1667aa205f968d31874ac1fa00e4ca1bb189b5a835e6a677fc15439c55"
+    },
+    "role": "nuisance",
+    "risk": "irritant",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "earthworm",
+    "kind": "organism",
+    "common_name": "Earthworms",
+    "aka": [
+      "Nightcrawler"
+    ],
+    "aliases": [
+      "earthworm",
+      "earthworms",
+      "nightcrawler"
+    ],
+    "scientific_name": "Lumbricina",
+    "rank": "order",
+    "group": "snails-slugs-worms",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Long, thin, cylindrical body divided into many visible ring-like segments, pinkish to reddish-brown",
+      "No legs, eyes, or obvious head; moves by stretching and contracting its segmented body",
+      "Found in moist soil, mulch, or on pavement after heavy rain, never coiled tightly like a snake",
+      "Leaves small, dark, granular castings (droppings) on the soil surface"
+    ],
+    "look_alikes": [
+      {
+        "slug": "brahminy-blind-snake",
+        "difference": "Earthworm has visible ring-like segments and no head; brahminy blind snake has smooth glossy skin and a distinct head that flicks a tiny tongue",
+        "next_photo": "A close-up along the body checking for segment rings versus smooth glossy skin, and whether it flicks its tongue",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "snail-slug-worm"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "One of the best signs of healthy soil in a lawn or garden bed. Seeing more of them after rain, sometimes on the pavement, is completely normal and never something to treat.",
+      "fact": "A single earthworm can process its own body weight in soil and organic matter every day, which is a big part of why they're so good for garden soil."
+    },
+    "tech_notes": "No treatment indicated; if a customer reports a 'baby snake' in mulch or on a sidewalk after rain, check for segmentation (worm) versus smooth skin and a flicking tongue (brahminy blind snake) before responding.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Earthworm"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "562d2bce06b0bb3fdd2343723d5e175d635dd7af719e4ab4679f2be7261c6831"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  }
+]

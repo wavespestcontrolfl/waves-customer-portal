@@ -8,6 +8,7 @@ import {
   bookingPropertyTarget,
   buildFindTimeRequestBody,
   canSubmitAppointments,
+  classifyCallBookingConflict,
   classifyManualPrepayMintOutcome,
   classifySubmitGroupFailure,
   composeAppointmentSuccessToast,
@@ -341,7 +342,7 @@ describe('classifySubmitGroupFailure', () => {
       dupError([{ id: 's1', sourceEstimateId: 108 }]),
       { group: { seasonalIndex: 0 }, linkedEstimate: { id: 108 }, separateProgram: null, key: 'quarterly', groupLabelText: 'Quarterly' },
     );
-    expect(decision).toEqual({ recoverable: true, duplicateConflict: null, firstError: null });
+    expect(decision).toEqual({ recoverable: true, duplicateConflict: null, callBookingConflict: null, firstError: null });
   });
 
   // GitHub review round 4 P1 (PR #4656, :3225): the SAME conflict payload
@@ -403,6 +404,7 @@ describe('classifySubmitGroupFailure', () => {
     expect(decision).toEqual({
       recoverable: false,
       duplicateConflict: { code: 'duplicate_recurring_series', existingSeries: [{ id: 'other-series', sourceEstimateId: null }], key: 'quarterly', retryUncertain: false },
+      callBookingConflict: null,
       firstError: { label: 'Quarterly', message: 'duplicate', duplicate: true },
     });
   });
@@ -414,6 +416,79 @@ describe('classifySubmitGroupFailure', () => {
     expect(decision).toEqual({
       recoverable: false,
       duplicateConflict: null,
+      callBookingConflict: null,
+      firstError: { label: 'Weekly', message: 'network down', duplicate: false },
+    });
+  });
+});
+
+// Phone-agent double-booking guard (owner ruling 2026-09-28): the server's
+// 409 duplicate_call_booking is classified by classifyCallBookingConflict,
+// ahead of classifySubmitGroupFailure's own duplicate-series logic — see
+// classifySubmitGroupFailure, the one call site submitAppointments actually
+// uses, below.
+describe('classifyCallBookingConflict', () => {
+  const callBookingError = () => Object.assign(new Error('The phone agent already booked this visit for this customer.'), {
+    body: {
+      code: 'duplicate_call_booking',
+      existingVisits: [{ id: 'visit-1', serviceType: 'General Pest Control', scheduledDate: '2026-09-14', windowStart: '09:00', status: 'confirmed' }],
+    },
+  });
+
+  it('classifies a duplicate_call_booking 409 as a non-recoverable call-booking conflict, keyed to the group', () => {
+    const decision = classifyCallBookingConflict(callBookingError(), { key: 'quarterly', groupLabelText: 'Quarterly' });
+    expect(decision).toEqual({
+      recoverable: false,
+      duplicateConflict: null,
+      callBookingConflict: {
+        code: 'duplicate_call_booking',
+        existingVisits: [{ id: 'visit-1', serviceType: 'General Pest Control', scheduledDate: '2026-09-14', windowStart: '09:00', status: 'confirmed' }],
+        key: 'quarterly',
+        separateProgram: null,
+      },
+      firstError: { label: 'Quarterly', message: 'The phone agent already booked this visit for this customer.', callBooking: true },
+    });
+  });
+
+  it('returns null for any other error, leaving classification to classifySubmitGroupFailure', () => {
+    expect(classifyCallBookingConflict(new Error('network down'), { key: 'weekly', groupLabelText: 'Weekly' })).toBeNull();
+    const seriesError = Object.assign(new Error('duplicate'), { body: { code: 'duplicate_recurring_series', existingSeries: [] } });
+    expect(classifyCallBookingConflict(seriesError, { key: 'weekly', groupLabelText: 'Weekly' })).toBeNull();
+  });
+});
+
+describe('classifySubmitGroupFailure', () => {
+  it('routes a phone-agent double-booking 409 to the call-booking conflict, never the duplicate-series one', () => {
+    const e = Object.assign(new Error('The phone agent already booked this visit for this customer.'), {
+      body: { code: 'duplicate_call_booking', existingVisits: [] },
+    });
+    const decision = classifySubmitGroupFailure(e, {
+      group: { seasonalIndex: 0 }, linkedEstimate: null, separateProgram: null, key: 'quarterly', groupLabelText: 'Quarterly',
+    });
+    expect(decision.recoverable).toBe(false);
+    expect(decision.duplicateConflict).toBeNull();
+    expect(decision.callBookingConflict).toMatchObject({ code: 'duplicate_call_booking', key: 'quarterly' });
+  });
+
+  it('a group that hit BOTH guards keeps its separate-program approval on the phone-agent conflict, so "Book another anyway" re-sends it (pre-push audit P1)', () => {
+    const e = Object.assign(new Error('The phone agent already booked this visit for this customer.'), {
+      body: { code: 'duplicate_call_booking', existingVisits: [] },
+    });
+    const separateProgram = { key: 'quarterly', existingSeries: [{ id: 's1' }] };
+    const decision = classifySubmitGroupFailure(e, {
+      group: { seasonalIndex: 0 }, linkedEstimate: null, separateProgram, key: 'quarterly', groupLabelText: 'Quarterly',
+    });
+    expect(decision.callBookingConflict.separateProgram).toBe(separateProgram);
+  });
+
+  it('falls through to the duplicate-series classification for every other failure', () => {
+    const decision = classifySubmitGroupFailure(new Error('network down'), {
+      group: { seasonalIndex: 0 }, linkedEstimate: null, separateProgram: null, key: 'weekly', groupLabelText: 'Weekly',
+    });
+    expect(decision).toEqual({
+      recoverable: false,
+      duplicateConflict: null,
+      callBookingConflict: null,
       firstError: { label: 'Weekly', message: 'network down', duplicate: false },
     });
   });
@@ -591,6 +666,23 @@ describe('appointmentGroupRequestBody', () => {
     expect(appointmentGroupRequestBody({ ...base, separateProgram, key: 'monthly' })).not.toHaveProperty('allowDuplicateSeries');
     expect(appointmentGroupRequestBody({ ...base, separateProgram: null })).not.toHaveProperty('allowDuplicateSeries');
   });
+
+  // Phone-agent double-booking guard "Book another anyway" retry (owner
+  // ruling 2026-09-28): the override is threaded as a plain boolean the
+  // caller already resolved to "this is the ONE group the retry targets"
+  // (callBookingDuplicateOverrideRef, consumed once per submit) — unlike
+  // separateProgram, appointmentGroupRequestBody itself does no key
+  // matching for it.
+  it('carries the override with exactly the reviewed phone-agent visits, and nothing otherwise (codex #5183 r2 P2)', () => {
+    expect(appointmentGroupRequestBody({ ...base, callBookingReviewedIds: ['v1', 'v2'] })).toMatchObject({
+      allowCallBookingDuplicate: true,
+      callBookingReviewedIds: ['v1', 'v2'],
+    });
+    for (const body of [appointmentGroupRequestBody({ ...base, callBookingReviewedIds: null }), appointmentGroupRequestBody(base)]) {
+      expect(body).not.toHaveProperty('allowCallBookingDuplicate');
+      expect(body).not.toHaveProperty('callBookingReviewedIds');
+    }
+  });
 });
 
 describe('firstGroupSendFlags', () => {
@@ -741,6 +833,12 @@ describe('matchesPrepayTarget', () => {
 });
 
 describe('submitFailureNotice', () => {
+  it('a phone-agent conflict gets its own toast, never the recurring-program one (codex #5183 r1 P2)', () => {
+    expect(submitFailureNotice({ firstError: { callBooking: true, label: 'Quarterly', message: 'x' }, created: 0, total: 1 }))
+      .toEqual({ toastText: 'The phone agent already booked this visit — review it below.', alertText: null });
+    expect(submitFailureNotice({ firstError: { callBooking: true, label: 'Quarterly', message: 'x' }, created: 1, total: 2 }).toastText)
+      .toBe('1 of 2 appointment series saved. The phone agent already booked the rest — review it below.');
+  });
   it('reads as a toast for a duplicate-program conflict, review-only wording with nothing yet created', () => {
     expect(submitFailureNotice({ firstError: { duplicate: true, label: 'Quarterly', message: 'x' }, created: 0, total: 2 }))
       .toEqual({ toastText: 'Review the existing recurring program below.', alertText: null });

@@ -65,6 +65,46 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText('10 g/gal')).toBeInTheDocument();
   });
 
+  // Owner ask 2026-09-28: every record of service links to the public Products
+  // & Safety page from its footer, product rows or not. The URL prints in full.
+  it.each([
+    ['with product rows', BASE_DATA],
+    ['with no product rows', { ...BASE_DATA, applications: [] }],
+  ])('links to the public Products & Safety page (%s)', (_label, data) => {
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/Every product we use and our safety protocol:/)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'https://www.wavespestcontrol.com/products-and-safety/' });
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  // GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28) is LIVE-VIEW ONLY
+  // (codex P1 2026-09-28): the server strips `report_copy` from every PDF
+  // payload before it reaches this document (stripLiveOnlyReportProductCopy,
+  // report-data.js), so the PDF never renders it even if a caller somehow
+  // still handed the component a `report_copy` key.
+  it('never renders "How it works" / "Also labeled for" / "Pets & kids", even if report_copy is present on the payload', () => {
+    const data = {
+      ...BASE_DATA,
+      applications: [{
+        ...BASE_DATA.applications[0],
+        product: {
+          ...BASE_DATA.applications[0].product,
+          report_copy: {
+            how_it_works: 'A fast-acting non-repellent that reaches ants you never see.',
+            also_labeled_for: 'Cockroaches, crickets, earwigs and silverfish.',
+            pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+          },
+        },
+      }],
+    };
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.queryByText(/How it works:/)).toBeNull();
+    expect(screen.queryByText(/Also labeled for:/)).toBeNull();
+    expect(screen.queryByText(/Pets & kids:/)).toBeNull();
+  });
+
   it('is a service record, not an invoice — no pricing ever renders', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(container.textContent).toContain('This is not an invoice.');
@@ -199,6 +239,80 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('Keep shrubs trimmed back from the exterior walls');
   });
 
+  it('prints a tappable Poison Control line when a product was applied', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    const line = screen.getByTestId('doc-poison-control');
+    const link = screen.getByRole('link', { name: '1-800-222-1222' });
+    expect(line).toContainElement(link);
+    expect(link).toHaveAttribute('href', 'tel:+18002221222');
+    expect(line.textContent).toMatch(/call 911/);
+  });
+
+  it('prints no Poison Control line on a visit that applied nothing', () => {
+    const termiteCheck = {
+      id: 'st-1',
+      method: 'station_check',
+      product: { name: 'Trelona ATBS Termite Bait Station', category: 'termite bait' },
+    };
+    for (const applications of [[], [termiteCheck]]) {
+      const { container, unmount } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications }} token="tok123" />);
+      expect(container.textContent).not.toContain('Poison Control');
+      expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
+      unmount();
+    }
+  });
+
+  it('prints Poison Control on its own for a rodent bait-station visit or a productless treatment', () => {
+    // a station device row: servicing it is not an application, but the
+    // station holds rodenticide
+    const rodentCheck = {
+      id: 'st-2',
+      method: 'station_check',
+      product: { name: 'Protecta Rodent Bait Station' },
+    };
+    for (const data of [
+      { ...BASE_DATA, applications: [rodentCheck] },
+      { ...BASE_DATA, applications: [], typedReport: { ...BASE_DATA.typedReport, type: 'rodent_bait_station' } },
+      { ...BASE_DATA, applications: [], applicationMade: true },
+    ]) {
+      const { container, unmount } = render(<ServiceReportDocument data={data} token="tok123" />);
+      expect(screen.queryByText('Products applied')).toBeNull();
+      expect(screen.getByText('Poison Control')).toBeInTheDocument();
+      const block = screen.getByTestId('doc-poison-control');
+      expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+      // no product list on the page, so the line never points at one
+      expect(block.textContent).not.toMatch(/names each product/);
+      unmount();
+    }
+  });
+
+  it('names the applicator only on application evidence, never on a bait-station check', () => {
+    const rodentCheck = { id: 'st-3', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
+    const withId = { ...BASE_DATA, applicatorFdacsId: 'JE000001' };
+    const { unmount } = render(<ServiceReportDocument data={{ ...withId, applications: [rodentCheck], applicationMade: false }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).not.toContain('FDACS ID');
+    unmount();
+    render(<ServiceReportDocument data={{ ...withId, applications: [], applicationMade: true }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).toContain('FDACS ID card #JE000001');
+  });
+
+  it('prints Poison Control when the application verdict is unknown (product read failed)', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [], applicationMade: null, applicatorFdacsId: 'JE000001' }} token="tok123" />);
+    const block = screen.getByTestId('doc-poison-control');
+    expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+    expect(block.textContent).not.toContain('FDACS ID');
+  });
+
+  it('prints the applicator FDACS ID card number beside Poison Control when the server sends one', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: 'JE000001' }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).toContain('Applicator: Adam · FDACS ID card #JE000001');
+  });
+
+  it('prints no applicator line when the server withholds the number', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: null }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).not.toContain('FDACS ID');
+  });
+
   it('does not claim treatment areas on a visit with no applications', () => {
     // the server always builds mapSvg, even for inspection-only visits
     const data = { ...BASE_DATA, applications: [], mapSvg: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>' };
@@ -238,6 +352,98 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText(/A wet week to keep in mind/)).toBeInTheDocument();
     expect(screen.getByText(/Turf is dense across the yard/)).toBeInTheDocument();
     expect(container.textContent).not.toContain(rawBlurb);
+  });
+
+  it('prints exactly one watering line for a hold visit (the banner sentence is not restated by the hero task or insights)', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'hold', lines: [line1, 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} That gives today’s treatment time to work.`, holdTask: line1, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: line1 },
+        followUp: { customerAction: line1 },
+        insights: [
+          { category: 'water', headline: 'Water', customerAction: line1 },
+          { category: 'mowing', headline: 'Mowing', customerAction: `Raise the mower one setting. ${line1}` },
+        ],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.match(/Skip your turf watering until Thu 3 PM\./g)).toHaveLength(1);
+    expect(text).toContain('Raise the mower one setting.'); // other advice in the same action survives
+    expect(text).toContain('That gives today’s treatment time to work.');
+  });
+
+  it('a label mow hold on the banner changes nothing in the printed document', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const build = (banner) => ({
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner,
+        aftercare: { watering: `${line1} That gives today’s treatment time to work.`, holdTask: line1, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: line1 },
+        followUp: { customerAction: line1 },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line1 }],
+      },
+    });
+    const base = { state: 'hold', lines: [line1, 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+    const mow = { days: 2, untilAt: '2026-10-03T19:00:00.000Z', untilDate: '2026-10-03', untilLabel: 'Sat 3 PM', line: 'Mowing: hold off until Sat 3 PM, 2 days after today\'s treatment.' };
+    const without = render(<ServiceReportDocument data={build(base)} token="tok123" />);
+    const textWithout = without.container.textContent;
+    without.unmount();
+    const withMow = render(<ServiceReportDocument data={build({ ...base, mowHold: mow })} token="tok123" />);
+    expect(withMow.container.textContent).toBe(textWithout);
+    expect(withMow.container.textContent).not.toContain('Mowing: hold off');
+    expect(withMow.container.textContent.match(/Skip your turf watering until Thu 3 PM\./g)).toHaveLength(1);
+  });
+
+  it('hold then water-in: a hero task carrying both banner lines prints each line once', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const line2 = 'After that, water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.';
+    const line3 = 'Run it even if it is not your usual day.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'hold_then_water_in', lines: [line1, line2, line3], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2} ${line3}`, holdTask: `${line1} ${line2}`, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2}` },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line2 }],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.split(line1)).toHaveLength(2);
+    expect(text.split(line2)).toHaveLength(2);
+  });
+
+  it('partial credit: the frozen any-day sentence inside an action is stripped even though the banner composed a longer line', () => {
+    const line1 = 'Water in today’s treatment by Thu 2 PM.';
+    const line2 = 'Run each zone about 40 minutes.';
+    const frozen3 = 'Run it even if it is not your usual day.';
+    const composed3 = `${frozen3} That counts toward this week’s watering.`;
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'water_in', lines: [line1, line2, composed3], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2} ${frozen3}`, waterInTask: line1, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2} ${frozen3}` },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent.split(frozen3)).toHaveLength(2);
+  });
+
+  it('without a banner the recommendations list is unchanged', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { aftercare: { watering: line1 }, snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: 'Water the front strip by hand.' } } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain('Water the front strip by hand.');
   });
 
   it('keeps approved visual moments and the turf-height gauge photo', () => {
@@ -1537,5 +1743,85 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
     expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();
     expect(screen.queryByText(reservice.result)).toBeNull();
+  });
+});
+
+describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPECTATIONS, dark)', () => {
+  it('renders the rain, spider, and what-to-expect blocks when present on pestReportV2.expectations', () => {
+    render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      pestReportV2: {
+        expectations: {
+          rain: { lines: ['It\'s rained about 1.2" at your property over the past week.'] },
+          // whatWeDid is server-fixed wording (never a raw protocol-action
+          // label — owner ruling 2026-09-28); this matches the actual
+          // server output.
+          spiders: {
+            headline: 'Spiders',
+            whatWeDid: 'We knocked down webs and treated the eaves and entry points where spiders build.',
+            expectation: 'Webbing should noticeably thin out over about two weeks.',
+            nextStep: 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.',
+          },
+          whatToExpect: { lines: ['Non-repellent products (like what we used) work by transfer.'] },
+        },
+      },
+    }} token="tok123" />);
+    expect(screen.getByText('Rain and your treatment')).toBeInTheDocument();
+    expect(screen.getByText(/rained about 1\.2"/)).toBeInTheDocument();
+    expect(screen.getByText('Spiders')).toBeInTheDocument();
+    expect(screen.getByText(/knocked down webs/)).toBeInTheDocument();
+    expect(screen.getByText('What to expect')).toBeInTheDocument();
+    expect(screen.getByText(/Non-repellent products/)).toBeInTheDocument();
+  });
+
+  it('omits all three blocks when expectations is absent (gate off — the common case today)', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(screen.queryByText('Rain and your treatment')).toBeNull();
+    expect(screen.queryByText('Spiders')).toBeNull();
+    expect(screen.queryByText('What to expect')).toBeNull();
+  });
+
+  it('the PDF/static render never carries the live-forecast heavy-rain caveat — server-side, forecastHeavyRain is only ever true for mode==="live" (reports-public.js), so a PDF payload\'s rain.lines can only ever be the trailing-week facts, never this sentence', () => {
+    render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      pestReportV2: { expectations: { rain: { lines: ['It\'s rained about 0.2" at your property over the past week.'] } } },
+    }} token="tok123" />);
+    expect(screen.queryByText(/Heavy rain right after a treatment/)).toBeNull();
+  });
+});
+
+describe('ServiceReportDocument: the four-section report', () => {
+  const sections = [
+    { key: 'whatWeFound', title: 'What we found', paragraphs: ['Light activity under the sink.'] },
+    { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We placed bait where the roaches were feeding.'] },
+    { key: 'whatToExpect', title: 'What to expect', paragraphs: ['You may see more roaches in the open for a week or two.'] },
+    { key: 'whatsNext', title: 'What’s next', paragraphs: ['Let us know if you still see them after that.'] },
+  ];
+  const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+
+  it('prints the summary with its section titles', () => {
+    render(<ServiceReportDocument
+      data={{ ...BASE_DATA, typedReport: { ...BASE_DATA.typedReport, todaysResult: { ...BASE_DATA.typedReport.todaysResult, body } }, reportSections: sections }}
+      token="tok123"
+    />);
+    expect(screen.getByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText('We placed bait where the roaches were feeding.')).toBeInTheDocument();
+    expect(screen.queryByText(body)).toBeNull();
+  });
+
+  it('drops the separate "What to expect" block when the sections carry their own', () => {
+    const whatToExpect = { lines: ['Ants that find the bait carry it back to the colony.'] };
+    const withSections = { ...BASE_DATA, typedReport: { ...BASE_DATA.typedReport, todaysResult: { ...BASE_DATA.typedReport.todaysResult, body } }, reportSections: sections, pestReportV2: { expectations: { whatToExpect } } };
+    const { unmount } = render(<ServiceReportDocument data={withSections} token="tok123" />);
+    expect(screen.queryByText('Ants that find the bait carry it back to the colony.')).toBeNull();
+    unmount();
+    render(<ServiceReportDocument data={{ ...BASE_DATA, pestReportV2: { expectations: { whatToExpect } } }} token="tok123" />);
+    expect(screen.getByText('Ants that find the bait carry it back to the colony.')).toBeInTheDocument();
+  });
+
+  it('prints the summary as before without sections', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(screen.queryByText('What we did and why')).toBeNull();
+    expect(screen.getByText('We completed the scheduled service.')).toBeInTheDocument();
   });
 });

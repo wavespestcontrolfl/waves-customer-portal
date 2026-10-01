@@ -1,3 +1,9 @@
+// The whole-draft company-name check makes a model call; by default the
+// fixed drafts here name no company (tests override via deps).
+jest.mock('../services/content/business-name-confirmer', () => ({
+  extractCompanyNames: jest.fn(async () => ({ ok: true, key: 'k', companies: [] })),
+  assertOwnerListForCommit: jest.fn(async () => ({ extraction: null, requiresHumanMerge: false })),
+}));
 const rem = require('../services/content/codex-remediation');
 
 const {
@@ -315,6 +321,7 @@ describe('runRemediationForPr', () => {
       document: reviewedDocument,
       path: 'src/content/blog/pest-control/roaches.md',
       brief: editorialBrief,
+      evidenceUrls: [],
     });
     expect(gh._calls.putFile).toHaveLength(0);
     expect(gh._calls.commitFiles).toEqual([{
@@ -338,6 +345,26 @@ describe('runRemediationForPr', () => {
     const editorialEvidence = { filesForDocument: jest.fn(async () => []) };
     const ctx = { ...CTX, expectedParentSha: HEAD, prePushCheck: jest.fn(async () => true), onPark };
     const deps = { db, gh, editorialEvidence, callAnthropic: jest.fn(makeCall('FIXED BODY')), validateFixedBlogFile: validate };
+
+    const first = await runRemediationForPr(ctx, deps);
+    expect(first).toEqual(expect.objectContaining({ skipped: true, transient: true, reason: expect.stringContaining('will retry') }));
+    expect(onPark).not.toHaveBeenCalled();
+    expect(db._tables.codex_remediation_state[0]).toEqual(expect.objectContaining({ status: 'active', rounds: 1 }));
+
+    const second = await runRemediationForPr(ctx, deps);
+    expect(second).toEqual(expect.objectContaining({ remediated: true, round: 2 }));
+  });
+
+  test('a company-name check outage in the lane revalidation retries on the transient-round budget instead of parking (Codex r6)', async () => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const onPark = jest.fn();
+    const revalidateFix = jest.fn()
+      .mockResolvedValueOnce({ ok: false, transient: true, reason: 'company-name check unavailable for the fix (timeout)' })
+      .mockResolvedValue({ ok: true });
+    const editorialEvidence = { filesForDocument: jest.fn(async () => []) };
+    const ctx = { ...CTX, expectedParentSha: HEAD, prePushCheck: jest.fn(async () => true), onPark, revalidateFix };
+    const deps = { db, gh, editorialEvidence, callAnthropic: jest.fn(makeCall('FIXED BODY')), validateFixedBlogFile: PASS };
 
     const first = await runRemediationForPr(ctx, deps);
     expect(first).toEqual(expect.objectContaining({ skipped: true, transient: true, reason: expect.stringContaining('will retry') }));
@@ -1138,6 +1165,66 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     expect(db._tables.blog_posts[0].content).toBe('NEW FIXED BODY');
   });
 
+  // Codex r7 on #5146: a scheduler-lane fix runs the owner-list chokepoint
+  // on the FIXED text before the branch write.
+  describe('scheduler lane owner-list recheck', () => {
+    const confirmer = require('../services/content/business-name-confirmer');
+    const row = () => ({ id: 1, publish_status: 'publishing', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'OLD BODY' });
+    const orig = '---\ntitle: T\n---\nOLD BODY';
+    const fixedMd = '---\ntitle: T\n---\nBug Out competes with local providers in Sarasota.';
+    beforeEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true'; });
+    afterEach(() => { confirmer.assertOwnerListForCommit.mockImplementation(async () => ({ extraction: null, requiresHumanMerge: false })); });
+
+    test('an off-list company in the fix parks it before any branch write, and the check saw the fixed text', async () => {
+      confirmer.assertOwnerListForCommit.mockImplementation(async () => { throw Object.assign(new Error('final text names competitor(s) outside the owner-approved list: Bug Out'), { code: 'BLOG_OWNER_LIST_BLOCKED' }); });
+      const db = makeDb({ blog_posts: [row()] });
+      const gh = makeGh({ fileContent: orig });
+
+      const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+
+      expect(r).toMatchObject({ parked: true });
+      expect(r.reason).toMatch(/owner competitor list.*Bug Out/);
+      expect(confirmer.assertOwnerListForCommit.mock.calls.at(-1)[0]).toMatchObject({ humanMergeFallback: true, body: expect.stringContaining('Bug Out competes') });
+      expect(gh._calls.putFile).toHaveLength(0);
+    });
+
+    test('a check outage is transient (retried on the round budget, no park)', async () => {
+      confirmer.assertOwnerListForCommit.mockImplementation(async () => { throw Object.assign(new Error('company-name check unavailable for the final text (timeout)'), { code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true }); });
+      const db = makeDb({ blog_posts: [row()] });
+      const gh = makeGh({ fileContent: orig });
+
+      const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+
+      expect(r).toMatchObject({ skipped: true, transient: true });
+      expect(gh._calls.putFile).toHaveLength(0);
+    });
+
+    test('approved-list competitor content stamps the row for a human merge, then pushes', async () => {
+      confirmer.assertOwnerListForCommit.mockImplementation(async () => ({ extraction: null, requiresHumanMerge: true }));
+      const db = makeDb({ blog_posts: [row()] });
+      const gh = makeGh({ fileContent: orig });
+
+      const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall('---\ntitle: T\n---\nOrkin offers recurring residential plans.'), validateFixedBlogFile: PASS });
+
+      expect(r.remediated).toBe(true);
+      expect(db._tables.blog_posts[0].astro_requires_human_merge).toBe(true);
+    });
+
+    test('a candidate a later step rejects leaves no human-merge stamp (Codex r12 on #5146)', async () => {
+      confirmer.assertOwnerListForCommit.mockImplementation(async () => ({ extraction: null, requiresHumanMerge: true }));
+      const db = makeDb({ blog_posts: [row()] });
+      const gh = makeGh({ fileContent: orig });
+      // The editorial review after the owner-list check refuses the fix.
+      const editorialEvidence = { filesForDocument: jest.fn(async () => { throw Object.assign(new Error('Editorial review did not pass'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED' }); }) };
+
+      const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, editorialEvidence, callAnthropic: makeCall('---\ntitle: T\n---\nOrkin offers recurring residential plans.'), validateFixedBlogFile: PASS });
+
+      expect(r.remediated).not.toBe(true);
+      expect(gh._calls.putFile).toHaveLength(0);
+      expect(db._tables.blog_posts[0].astro_requires_human_merge).toBeFalsy();
+    });
+  });
+
   // r9/r11: two layers guard the sync. The pre-push check skips BEFORE the
   // branch write when the row already left the claim; the CAS covers the
   // narrower putFile→sync window and parks.
@@ -1363,6 +1450,13 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
       if (prior === undefined) delete process.env.GATE_EDITORIAL_EVIDENCE;
       else process.env.GATE_EDITORIAL_EVIDENCE = prior;
     }
+  });
+
+  test('a remediation fix that leaves a competitor link is refused before any commit (owner ruling 2026-09-28)', async () => {
+    const withLink = `---\n${JSON.stringify(TERMITE_FM, null, 2)}\n---\nBait stations target the colony itself. Compare [this plan](https://www.orkin.com/plans) before you sign.`;
+    const r = await rem.validateFixedBlogFile(withLink, { operatorFaqException: true }, gateDeps);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/COMPETITOR_LINK/);
   });
 
   test('validateFixedBlogFile: termite post with a pre-existing FAQ blocks without the flag, passes with it', async () => {
@@ -1660,16 +1754,78 @@ describe('validateAutonomousRunGates', () => {
       deps.autonomousRunner._loadReviewedBrief = async () => ({
         page_type: 'supporting-blog', action_type: 'new_supporting_blog', gsc_signal: { intercept: true },
       });
-      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
+      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] });
+      // The publisher's commit chokepoint, simulated: it cleared Orkin.
+      deps.businessNameConfirmer = { assertOwnerListForCommit: jest.fn(async ({ draft }) => {
+        Object.assign(draft, { company_extraction: { ok: true, key: 'k', companies: ['Orkin'] }, final_named_competitors: ['Orkin'], competitors_approved_by_list: ['Orkin'] });
+        return { extraction: draft.company_extraction, requiresHumanMerge: false };
+      }) };
       const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(r.ok).toBe(true);
+      // The owner list cleared the fix — recorded on the returned verdict
+      // the autonomous caller persists with the head pin.
+      expect(r.comparisonResult.competitors_approved_by_list).toEqual(['Orkin']);
       // No verdict persistence anywhere in this validator (PR r3 P2: the
       // poller's merge gate re-evaluates the current head itself).
       const row = deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1');
       expect(row.comparison_table_result).toBeUndefined();
+
+      // Owner rulings 2026-09-27 (D2) + 2026-09-28: a fix that adds a name
+      // off the owner list never rides the unattended lane.
+      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Hughes Exterminators'] });
+      deps.businessNameConfirmer.assertOwnerListForCommit = jest.fn(async () => {
+        throw Object.assign(new Error('off list'), { code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Hughes Exterminators'] });
+      });
+      const offList = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
+      expect(offList).toMatchObject({ ok: false, reason: expect.stringMatching(/named_competitor_off_list: Hughes Exterminators/) });
     } finally {
       fg.isEnabled.mockRestore();
     }
+  });
+
+  test('owner-list chokepoint on a fix: the stored extraction is handed over for reuse with the FIXED frontmatter + body; a block or an outage refuses the fix', async () => {
+    const stored = { ok: true, key: 'k-stored', companies: [] };
+    const deps = goodDeps();
+    deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1').comparison_table_result = JSON.stringify({ companyExtraction: stored });
+    deps.businessNameConfirmer = { assertOwnerListForCommit: jest.fn(async ({ draft }) => ({ extraction: draft.company_extraction, requiresHumanMerge: false })) };
+    deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] });
+    const fixed = '---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: A technician at a lanai\n---\nFixed body text';
+
+    const cleared = await rem.validateAutonomousRunGates(fixed, RUN_REF, deps);
+    expect(cleared.ok).toBe(true);
+    const [args] = deps.businessNameConfirmer.assertOwnerListForCommit.mock.calls[0];
+    expect(args.draft.company_extraction).toEqual(stored);
+    expect(args.frontmatter).toMatchObject({ title: 'T', hero_image: { alt: 'A technician at a lanai' } });
+    expect(args.body).toBe('Fixed body text');
+    expect(args.brief).toMatchObject({ action_type: 'new_supporting_blog' });
+    expect(cleared.comparisonResult.companyExtraction).toEqual(stored);
+
+    deps.businessNameConfirmer.assertOwnerListForCommit = jest.fn(async () => {
+      throw Object.assign(new Error('x'), { code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+    });
+    expect(await rem.validateAutonomousRunGates(fixed, RUN_REF, deps))
+      .toMatchObject({ ok: false, reason: expect.stringMatching(/named_competitor_off_list: Bug Out/) });
+
+    deps.businessNameConfirmer.assertOwnerListForCommit = jest.fn(async () => {
+      throw Object.assign(new Error('company-name check unavailable for the final text (timeout)'), { code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true });
+    });
+    expect(await rem.validateAutonomousRunGates(fixed, RUN_REF, deps))
+      .toMatchObject({ ok: false, transient: true, reason: expect.stringMatching(/company-name check unavailable/) });
+  });
+
+  test('a fix whose rewritten hero alt disparages a competitor is refused by the REAL chokepoint (pre-push r16)', async () => {
+    const realConfirmer = jest.requireActual('../services/content/business-name-confirmer');
+    const spy = jest.spyOn(realConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: ['Orkin'] });
+    try {
+      const deps = goodDeps();
+      deps.businessNameConfirmer = realConfirmer;
+      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] });
+      const fixed = '---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Orkin scams customers with hidden fees\n---\nFixed body text';
+
+      const r = await rem.validateAutonomousRunGates(fixed, RUN_REF, deps);
+
+      expect(r).toMatchObject({ ok: false, reason: expect.stringMatching(/comparison_table_failed/) });
+    } finally { spy.mockRestore(); }
   });
 
   test('missing opportunity row -> fail closed (no guardrail context)', async () => {

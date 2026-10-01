@@ -120,6 +120,63 @@ describe('deriveRevenue — mirrors the completion handler invoiceAmount', () =>
   test('no price anywhere yields $0', () => {
     expect(deriveRevenue({ serviceRecord: {}, scheduledService: {}, customer: {} })).toBe(0);
   });
+
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a STAMPED 0 (as
+  // opposed to the genuinely blank estimated_price the test above and
+  // "non-callback with no visit price" above cover) records $0 revenue, not
+  // the customer's monthly_rate. Off is byte-identical to today.
+  describe('a stamped $0 visit — GATE_STAMPED_ZERO_FREE', () => {
+    afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
+
+    test('off: a bare stamped 0 still records monthly_rate as revenue, same as today', () => {
+      const rev = deriveRevenue({
+        serviceRecord: {},
+        scheduledService: { estimated_price: 0, is_callback: false },
+        customer: { monthly_rate: 99 },
+      });
+      expect(rev).toBe(99);
+    });
+
+    test('on: a bare stamped 0 records $0 revenue, never the monthly_rate', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      const rev = deriveRevenue({
+        serviceRecord: {},
+        scheduledService: { estimated_price: 0, is_callback: false },
+        customer: { monthly_rate: 99 },
+      });
+      expect(rev).toBe(0);
+    });
+
+    test('on: a genuinely blank (never-priced) row is unaffected — still records monthly_rate', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      const rev = deriveRevenue({
+        serviceRecord: {},
+        scheduledService: { estimated_price: null, is_callback: false },
+        customer: { monthly_rate: 99 },
+      });
+      expect(rev).toBe(99);
+    });
+
+    test('on: a callback stamped $0 is unaffected ($0 revenue either way)', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      const rev = deriveRevenue({
+        serviceRecord: {},
+        scheduledService: { estimated_price: 0, is_callback: true },
+        customer: { monthly_rate: 99 },
+      });
+      expect(rev).toBe(0);
+    });
+
+    test('on: a POSITIVE price always wins, gate or not', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      const rev = deriveRevenue({
+        serviceRecord: {},
+        scheduledService: { estimated_price: 60, is_callback: false },
+        customer: { monthly_rate: 99 },
+      });
+      expect(rev).toBe(60);
+    });
+  });
 });
 
 describe('computeServiceRecordFinancials', () => {

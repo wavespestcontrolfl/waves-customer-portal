@@ -101,6 +101,121 @@ describe('aeoVerdict — answer-engine visibility feedback', () => {
   });
 });
 
+describe('AEO feedback loop covers aeo_question_gap', () => {
+  const { aeoQueryIdsForRun } = tracker._internals;
+  function fakeDb(rowsByTable) {
+    const calls = [];
+    const database = (table) => {
+      const q = { table, filters: [] };
+      q.where = (...a) => { q.filters.push(['where', ...a]); return q; };
+      q.whereIn = (...a) => { q.filters.push(['whereIn', ...a]); return q; };
+      q.whereRaw = (...a) => { q.filters.push(['whereRaw', ...a]); return q; };
+      q.select = async () => { calls.push(q); return rowsByTable[table] || []; };
+      q.update = async () => 1;
+      return q;
+    };
+    return { database, calls };
+  }
+
+  test('a question row watches exactly its own active managed query; aeo_gap keeps city×service', async () => {
+    const { database, calls } = fakeDb({ seo_llm_mention_queries: [{ id: 42 }] });
+    const question = 'How do I get rid of German cockroaches in my Florida home — should I hire a professional?';
+    expect(await aeoQueryIdsForRun(database, { bucket: 'aeo_question_gap', query: question })).toEqual([42]);
+    expect(calls[0].filters).toEqual([['where', { active: true, query: question }]]);
+    expect(await aeoQueryIdsForRun(database, { bucket: 'aeo_question_gap', query: null })).toEqual([]);
+    await aeoQueryIdsForRun(database, { bucket: 'aeo_gap', city: 'Sarasota', service: 'pest' });
+    expect(calls[1].filters.map((f) => f[0])).toEqual(['where', 'whereRaw', 'whereRaw']);
+  });
+
+  test.each([
+    ['query-id', 'seo_llm_mention_queries'],
+    ['run-context', 'autonomous_runs as r'],
+  ])('a transient %s lookup failure throws instead of freezing an incomplete impact row; the retry records the cohort', async (_label, failingTable) => {
+    let lookupFails = true;
+    const inserts = [];
+    // Chainable fake: every builder method returns the chain; awaiting it
+    // resolves per table.
+    const database = (table) => {
+      const chain = new Proxy({}, {
+        get(_t, prop) {
+          if (prop === 'then') {
+            const value = table === 'seo_llm_mention_queries'
+              ? (lookupFails && failingTable === table ? Promise.reject(new Error('connection reset')) : Promise.resolve([{ id: 42 }]))
+              : Promise.resolve([]);
+            return value.then.bind(value);
+          }
+          if (prop === 'first') {
+            return async () => {
+              if (table !== 'autonomous_runs as r') return undefined;
+              if (lookupFails && failingTable === table) throw new Error('connection reset');
+              return { bucket: 'aeo_question_gap', query: 'Q?', city: null, service: 'pest' };
+            };
+          }
+          if (prop === 'insert') return (row) => { inserts.push(row); return chain; };
+          if (prop === 'returning') return async () => [inserts[inserts.length - 1]];
+          return () => chain;
+        },
+      });
+      return chain;
+    };
+    database.raw = (sql) => sql;
+    const args = { db: database, runId: 'run-1', pageUrl: 'https://www.wavespestcontrol.com/termite/termite-bond/' };
+    await expect(tracker.snapshotBaseline(args)).rejects.toThrow('connection reset');
+    expect(inserts).toHaveLength(0); // nothing frozen — sweepNewlyLive retries this run
+    lookupFails = false;
+    await tracker.snapshotBaseline(args);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).toMatchObject({ bucket: 'aeo_question_gap', aeo_query_ids: JSON.stringify([42]) });
+  });
+
+  test('a question-gap verdict counts only the engines that originally missed the target', async () => {
+    const page = 'https://www.wavespestcontrol.com/termite/termite-bond/';
+    const deployed = new Date(Date.now() - 40 * 86400_000);
+    const day = (n) => etDateString(addETDays(new Date(), -n));
+    const obs = (platform, n, cited) => ({ llm_platform: platform, check_date: day(n), measurement_version: 2, answer_available: true,
+      citations_complete: true, waves_cited_urls: JSON.stringify(cited ? [page] : []) });
+    const run = async (mentions, bucket = 'aeo_question_gap') => {
+      const updates = [];
+      const database = (table) => {
+        const f = {};
+        const q = {
+          where(a, b) { if (typeof a === 'string') f[a] = b; return q; },
+          whereIn(c, v) { f[c] = v; return q; },
+          join() { return q; },
+          first: async () => ({ signal_metadata: { engines_missing: [{ platform: 'chatgpt' }, { platform: 'gemini' }, { platform: 'claude' }] } }),
+          select: async () => {
+            if (table === 'content_optimization_impact') {
+              return [{ id: 1, bucket, run_id: 'run-1', page_url: page, aeo_query_ids: [7], deployed_at: deployed }];
+            }
+            return mentions.filter((m) => !f.llm_platform || f.llm_platform.includes(m.llm_platform));
+          },
+          update: async (u) => { updates.push(u); return 1; },
+        };
+        return q;
+      };
+      await tracker.checkAeoVisibility({ db: database });
+      return updates[0];
+    };
+    // Perplexity already cited the target when the question qualified; its
+    // later hits alone are not a treatment success.
+    const alreadyCiting = [1, 2, 3, 4, 5].map((n) => obs('perplexity', n, true));
+    const missingStillAbsent = [1, 2, 3, 4, 5].map((n) => obs('chatgpt', n, false));
+    expect(await run([...alreadyCiting, ...missingStillAbsent])).toMatchObject({ aeo_verdict: 'still_absent', aeo_now_cited: false });
+    expect(await run(alreadyCiting)).toMatchObject({ aeo_verdict: 'insufficient_data' });
+    // An originally missing engine citing the target is.
+    const recovered = [...missingStillAbsent.slice(1), obs('gemini', 1, true)];
+    expect(await run([...alreadyCiting, ...recovered])).toMatchObject({ aeo_verdict: 'now_cited', aeo_now_cited: true });
+    // aeo_gap keeps its all-engine evaluator.
+    expect(await run(alreadyCiting, 'aeo_gap')).toMatchObject({ aeo_verdict: 'now_cited' });
+  });
+
+  test('citation rechecks select both AEO buckets', async () => {
+    const { database, calls } = fakeDb({ content_optimization_impact: [] });
+    await tracker.checkAeoVisibility({ db: database });
+    expect(calls[0].filters[0]).toEqual(['whereIn', 'bucket', ['aeo_gap', 'aeo_question_gap']]);
+  });
+});
+
 describe('impact-tracker pure helpers', () => {
   test('median handles odd/even/empty', () => {
     expect(median([3, 1, 2])).toBe(2);

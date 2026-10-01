@@ -77,6 +77,8 @@ function makeFakeDb(seed = {}) {
       whereIn(col, vals) { whereInClauses.push({ col, vals }); return api; },
       whereNotIn(col, vals) { whereNotInClauses.push({ col, vals }); return api; },
       whereRaw(sql) {
+        // The street-level address-hold exclusion: none of these fixtures holds one.
+        if (sql.includes('street_level_address')) return api;
         if (sql !== "payload->'reschedule_proposal' IS NULL") throw new Error(`Unsupported test query: ${sql}`);
         rawPredicates.push((row) => row.payload?.reschedule_proposal == null);
         return api;

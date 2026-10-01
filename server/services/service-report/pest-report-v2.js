@@ -24,6 +24,7 @@
 
 const { validateCustomerCopy } = require('./premium-experience');
 const { detectServiceLine } = require('./service-line-configs');
+const { pestReportExpectationsGateOn, buildPestExpectations } = require('./pest-report-expectations');
 
 // propertyDefenseStatus.overallLabel → the customer-facing protection status.
 // tone drives the client accent (good = green, watch = amber, attention = red).
@@ -218,6 +219,33 @@ function buildPestReportV2({
   technicianReport = null,
   customerConcern = null,
   suppressDefense = false,
+  // "Expectations" blocks (owner-approved 2026-09-27, dark behind
+  // GATE_PEST_REPORT_EXPECTATIONS): applications MIXES a public shape
+  // (report-data.js's `data.applications` — name/targets/applicationArea/
+  // method/methodInferred, all already public) with the moa_group /
+  // rainfast_minutes facts ONLY report-data.js's expectationFactsOut
+  // out-param carries (codex P0 2026-09-28: those two facts must never
+  // reach the public payload), shaped { id, product: { name, moa_group,
+  // rainfast_minutes }, targets: [...], applicationArea, method,
+  // methodInferred }; actionLabels is report-data.js's
+  // completedProtocolActionLabels(service) — SERVER-INTERNAL ONLY the same
+  // way (raw protocol-action labels never reach the public report payload;
+  // the caller computes this directly from `service`, never from returned
+  // report data) — used only for the spider section's gate; actionEntries
+  // is report-data.js's completedProtocolActionEntries(service),
+  // { label, treatmentApplied }[], SERVER-INTERNAL ONLY the same way — used
+  // for the spider section's residual-evidence check (codex P1 2026-09-28:
+  // a sweep, treatmentApplied: false, must not count as a treatment);
+  // weekWeather is application-conditions.js's fetchServiceWeekWeather
+  // result ({ rainInches, rainConfidence }); forecastHeavyRain is LIVE VIEW
+  // ONLY (see pest-report-expectations.js) and must be false/omitted for
+  // any PDF/static render; serviceMonth is 1–12.
+  applications = [],
+  actionLabels = [],
+  actionEntries = [],
+  weekWeather = null,
+  forecastHeavyRain = false,
+  serviceMonth = null,
 } = {}) {
   if (!premiumExperience) return null;
   const defenseStatus = premiumExperience.propertyDefenseStatus;
@@ -252,13 +280,28 @@ function buildPestReportV2({
   // guard) — an unscreenable concern drops the card rather than the report.
   const concernCard = buildCustomerConcernCard(customerConcern);
 
+  // Rain / spiders / what-to-expect — dark behind GATE_PEST_REPORT_EXPECTATIONS.
+  // Gate off => expectations is null, same always-present-but-possibly-null
+  // convention as `defense` / `aiSummary` / `forecast` above — and built
+  // BEFORE the emptiness checks below (codex P2 2026-09-29 round 3: a
+  // sparse callback report — suppressDefense, no primary move, metric, AI
+  // summary or concern — used to return null before expectations was ever
+  // computed, discarding a recorded rain / eave-sweeping / product
+  // expectation exactly where it would have been the ONLY content).
+  const expectations = pestReportExpectationsGateOn()
+    ? buildPestExpectations({
+      weekWeather, applications, actionLabels, actionEntries, serviceMonth, forecastHeavyRain,
+    })
+    : null;
+
   // Nothing meaningful to show → don't render an empty V2 shell. Under
   // suppressDefense the DELIBERATE removal of the schematic must not be
   // what empties the shell (codex P1 r1): a callback whose remaining
   // content is the concern card, the tech-reviewed summary, the receipt,
   // or the weather call keeps the dashboard — on a complaint visit those
   // are exactly the customer-issue content. Regular visits keep the
-  // original predicate unchanged.
+  // original predicate unchanged. `expectations` now counts too (gate off
+  // ⇒ always null ⇒ byte-identical to the pre-fix predicate).
   if (suppressDefense) {
     // Callback emptiness counts ONLY fields the composed section MOUNTS
     // (codex P2 r4 + r5): the hero (supportingMetric + aiSummary), the
@@ -266,10 +309,10 @@ function buildPestReportV2({
     // receipt, and the weather call were removed from the composed section
     // 2026-07-09 — counting them kept an empty status-hero shell alive
     // that also suppressed the legacy summary/coverage sections.
-    if (!primaryMove && !supportingMetric && !aiSummary && !concernCard) {
+    if (!primaryMove && !supportingMetric && !aiSummary && !concernCard && !expectations) {
       return null;
     }
-  } else if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard) {
+  } else if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard && !expectations) {
     // Nothing meaningful to show → don't render an empty V2 shell
     // (regular visits keep the original predicate unchanged).
     return null;
@@ -294,6 +337,10 @@ function buildPestReportV2({
     weatherCall: premiumExperience.weatherCall || null,
     aiSummary,
     forecast: forecastCard,
+    // Omitted entirely when dark or empty (codex P0 #5137 r6): the public
+    // contract promises the gate-off payload has no `expectations` key at
+    // all — unlike the always-present-but-nullable siblings above.
+    ...(expectations ? { expectations } : {}),
   };
 }
 
@@ -341,7 +388,12 @@ function pestReportV2PdfSignature(service = {}) {
   // INDEPENDENTLY of PEST_REPORT_V2 (codex P1): the schematic suppression
   // applies to every pest PDF, V2 dashboard or not.
   const tonSuffix = pestTraceOrNothingGateOn() ? '-ton1' : '';
-  if (process.env.PEST_REPORT_V2 !== 'true') return tonSuffix;
+  // '-pex1' rides every pest-line key while the expectations gate is on —
+  // same append-not-switch pattern as '-ton1' above, and independent of
+  // PEST_REPORT_V2 for the same reason: computed before the V2 early-return
+  // so a flip re-renders cached documents once regardless of dashboard state.
+  const pexSuffix = pestReportExpectationsGateOn() ? '-pex1' : '';
+  if (process.env.PEST_REPORT_V2 !== 'true') return `${tonSuffix}${pexSuffix}`;
   // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a
   // cockroach PDF cached under '-pestv2b' would keep serving the perimeter
@@ -350,7 +402,7 @@ function pestReportV2PdfSignature(service = {}) {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
       : service.service_data;
-    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}`;
+    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}${pexSuffix}`;
   } catch { /* fall through to the line suffix */ }
   // 'c' = the trust-fix composition (codex P2 #3043): the customer-concern
   // card, softened no-activity copy, facts-only weather, and property-gated
@@ -359,14 +411,29 @@ function pestReportV2PdfSignature(service = {}) {
   // ('b' was the typed-activity composition, owner ruling 2026-07-14.)
   // Bump this suffix whenever the pest-line report COMPOSITION changes —
   // each pest PDF re-renders once on next view.
-  return `-pestv2c${tonSuffix}`;
+  return `-pestv2c${tonSuffix}${pexSuffix}`;
 }
+
+// codex P1 2026-09-29 round 3: pestWeekWeatherUncacheableForPdf (and its
+// own fetchPestWeekWeatherForCache) used to live here as a SEPARATE
+// preflight fetch so pdf-queue.js's queued renderer — which never composes
+// pestReportV2 itself — could learn the pest week's settledness without
+// composing the whole dashboard. That preflight was itself the bug: it was
+// a second, independent fetch that could disagree with whatever the
+// browser's own live /data request resolved moments later (two separate
+// process invocations racing the same provider). Removed — pdf-queue.js's
+// call to buildReportV1Data now carries `pestWeekWeatherUncacheable`
+// directly on the returned object (report-data.js's resolvePestWeekWeather
+// / resolvePestWeekWeatherForBuild, the ONE canonical fetch+freeze every
+// caller of buildReportV1Data shares), so there is nothing left for this
+// module to fetch on pdf-queue.js's behalf.
 
 module.exports = {
   buildPestReportV2,
   buildCustomerConcernCard,
   pestReportV2PdfSignature,
   pestTraceOrNothingGateOn,
+  pestReportExpectationsGateOn,
   isCockroachTypedReportType,
   // exported for tests
   stripZoneLetter,

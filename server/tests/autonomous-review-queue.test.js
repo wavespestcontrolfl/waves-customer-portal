@@ -75,6 +75,41 @@ describe('autonomous-review-queue read model helpers', () => {
     expect(b.can_approve_trust_build).toBe(true);
   });
 
+  test('a superseded citability review exposes no decision that can revive or publish it', () => {
+    const actions = reviewActions({
+      opportunity: {
+        status: 'pending_review',
+        bucket: 'citability_backfill',
+        signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'refresh:replacement' } },
+      },
+      run: { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_3' },
+    });
+    expect(actions).toEqual({
+      can_requeue: false,
+      can_dismiss: false,
+      can_approve_trust_build: false,
+      can_approve_named_competitor: false,
+    });
+  });
+
+  test('a superseded reconciliation hold keeps only dismiss, so a person can retire an unconfirmed write', () => {
+    const actions = reviewActions({
+      opportunity: {
+        status: 'pending_review',
+        skip_reason: 'astro_pr_audit_failed',
+        bucket: 'citability_backfill',
+        signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'refresh:replacement' } },
+      },
+      run: null,
+    });
+    expect(actions).toEqual({
+      can_requeue: false,
+      can_dismiss: true,
+      can_approve_trust_build: false,
+      can_approve_named_competitor: false,
+    });
+  });
+
   test('parses JSON columns with fallback', () => {
     expect(parseJsonMaybe('{"ok":true}', {})).toEqual({ ok: true });
     expect(parseJsonMaybe('{bad json', { ok: false })).toEqual({ ok: false });
@@ -370,5 +405,122 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
     const { oppUpdates, run } = mockReplacedRun({ decision: 'dismiss' });
     await expect(run()).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newer run replaced/) });
     expect(oppUpdates.find((u) => u.status === 'skipped')).toBeFalsy();
+  });
+
+  test('rejects a superseded citability requeue before any transaction can revive it', async () => {
+    const chain = {
+      where: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      first: jest.fn().mockResolvedValue({
+        id: 'opp-1',
+        status: 'pending_review',
+        bucket: 'citability_backfill',
+        signal_metadata: JSON.stringify({ page_edit_superseded: { ordinary_dedupe_key: 'refresh:replacement' } }),
+      }),
+    };
+    db.mockImplementation(() => chain);
+    db.transaction = jest.fn();
+
+    await expect(decideReviewItem('opp-1', { decision: 'requeue', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/superseded/) });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('an unreconciled refresh write is dismiss-only even when nothing superseded it', async () => {
+    const hold = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'refresh_publish_unreconciled',
+      bucket: 'citability_backfill', action_type: 'refresh_existing_page', signal_metadata: '{}',
+    };
+    const actions = reviewActions({ opportunity: hold, run: { action_type: 'refresh_existing_page' } });
+    expect(actions).toMatchObject({ can_requeue: false, can_dismiss: true, can_approve_trust_build: false, can_approve_named_competitor: false });
+
+    const chain = {
+      where: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      first: jest.fn().mockResolvedValue(hold),
+    };
+    db.mockImplementation(() => chain);
+    db.transaction = jest.fn().mockRejectedValue(new Error('reached transaction'));
+
+    for (const decision of ['requeue', 'approve_trust_build', 'approve_named_competitor']) {
+      await expect(decideReviewItem('opp-1', { decision, reviewer: 'owner' }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/check GitHub, then dismiss/) });
+    }
+    expect(db.transaction).not.toHaveBeenCalled();
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
+      .rejects.toThrow('reached transaction');
+  });
+
+  test('an interrupted approval publish is dismiss-only: the janitor cannot tell whether its PR landed', async () => {
+    const hold = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'named_competitor_publish_interrupted',
+      bucket: 'citability_backfill', action_type: 'refresh_existing_page', signal_metadata: '{}',
+    };
+    expect(reviewActions({ opportunity: hold, run: { action_type: 'refresh_existing_page' } }))
+      .toMatchObject({ can_requeue: false, can_dismiss: true });
+    const chain = {
+      where: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      first: jest.fn().mockResolvedValue(hold),
+    };
+    db.mockImplementation(() => chain);
+    db.transaction = jest.fn().mockRejectedValue(new Error('reached transaction'));
+    await expect(decideReviewItem('opp-1', { decision: 'requeue', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/check GitHub, then dismiss/) });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('an interrupted new-blog approval can be dismissed (and only dismissed) after a person checks GitHub', async () => {
+    const hold = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'named_competitor_publish_interrupted',
+      action_type: 'new_supporting_blog', signal_metadata: '{}',
+    };
+    const run = { id: 'run-1', action_type: 'new_supporting_blog' };
+    expect(reviewActions({ opportunity: hold, run })).toMatchObject({ can_requeue: false, can_dismiss: true, can_approve_named_competitor: false });
+    // An ordinary engine-managed blog row still offers nothing.
+    expect(reviewActions({ opportunity: { ...hold, skip_reason: 'topic_ownership_failed' }, run }).can_dismiss).toBe(false);
+
+    const rowsFor = (opp) => {
+      const first = jest.fn().mockResolvedValueOnce(opp).mockResolvedValueOnce(run);
+      const chain = { where: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first };
+      db.mockImplementation(() => chain);
+    };
+    db.transaction = jest.fn().mockRejectedValue(new Error('reached transaction'));
+
+    rowsFor(hold);
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' })).rejects.toThrow('reached transaction');
+    rowsFor(hold);
+    await expect(decideReviewItem('opp-1', { decision: 'requeue', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    rowsFor({ ...hold, skip_reason: 'topic_ownership_failed' });
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/managed by the engine/) });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('a superseded reconciliation hold rejects requeue but lets dismiss through to its locked transaction', async () => {
+    const hold = {
+      id: 'opp-1',
+      status: 'pending_review',
+      skip_reason: 'named_competitor_publish_interrupted',
+      bucket: 'citability_backfill',
+      signal_metadata: JSON.stringify({ page_edit_superseded: { ordinary_dedupe_key: 'refresh:replacement' } }),
+    };
+    const chain = {
+      where: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      first: jest.fn().mockResolvedValue(hold),
+    };
+    db.mockImplementation(() => chain);
+    db.transaction = jest.fn().mockRejectedValue(new Error('reached transaction'));
+
+    // An interrupted publish is a may-have-published hold: the dismiss-only
+    // guard answers before the supersession one.
+    await expect(decideReviewItem('opp-1', { decision: 'requeue', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/check GitHub, then dismiss/) });
+    expect(db.transaction).not.toHaveBeenCalled();
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
+      .rejects.toThrow('reached transaction');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 });

@@ -9,7 +9,7 @@ const dispatch = fs.readFileSync(path.join(__dirname, '..', 'services', 'complet
 
 describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
   test('solo wizard bookings run the waiver rechecks but NEVER stamp (plan not activated)', () => {
-    expect(booking).toContain('const stampDisclosedSetupFee = async (outerTrx, { allowStamp = true, stampServiceRow = null } = {}) =>');
+    expect(booking).toMatch(/const stampDisclosedSetupFee = async \(outerTrx, \{[\s\S]{0,160}allowStamp = true,[\s\S]{0,100}stampServiceRow = null,[\s\S]{0,100}ownershipSnapshot = null,/);
     expect(booking).toMatch(/if \(!shouldSeedQuarterlyPestFollowUps && setupFeeHandoffEligible && !isOneTimeEstimateBooking\) \{/);
     // The rechecks/waivers always run; only the stamp is gated on the visit
     // being able to mint it.
@@ -32,7 +32,17 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     // against effectiveParent (Codex #4716 r3: the re-verified parent row,
     // serviceRow merged with a fresh owner-checked FOR UPDATE read), not
     // the stale in-memory serviceRow.
-    expect(booking).toMatch(/await stampDisclosedSetupFee\(trx, \{ stampServiceRow: effectiveParent \}\)/);
+    expect(booking).toMatch(/await stampDisclosedSetupFee\(trx, \{[\s\S]{0,120}stampServiceRow: effectiveParent,[\s\S]{0,120}ownershipSnapshot: seedingOwnershipSnapshot,/);
+  });
+
+  test('setup-fee ownership waits on both comms fences and locked account rows before locking the draft', () => {
+    const helperAt = booking.indexOf('const stampDisclosedSetupFee = async');
+    const fencesAt = booking.indexOf('for (const id of ownershipCustomerIds) await lockCustomerComms(sp, id);', helperAt);
+    const customersAt = booking.indexOf('const lockedOwnershipCustomers = await lockCustomerAccountRows(', fencesAt);
+    const draftAt = booking.indexOf('const freshPricingEst = await validateEstimateOwnershipUnderLock(', customersAt);
+    expect(fencesAt).toBeGreaterThan(helperAt);
+    expect(customersAt).toBeGreaterThan(fencesAt);
+    expect(draftAt).toBeGreaterThan(customersAt);
   });
 
   test('the signed funnel key is normalized to the priced family before the setup-fee intersection (codex #3591 r25 P1)', () => {

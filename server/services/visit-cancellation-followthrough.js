@@ -49,6 +49,13 @@ const {
  * @param {Date} [opts.now] Explicit cancellation instant for callers that
  *   already retain it. Otherwise read the latest real cancellation transition;
  *   same-status retries must never evaluate fees against the retry clock.
+ * @param {object} [opts.pinnedEffects] Per-target effects a confirmation
+ *   card showed, keyed by target id: `{ invoices, fee,
+ *   creditReversalOfferIds }` (from appointment-cancel-impact.js). A pinned
+ *   target voids ONLY the listed invoices at the listed amounts, reverses
+ *   inspection credit only for the listed offers, and runs NO card rail
+ *   (the card only confirms visits without one); a rail that appeared since
+ *   goes to office review. Unpinned targets are unchanged.
  */
 async function runVisitCancellationFollowThrough({
   targetIds = [],
@@ -57,6 +64,7 @@ async function runVisitCancellationFollowThrough({
   reason = null,
   source = 'cancellation',
   now,
+  pinnedEffects = null,
 } = {}) {
   const ids = targetIds.filter(Boolean);
   const CardHolds = require('./estimate-card-holds');
@@ -65,18 +73,23 @@ async function runVisitCancellationFollowThrough({
 
   for (const id of ids) {
     let feeOutcome;
+    const pinned = pinnedEffects?.[id] || null;
     try {
       // Close service-invoice collection before starting a Stripe fee call.
       // A failed cleanup skips the fee and alerts, but tracker cleanup and
       // the other cancelled visits still proceed.
-      await InvoiceService.voidOpenInvoicesForCancelledService(id);
+      if (pinned) {
+        await InvoiceService.voidOpenInvoicesForCancelledService(id, {
+          pinnedInvoices: pinned.invoices || [],
+          pinnedCreditReversalOfferIds: pinned.creditReversalOfferIds || [],
+        });
+      } else {
+        await InvoiceService.voidOpenInvoicesForCancelledService(id);
+      }
       // The void sweep deliberately skips unsafe invoices without throwing.
       // Reuse its callers' resolved-status contract: paid/processing money,
       // an unverifiable PI, and still-collectible invoices all need review.
-      const unresolvedInvoice = await db('invoices')
-        .where({ scheduled_service_id: id })
-        .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
-        .first('id');
+      const unresolvedInvoice = await InvoiceService.unresolvedInvoicesForCancelledService(db, id).first('id');
       if (unresolvedInvoice) {
         throw new Error('Service invoice still needs money handling; fee requires review');
       }
@@ -102,13 +115,27 @@ async function runVisitCancellationFollowThrough({
         waiveFee: waiveFee || Date.now() - feeTime.getTime() > CardHolds.NO_SHOW_FEE_MAX_AGE_MS,
         now: feeTime,
       };
-      const { reason: holdReason, charged, released, parked } = await CardHolds.handleCardHoldCancellation(feeOptions);
-      feeOutcome = holdReason === 'no_hold'
-        ? await ApptCardRequests.handleAppointmentCardCancellation(feeOptions)
-        : {
-          released: [charged, released, parked, holdReason === 'park_gate_off'].includes(true),
-          reason: holdReason || 'hold_unresolved',
-        };
+      // A pinned (card-confirmed) cancel is only ever a visit with NO card
+      // fee rail (the card refuses any other). It runs no card rail at all,
+      // so nothing can charge, release or park a hold the card never showed;
+      // re-read the rails at the cancellation instant and send anything that
+      // appeared since to office review.
+      if (pinned) {
+        const { previewCancelFee, feeRailClear } = require('./appointment-cancel-impact');
+        if (!feeRailClear(await previewCancelFee(id, feeTime))) {
+          throw new Error('A card fee agreement appeared since the confirmed card; fee requires review');
+        }
+        feeOutcome = { released: true, reason: 'pinned_no_card_rail' };
+      }
+      if (!pinned) {
+        const { reason: holdReason, charged, released, parked } = await CardHolds.handleCardHoldCancellation(feeOptions);
+        feeOutcome = holdReason === 'no_hold'
+          ? await ApptCardRequests.handleAppointmentCardCancellation(feeOptions)
+          : {
+            released: [charged, released, parked, holdReason === 'park_gate_off'].includes(true),
+            reason: holdReason || 'hold_unresolved',
+          };
+      }
     } catch (e) {
       logger.error(`[${source}] cancellation money handling failed (target ${id}): ${e.message}`);
       feeOutcome = { released: false, reason: 'fee_step_error' };

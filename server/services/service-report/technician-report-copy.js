@@ -718,6 +718,52 @@ const MAX_CUSTOMER_COPY_SCREEN_CHARS = 16000;
 const WHAT_WE_DID_HEADER = /^\s*WHAT WE DID:?\s*$/;
 const WHAT_WE_FOUND_HEADER = /^\s*WHAT WE FOUND:?\s*$/;
 
+// The four-section report the writer produces under GATE_REPORT_WRITER_RULES
+// (owner "ok go" 2026-10-01): these titles, once each, in this order, each
+// followed by exactly ONE line (the same boundary the two-section shape
+// keeps: a note typed on a line under the report rejects the parse instead
+// of publishing). Longer than the two-section paragraph, so it carries its
+// own cap.
+const FOUR_SECTION_HEADERS = Object.freeze([
+  ['whatWeFound', 'What we found', /^\s*WHAT WE FOUND:?\s*$/],
+  ['whatWeDid', 'What we did and why', /^\s*WHAT WE DID AND WHY:?\s*$/],
+  ['whatToExpect', 'What to expect', /^\s*WHAT TO EXPECT:?\s*$/],
+  ['whatsNext', 'What’s next', /^\s*WHAT['’]S NEXT:?\s*$/],
+]);
+const MAX_FOUR_SECTION_CHARS = 3200;
+// Read at call time: with the switch off (never on, or turned off as the
+// kill switch) a four-section note is not reviewed report copy, so saved
+// four-section reports fall back like any unparsed note (Codex #5500).
+const { reportWriterRulesLive } = require('../../config/feature-gates');
+const ANY_REPORT_HEADER_RE = /^\s*WHAT (?:WE DID(?: AND WHY)?|WE FOUND|TO EXPECT|['’]S NEXT):?\s*$/;
+
+// A title written inline ("WHAT WE FOUND: You mentioned…") is the same
+// shape as a title on its own line followed by its text.
+const INLINE_FOUR_SECTION_TITLE_RE = /^\s*(WHAT WE FOUND|WHAT WE DID AND WHY|WHAT TO EXPECT|WHAT['’]S NEXT):\s*(\S.*)$/;
+
+function parseFourSections(text) {
+  const lines = text.split(/\r?\n/).flatMap((line) => {
+    const inline = INLINE_FOUR_SECTION_TITLE_RE.exec(line);
+    return inline ? [inline[1], inline[2]] : [line];
+  });
+  const starts = FOUR_SECTION_HEADERS.map(([, , header]) => lines.findIndex((line) => header.test(line)));
+  if (starts.some((index) => index === -1)) return null;
+  if (starts.some((index, i) => i > 0 && index <= starts[i - 1])) return null;
+  // Free text above the report is not reviewed customer copy.
+  if (contentLines(lines.slice(0, starts[0])).length) return null;
+  const sections = FOUR_SECTION_HEADERS.map(([key, title], i) => ({
+    key,
+    title,
+    paragraphs: contentLines(lines.slice(starts[i] + 1, i + 1 < starts.length ? starts[i + 1] : lines.length)),
+  }));
+  // Exactly one line per section: any second line (an internal note typed
+  // under the report, a stray title) is unreviewed free text and rejects
+  // the whole parse.
+  if (sections.some((section) => section.paragraphs.length !== 1
+    || ANY_REPORT_HEADER_RE.test(section.paragraphs[0]))) return null;
+  return sections;
+}
+
 function contentLines(lines) {
   return lines
     .map((line) => String(line).replace(/\s+/g, ' ').trim())
@@ -738,9 +784,39 @@ function contentLines(lines) {
 const SAFE_IDIOM_RE = /(?<![-\w])(?<!\b(?:pets?|kids?|child|children|family)\s)safe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi;
 const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t|fail(?:s|ed|ing)?|unable|without|refus(?:es|ed|ing)?|forg(?:ot|ets?|etting)|neglect(?:s|ed|ing)?|omit(?:s|ted|ting)?|declin(?:es|ed|ing)?|miss(?:es|ed|ing)?|need(?:s|ed|ing)?|yet|wait(?:s|ed|ing)?|await(?:s|ed|ing)?|pending|remain(?:s|ed|ing)?|plan(?:s|ned|ning)?|intend(?:s|ed|ing)?|expect(?:s|ed|ing)?|hop(?:es|ed|ing)?|tr(?:y|ies|ied|ying)|attempt(?:s|ed|ing)?|schedul(?:es|ed|ing)?|going|will|would|should|must|supposed)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\b(?:not|nothing|neither|never|no)\b)[^.!?]){0,25}(?<!\b(?!(?:the|its|confirm(?:s|ed|ing)?|re-?entry|entry|reentry|drying|dry(?:ing)?|dry[-\s]?time|time|treatment)\b)[a-z][a-z'’-]*\s+)\btiming\b(?![^.!?]{0,30}\b(?:not|never|no|nothing|unavailable|unknown|unconfirmed|undetermined|pending|(?:wasn|weren|isn|aren|won|didn|doesn|hasn|haven|hadn|couldn|shouldn|wouldn)['’]t|cannot|can['’]t)\b)/i;
 
+// The four-section report's structure and its customer-copy violations,
+// whether or not it would publish (the edit heads-up names what an edit
+// added even when a refused word would drop the whole body). Null unless
+// the switch is live and the shape holds.
+function fourSectionReport(notes) {
+  const text = String(notes || '');
+  if (!text.trim() || !reportWriterRulesLive() || text.length > MAX_FOUR_SECTION_CHARS) return null;
+  const sections = parseFourSections(text);
+  if (!sections) return null;
+  const body = sections.map((section) => section.paragraphs.join(' ')).join(' ').trim();
+  return { sections, body, violations: customerCopyViolations(body) };
+}
+
 function technicianReportCustomerCopy(notes) {
   const text = String(notes || '');
-  if (!text.trim() || text.length > MAX_REPORT_CHARS) return null;
+  if (!text.trim()) return null;
+
+  // Four-section report: the same screens over the joined text; `sections`
+  // keeps the titles for surfaces that render them.
+  const fourSectionCopy = fourSectionReport(text);
+  if (fourSectionCopy) {
+    const { sections: fourSections, body, violations } = fourSectionCopy;
+    const sectionText = (key) => fourSections.find((section) => section.key === key).paragraphs.join(' ');
+    return {
+      whatWeDid: sectionText('whatWeDid'),
+      whatWeFound: sectionText('whatWeFound'),
+      sections: violations.length ? null : fourSections,
+      body: violations.length ? null : body,
+      violations,
+    };
+  }
+
+  if (text.length > MAX_REPORT_CHARS) return null;
 
   const lines = text.split(/\r?\n/);
   const didIndex = lines.findIndex((line) => WHAT_WE_DID_HEADER.test(line));
@@ -879,6 +955,7 @@ function customerCopyViolations(text) {
 
 module.exports = {
   technicianReportCustomerCopy,
+  fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,
   summaryCopySignature,

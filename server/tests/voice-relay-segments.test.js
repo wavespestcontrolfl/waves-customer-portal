@@ -1,6 +1,21 @@
 const segments = require('../services/voice-agent/relay-segments');
 
 describe('relay segment storage representation', () => {
+  // Codex r10 P2: an OpenAI session stamps its reasoning effort — 'none' for
+  // gpt-5.6-luna/terra — and a stored segment must keep it, or recomposed
+  // effort_counts could not tell no-reasoning from no effort configured.
+  test('stored turn stats keep every stampable effort, none included, and drop anything else', () => {
+    const { storedTurnStats, summarizeTurnStats } = require('../services/voice-agent/relay-transcript');
+    const efforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    const stored = storedTurnStats([...efforts, 'turbo', null, undefined].map((effort) => ({ promptAt: 0, effort })));
+    expect(stored.map((t) => t.effort)).toEqual([...efforts, null, null, null]);
+
+    const leg = segments.buildSegment({ sessionKey: 'k', turnStats: stored.slice(0, 2),
+      turnCounts: { caller_turns: 2, agent_turns: 2, tool_calls: 0 }, latency: summarizeTurnStats(stored.slice(0, 2)) });
+    const summary = segments.summarizeSegments({ relay_segment_owners: ['k'], relay_segments: [leg] });
+    expect(summary.latency.effort_counts).toEqual({ none: 1, minimal: 1 });
+  });
+
   test('whole-call telemetry recomputes percentiles from samples and excludes raw utterances', () => {
     const { storedTurnStats, summarizeTurnStats } = require('../services/voice-agent/relay-transcript');
     const makeLeg = (key, sendTimes) => {

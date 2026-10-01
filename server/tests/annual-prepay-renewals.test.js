@@ -1,4 +1,38 @@
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const dbFn = jest.fn();
+  // Codex round-7 P1/P2: recordDecision's own advisory lock
+  // (withParentDecisionLock) acquires a raw connection and always
+  // succeeds on the FIRST try by default — same pattern
+  // admin-customers-cancel-plan.test.js already uses for its own
+  // session-scoped advisory lock. The blocking pg_advisory_lock (bounded
+  // by a set_config'd lock_timeout, never the old pg_try_advisory_lock
+  // poll) either resolves (lock acquired) or throws a 55P03
+  // (lock_not_available) — flip `dbFn.client.locked` to `false` to
+  // exercise the timeout/contention path.
+  const lockConn = {
+    query: jest.fn(async (sql) => {
+      if (/pg_advisory_lock/.test(String(sql)) && !/pg_advisory_unlock/.test(String(sql))) {
+        if (!dbFn.client.locked) {
+          const err = new Error('canceling statement due to lock timeout');
+          err.code = '55P03';
+          throw err;
+        }
+      }
+      return { rows: [] };
+    }),
+  };
+  dbFn.client = {
+    locked: true,
+    lockConn,
+    acquireConnection: jest.fn(async () => lockConn),
+    releaseConnection: jest.fn(async () => {}),
+    // The renewal gate's session lock (withParentDecisionLock) runs on a
+    // dedicated connection outside the pool (Codex #4971 r12 P1).
+    acquireRawConnection: jest.fn(async () => lockConn),
+    destroyRawConnection: jest.fn(async () => {}),
+  };
+  return dbFn;
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -76,6 +110,7 @@ function query({ first, returning, columnInfo, rows = [], updateCount = 1 } = {}
     'forUpdate',
     'leftJoin',
     'join',
+    'limit',
     'whereRaw',
     'whereNotNull',
     'orWhereNotNull',
@@ -141,6 +176,12 @@ function setDbQueues(queues) {
       // r41: every seeding insert presence-probes the term owner under the
       // comms fence via this alias. Default = owner unchanged, so seeding
       // tests stay focused; the moved-owner defer pin queues its own miss.
+      // Concurrent-seed recheck under the comms lock: default = no visit
+      // appeared since the seeder read its gaps.
+      if (table === 'scheduled_services as seed_recheck') return query({ rows: [] });
+      // The recheck's canonical coverage read also does the palm identity
+      // lookups (services) AFTER the main flow drained that queue: nothing found.
+      if (table === 'services') return query({ first: undefined });
       if (table === 'annual_prepay_terms as apt_owner_probe') {
         return query({ first: { customer_id: 'owner-unchanged' } });
       }
@@ -148,6 +189,10 @@ function setDbQueues(queues) {
       // Default = no accepted SMS on file, so send tests stay focused; the
       // recovery tests install an evidence ledger (auditLedger).
       if (table === 'messaging_audit_log') return auditLedgerQuery();
+      // Stamp-time price check (#5387): the secure-plan mint record lookup.
+      // Default = no record, so every term that is not a /secure pick keeps
+      // its exact prior stamping.
+      if (table === 'activity_log') return query({ first: undefined });
       throw new Error(`Unexpected db table ${table}`);
     }
     return queue.shift();
@@ -2141,6 +2186,11 @@ describe('annual prepay renewal helpers', () => {
       whereNull: jest.fn().mockReturnThis(),
       update: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'term-1', status: 'cancelled', renewal_decision: 'cancel' }]),
+      // Codex round-7 P1 (redesigned): the termite-scoping peek — a plain
+      // (non-termite) program's term reads no annual_plan_version, so the
+      // decision below stays byte-identical to before (no lock, no
+      // transaction wrapper).
+      first: jest.fn().mockResolvedValue({ annual_plan_version: null }),
       // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
       columnInfo: jest.fn().mockResolvedValue({}),
     };
@@ -3918,16 +3968,105 @@ describe('annual prepay renewal helpers', () => {
     expect(seedInsert.insert).not.toHaveBeenCalled();
   });
 
+  test('Codex round-1 P1: renewalChargeConsentAt is written onto a newly-inserted successor — the parent\'s Auto Pay consent carries forward', async () => {
+    const consentAt = new Date('2025-09-01T00:00:00Z');
+    const termInsert = query({ returning: [termiteTerm({ status: 'payment_pending' })] });
+    const seedInsert = query({ returning: [{ id: 'never' }] });
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: { annual_plan_version: {}, renewed_from_term_id: {}, renewal_charge_consent_at: {}, coverage_service_type: {}, coverage_visit_count: {}, coverage_cadence: {} } }),
+        query({ first: undefined }), // existing lookup by source estimate
+        query({ first: undefined }), // existing lookup by customer + window
+        termInsert,
+        query({ first: termiteTerm({ status: 'payment_pending' }) }), // refreshTermSnapshot term read
+        query({ returning: [termiteTerm({ status: 'payment_pending' })] }),
+      ],
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        ...Array.from({ length: 6 }, () => query({ rows: [] })),
+        seedInsert,
+      ],
+    });
+
+    await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-termite',
+      prepayInvoiceId: 'succ-invoice-1',
+      termStart: '2026-09-27',
+      coverageServiceType: 'Termite Bait',
+      coverageVisitCount: 1,
+      coverageCadence: 'annual',
+      annualPlanVersion: 'v3',
+      renewedFromTermId: 'parent-1',
+      renewalChargeConsentAt: consentAt,
+    });
+
+    expect(termInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_consent_at: consentAt }));
+  });
+
+  // A renewal successor carries no source_estimate_id of its own — its
+  // plan identity is its lineage (Codex #4971 pre-push P0,
+  // successorCoverageScope). Each ensureCoverageRowsForTerm pass resolves it
+  // twice (the seeding refusal check, then the candidate-row selection):
+  // one parent hop + one root-estimate read per resolution.
+  // +1 over the pre-recheck count: the seed recheck under the comms lock re-resolves
+  // the lineage through coverageRowsForTerm.
+  const successorLineageQueues = (resolutions = 3) => ({
+    annual_prepay_terms: Array.from({ length: resolutions }, () => query({
+      first: { id: 'term-prior', customer_id: 'customer-termite', source_estimate_id: 'est-termite', renewed_from_term_id: null },
+    })),
+    estimates: Array.from({ length: resolutions }, () => query({ first: { property_id: 'prop-termite' } })),
+  });
+
   test('renewal successors and unstamped terms are never deferred — they reach the seeding path', async () => {
     const run = (t) => _private.ensureCoverageRowsForTerm(t, undefined, { today: '2026-01-01' });
-    for (const term of [termiteTerm({ renewed_from_term_id: 'term-prior' }), termiteTerm({ annual_plan_version: null })]) {
+    for (const term of [termiteTerm({ renewed_from_term_id: 'term-prior', source_estimate_id: null }), termiteTerm({ annual_plan_version: null })]) {
       _private.resetCachesForTests();
       const insertQuery = query({ returning: [{ id: 'svc-seeded', scheduled_date: term.term_start }] });
       setDbQueues({
         scheduled_services: [query({ columnInfo: TERMITE_COVERAGE_COLUMNS }), query({ rows: [] }), query({ first: undefined }), insertQuery],
+        ...(term.renewed_from_term_id ? successorLineageQueues() : {}),
       });
       await expect(run(term)).resolves.toMatchObject({ createdCount: 1 });
     }
+  });
+
+  // Codex #4971 pre-push P0 (seeding): a renewal successor's seeded visit is
+  // booked at its PLAN's property (the resolved lineage), never at a guessed
+  // "sole active property" of a multi-property customer.
+  test('a renewal successor seeds its coverage visit at the plan\'s own property', async () => {
+    _private.resetCachesForTests();
+    const insertQuery = query({ returning: [{ id: 'svc-seeded', scheduled_date: '2026-10-01' }] });
+    setDbQueues({
+      scheduled_services: [
+        query({ columnInfo: { ...TERMITE_COVERAGE_COLUMNS, property_id: {} } }), query({ rows: [] }), query({ first: undefined }), insertQuery,
+      ],
+      ...successorLineageQueues(4),
+    });
+    await expect(_private.ensureCoverageRowsForTerm(
+      termiteTerm({ renewed_from_term_id: 'term-prior', source_estimate_id: null, term_start: '2026-10-01', term_end: '2027-10-01' }),
+      undefined, { today: '2026-10-01' },
+    )).resolves.toMatchObject({ createdCount: 1 });
+    expect(insertQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ property_id: 'prop-termite', annual_prepay_term_id: 'term-termite' }));
+  });
+
+  // Codex #4971 pre-push P0: a successor whose lineage cannot be resolved
+  // (here: its parent row is gone) seeds nothing, selects nothing, and
+  // files a staff exception — never a customer-wide fallback.
+  test('a renewal successor with an unresolvable lineage seeds nothing and tells staff', async () => {
+    _private.resetCachesForTests();
+    const insertQuery = query({ returning: [{ id: 'svc-never' }] });
+    setDbQueues({
+      // No scheduled_services read at all: nothing selected, nothing seeded.
+      scheduled_services: [insertQuery],
+      annual_prepay_terms: [query({ first: undefined })], // the parent hop finds nothing
+      notifications: [query({ first: undefined })],
+    });
+    const result = await _private.ensureCoverageRowsForTerm(
+      termiteTerm({ renewed_from_term_id: 'term-gone', source_estimate_id: null }), undefined, { today: '2026-10-01' },
+    );
+    expect(result).toMatchObject({ createdCount: 0, reason: 'renewal_lineage_unresolved' });
+    expect(insertQuery.insert).not.toHaveBeenCalled();
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('plan lineage cannot be resolved'));
   });
 
   test('once anchored, the installation visit itself is the coverage year\'s visit — even under an installation label — and the anchored window never slides', async () => {
@@ -3980,6 +4119,45 @@ describe('annual prepay renewal helpers', () => {
     expect(insertQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_date: '2026-10-20', service_type: 'Termite Bait', annual_prepay_term_id: 'term-termite',
     }));
+  });
+
+  // Codex #4971 round-3 P1 (item 5): a renewal SUCCESSOR's window is fixed
+  // at mint (the day after its parent's term_end, through the next
+  // anniversary) and its grace coverage already ran from that start. Paid
+  // on grace day 20 it has no anchor stamp and no linked visit yet, which
+  // used to read as a first activation and slide term_end by the payment
+  // delay (20 unpaid days, and every later renewal date with them).
+  test('a renewal successor paid late during grace never slides its window — visits seed inside the minted window only', async () => {
+    const insertQuery = query({ returning: [{ id: 'svc-renewal', scheduled_date: '2026-10-20' }] });
+    // The slide's own queries, queued so a regression would actually slide
+    // (term_end column present, no later term to cap it) — and be caught.
+    const termSlideUpdate = query({});
+    const lineage = successorLineageQueues();
+    setDbQueues({
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        query({ rows: [] }),
+        query({ first: undefined }),
+        insertQuery,
+      ],
+      annual_prepay_terms: [
+        ...lineage.annual_prepay_terms,
+        query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), termSlideUpdate,
+      ],
+      estimates: lineage.estimates,
+    });
+    const result = await _private.ensureCoverageRowsForTerm(termiteTerm({
+      id: 'term-renewal',
+      source_estimate_id: null,
+      term_start: '2026-09-30',
+      term_end: '2027-09-30',
+      renewed_from_term_id: 'term-prior',
+      installation_anchored_at: null,
+    }), undefined, { today: '2026-10-20' });
+
+    expect(result).toMatchObject({ createdCount: 1, targetDates: ['2026-10-20'], effectiveTermEnd: '2027-09-30' });
+    expect(insertQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-10-20' }));
+    expect(termSlideUpdate.update).not.toHaveBeenCalled();
   });
 
   // ---- termite annual plan: unified 45/30 notice-obligation pass (Codex #4921 r3 structural fix)
@@ -4472,6 +4650,68 @@ describe('annual prepay renewal helpers', () => {
 
 });
 
+// Codex round-6 P1 (in part a false alarm): the auditor claimed `dateOnly`
+// is undefined inside termiteRenewalGraceDeadlineFor — it is NOT; `dateOnly`
+// is a function declaration (line ~148), function-hoisted above its call
+// site here, so this has always run correctly. The VALID part of the
+// finding: neither termiteRenewalGraceDeadlineFor nor
+// termiteRenewalGraceDeadlineSql was ever executed UNMOCKED anywhere in
+// this PR's tests — termite-annual-renewal-charge.test.js's mockGraceHelpers
+// always substitutes a separate, hand-rolled fake implementation of
+// termiteRenewalGraceDeadlineFor for its own tests, and the real-Postgres
+// coverage suite only exercises the SQL twin INDIRECTLY, through
+// coveredTermsAsOf's full query — never a direct, unmocked call to either
+// twin. These tests call the REAL functions, requiring nothing about
+// termite-annual-renewal-charge.js or annual-prepay-renewals.js itself
+// mocked (this file's own top-of-file jest.mock calls target unrelated
+// dependencies — datetime-et.js is never mocked here).
+describe('termiteRenewalGraceDeadlineFor / termiteRenewalGraceDeadlineSql — the real, unmocked twins (Codex round-6 P1)', () => {
+  test('anchors on term_start when it is LATER than created_at (a mint recorded well after its nominal start)', () => {
+    // term_start 2026-10-15 is later than created_at's ET date 2026-09-27.
+    const deadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor({
+      term_start: '2026-10-15', created_at: '2026-09-27T12:00:00Z',
+    });
+    expect(deadline).toBe('2026-11-14');
+  });
+
+  test('anchors on created_at (ET date) when it is LATER than term_start (a delayed sweep tick mint)', () => {
+    // created_at's ET date 2026-10-02 is later than term_start 2026-09-27.
+    const deadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor({
+      term_start: '2026-09-27', created_at: '2026-10-02T12:00:00Z',
+    });
+    expect(deadline).toBe('2026-11-01');
+  });
+
+  // Codex round-1 P1's own fix, now proven against the REAL function rather
+  // than the mock's reimplementation: 2026-10-01T01:30Z is 2026-09-30 21:30
+  // in America/New_York (EDT, UTC-4) — a mint that landed just before
+  // midnight ET must anchor on the ET calendar day (2026-09-30), not the
+  // UTC one (2026-10-01) a bare cast would read.
+  test('the ET evening boundary — a mint at 2026-10-01T01:30Z anchors on 2026-09-30 ET, not the UTC calendar day', () => {
+    const deadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor({
+      term_start: '2026-09-30', created_at: '2026-10-01T01:30:00Z',
+    });
+    // Correct ET-anchored deadline: 2026-09-30 + 30 days = 2026-10-30. The
+    // bug's deadline (a bare UTC cast reading created_at as 2026-10-01)
+    // would instead compute 2026-10-31.
+    expect(deadline).toBe('2026-10-30');
+  });
+
+  test('month/year-end rollover — December 15 plus the 30-day grace window rolls into the next January', () => {
+    const deadline = AnnualPrepayRenewals.termiteRenewalGraceDeadlineFor({
+      term_start: '2026-12-15', created_at: '2026-12-15T12:00:00Z',
+    });
+    expect(deadline).toBe('2027-01-14');
+  });
+
+  test('termiteRenewalGraceDeadlineSql builds the exact GREATEST/INTERVAL expression for a given alias', () => {
+    expect(AnnualPrepayRenewals.termiteRenewalGraceDeadlineSql('t')).toBe(
+      "(GREATEST(t.term_start, (t.created_at AT TIME ZONE 'America/New_York')::date) + INTERVAL '30 days')::date",
+    );
+    expect(AnnualPrepayRenewals.termiteRenewalGraceDeadlineSql('s')).toContain('s.term_start');
+  });
+});
+
 // Slice 6a — customer online decline (agreement v3: "decline renewal ...
 // online through their customer portal ... never only by phone"). Dark
 // behind termiteAnnualPlanSelectionEnabled() (GATE_TERMITE_ANNUAL_PLAN AND
@@ -4483,8 +4723,15 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
   // bare db('annual_prepay_terms').columnInfo(). The probe answers "column
   // present" without consuming a queued query, so every queued chain below
   // still lines up with the statement it models.
+  // The decline's own transaction takes the termite renewal gate for the
+  // customer's termite terms FIRST (acquireTermiteGateAtEntry — a plain
+  // lookup, then the advisory locks), before any term row lock: every queue
+  // below is preceded by that lookup, which finds no term to lock here.
+  const gateLookups = [];
   const setDeclineQueues = (queues) => {
-    const queued = setDbQueues(queues);
+    const gateLookup = query({ rows: [] });
+    gateLookups.push(gateLookup);
+    const queued = setDbQueues({ ...queues, annual_prepay_terms: [gateLookup, ...(queues.annual_prepay_terms || [])] });
     const impl = db.getMockImplementation();
     db.mockImplementation((table) => {
       if (table !== 'annual_prepay_terms') return impl(table);
@@ -4522,8 +4769,17 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     const termSelectQuery = query({ first: termRow });
+    // Codex #4971 (merge with #4940) — recordDecision's termite xact-lock
+    // wrapper (writeDecisionUnderTermiteLock) peeks annual_plan_version
+    // before writing, for EVERY termite term regardless of who decided it —
+    // one extra annual_prepay_terms query ahead of the real write.
+    const lockPeekQuery = query({ first: { annual_plan_version: 'v3' } });
     const termUpdateQuery = query({ returning: [decidedRow] });
-    const termQueue = [termSelectQuery, termUpdateQuery];
+    // Codex #4971 r4 P1: a termite cancel first checks the parent's open
+    // renewal successors for money in motion (none here).
+    const ladderCheck = query({ rows: [] }); // the decline's own refusal ladder
+    const successorLookup = query({ rows: [] }); // recordDecision's chokepoint
+    const termQueue = [termSelectQuery, ladderCheck, lockPeekQuery, successorLookup, termUpdateQuery];
     const activityInsert = query();
     setDeclineQueues({
       annual_prepay_terms: termQueue,
@@ -4538,6 +4794,10 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     expect(result).toEqual({
       ok: true, termId: 'term-1', termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, alreadyDeclined: false,
     });
+    // Codex #4971 pre-push lock order: the gate lookup for the customer's
+    // termite terms ran FIRST — before the term row lock.
+    expect(gateLookups.at(-1).whereRaw).toHaveBeenCalledWith(expect.stringContaining('customer_id = ANY('), ['{}', '{}', '{}', '{cust-1}']);
+    expect(gateLookups.at(-1).whereRaw.mock.invocationCallOrder[0]).toBeLessThan(termSelectQuery.forUpdate.mock.invocationCallOrder[0]);
     // The SAME status/decision transition recordDecision('cancel') always
     // writes (statusAfterDecision('cancel') === 'cancelled') — this is what
     // coveredTermsAsOf's decided-lapse branch (lapsedRenewalStillInTerm,
@@ -4577,13 +4837,103 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
   // ORIGINAL term's installation_anchored_at being NULL no longer blocks
   // the decline. termite-annual-activation.js's anchor now tolerates the
   // resulting decided-lapse shape (its own suite covers that half).
+  // Codex #4971 r4/r5 P1: no decline while a renewal payment is clearing.
+  // The reachable case is the renewal SUCCESSOR's own card: past the prior
+  // year's term_end the parent is refused as term_ended, while the
+  // payment_pending successor stays declinable. Refused under the gate,
+  // nothing written, and the portal gets a reason it can explain.
+  test('a renewal successor declined while its own renewal payment clears is refused — nothing written, a clear reason', async () => {
+    const successorRow = {
+      id: 'succ-1', customer_id: 'cust-1', annual_plan_version: 'v3', renewed_from_term_id: 'term-0',
+      prepay_invoice_id: 'inv-succ', status: 'payment_pending', renewal_decision: null,
+      term_start: '2026-09-20', term_end: '2027-09-19', prepay_amount: '450.00',
+    };
+    const write = query({ returning: [] });
+    const renewalInvoiceRead = query({ first: { status: 'processing' } }); // its own ACH debit
+    const activityInsert = query();
+    setDeclineQueues({
+      annual_prepay_terms: [query({ first: successorRow }), write],
+      invoices: [renewalInvoiceRead],
+      activity_log: [activityInsert],
+    });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'succ-1', today: '2026-09-26' });
+
+    expect(result).toEqual({ ok: false, reason: 'renewal_payment_clearing', termId: 'succ-1' });
+    expect(renewalInvoiceRead.where).toHaveBeenCalledWith({ id: 'inv-succ' });
+    expect(write.update).not.toHaveBeenCalled();
+    expect(activityInsert.insert).not.toHaveBeenCalled();
+    const NotificationService = require('../services/notification-service');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test.each(['cancel', 'switch_plan'])('recordDecision(%s) on a termite parent whose renewal is clearing throws one actionable 409 (the admin routes surface it as-is); renew is never refused', async (action) => {
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ previous: '0' }] });
+    const decisionUpdate = query({ returning: [] });
+    setDbQueues({
+      annual_prepay_terms: [
+        // A cancel first probes cancel_disposition support (columnInfo).
+        ...(action === 'cancel' ? [query({ columnInfo: { cancel_disposition: {} } })] : []),
+        query({ first: { annual_plan_version: 'v3' } }),
+        query({ rows: [{ id: 'succ-1', status: 'payment_pending', prepay_invoice_id: 'inv-succ' }] }),
+        decisionUpdate,
+      ],
+      invoices: [query({ first: { status: 'processing' } })],
+    });
+    await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action })).rejects.toMatchObject({
+      code: 'renewal_money_in_motion',
+      statusCode: 409,
+      isOperational: true,
+      message: expect.stringContaining('still clearing (an ACH payment on the renewal invoice is still clearing) — wait for it to settle or refund it first'),
+    });
+    expect(decisionUpdate.update).not.toHaveBeenCalled();
+
+    const renewUpdate = query({ returning: [{ id: 'term-1', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({ annual_prepay_terms: [query({ first: { annual_plan_version: 'v3' } }), renewUpdate] });
+    await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action: 'renew' })).resolves.toMatchObject({ renewal_decision: 'renew' });
+  });
+
+  // Codex #4971 r13 P1: a renewal already PAID (successor active) whose
+  // parent 'renewed' stamp has not landed yet blocks a cancel / switch the
+  // same way — the backstop's renew is never refused.
+  test.each(['cancel', 'switch_plan'])('recordDecision(%s) on a termite parent whose PAID renewal awaits its parent stamp: one actionable 409; renew still goes through', async (action) => {
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ previous: '0' }] });
+    const decisionUpdate = query({ returning: [] });
+    setDbQueues({
+      annual_prepay_terms: [
+        ...(action === 'cancel' ? [query({ columnInfo: { cancel_disposition: {} } })] : []),
+        query({ first: { annual_plan_version: 'v3' } }),
+        query({ rows: [{ id: 'succ-1', status: 'active', prepay_invoice_id: 'inv-succ' }] }),
+        query({ first: { status: 'active', renewal_decision: null } }), // the parent still awaits its stamp
+        decisionUpdate,
+      ],
+      invoices: [query({ first: { status: 'paid', paid_at: new Date(), stripe_payment_intent_id: 'pi_succ' } })],
+      payments: [query({ first: undefined })],
+    });
+    await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action })).rejects.toMatchObject({
+      code: 'renewal_money_in_motion', statusCode: 409, isOperational: true,
+      message: 'A renewal payment was received for this plan and is still being recorded — try again shortly, or refund it first.',
+    });
+    expect(decisionUpdate.update).not.toHaveBeenCalled();
+
+    const renewUpdate = query({ returning: [{ id: 'term-1', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({ annual_prepay_terms: [query({ first: { annual_plan_version: 'v3' } }), renewUpdate] });
+    await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action: 'renew' })).resolves.toMatchObject({ renewal_decision: 'renew' });
+  });
+
   test('declines an ORIGINAL term still awaiting installation — no longer blocked, records normally', async () => {
     const termRow = {
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
       status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
-    const termQueue = [query({ first: termRow }), query({ returning: [decidedRow] })];
+    const termQueue = [
+      query({ first: termRow }),
+      query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
+      query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+      query({ rows: [] }), // recordDecision's own renewal-clearing check
+      query({ returning: [decidedRow] }),
+    ];
     setDeclineQueues({
       annual_prepay_terms: termQueue,
       activity_log: [query()],
@@ -4669,7 +5019,13 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
+      annual_prepay_terms: [
+        query({ first: termRow }),
+        query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
+        query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+        query({ rows: [] }), // recordDecision's own renewal-clearing check
+        query({ returning: [decidedRow] }),
+      ],
       activity_log: [query()],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
     });
@@ -4693,7 +5049,13 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     const activityInsert = query();
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
+      annual_prepay_terms: [
+        query({ first: termRow }),
+        query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
+        query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+        query({ rows: [] }), // recordDecision's own renewal-clearing check
+        query({ returning: [decidedRow] }),
+      ],
       activity_log: [activityInsert],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
     });
@@ -4718,7 +5080,13 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     const activityInsert = query();
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
+      annual_prepay_terms: [
+        query({ first: termRow }),
+        query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
+        query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+        query({ rows: [] }), // recordDecision's own renewal-clearing check
+        query({ returning: [decidedRow] }),
+      ],
       activity_log: [activityInsert],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
     });
@@ -4811,7 +5179,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const supersede = query({ returning: [decidedRow] });
     const activityInsert = query();
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), query({ first: null }), supersede, query({ first: null })],
+      annual_prepay_terms: [query({ first: termRow }), query({ first: null }), query({ rows: [] }) /* renewal-clearing check */, supersede, query({ first: null })],
       'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
       activity_log: [activityInsert],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -4838,7 +5206,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       status: 'renewed', renewal_decision: 'renew', term_end: '2027-05-20', prepay_amount: '450.00',
     };
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), query({ first: null })],
+      annual_prepay_terms: [query({ first: termRow }), query({ first: null }), query({ rows: [] }) /* renewal-clearing check */],
       'annual_prepay_terms as t': [query({ first: null })],
     });
 
@@ -4861,7 +5229,13 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const decline = (termRow) => {
       const decided = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
       setDeclineQueues({
-        annual_prepay_terms: [query({ first: termRow }), query({ returning: [decided] })],
+        annual_prepay_terms: [
+          query({ first: termRow }),
+          query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
+          query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+          query({ rows: [] }), // recordDecision's own renewal-clearing check
+          query({ returning: [decided] }),
+        ],
         activity_log: [query()],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
       });
@@ -4908,7 +5282,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       const write = query({ returning: [decided] });
       const activityInsert = query();
       setDeclineQueues({
-        annual_prepay_terms: [query({ first: unpaidTerm }), write],
+        annual_prepay_terms: [query({ first: unpaidTerm }), query({ rows: [] }) /* renewal-clearing check (Codex #4971 r4 P1) */, write],
         activity_log: [activityInsert],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
       });
@@ -4954,7 +5328,13 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     };
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), query({ returning: [decidedRow] })],
+      annual_prepay_terms: [
+        query({ first: termRow }),
+        query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
+        query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+        query({ rows: [] }), // recordDecision's own renewal-clearing check
+        query({ returning: [decidedRow] }),
+      ],
       activity_log: [query()],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
     });
@@ -6306,6 +6686,433 @@ describe('annual_prepay billing_mode stamp timing', () => {
       expect.objectContaining({ billing_mode: 'annual_prepay' }),
     );
   });
+
+});
+
+// Move 14 (docs/annual-prepay-term-states.md, P2-1/P2-4 termite renewal
+// lane): stampParentRenewedForSuccessor is the hook syncTermForInvoicePayment
+// calls on the pending→active (and cancelled→active revival) transitions
+// for a row carrying renewed_from_term_id. Tested in isolation — the exact
+// call sites inside syncTermForInvoicePayment's much larger flow are
+// exercised end-to-end by termite-annual-renewal-charge.test.js's own
+// mint/decideAndCharge/grace-lapse suites and the real-Postgres grace-
+// coverage suite.
+describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook', () => {
+  // Codex #4971 r6 P1: the automatic renew stamp runs under the parent's
+  // gate (its lookup statement first) and re-checks the parent
+  // (resolveParentEligibility — a live parent with no linked invoice here)
+  // before recordDecision's own peek + write.
+  //
+  // Codex #4971 pre-push P1: and re-reads the SUCCESSOR first (active, its
+  // own invoice paid and not refunded on the ledger), under both keys.
+  const LIVE_PARENT = { id: 'parent-term', status: 'active', renewal_decision: null, prepay_invoice_id: null };
+  const PAID_SUCCESSOR = { id: 'succ-term', status: 'active', prepay_invoice_id: 'inv-succ', dispute_suspended_at: null };
+  const stampPrelude = (successor = PAID_SUCCESSOR) => [query({ rows: [] }), query({ first: successor }), query({ first: LIVE_PARENT })];
+  // Codex #4971 r16 P1 (finding 5): recordParentRenewedIfEligible now reads
+  // customers.deleted_at right after the successor's payment backs the
+  // renewal (before ever reading the parent) — every happy-path fixture
+  // below reaches it, so this default models a LIVE customer; the
+  // dedicated deletion describe block overrides it.
+  const paidEvidence = (invoice = { status: 'paid', stripe_payment_intent_id: 'pi_succ' }, ledgerRefund = undefined, customer = { deleted_at: null }) => ({
+    invoices: [query({ first: invoice })], payments: [query({ first: ledgerRefund })], customers: [query({ first: customer })],
+  });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+  });
+
+  test('a successor with renewed_from_term_id calls recordDecision(\'renew\') on the PARENT — reusing the canonical writer, not a new status-write site', async () => {
+    // Codex round-7 P1 (redesigned): recordDecision now peeks the term's
+    // annual_plan_version first (same conn, no lock for a non-termite
+    // term) before its actual write — same query object serves both calls
+    // here since this fixture isn't testing that termite-scoping itself
+    // (see the dedicated recordDecision termite-lock describe below).
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({ annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ], ...paidEvidence() });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.where).toHaveBeenCalledWith({ id: 'parent-term' });
+    expect(recordDecisionQ.whereIn).toHaveBeenCalledWith('status', ['active', 'renewal_pending']);
+    expect(recordDecisionQ.whereNull).toHaveBeenCalledWith('renewal_decision');
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'renewed', renewal_decision: 'renew',
+    }));
+  });
+
+  // Codex #4971 r18 P1: the stamp uses the successor-specific predicate
+  // (parentRefusalForSuccessor), so a parent whose term_end moved since the
+  // mint is never stamped renewed against the stale successor window.
+  test('a parent whose term_end moved since the mint is never stamped renewed (parent_term_moved)', async () => {
+    const movedParent = { ...LIVE_PARENT, term_end: '2027-03-01' };
+    const staleSuccessor = { ...PAID_SUCCESSOR, term_start: '2026-10-01' };
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [query({ rows: [] }), query({ first: staleSuccessor }), query({ first: movedParent }), recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.update).not.toHaveBeenCalled();
+  });
+
+  test('a parent whose term_end still lines up with the successor window is stamped renewed', async () => {
+    const parent = { ...LIVE_PARENT, term_end: '2026-09-30' };
+    const successor = { ...PAID_SUCCESSOR, term_start: '2026-10-01' };
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [query({ rows: [] }), query({ first: successor }), query({ first: parent }), recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+
+  // Codex #4971 pre-push P1: the successor's own payment is re-read under
+  // the gate (both keys), never trusted from the caller's earlier read.
+  test('the gate is taken over BOTH the parent and the successor keys', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    const [gateQ, ...rest] = stampPrelude();
+    setDbQueues({ annual_prepay_terms: [gateQ, ...rest, recordDecisionQ, recordDecisionQ], ...paidEvidence() });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    const [, bindings] = gateQ.whereRaw.mock.calls[0];
+    expect(bindings[0]).toBe('{parent-term,succ-term}');
+  });
+
+  // Codex #4971 r16 P1 — finding 5 (DELETION (b)): an ACH successor can
+  // settle days after submission — long enough for the account to be
+  // deleted in between. This stamp used to run with no deletion check at
+  // all, silently recording the parent 'renewed' under a deleted account
+  // with no alert. It must instead ring the SAME refund-or-honor alert a
+  // parent that changed any other way gets, and never touch the parent row.
+  test('a deleted customer never gets a silent renew stamp — the refund-or-honor alert fires instead', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const parentQ = query({ first: LIVE_PARENT });
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [...stampPrelude(), parentQ, recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(undefined, undefined, { deleted_at: new Date('2026-09-20T00:00:00Z') }),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringMatching(/account was deleted/i), expect.objectContaining({
+      dedupeKey: 'termite-renewal-charge:succ-term:paid_after_parent_ended',
+    }));
+    // Never reads or writes the parent — this is not a renewal decision.
+    expect(parentQ.first).not.toHaveBeenCalled();
+    expect(recordDecisionQ.update).not.toHaveBeenCalled();
+  });
+
+  // Codex #4971 r17 P2 — finding 5: with no persisted exclusion, the
+  // deleted-account conflict bell above rings again on every tick, but the
+  // parent NEVER leaves ACTIVE_STATUSES/renewal_decision-null on its own —
+  // so reconcileParentRenewedStamps' own bounded LIMIT 200 scan would
+  // re-select this SAME row forever, starving any newer conflict behind it.
+  // A successful bell (fresh or deduped — either way staff has been told)
+  // now persists renewal_parent_deleted_conflict_belled_at; see the SQL
+  // exclusion itself in the reconcileParentRenewedStamps describe below.
+  test('a successful deleted-account bell persists the exclusion marker (finding 5)', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const markedSuccessor = { ...PAID_SUCCESSOR, renewal_parent_deleted_conflict_belled_at: null };
+    const gateQ = query({ rows: [] });
+    const successorQ = query({ first: markedSuccessor });
+    const updateMarkerQ = query({ updateCount: 1 });
+    setDbQueues({
+      annual_prepay_terms: [gateQ, successorQ, updateMarkerQ],
+      ...paidEvidence(undefined, undefined, { deleted_at: new Date('2026-09-20T00:00:00Z') }),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringMatching(/account was deleted/i), expect.objectContaining({
+      dedupeKey: 'termite-renewal-charge:succ-term:paid_after_parent_ended',
+    }));
+    expect(updateMarkerQ.where).toHaveBeenCalledWith({ id: markedSuccessor.id });
+    expect(updateMarkerQ.whereNull).toHaveBeenCalledWith('renewal_parent_deleted_conflict_belled_at');
+    expect(updateMarkerQ.update).toHaveBeenCalledWith({ renewal_parent_deleted_conflict_belled_at: expect.any(Date) });
+  });
+
+  // Codex #4971 r17 P2 — finding 5 regression: once the marker is already
+  // set, the deletion check (and its bell) never runs again for this
+  // successor — never a repeat notification, never a repeat customers read.
+  test('an already-marked successor skips the deletion check entirely — no re-bell, no re-read', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const alreadyMarked = { ...PAID_SUCCESSOR, renewal_parent_deleted_conflict_belled_at: new Date('2026-09-21T00:00:00Z') };
+    setDbQueues({
+      annual_prepay_terms: [query({ rows: [] }), query({ first: alreadyMarked })],
+      ...paidEvidence(),
+    });
+
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  const TERMS = 'annual_prepay_terms';
+  test.each([
+    ['refunded in full on the payments ledger', PAID_SUCCESSOR, paidEvidence(undefined, { id: 'pay-refunded' }), [TERMS, TERMS, 'invoices', 'payments']],
+    ['dispute-suspended (demoted to payment_pending)', { ...PAID_SUCCESSOR, status: 'payment_pending', dispute_suspended_at: new Date() }, {}, [TERMS, TERMS]],
+    ['cancelled', { ...PAID_SUCCESSOR, status: 'cancelled' }, {}, [TERMS, TERMS]],
+    ['on an invoice that is no longer paid', PAID_SUCCESSOR, { invoices: [query({ first: { status: 'open' } })] }, [TERMS, TERMS, 'invoices']],
+    ['on a missing invoice row (no evidence, never vacuous)', PAID_SUCCESSOR, { invoices: [query({ first: undefined })] }, [TERMS, TERMS, 'invoices']],
+    ['with no linked invoice', { ...PAID_SUCCESSOR, prepay_invoice_id: null }, {}, [TERMS, TERMS]],
+    // Codex #4971 r8 P2: the decided-lapse shape backs the renewal only
+    // while its invoice is settled — a refunded decided cancel never does.
+    ['in the decided-lapse shape, refunded on the ledger', { ...PAID_SUCCESSOR, status: 'cancelled', renewal_decision: 'cancel' }, paidEvidence(undefined, { id: 'pay-refunded' }), [TERMS, TERMS, 'invoices', 'payments']],
+    ['cancelled without a decision (a void / refund cancel)', { ...PAID_SUCCESSOR, status: 'cancelled', renewal_decision: null }, {}, [TERMS, TERMS]],
+  ])('a successor %s under the gate → no renew stamp, the parent is never read', async (_label, successor, evidence, tables) => {
+    const parentQ = query({ first: LIVE_PARENT });
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    const successorQ = query({ first: successor });
+    setDbQueues({ annual_prepay_terms: [query({ rows: [] }), successorQ, parentQ, recordDecisionQ, recordDecisionQ], ...evidence });
+
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+
+    // Exactly the gate lookup, the successor re-read and its evidence — and
+    // nothing after (no parent read, no decision write).
+    expect(db.mock.calls.map(([table]) => table)).toEqual(tables);
+    expect(successorQ.where).toHaveBeenCalledWith({ id: 'succ-term' });
+    expect(parentQ.first).not.toHaveBeenCalled();
+    expect(recordDecisionQ.update).not.toHaveBeenCalled();
+  });
+
+  test('a PAID decided-lapse successor (declined while pending, then paid: cancelled + cancel) still stamps the parent', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [...stampPrelude({ ...PAID_SUCCESSOR, status: 'cancelled', renewal_decision: 'cancel' }), recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+
+  test('an ACTIVE successor still carrying the dispute marker (won / re-paid recovery, cleared after this stamp) with a paid invoice still stamps', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [...stampPrelude({ ...PAID_SUCCESSOR, dispute_suspended_at: new Date() }), recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+
+  test('a term with no renewed_from_term_id (ordinary annual prepay, or an original termite term) touches the db not at all', async () => {
+    setDbQueues({}); // any db(table) call here throws "Unexpected db table" and fails the test
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'term-s', renewed_from_term_id: null }, 'test')).resolves.toBeUndefined();
+  });
+
+  test('idempotent — a parent already decided (guard miss) is a silent no-op, never throws', async () => {
+    const recordDecisionQ = query({ returning: [] }); // guard miss: recordDecision resolves null
+    setDbQueues({ annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ], ...paidEvidence() });
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+  });
+
+  test('a db failure is best-effort — logged and swallowed, never thrown to the caller', async () => {
+    db.mockImplementation(() => { throw new Error('connection lost'); });
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+  });
+
+  // Codex round-2 P1: the parent stamp must run on the successor's OWN
+  // transaction/savepoint, never a separate global-db write that could
+  // commit out of order with (or survive a rollback of) the successor's
+  // own activation flip.
+  test('when the caller passes an existing transaction, the stamp runs as a SAVEPOINT on it (conn.transaction), never the global db', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    const trxTableQueues = { annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ], ...paidEvidence() };
+    const trx = jest.fn((table) => {
+      const queue = trxTableQueues[table];
+      if (!queue || !queue.length) throw new Error(`Unexpected trx table ${table}`);
+      return queue.shift();
+    });
+    trx.isTransaction = true;
+    trx.transaction = jest.fn(async (cb) => cb(trx));
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test', trx);
+
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(db).not.toHaveBeenCalled(); // never touches the global handle
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+
+  test('a failure inside the savepoint never aborts (or is masked by) the caller\'s own transaction', async () => {
+    const trx = jest.fn(() => { throw new Error('constraint violation'); });
+    trx.isTransaction = true;
+    trx.transaction = jest.fn(async (cb) => cb(trx));
+
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test', trx))
+      .resolves.toBeUndefined();
+    expect(trx.transaction).toHaveBeenCalledTimes(1); // the savepoint, not a raw statement on trx
+  });
+
+  test('a plain (non-db, non-transaction) conn runs the stamp directly, with no extra transaction/savepoint wrapper', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    const plainConnQueues = { annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ], ...paidEvidence() };
+    const plainConn = jest.fn((table) => {
+      const queue = plainConnQueues[table];
+      if (!queue || !queue.length) throw new Error(`Unexpected conn table ${table}`);
+      return queue.shift();
+    });
+    // Deliberately no .transaction / .isTransaction — same shape a bare
+    // knex query builder (not a full connection) would have.
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test', plainConn);
+
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+});
+
+describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
+  // Per stamp, under the gate: the gate lookup, the successor re-read (and
+  // its invoice + ledger), then the parent re-read.
+  const prelude = (id) => [
+    query({ rows: [] }),
+    query({ first: { id: `succ-of-${id}`, status: 'active', prepay_invoice_id: `inv-of-${id}` } }),
+    query({ first: { id, status: 'active', renewal_decision: null, prepay_invoice_id: null } }),
+  ];
+  const evidence = (n) => ({
+    invoices: Array.from({ length: n }, () => query({ first: { status: 'paid', stripe_payment_intent_id: 'pi_x' } })),
+    payments: Array.from({ length: n }, () => query({ first: undefined })),
+    // Codex #4971 r16 P1 (finding 5): one customers.deleted_at read per row
+    // (see paidEvidence's own comment above) — a live customer by default.
+    customers: Array.from({ length: n }, () => query({ first: { deleted_at: null } })),
+  });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+  });
+
+  test('stamps recordDecision(\'renew\') for every active, paid termite successor whose parent is still undecided', async () => {
+    const scanQ = query({ rows: [{ successor_id: 'succ-1', parent_id: 'parent-1' }, { successor_id: 'succ-2', parent_id: 'parent-2' }] });
+    const decision1 = query({ returning: [{ id: 'parent-1', renewal_decision: 'renew' }] });
+    const decision2 = query({ returning: [{ id: 'parent-2', renewal_decision: 'renew' }] });
+    // Codex round-7 P1 (redesigned): each recordDecision call now peeks
+    // annual_plan_version first (same query object, same conn) before its
+    // actual write — two dequeues per row.
+    setDbQueues({
+      'annual_prepay_terms as s': [scanQ],
+      annual_prepay_terms: [...prelude('parent-1'), decision1, decision1, ...prelude('parent-2'), decision2, decision2],
+      ...evidence(2),
+    });
+
+    const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
+
+    expect(summary.scanned).toBe(2);
+    expect(summary.stamped).toBe(2);
+    expect(decision1.where).toHaveBeenCalledWith({ id: 'parent-1' });
+    expect(decision2.where).toHaveBeenCalledWith({ id: 'parent-2' });
+  });
+
+  test('a scan failure degrades to an empty summary, never throws', async () => {
+    const conn = jest.fn(() => { throw new Error('db down'); });
+    await expect(AnnualPrepayRenewals.reconcileParentRenewedStamps({ conn })).resolves.toEqual({ scanned: 0, stamped: 0 });
+  });
+
+  test('a per-row failure never blocks the rest', async () => {
+    const scanQ = query({ rows: [{ successor_id: 'succ-1', parent_id: 'bad-parent' }, { successor_id: 'succ-2', parent_id: 'parent-2' }] });
+    const badDecision = query();
+    badDecision.returning = jest.fn().mockRejectedValue(new Error('boom'));
+    const goodDecision = query({ returning: [{ id: 'parent-2', renewal_decision: 'renew' }] });
+    setDbQueues({
+      'annual_prepay_terms as s': [scanQ],
+      annual_prepay_terms: [...prelude('bad-parent'), query({ first: undefined }), badDecision, ...prelude('parent-2'), query({ first: undefined }), goodDecision],
+      ...evidence(2),
+    });
+
+    const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
+
+    expect(summary.scanned).toBe(2);
+    expect(summary.stamped).toBe(1);
+  });
+
+  // Codex #4971 r17 P2 — finding 5: the scan itself excludes a successor
+  // whose deleted-account conflict already told staff — directly in SQL,
+  // never just as an in-JS re-check after the row is already inside this
+  // bounded LIMIT page. Without this, that SAME row (its parent never
+  // leaves ACTIVE_STATUSES/renewal_decision-null on its own) would keep
+  // being reselected on every tick, starving any newer conflict behind it.
+  test('the scan query excludes rows whose deleted-account conflict already belled', async () => {
+    const scanQ = query({ rows: [] });
+    setDbQueues({ 'annual_prepay_terms as s': [scanQ] });
+
+    await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
+
+    expect(scanQ.whereNull).toHaveBeenCalledWith('s.renewal_parent_deleted_conflict_belled_at');
+  });
+});
+
+// Codex #4971 r17 P1 — finding 1: withParentDecisionLock's connection-loss
+// tracker (trackConnectionLoss) must be attached BEFORE any lock query, not
+// after takeSessionDecisionLocks() returns — otherwise a close/end landing
+// while a lock query is still outstanding is silently missed forever (the
+// listener that would have caught it isn't registered yet). Proved here by
+// making the mocked session connection's own query implementation fire its
+// 'close' handlers WHILE the advisory-lock query is in flight: with the
+// tracker attached early, fn() sees the loss; the pre-fix ordering (attach
+// only after every lock query settles) would have missed this exact event
+// and let fn() run believing the lock still held. The real end-to-end wiring
+// against an actually-killed Postgres backend is proved separately in
+// annual-prepay-parent-decision-lock-postgres.test.js.
+describe('withParentDecisionLock — connection-loss tracking (finding 1)', () => {
+  afterEach(() => {
+    delete db.client.lockConn.on;
+    db.client.lockConn.query = jest.fn(async (sql) => {
+      if (/pg_advisory_lock/.test(String(sql)) && !/pg_advisory_unlock/.test(String(sql))) {
+        if (!db.client.locked) {
+          const err = new Error('canceling statement due to lock timeout');
+          err.code = '55P03';
+          throw err;
+        }
+      }
+      return { rows: [] };
+    });
+  });
+
+  test('a close event firing while a lock query is still in flight is caught — never missed by attaching the tracker too late', async () => {
+    const handlers = {};
+    db.client.lockConn.on = jest.fn((event, cb) => { handlers[event] = cb; });
+    const baseQuery = db.client.lockConn.query;
+    db.client.lockConn.query = jest.fn(async (sql, params) => {
+      const result = await baseQuery(sql, params);
+      // The underlying socket closing WHILE this exact advisory-lock query
+      // was outstanding — the scenario the old attach-after-the-fact
+      // ordering missed.
+      if (/pg_advisory_lock/.test(String(sql)) && !/pg_advisory_unlock/.test(String(sql))) {
+        handlers.close?.();
+      }
+      return result;
+    });
+
+    let sawAliveInsideFn = false;
+    let thrownInsideFn = null;
+    await AnnualPrepayRenewals.withParentDecisionLock('term-loss-1', async () => {
+      try {
+        AnnualPrepayRenewals.assertParentDecisionLockAlive();
+        sawAliveInsideFn = true;
+      } catch (err) {
+        thrownInsideFn = err;
+      }
+    });
+
+    expect(sawAliveInsideFn).toBe(false);
+    expect(thrownInsideFn).toBeTruthy();
+    expect(thrownInsideFn.code).toBe('PARENT_DECISION_LOCK_LOST');
+    expect(thrownInsideFn.deliveryNeverAttempted).toBe(true);
+  });
 });
 
 // billing_mode reset on term void/refund (Codex round-5): the monthly cron
@@ -6317,6 +7124,9 @@ describe('billing_mode reset on term void/refund', () => {
   const cancelQueues = (term, cancelled, resetQ) => ({
     annual_prepay_terms: [
       query({ rows: [term] }), // terms select for the refunded invoice
+      // cancelTermWithRestorations opens its own transaction here, so the
+      // termite gate lookup is its first statement (none: not a termite term).
+      query({ rows: [] }),
       query({ returning: [cancelled] }), // cancel transition update
       query({ first: undefined }), // reset helper's replacement-coverage check
       query({ first: undefined }), // prior_billing_mode read (not recorded → heuristic)
@@ -6373,7 +7183,7 @@ describe('billing_mode reset on term void/refund', () => {
     const queues = cancelQueues(TERM, { ...TERM, status: 'cancelled' }, resetQ);
     // prior_billing_mode WAS recorded at stamp time — the heuristic
     // (no source estimate → NULL) must NOT win over it.
-    queues.annual_prepay_terms[3] = query({ first: { prior_billing_mode: 'per_application' } });
+    queues.annual_prepay_terms[4] = query({ first: { prior_billing_mode: 'per_application' } });
     setDbQueues(queues);
 
     await AnnualPrepayRenewals.syncTermForInvoicePayment(
@@ -6395,7 +7205,7 @@ describe('billing_mode reset on term void/refund', () => {
     const queues = cancelQueues(TERM, { ...TERM, status: 'cancelled' }, resetQ);
     // Recorded 'none' (prior was NULL legacy monthly) beats the heuristic
     // (source estimate present → per_application).
-    queues.annual_prepay_terms[3] = query({ first: { prior_billing_mode: 'none' } });
+    queues.annual_prepay_terms[4] = query({ first: { prior_billing_mode: 'none' } });
     setDbQueues(queues);
 
     await AnnualPrepayRenewals.syncTermForInvoicePayment(
@@ -6533,5 +7343,1066 @@ describe('billing_mode reset for decided-lapse terms on refund', () => {
     await expect(AnnualPrepayRenewals.syncTermForInvoicePayment(
       { id: 'inv-r', status: 'refunded', paid_at: null },
     )).resolves.toBeDefined();
+  });
+});
+
+describe('stamp-time price check (secure-prepay rail, #5387) — a repriced visit is never covered at the sold price', () => {
+  // A /secure annual prepay sold at $100 per visit x 4 with the 10% discount:
+  // the invoice (and prepay_amount) is $360, so each stamp slice is $90 and the
+  // term's own generated visits are priced $90. per_visit_amount ($100) is the
+  // list price selectSecurePlan re-checked under the customer lock at mint.
+  const TERM = {
+    id: 'term-1',
+    customer_id: 'customer-1',
+    prepay_invoice_id: 'inv-1',
+    prepay_amount: 360,
+    term_start: '2026-10-01',
+    term_end: '2027-09-30',
+    coverage_service_type: 'Quarterly Pest Control',
+    coverage_visit_count: 4,
+  };
+  const SECURE_MINT_RECORD = {
+    metadata: { source: 'secure_plan_choice', per_visit_amount: 100, annual_prepay_term_id: 'term-1' },
+  };
+  const COLUMNS = { prepaid_amount: {}, prepaid_method: {}, prepaid_at: {}, annual_prepay_term_id: {}, updated_at: {} };
+  const visit = (id, scheduled_date, estimated_price, extra = {}) => ({
+    id, customer_id: 'customer-1', scheduled_date, status: 'pending', service_type: 'Quarterly Pest Control',
+    estimated_price, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, ...extra,
+  });
+  const { notifyAdmin } = require('../services/notification-service');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ locked: true }] });
+    db.transaction = jest.fn(async (cb) => cb(db));
+    _private.resetCachesForTests();
+  });
+
+  function stampQueues({ rows, mintRecord = SECURE_MINT_RECORD, updates, notified, extra = {} }) {
+    const updateQueries = updates.map(() => query({ returning: [{ id: 'x' }] }));
+    const notifications = notified ? [notified] : [query({ first: undefined })];
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), ...updateQueries],
+      activity_log: [query({ first: mintRecord })],
+      notifications,
+      ...extra,
+    });
+    return updateQueries;
+  }
+  // A row the term itself seeded (ensureCoverageRowsForTerm): linked at insert,
+  // carrying the seeder's own notes text.
+  const seededVisit = (id, scheduled_date, estimated_price, extra = {}) => visit(id, scheduled_date, estimated_price, {
+    annual_prepay_term_id: 'term-1', notes: 'Annual prepaid Quarterly Pest Control coverage', ...extra,
+  });
+  // The prepay invoice the seeder priced from: $360 of coverage over 4 visits.
+  const invoiceQueue = (subtotal, lineItems = []) => ({
+    invoices: [query({ first: { subtotal, total: subtotal, line_items: lineItems } })],
+    setup_fee_claims: [query({ first: undefined })],
+  });
+
+  test('r9(a): a same-service sibling repriced after the /secure pick is held out of the stamp, flagged once, its slot left unused', async () => {
+    // Visit B (svc-2) was repriced $100 -> $125 while the selection only
+    // re-checked its own visit A. Activation must stamp A, C, D and hold B.
+    // Only three UPDATEs are queued: a stamp attempt on svc-2 would throw.
+    const rows = [
+      visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125),
+      visit('svc-3', '2027-04-15', 100), visit('svc-4', '2027-07-15', 100),
+    ];
+    const updateQueries = stampQueues({ rows, updates: [1, 2, 3] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(3);
+    expect(result.priceHeldRowIds).toEqual(['svc-2']);
+    // C keeps ITS slot's slice: the held slot is not handed to the next visit.
+    expect(updateQueries.map((q) => q.where.mock.calls[0][0].id)).toEqual(['svc-1', 'svc-3', 'svc-4']);
+    expect(updateQueries[0].update).toHaveBeenCalledWith(expect.objectContaining({
+      prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1',
+    }));
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Annual prepay: repriced visit left uncovered',
+      expect.stringMatching(/2027-01-15.*repriced to \$125\.00.*sold at \$100\.00.*NOT marked as covered/),
+      expect.objectContaining({ metadata: expect.objectContaining({
+        reason: 'price_drift_held:svc-2', annual_prepay_term_id: 'term-1',
+        dedupeKey: 'annual-prepay-first-visit:term-1:price_drift_held:svc-2',
+      }) }),
+    );
+  });
+
+  test('r9(b): a repriced later visit that becomes the 4th slot when an earlier one is cancelled is held, not stamped at the old price', async () => {
+    // Visit 4 was cancelled by the same save that repriced visit 5; canonical
+    // selection now reaches visit 5 (status-excluded visit 4 is not a slot).
+    const rows = [
+      visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 100),
+      visit('svc-3', '2027-04-15', 100), visit('svc-4', '2027-07-15', 100, { status: 'cancelled' }),
+      visit('svc-5', '2027-09-15', 140),
+    ];
+    const updateQueries = stampQueues({ rows, updates: [1, 2, 3] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(3);
+    expect(result.priceHeldRowIds).toEqual(['svc-5']);
+    expect(updateQueries.map((q) => q.where.mock.calls[0][0].id)).toEqual(['svc-1', 'svc-2', 'svc-3']);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert', expect.any(String), expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'price_drift_held:svc-5' }) }),
+    );
+  });
+
+  test('re-running the refresh does not re-flag: the dedupe is once per term+visit, with no 7-day expiry', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125)];
+    const alreadyFlagged = query({ first: { id: 'notif-existing' } });
+    stampQueues({ rows, updates: [1], notified: alreadyFlagged });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.priceHeldRowIds).toEqual(['svc-2']);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    // A time-boxed dedupe would re-file the same visit every 7 days.
+    expect(alreadyFlagged.where.mock.calls.map((c) => c[0])).not.toContain('created_at');
+  });
+
+  test('unchanged prices stamp exactly as before, and no invoice read is needed when every row is at the sold price', async () => {
+    const rows = [
+      visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 100),
+      visit('svc-3', '2027-04-15', '100.00'), visit('svc-4', '2027-07-15', 100),
+    ];
+    // No invoices queue: a seeded-price read here would throw (unexpected table).
+    stampQueues({ rows, updates: [1, 2, 3, 4] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(4);
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a REAL visit repriced to the discounted slice value is held — the slice is not an allowed price for it', async () => {
+    // $100 plan at 10% off: slice/seeded price is $90. A staff visit moved to
+    // $90 is still a changed price and must not ride the old-price invoice.
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 90)];
+    stampQueues({ rows, updates: [1], extra: invoiceQueue(360) });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(1);
+    expect(result.priceHeldRowIds).toEqual(['svc-2']);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a row the term SEEDED at its seeded price stamps', async () => {
+    const rows = [
+      visit('svc-1', '2026-10-15', 100),
+      seededVisit('svc-2', '2027-01-15', 90), seededVisit('svc-3', '2027-04-15', 90), seededVisit('svc-4', '2027-07-15', 90),
+    ];
+    stampQueues({ rows, updates: [1, 2, 3, 4], extra: invoiceQueue(360) });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(4);
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a seeded row that was REPRICED (neither sold nor seeded price) is held', async () => {
+    const rows = [seededVisit('svc-1', '2026-10-15', 90), seededVisit('svc-2', '2027-01-15', 95)];
+    stampQueues({ rows, updates: [1], extra: invoiceQueue(360) });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(1);
+    expect(result.priceHeldRowIds).toEqual(['svc-2']);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a term-linked row whose seeder note was edited reads as a real visit — the discounted price is held', async () => {
+    const rows = [seededVisit('svc-1', '2026-10-15', 90, { notes: 'call before arriving' })];
+    stampQueues({ rows, updates: [], extra: invoiceQueue(360) });
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(0);
+    expect(result.priceHeldRowIds).toEqual(['svc-1']);
+  });
+
+  test('the seeded price subtracts the setup line exactly as the seeder does (shared helper), not a raw slice', async () => {
+    // Invoice carries $360 coverage + $100 rodent setup. The seeder priced its
+    // visits (460 - 100) / 4 = $90; a raw 460 / 4 = $115 must NOT be accepted.
+    const lines = [
+      { description: 'Rodent - 4 prepaid applications', quantity: 1, unit_price: 360 },
+      { description: 'Bait Station Setup — one-time setup fee', quantity: 1, unit_price: 100 },
+    ];
+    const rows = [seededVisit('svc-1', '2026-10-15', 90), seededVisit('svc-2', '2027-01-15', 115)];
+    stampQueues({
+      rows,
+      updates: [1],
+      extra: {
+        invoices: [query({ first: { subtotal: 460, total: 460, line_items: lines } })],
+        setup_fee_claims: [query({ first: { amount: 100 } })],
+      },
+    });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(1);
+    expect(result.priceHeldRowIds).toEqual(['svc-2']);
+  });
+
+  test('a failed sold-price lookup PROPAGATES (fail closed) — nothing is stamped and nothing is filed', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 125)];
+    const failing = query({});
+    failing.first = jest.fn(async () => { throw new Error('connection terminated'); });
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows })],
+      activity_log: [failing],
+    });
+    notifyAdmin.mockClear();
+
+    await expect(AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM)).rejects.toThrow('connection terminated');
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a service-only change at an unchanged price is never a reason to hold', async () => {
+    const rows = [
+      visit('svc-1', '2026-10-15', 100),
+      // Same family text, different catalog identity; price untouched.
+      visit('svc-2', '2027-01-15', '100.00', { service_id: 'other-service-id', service_type: 'Quarterly Pest Control Service' }),
+    ];
+    stampQueues({ rows, updates: [1, 2] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(2);
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a visit this term already stamped is never un-stamped or re-judged by the price check', async () => {
+    const rows = [
+      visit('svc-1', '2026-10-15', 125, {
+        prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1',
+      }),
+    ];
+    stampQueues({ rows, updates: [1] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(result.stampedCount).toBe(1);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a term with no /secure mint record (operator, estimate-accept, on-site switch) has no per-visit baseline — stamping is unchanged', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125)];
+    stampQueues({ rows, mintRecord: null, updates: [1, 2] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(2);
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('attachScheduledServices does not link a repriced visit, and pins each link to the price it judged (B)', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125), visit('svc-3', '2027-04-15', 100)];
+    const link1 = query({});
+    const link3 = query({});
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), link1, link3],
+      activity_log: [query({ first: SECURE_MINT_RECORD })],
+    });
+
+    await _private.attachScheduledServices(TERM);
+
+    expect(link1.where.mock.calls[0][0]).toEqual({ id: 'svc-1' });
+    expect(link3.where.mock.calls[0][0]).toEqual({ id: 'svc-3' });
+    expect(link1.whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', [100]);
+    expect(link3.whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', [100]);
+  });
+
+  test('a term with no /secure baseline links in one bulk UPDATE with no price predicate (B: non-secure terms unchanged)', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125)];
+    const link = query({});
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), link],
+      activity_log: [query({ first: null })],
+    });
+
+    await _private.attachScheduledServices(TERM);
+
+    expect(link.whereIn).toHaveBeenCalledWith('id', ['svc-1', 'svc-2']);
+    expect(link.whereRaw).not.toHaveBeenCalled();
+  });
+
+  test('B: the stamp UPDATE is pinned to the price it judged (atomic with the decision)', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', '100.00')];
+    const updateQueries = stampQueues({ rows, updates: [1, 2] });
+
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    for (const q of updateQueries) {
+      expect(q.whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', [expect.anything()]);
+    }
+    expect(updateQueries[1].whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', ['100.00']);
+  });
+
+  test('B: a stamp whose row was REPRICED after it was judged matches nothing, is re-judged at the new price, held and flagged — not counted as a race', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100)];
+    const racedUpdate = query({ returning: [] });
+    // A writer outside the prepay lock (e.g. a scoped wind-down) committed $125
+    // between the coverage read and the stamp.
+    const reread = query({ rows: [{ ...rows[0], status: 'pending', estimated_price: 125 }] });
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), racedUpdate, reread],
+      activity_log: [query({ first: SECURE_MINT_RECORD }), query({ first: SECURE_MINT_RECORD })],
+      notifications: [query({ first: undefined })],
+    });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(0);
+    expect(result.racedRowIds).toEqual([]);
+    expect(result.priceHeldRowIds).toEqual(['svc-1']);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert', expect.any(String), expect.stringMatching(/repriced to \$125\.00/),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'price_drift_held:svc-1' }) }),
+    );
+  });
+
+  describe('A: a held visit stays held after it completes (completion reconcile)', () => {
+    const InvoiceService = require('../services/invoice');
+    const { postCreditMovement } = require('../services/customer-credit');
+    const completed = (price) => visit('svc-done', '2026-10-20', price, { status: 'completed' });
+    const pending = (id, date) => visit(id, date, 100);
+    const openInvoice = { id: 'inv-visit', status: 'pending', payment_recorded_at: null, annual_prepay_covered_term_id: null };
+
+    beforeEach(() => {
+      InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockReset();
+      postCreditMovement.mockReset();
+    });
+
+    test('a completed visit repriced away from the sold price is NOT settled or credited by the old-price prepay; alert filed once', async () => {
+      setDbQueues({
+        scheduled_services: [query({ rows: [completed(125), pending('s2', '2027-01-20'), pending('s3', '2027-04-20'), pending('s4', '2027-07-20')] })],
+        activity_log: [query({ first: SECURE_MINT_RECORD })],
+        notifications: [query({ first: undefined })],
+        // No invoices queue: a look at the visit's invoice would throw and set failed.
+      });
+      notifyAdmin.mockClear();
+
+      const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+      expect(result).toEqual({ settled: 0, credited: 0 });
+      expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+      expect(postCreditMovement).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(notifyAdmin).toHaveBeenCalledWith(
+        'alert', expect.any(String), expect.any(String),
+        expect.objectContaining({ metadata: expect.objectContaining({ reason: 'price_drift_held:svc-done' }) }),
+      );
+    });
+
+    test('the same completed visit at the sold price still settles as before', async () => {
+      setDbQueues({
+        scheduled_services: [query({ rows: [completed(100), pending('s2', '2027-01-20'), pending('s3', '2027-04-20'), pending('s4', '2027-07-20')] })],
+        activity_log: [query({ first: SECURE_MINT_RECORD })],
+        invoices: [query({ first: openInvoice })],
+      });
+      InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockResolvedValueOnce({ settled: true });
+
+      const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+      expect(result).toEqual({ settled: 1, credited: 0 });
+    });
+
+    test('a failed sold-price lookup fails closed: nothing settled or credited', async () => {
+      const failing = query({});
+      failing.first = jest.fn(async () => { throw new Error('connection terminated'); });
+      setDbQueues({
+        scheduled_services: [query({ rows: [completed(125)] })],
+        activity_log: [failing],
+        invoices: [query({ first: openInvoice })],
+      });
+
+      const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+      expect(result.failed).toBe(true);
+      expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('restampUnstampedActiveTerms — the nightly leg for active terms a failed stamp pass left unstamped', () => {
+  const termRow = (id, extra = {}) => ({
+    id,
+    customer_id: `customer-${id}`,
+    prepay_invoice_id: `inv-${id}`,
+    status: 'active',
+    prepay_amount: 360,
+    term_start: '2026-10-01',
+    term_end: '2027-09-30',
+    coverage_service_type: 'Quarterly Pest Control',
+    coverage_visit_count: 4,
+    ...extra,
+  });
+  const visit = (id, termId, scheduled_date, extra = {}) => ({
+    id, customer_id: `customer-${termId}`, scheduled_date, status: 'pending', service_type: 'Quarterly Pest Control',
+    estimated_price: 100, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, ...extra,
+  });
+  const stamped = (id, termId, scheduled_date) => visit(id, termId, scheduled_date, {
+    prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: termId,
+  });
+  const COLUMNS = { prepaid_amount: {}, prepaid_method: {}, prepaid_at: {}, annual_prepay_term_id: {}, updated_at: {} };
+  const SECURE_MINT_RECORD = {
+    metadata: { source: 'secure_plan_choice', per_visit_amount: 100, annual_prepay_term_id: 'term-h' },
+  };
+  const { notifyAdmin } = require('../services/notification-service');
+
+  // forShare is not part of the shared query() stand-in.
+  const shareable = (q) => { q.forShare = jest.fn(() => q); return q; };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.raw = jest.fn().mockResolvedValue({ rows: [] });
+    db.transaction = jest.fn(async (cb) => cb(db));
+    _private.resetCachesForTests();
+  });
+
+  // One entry per term, in order: the canonical-rows read, and — for a term
+  // that reaches the refresh — the invoice share lock, the term row FOR UPDATE
+  // (plain `annual_prepay_terms`), the paid-backing recheck (second
+  // `annual_prepay_terms as t` read onward) and the customer row FOR UPDATE.
+  // `link` queues the "was any visit ever linked" probe the never-seeded
+  // branch makes when no canonical row is open.
+  function queues({ terms, perTerm, extra = {} }) {
+    const scheduled = [query({ columnInfo: COLUMNS })];
+    const invoices = [];
+    const recheck = [];
+    const termLocks = [];
+    const customerLocks = [];
+    perTerm.forEach((entry) => {
+      scheduled.push(query({ rows: entry.rows }));
+      if (entry.link !== undefined) scheduled.push(query({ first: entry.link }));
+      if (entry.reachesRefresh) {
+        invoices.push(shareable(query({ first: { id: 'inv' } })));
+        termLocks.push(query({ first: { id: 'lock' } }));
+        recheck.push(query({ first: entry.recheck === undefined ? entry.term : entry.recheck }));
+        customerLocks.push(query({ first: { id: 'cust' } }));
+      }
+    });
+    return setDbQueues({
+      'annual_prepay_terms as t': [query({ rows: terms }), ...recheck],
+      annual_prepay_terms: termLocks,
+      scheduled_services: scheduled,
+      invoices,
+      customers: customerLocks,
+      notifications: [query({ first: undefined }), query({ first: undefined })],
+      ...extra,
+    });
+  }
+
+  test('an active paid term with an unstamped canonical visit is re-stamped through the activation path, in one transaction', async () => {
+    const term = termRow('term-1');
+    queues({
+      terms: [term],
+      perTerm: [{
+        term,
+        reachesRefresh: true,
+        rows: [stamped('v1', 'term-1', '2026-10-15'), visit('v2', 'term-1', '2027-01-15'), visit('v3', 'term-1', '2027-04-15'), visit('v4', 'term-1', '2027-07-15')],
+      }],
+    });
+    const refresh = jest.fn(async () => term);
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-1' }), db);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.raw).toHaveBeenCalledWith('select 1');
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the term select is the paid-backed covered set narrowed to live, configured terms with an unstamped visit (ended windows included)', async () => {
+    const terms = [termRow('term-1')];
+    const q = query({ rows: terms });
+    setDbQueues({
+      'annual_prepay_terms as t': [q],
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows: [stamped('v1', 'term-1', '2026-10-15')] })],
+    });
+
+    await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn() });
+
+    expect(q.whereIn).toHaveBeenCalledWith('t.status', ['active', 'renewal_pending']);
+    // No date cutoff on the unstamped-visit branch: a pending visit inside an
+    // ENDED window is still prepaid work. Only the never-seeded branch is
+    // limited to open windows.
+    expect(q.where).not.toHaveBeenCalledWith('t.term_end', '>=', expect.anything());
+    const existsCall = q.whereRaw.mock.calls.find(([sql]) => /exists \(\s*select 1 from scheduled_services/.test(sql));
+    expect(existsCall).toBeTruthy();
+    // Terminal statuses (incl. completed) never make a term a candidate.
+    expect(existsCall[1]).toEqual(expect.arrayContaining(['completed', 'cancelled', 'annual_prepay_invoice', '2026-10-20']));
+  });
+
+  test('an ENDED term with an unfinished in-window visit is stamped only — never refreshed (no seeding past-dated visits)', async () => {
+    const term = termRow('term-1', { term_start: '2025-10-01', term_end: '2026-09-30' });
+    queues({
+      terms: [term],
+      perTerm: [{
+        term,
+        reachesRefresh: true,
+        rows: [stamped('v1', 'term-1', '2025-10-15'), visit('v2', 'term-1', '2026-09-20')],
+      }],
+    });
+    const refresh = jest.fn();
+    const stampOnly = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh, stampOnly });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(stampOnly).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-1' }), db);
+  });
+
+  test('an ENDED term with no linked visit is never seeded', async () => {
+    const term = termRow('term-1', { term_start: '2025-10-01', term_end: '2026-09-30' });
+    queues({ terms: [term], perTerm: [{ term, rows: [] }] });
+    const refresh = jest.fn();
+    const stampOnly = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh, stampOnly });
+
+    expect(summary.restamped).toBe(0);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(stampOnly).not.toHaveBeenCalled();
+  });
+
+  test('a fully stamped term is left untouched: no refresh, no transaction, no writes, no alert', async () => {
+    const term = termRow('term-1');
+    queues({
+      terms: [term],
+      perTerm: [{
+        rows: [
+          stamped('v1', 'term-1', '2026-10-15'), stamped('v2', 'term-1', '2027-01-15'),
+          stamped('v3', 'term-1', '2027-04-15'),
+          // A completed unstamped visit is the pending-window reconcile's, not ours.
+          visit('v4', 'term-1', '2027-07-15', { status: 'completed' }),
+        ],
+      }],
+    });
+    const refresh = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 0, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a visit prepaid some other way (cash) or by another term is not a gap', async () => {
+    const term = termRow('term-1');
+    queues({
+      terms: [term],
+      perTerm: [{
+        rows: [
+          stamped('v1', 'term-1', '2026-10-15'),
+          visit('v2', 'term-1', '2027-01-15', { prepaid_amount: 120, prepaid_method: 'cash' }),
+          visit('v3', 'term-1', '2027-04-15', { prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'other-term' }),
+          stamped('v4', 'term-1', '2027-07-15'),
+        ],
+      }],
+    });
+    const refresh = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary.restamped).toBe(0);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  test('a price-held visit stays held: the only unstamped canonical row is held, so nothing is refreshed; the hold alert is (re)filed', async () => {
+    // Sold at $100 per visit; v2 was repriced to $125 after the sale.
+    const term = termRow('term-h');
+    queues({
+      terms: [term],
+      perTerm: [{
+        rows: [stamped('v1', 'term-h', '2026-10-15'), visit('v2', 'term-h', '2027-01-15', { estimated_price: 125 })],
+      }],
+      extra: { activity_log: [query({ first: SECURE_MINT_RECORD })] },
+    });
+    const refresh = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 0, held: 1, skipped: 0, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+    // The failed stamp pass may never have filed it; the per-visit,
+    // never-expiring dedupe keeps a re-file to one alert.
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][1]).toMatch(/repriced visit left uncovered/i);
+  });
+
+  test('a term that stopped being paid-backed between the read and the lock is skipped, not refreshed', async () => {
+    const term = termRow('term-1');
+    queues({
+      terms: [term],
+      perTerm: [{ term, recheck: undefined, reachesRefresh: true, rows: [visit('v1', 'term-1', '2026-10-15')] }],
+    });
+    // The paid-backing recheck finds nothing (refund landed first).
+    const refresh = jest.fn();
+    const tableQueue = db.getMockImplementation();
+    let termReads = 0;
+    db.mockImplementation((table) => {
+      if (table === 'annual_prepay_terms as t') {
+        termReads += 1;
+        if (termReads === 2) return query({ first: undefined });
+      }
+      return tableQueue(table);
+    });
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 0, held: 0, skipped: 1, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  test('one term throwing does not stop the others: it is logged and alerted, the next term is still re-stamped', async () => {
+    const bad = termRow('term-bad');
+    const good = termRow('term-good');
+    queues({
+      terms: [bad, good],
+      perTerm: [
+        { term: bad, reachesRefresh: true, rows: [visit('v1', 'term-bad', '2026-10-15')] },
+        { term: good, reachesRefresh: true, rows: [visit('v1', 'term-good', '2026-10-15')] },
+      ],
+    });
+    const refresh = jest.fn(async (t) => {
+      if (t.id === 'term-bad') throw new Error('price lookup failed');
+      return t;
+    });
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 2, restamped: 1, held: 0, skipped: 0, failed: 1 });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Annual prepay: visits not marked as covered',
+      expect.stringMatching(/price lookup failed/),
+      expect.objectContaining({ metadata: expect.objectContaining({
+        reason: 'restamp_sweep_failed',
+        annual_prepay_term_id: 'term-bad',
+        dedupeKey: 'annual-prepay-first-visit:term-bad:restamp_sweep_failed',
+      }) }),
+    );
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringMatching(/restamp sweep failed for term term-bad/));
+  });
+
+  test('a repeat failure inside the 7-day window does not file a second alert', async () => {
+    const bad = termRow('term-bad');
+    const alreadyFiled = query({ first: { id: 'notif-existing' } });
+    queues({
+      terms: [bad],
+      perTerm: [{ term: bad, reachesRefresh: true, rows: [visit('v1', 'term-bad', '2026-10-15')] }],
+      extra: { notifications: [alreadyFiled] },
+    });
+    const refresh = jest.fn(async () => { throw new Error('still failing'); });
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary.failed).toBe(1);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    // The dedupe is time-boxed (7 days), not once-ever: a term still broken a
+    // week later is raised again.
+    expect(alreadyFiled.where.mock.calls.map((c) => c[0])).toContain('created_at');
+  });
+
+  test('a failed term select or a missing table returns an empty summary and never throws', async () => {
+    const failing = query({});
+    failing.select = jest.fn(() => { throw new Error('connection terminated'); });
+    setDbQueues({
+      'annual_prepay_terms as t': [failing],
+      scheduled_services: [query({ columnInfo: COLUMNS })],
+    });
+    const refresh = jest.fn();
+    await expect(AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh }))
+      .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 });
+
+    _private.resetCachesForTests();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(false) };
+    await expect(AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh }))
+      .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  test('lock order inside the refresh: invoice share -> term row FOR UPDATE -> covered recheck -> customer row FOR UPDATE -> refresh; the billing-mode stamp then runs', async () => {
+    const term = termRow('term-1', { term_end: '2099-01-01' });
+    const customerLock = query({ first: { id: 'cust' } });
+    const currentCustomer = query({ first: { billing_mode: 'per_application' } });
+    const stampCustomer = query({});
+    queues({
+      terms: [term],
+      perTerm: [{ term, reachesRefresh: true, rows: [visit('v1', 'term-1', '2026-10-15')] }],
+      extra: {
+        customers: [customerLock, currentCustomer, stampCustomer],
+        annual_prepay_terms: [query({ first: { id: 'lock' } }), query({})],
+      },
+    });
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true), hasColumn: jest.fn().mockResolvedValue(true) };
+    const order = [];
+    const inner = db.getMockImplementation();
+    db.mockImplementation((table) => { order.push(table); return inner(table); });
+    const refresh = jest.fn(async () => { order.push('REFRESH'); return term; });
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary.restamped).toBe(1);
+    const at = (name, from = 0) => order.indexOf(name, from);
+    const txStart = at('invoices');
+    expect(txStart).toBeGreaterThan(-1);
+    expect(at('annual_prepay_terms', txStart)).toBeGreaterThan(txStart);
+    expect(at('annual_prepay_terms as t', txStart)).toBeGreaterThan(at('annual_prepay_terms', txStart));
+    expect(at('customers', txStart)).toBeGreaterThan(at('annual_prepay_terms as t', txStart));
+    expect(at('REFRESH')).toBeGreaterThan(at('customers', txStart));
+    expect(customerLock.forUpdate).toHaveBeenCalled();
+    // stampUnlessYearEnded: the customer is stamped annual_prepay after the refresh.
+    expect(stampCustomer.update).toHaveBeenCalledWith(expect.objectContaining({ billing_mode: 'annual_prepay' }));
+  });
+
+  test('an ended year is not billing-mode stamped by the leg (stampUnlessYearEnded)', async () => {
+    const term = termRow('term-1', { term_end: '2000-01-01' });
+    const stampCustomer = query({});
+    queues({
+      terms: [term],
+      perTerm: [{ term, reachesRefresh: true, rows: [visit('v1', 'term-1', '1999-12-15')] }],
+      extra: { customers: [query({ first: { id: 'cust' } }), stampCustomer] },
+    });
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true), hasColumn: jest.fn().mockResolvedValue(true) };
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '1999-12-01', conn: db, refresh: jest.fn(async () => term) });
+
+    expect(summary.restamped).toBe(1);
+    expect(stampCustomer.update).not.toHaveBeenCalled();
+  });
+
+  test('a mixed term (one price-held row, one genuinely open row) still refreshes — the refresh itself keeps the hold', async () => {
+    const term = termRow('term-h');
+    queues({
+      terms: [term],
+      perTerm: [{
+        term,
+        reachesRefresh: true,
+        rows: [visit('v1', 'term-h', '2026-10-15', { estimated_price: 125 }), visit('v2', 'term-h', '2027-01-15', { estimated_price: 100 })],
+      }],
+      extra: { activity_log: [query({ first: SECURE_MINT_RECORD })] },
+    });
+    const refresh = jest.fn(async () => term);
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test('the prefilter also admits terms no visit was ever linked to, behind a 15-minute settle window', async () => {
+    const q = query({ rows: [] });
+    setDbQueues({
+      'annual_prepay_terms as t': [q],
+      scheduled_services: [query({ columnInfo: COLUMNS })],
+    });
+
+    await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn() });
+
+    const sqls = q.whereRaw.mock.calls.map(([sql]) => sql);
+    expect(sqls.some((sql) => /updated_at.*interval '15 minutes'/.test(sql))).toBe(true);
+    expect(sqls.some((sql) => /or \(t\.term_end >= \? and not exists \(\s*select 1 from scheduled_services lk/.test(sql))).toBe(true);
+  });
+
+  describe('a term whose activation failed before seeding (no canonical rows at all)', () => {
+    test('with no visit EVER linked to it, the leg refreshes it so the seeder runs', async () => {
+      const term = termRow('term-1');
+      queues({ terms: [term], perTerm: [{ term, reachesRefresh: true, rows: [], link: null }] });
+      const refresh = jest.fn(async () => term);
+
+      const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+      expect(summary.restamped).toBe(1);
+      expect(refresh).toHaveBeenCalledTimes(1);
+    });
+
+    test('a visit linked in ANY status means the office may have cancelled slots on purpose — never re-seeded', async () => {
+      const term = termRow('term-1');
+      queues({ terms: [term], perTerm: [{ term, rows: [], link: { id: 'cancelled-linked-visit' } }] });
+      const refresh = jest.fn();
+
+      const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+      expect(summary).toEqual({ scanned: 1, restamped: 0, held: 0, skipped: 0, failed: 0 });
+      expect(refresh).not.toHaveBeenCalled();
+    });
+
+    test('a termite plan awaiting installation and a renewal successor cannot seed yet — left alone', async () => {
+      const awaiting = termRow('term-a', { annual_plan_version: 1, installation_anchored_at: null });
+      const successor = termRow('term-r', { renewed_from_term_id: 'term-old' });
+      queues({ terms: [awaiting, successor], perTerm: [{ term: awaiting, rows: [] }, { term: successor, rows: [] }] });
+      const refresh = jest.fn();
+
+      const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+      expect(summary.restamped).toBe(0);
+      expect(refresh).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('overlapping refreshes of one term never seed duplicate visits (re-evaluated under the insert lock)', () => {
+    const SS_COLS = {
+      scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, is_recurring: {}, recurring_pattern: {},
+      recurring_parent_id: {}, recurring_ongoing: {}, technician_id: {}, window_start: {}, window_end: {},
+      time_window: {}, customer_notes: {}, zone: {}, notes: {}, estimated_duration_minutes: {},
+    };
+    const SEED_TERM = {
+      id: 'term-1', customer_id: 'customer-1', term_start: '2026-06-15', term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4,
+    };
+    const other = (id, scheduled_date) => ({
+      id, customer_id: 'customer-1', scheduled_date, status: 'pending', service_type: 'Quarterly Pest Control',
+      annual_prepay_term_id: 'term-1',
+    });
+    const inserted = (id, scheduled_date) => query({ returning: [{ id, scheduled_date }] });
+
+    test('a concurrent refresh already committed the first two dates: only the two missing visits are inserted', async () => {
+      const lateInserts = [inserted('svc-3', '2026-12-15'), inserted('svc-4', '2027-03-15')];
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined }), ...lateInserts],
+        // One recheck per date, each seeing what the OTHER refresh has committed by then.
+        'scheduled_services as seed_recheck': [
+          query({ rows: [other('b1', '2026-06-15')] }),
+          query({ rows: [other('b1', '2026-06-15'), other('b2', '2026-09-15')] }),
+          query({ rows: [other('b1', '2026-06-15'), other('b2', '2026-09-15')] }),
+          query({ rows: [other('b1', '2026-06-15'), other('b2', '2026-09-15'), other('svc-3', '2026-12-15')] }),
+        ],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { today: '2026-01-01' });
+
+      expect(result.createdCount).toBe(2);
+      expect(lateInserts[0].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-12-15' }));
+      expect(lateInserts[1].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+    });
+
+    test('a concurrent refresh already filled every sold slot: nothing is inserted', async () => {
+      const fill = [other('b1', '2026-06-15'), other('b2', '2026-09-15'), other('b3', '2026-12-15'), other('b4', '2027-03-15')];
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined })],
+        'scheduled_services as seed_recheck': [query({ rows: fill }), query({ rows: fill }), query({ rows: fill }), query({ rows: fill })],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { today: '2026-01-01' });
+
+      expect(result.createdCount).toBe(0);
+    });
+
+    test('one concurrent visit halfway between two monthly slots fills only ONE of them', async () => {
+      const MONTHLY = {
+        ...SEED_TERM, term_start: '2026-06-15', term_end: '2027-06-14',
+        coverage_service_type: 'Monthly Pest Control', coverage_visit_count: 12,
+      };
+      const halfway = { ...other('mid', '2026-06-30'), service_type: 'Monthly Pest Control' };
+      const inserts = Array.from({ length: 12 }, (_, i) => inserted(`svc-${i}`, null));
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined }), ...inserts],
+        'scheduled_services as seed_recheck': Array.from({ length: 12 }, () => query({ rows: [halfway] })),
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...MONTHLY }, undefined, { today: '2026-01-01' });
+
+      // 06-30 is within the half-cadence tolerance of both 06-15 and 07-15;
+      // it may stand in for one of them, never both.
+      expect(result.createdCount).toBe(11);
+    });
+
+    test('a concurrent visit of ANOTHER service (a lawn visit) never suppresses a sold seed', async () => {
+      const lawn = (id, scheduled_date) => ({ ...other(id, scheduled_date), service_type: 'Lawn Care', annual_prepay_term_id: null });
+      const inserts = [inserted('s1', '2026-06-15'), inserted('s2', '2026-09-15'), inserted('s3', '2026-12-15'), inserted('s4', '2027-03-15')];
+      const lawns = [lawn('l1', '2026-06-15'), lawn('l2', '2026-09-15'), lawn('l3', '2026-12-15'), lawn('l4', '2027-03-15')];
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined }), ...inserts],
+        'scheduled_services as seed_recheck': [query({ rows: lawns }), query({ rows: lawns }), query({ rows: lawns }), query({ rows: lawns })],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { today: '2026-01-01' });
+
+      expect(result.createdCount).toBe(4);
+    });
+
+    describe('renewal scope: only a visit THIS successor would count can fill its slot', () => {
+      const SUCCESSOR = {
+        id: 'term-termite', customer_id: 'customer-termite', source_estimate_id: null, renewed_from_term_id: 'term-prior',
+        term_start: '2026-10-01', term_end: '2027-10-01', coverage_service_type: 'Termite Bait',
+        coverage_visit_count: 1, coverage_cadence: 'annual', annual_plan_version: 'v3', installation_anchored_at: null,
+      };
+      const COLS = { ...SS_COLS, property_id: {} };
+      const lineage = () => ({
+        annual_prepay_terms: Array.from({ length: 8 }, () => query({
+          first: { id: 'term-prior', customer_id: 'customer-termite', source_estimate_id: 'est-termite', renewed_from_term_id: null },
+        })),
+        estimates: Array.from({ length: 8 }, () => query({ first: { property_id: 'prop-termite' } })),
+      });
+      const concurrentVisit = (property_id) => ({
+        id: 'c1', customer_id: 'customer-termite', scheduled_date: '2026-10-01', status: 'pending',
+        service_type: 'Termite Bait', property_id, annual_prepay_term_id: null, source_estimate_id: null,
+      });
+
+      test('a concurrent visit at ANOTHER property does not suppress the seed', async () => {
+        _private.resetCachesForTests();
+        const insert = inserted('seeded', '2026-10-01');
+        setDbQueues({
+          scheduled_services: [query({ columnInfo: COLS }), query({ rows: [] }), query({ first: undefined }), insert],
+          'scheduled_services as seed_recheck': [query({ rows: [concurrentVisit('prop-other')] })],
+          ...lineage(),
+        });
+
+        const result = await _private.ensureCoverageRowsForTerm({ ...SUCCESSOR }, undefined, { today: '2026-10-01' });
+
+        expect(result.createdCount).toBe(1);
+        expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({ annual_prepay_term_id: 'term-termite' }));
+      });
+
+      test('a concurrent visit in the SAME scope still suppresses it (no duplicate)', async () => {
+        _private.resetCachesForTests();
+        setDbQueues({
+          scheduled_services: [query({ columnInfo: COLS }), query({ rows: [] }), query({ first: undefined })],
+          'scheduled_services as seed_recheck': [query({ rows: [concurrentVisit('prop-termite')] })],
+          ...lineage(),
+        });
+
+        const result = await _private.ensureCoverageRowsForTerm({ ...SUCCESSOR }, undefined, { today: '2026-10-01' });
+
+        expect(result.createdCount).toBe(0);
+      });
+    });
+
+    test('inside a caller transaction the same recheck runs under the held comms lock', async () => {
+      const fill = [other('b1', '2026-06-15'), other('b2', '2026-09-15'), other('b3', '2026-12-15'), other('b4', '2027-03-15')];
+      const trx = jest.fn((table) => db(table));
+      trx.isTransaction = true;
+      trx.transaction = jest.fn(async (cb) => cb(trx));
+      trx.raw = jest.fn().mockResolvedValue({ rows: [{ locked: true }] });
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined })],
+        'scheduled_services as seed_recheck': [query({ rows: fill }), query({ rows: fill }), query({ rows: fill }), query({ rows: fill })],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, trx, { today: '2026-01-01' });
+
+      expect(result.createdCount).toBe(0);
+    });
+  });
+
+  describe('the late-payment window slide is applied once, not once per retry', () => {
+    const SLIDE_COLS = {
+      scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, window_start: {}, window_end: {},
+      time_window: {}, technician_id: {}, estimated_duration_minutes: {}, notes: {},
+    };
+    const baseTerm = () => ({
+      id: 'term-s', customer_id: 'customer-s', term_start: '2026-07-30', term_end: '2027-07-30',
+      coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly',
+    });
+
+    test('the first slide records the ORIGINAL end in a marker row BEFORE term_end moves', async () => {
+      const marker = query({});
+      const slide = query({});
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }), query({ rows: [] }),
+          query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] }), query({ returning: [{ id: 'd' }] })],
+        annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), slide, query({})],
+        activity_log: [query({ first: undefined }), marker],
+      });
+
+      await _private.ensureCoverageRowsForTerm(baseTerm(), undefined, { today: '2026-12-30' });
+
+      expect(marker.insert).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'annual_prepay_window_slid',
+        metadata: expect.objectContaining({ term_id: 'term-s', original_term_end: '2027-07-30', effective_term_end: '2027-12-30' }),
+      }));
+      expect(slide.update).toHaveBeenCalledWith(expect.objectContaining({ term_end: '2027-12-30' }));
+      expect(marker.insert.mock.invocationCallOrder[0]).toBeLessThan(slide.update.mock.invocationCallOrder[0]);
+    });
+
+    test('a retry after the slide persisted (activation failed before any visit linked) does NOT slide again', async () => {
+      const slidTerm = { ...baseTerm(), term_end: '2027-12-30' };
+      const marker = query({});
+      const slide = query({});
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }),
+          query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] }), query({ returning: [{ id: 'd' }] })],
+        annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), slide],
+        activity_log: [query({ first: { metadata: { term_id: 'term-s', original_term_end: '2027-07-30', effective_term_end: '2027-12-30' } } }), marker],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm(slidTerm, undefined, { today: '2026-12-30' });
+
+      // Without the marker this retry would extend 2027-12-30 by the lag again.
+      expect(slide.update).not.toHaveBeenCalledWith(expect.objectContaining({ term_end: expect.any(String) }));
+      expect(marker.insert).not.toHaveBeenCalled();
+      expect(slidTerm.term_end).toBe('2027-12-30');
+      expect(result.targetDates).toEqual(['2026-12-30', '2027-03-30', '2027-06-30', '2027-09-30']);
+    });
+
+    test('a later retry grows the end only by what its later anchor adds, from the recorded original', async () => {
+      const slidTerm = { ...baseTerm(), term_end: '2027-12-30' };
+      const marker = query({});
+      const slide = query({});
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }), query({ rows: [] }),
+          query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] }), query({ returning: [{ id: 'd' }] })],
+        annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), slide, query({})],
+        activity_log: [query({ first: { metadata: { term_id: 'term-s', original_term_end: '2027-07-30' } } }), marker],
+      });
+
+      await _private.ensureCoverageRowsForTerm(slidTerm, undefined, { today: '2027-01-15' });
+
+      // original 2027-07-30 + 169 days (2026-07-30 -> 2027-01-15) = 2028-01-15, not 2027-12-30 + 169.
+      expect(slide.update).toHaveBeenCalledWith(expect.objectContaining({ term_end: '2028-01-15' }));
+      expect(marker.insert).not.toHaveBeenCalled();
+    });
+
+    test('an unreadable marker fails safe: the window is not extended this run', async () => {
+      const failing = query({});
+      failing.first = jest.fn(async () => { throw new Error('connection terminated'); });
+      const slide = query({});
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }),
+          query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] })],
+        annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), slide],
+        activity_log: [failing],
+      });
+
+      await _private.ensureCoverageRowsForTerm(baseTerm(), undefined, { today: '2026-12-30' });
+
+      expect(slide.update).not.toHaveBeenCalledWith(expect.objectContaining({ term_end: expect.any(String) }));
+    });
   });
 });

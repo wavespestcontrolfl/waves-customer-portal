@@ -1,5 +1,15 @@
 const db = require('../models/db');
 const logger = require('./logger');
+
+// A failure log line for the notification writers carries only a fixed code /
+// constraint — never err.message: a Knex error echoes the SQL and its bound
+// values, which for a bell is the notification body (customer names and
+// addresses). Behavior (return value / throw) at every call site is unchanged.
+function safeErrorSummary(err) {
+  const bits = [err ? (err.code || err.name || 'error') : 'error'];
+  if (err && err.constraint) bits.push(`constraint=${err.constraint}`);
+  return bits.filter(Boolean).join(' ');
+}
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
@@ -46,6 +56,97 @@ function scopeAdminFeedToRole(query, role) {
   );
 }
 
+// Activity-only rows (metadata.feed === 'activity' — deliverOpsDigest stamps
+// this for a non-owner audience, admin-alerts-brevity scope 2026-09-28)
+// never reach the admin BELL: not its list, not its unread count, not
+// mark-all-read. They still show in the Agents → Activity feed, which reads
+// notifications directly and does not go through these helpers. Deliberately
+// NOT folded into scopeAdminFeedToRole above: that helper also scopes
+// markReadAdmin (mark-one-read by id), which the Activity feed's own Review
+// link relies on to clear a row the feed itself can see.
+function excludeActivityOnlyFromBell(query) {
+  return query.whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'");
+}
+
+// Content version of an admin row: an md5 over everything the bell shows
+// (title, body, link, detail, metadata). notifyAdmin's refreshOnDedupe can
+// rewrite a standing row in place while keeping its id and read state, so an
+// id alone cannot say WHICH text an admin saw. The bell list returns this as
+// `version`; a Done click sends it back and markAdminDone only marks the row
+// done while the content is still that version. The ONE definition: every
+// reader and the fence must agree on it. No `updated_at` column exists.
+// A JSON array, not a joined string: field boundaries and NULL-vs-empty stay
+// distinct, so two different contents never share a version.
+const NOTIFICATION_VERSION_SQL = "md5(jsonb_build_array(title, body, link, detail, metadata)::text)";
+
+// The done state (docs/admin-notifications.md section 4.3, owner ruling
+// 2026-09-30): read is not done. A done admin row leaves the bell whether a
+// person marked it or the condition it was about cleared. done_by names who
+// (an admin user id, 'claude', or a system component); resolution is one
+// plain line of what fixed it. markAdminDone is the one id-addressed writer;
+// the emitters that close a row inside their own fenced UPDATE spread
+// doneColumns into it instead. An auto-close selects rows by the condition it
+// judged and `done_at IS NULL`, never by read state (a row someone opened is
+// still open work), and passes keepExisting: done_at, resolution and read_at
+// are then COALESCEd, so a person's own read and done time stand; done_by
+// names the latest closer (see doneColumns).
+const MAX_RESOLUTION_CHARS = 200;
+const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
+
+// A PERSON closed the row: done_by is a technician/admin id (a uuid; plain
+// digits too, for legacy ids) or 'claude' (an agent acting for a person).
+// Anything else is a system component ('episodes', 'relevance', 'ops-crons',
+// 'supersede', 'dispatch', 'backfill', ...). Only a person's Done can be put
+// back: a system close leaves state behind that a reopen cannot restore (an
+// ops digest keeps metadata.resolved, its dedupeKey is dropped, ...).
+const PERSON_DONE_BY_SQL = "(done_by ~ '^[0-9]+$' OR done_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' OR done_by = 'claude')";
+
+function cleanResolution(text) {
+  const plain = String(stripEmoji(text) || '').replace(/\s+/g, ' ').trim();
+  return plain ? truncateAtWord(plain, MAX_RESOLUTION_CHARS) : null;
+}
+
+function doneColumns({ by, resolution = null, at = new Date(), keepExisting = false, conn = db }) {
+  const columns = { done_at: at, done_by: String(by).slice(0, 64), resolution: cleanResolution(resolution) };
+  if (!keepExisting) return columns;
+  return {
+    done_at: conn.raw('COALESCE(done_at, ?::timestamptz)', [columns.done_at]),
+    // done_by is the LATEST closer, not COALESCEd: a system close of a row a
+    // person already marked done now owns it (the condition really cleared,
+    // and its state — a resolved digest, a dropped dedupeKey — is not what a
+    // reopen could restore), so PERSON_DONE_BY_SQL refuses its reopen. The
+    // first done_at, the person's resolution and their read still stand.
+    done_by: columns.done_by,
+    resolution: conn.raw('COALESCE(resolution, ?)', [columns.resolution]),
+    read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [columns.done_at]),
+  };
+}
+
+// The JS twin of PERSON_DONE_BY_SQL, for a `by` the caller already holds.
+const UUID_DONE_BY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isPersonDoneBy(by) {
+  const text = String(by ?? '');
+  return /^[0-9]+$/.test(text) || UUID_DONE_BY_RE.test(text) || text === 'claude';
+}
+
+// The ONE row selection every SYSTEM closer uses for its closing UPDATE (a
+// closer that spreads doneColumns with keepExisting). doneColumns makes the
+// latest closer the owner, so a system close of a row a PERSON already marked
+// Done must be able to reach that row: otherwise the person's done_by survives
+// and their stale Reopen brings an obsolete alert back. Selects rows that are
+// not done, OR done by a person (the system takes ownership exactly once: a
+// row any system component already closed is left alone, so a sweep never
+// rewrites history on each run). done_by NULL on a done row is treated as
+// not-a-person (COALESCE), so it is left alone too. A closer that is itself
+// a person's action (`by` a person: markAdminDone) keeps the plain
+// done_at IS NULL, so a second Done writes nothing. Not for PROBES that ask
+// "is there still an open bell the office could act on": those stay
+// whereNull('done_at'). Columns are unqualified, like doneColumns' own.
+function openToCloser(query, by) {
+  if (isPersonDoneBy(by)) return query.whereNull('done_at');
+  return query.where((q) => q.whereNull('done_at').orWhereRaw(`COALESCE(${PERSON_DONE_BY_SQL}, false)`));
+}
+
 // `scheduledServiceId` (app property scope, PR 3): the five appointment keys
 // follow the visit's NON-primary saved property (enforced under
 // GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unknown = not sent.
@@ -89,13 +190,233 @@ async function existingCustomerNotification(customerId, dedupeKey, connection = 
 // sweep. Customer-facing notifications are untouched.
 const { stripEmoji } = require('../utils/strip-emoji');
 
+// Admin brevity guard (owner rulings 2026-09-28 and 2026-09-30): an admin
+// BODY over this length is cut to one sentence rather than left to run on for
+// a screen-length jargon dump — MAX_ADMIN_BODY_CHARS matches the scope doc's
+// "one sentence, 110 characters or less" rule — and the full original moves to
+// `detail`, so no text is lost. Live for EVERY admin category unless
+// ADMIN_BODY_GUARD_ALL is killed (feature-gates.js adminBodyGuardAllLive);
+// killed, only `ops_digest` (DIGEST_CATEGORY below) is cut and every other
+// category is stored byte-for-byte and merely LOGGED when its body runs long.
+// `detail` is read back in two places: the bell's "Show full text" on any
+// non-digest row (client NotificationBell.jsx; the bell list endpoint returns
+// the whole row) and the Agents → Activity feed for `ops_digest` rows
+// (services/agent-activity.js). The TITLE is never cut for ANY category (see
+// MAX_ADMIN_TITLE_CHARS) — several senders dedupe/refresh by an exact title
+// lookup against the stored row (google-business.js's "Review sync health
+// escalation [...]" signature marker and its per-location review-request
+// title, voice-agent/relay-alert.js); a title this guard silently shortened
+// would never match that probe again and the alert would re-ring on every run.
+// ops-digest.js composes its OWN ≤60-char headline before this guard ever
+// sees it, so that path is unaffected either way.
+const DIGEST_CATEGORY = 'ops_digest'; // written by services/ops-digest.js and routes/ops-digest-ingest.js
+const MAX_ADMIN_TITLE_CHARS = 80; // logged when exceeded; never enforced by cutting
+const MAX_ADMIN_BODY_CHARS = 110; // enforced (cut into detail) for every admin category; ops_digest only when ADMIN_BODY_GUARD_ALL is killed
+
+// Cuts `text` to at most `max` chars, breaking on the last word boundary
+// inside the budget and appending an ellipsis — never mid-word, never over
+// `max`. A string with no space inside the budget just hard-cuts (still
+// never exceeds `max`).
+function truncateAtWord(text, max) {
+  const s = String(text || '');
+  if (s.length <= max) return s;
+  const ellipsis = '…';
+  const budget = Math.max(max - ellipsis.length, 0);
+  let cut = s.slice(0, budget);
+  const lastSpace = cut.lastIndexOf(' ');
+  if (lastSpace > 0) cut = cut.slice(0, lastSpace);
+  return `${cut.trimEnd()}${ellipsis}`;
+}
+
+// ADMIN_BODY_GUARD_ALL through its canonical reader, asked at call time. A
+// reader that is missing or throws reads as LIVE: create() swallows its own
+// errors and returns null, so a failed gate read here would silently drop the
+// alert it was only meant to shorten.
+function bodyGuardAllLive() {
+  try {
+    const reader = require('../config/feature-gates').adminBodyGuardAllLive;
+    return typeof reader === 'function' ? reader() !== false : true;
+  } catch {
+    return true;
+  }
+}
+
+// A multi-line list body ("Follow-ups overdue:\n• item\n• item") cuts at its
+// first line break when that first line alone leaves room for the ellipsis;
+// anything else (one long line) is a plain word-boundary cut.
+function cutAdminBody(body) {
+  const trimmed = body.trim();
+  const firstLine = trimmed.split(/\r?\n/)[0].trim();
+  if (firstLine.length < MAX_ADMIN_BODY_CHARS && firstLine.length < trimmed.length) {
+    return `${firstLine.replace(/[\s:;,]+$/, '')}…`;
+  }
+  return truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
+}
+
+// Admin-only: cuts an over-length BODY (see the block above for which
+// categories) and moves the full original into `detail`. A caller-supplied
+// detail is kept ALONGSIDE the full body (full body first), unless it already
+// contains it verbatim. The TITLE is never cut for any category (see
+// MAX_ADMIN_TITLE_CHARS above) — only logged, so an offender can be found
+// without breaking a sender's own exact-title dedupe/refresh probe. Never logs
+// title/body text — they carry customer names — only the category.
+function applyAdminBrevityGuard({ category, title, body, detail }) {
+  let nextBody = body;
+  let nextDetail = detail || null;
+  let trimmed = false;
+  if (typeof title === 'string' && title.length > MAX_ADMIN_TITLE_CHARS) {
+    logger.info(`[notifications] admin title over ${MAX_ADMIN_TITLE_CHARS} chars (${category || 'notification'})`);
+  }
+  if (typeof body === 'string' && body.length > MAX_ADMIN_BODY_CHARS) {
+    const allLive = bodyGuardAllLive();
+    if (category === DIGEST_CATEGORY || allLive) {
+      nextBody = allLive ? cutAdminBody(body) : truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
+      nextDetail = nextDetail && nextDetail.includes(body)
+        ? nextDetail
+        : [body, nextDetail].filter(Boolean).join('\n\n');
+      trimmed = true;
+    } else {
+      logger.info(`[notifications] admin body over ${MAX_ADMIN_BODY_CHARS} chars (${category || 'notification'})`);
+    }
+  }
+  if (trimmed) logger.info(`[notifications] brevity guard trimmed admin ${category || 'notification'}`);
+  return { title, body: nextBody, detail: nextDetail };
+}
+
+// Emoji-strip THEN brevity-cut, admin rows only — one function so create()
+// and notifyAdmin's refresh comparison (which must judge "did the content
+// change?" on the SAME normalized text) never drift apart.
+function normalizeAdminNotificationText({ category, title, body, detail }) {
+  const strippedTitle = stripEmoji(title) || title;
+  const strippedBody = stripEmoji(body) || null;
+  // `detail` is admin notification text too — the bell and the Activity feed
+  // render it — so the no-emoji rule covers it like title/body (codex r2 P2
+  // on #5236).
+  const strippedDetail = stripEmoji(detail) || null;
+  return applyAdminBrevityGuard({ category, title: strippedTitle, body: strippedBody, detail: strippedDetail });
+}
+
+// Bell-routing stamps an ops digest carries in metadata (ops-digest.js
+// digestRowFields); a change to any of them is a real refresh.
+const ROUTING_METADATA_KEYS = ['kind', 'audience', 'feed'];
+// Ring-only-on-change stamps (admin-alerts-ring-v2 follow-up): a refresh
+// confined to THESE fields — count/newCount growing, or itemKeys naming a
+// different item — must still trigger the refresh and its ringOnRefresh
+// evaluation, or a swapped item behind unchanged title/body/link never
+// re-bells. Deliberately NOT folded into ROUTING_METADATA_KEYS: that list
+// feeds the audience-flip check in mergeRefreshMetadata below, which has
+// nothing to do with these.
+const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys', 'itemSetHash'];
+
+// Did this emission change anything a standing keyed row shows, routes by,
+// or rings on?
+function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged }) {
+  return versionChanged || existing.title !== nextTitle || existing.body !== nextBody
+    || existing.link !== nextLink || detailChanged || routingChanged || ringMetadataChanged;
+}
+
+// notifyAdmin's refreshOnDedupe branch (admin-alerts-ring scope 2026-09-28):
+// omitted `ringOnRefresh` defaults to true — byte-identical to the
+// pre-existing "any content change re-bells" behavior.
+async function resolveRingOnRefresh(ringOnRefresh, existing, existingMeta) {
+  return typeof ringOnRefresh === 'function' ? ringOnRefresh(existing, existingMeta) : true;
+}
+
+// Not ringing: keep the row's current bell visibility — `feed`/`quiet` are
+// dropped from this refresh's own metadata so existingMeta's values stand,
+// while every other field still merges normally. EXCEPT an audience flip
+// (owner<->engineering, codex r3 follow-up): that changes which surface the
+// row belongs to at all, not merely whether it rings, so its `feed` (and
+// whatever `quiet` this emission carries alongside it) always applies even
+// on a quiet refresh — a FIX->ACT flip must never leave the owner's action
+// hidden behind a stale feed:'activity'.
+//
+// Ringing: this refresh clears read_at, so it must also be visible — AND
+// its own last-ring stamp advances (`rungAt`, admin-alerts-ring-v2
+// follow-up: findPriorRungRow's 7-day baseline is measured from the last
+// ring, not this row's original created_at). Two corrections on top of the
+// straight `{...existingMeta, ...metadata}` merge, chosen by the MERGED
+// audience (never a cached one — an audience flip lands in `metadata` above
+// this call):
+//   - owner, or no audience at all (the plain refreshOnDedupe shape most
+//     callers outside ops-digest.js use, which never sets `audience`), and
+//     the merged object still says quiet:true: a caller that precomputed
+//     quiet from a different baseline (the ingest route's 7-day lookback
+//     can find this very row) would otherwise ring a row hidden behind
+//     feed:'activity' — clear both to restore the owner bell feed.
+//     Already-false quiet is left alone (nothing to correct).
+//   - a DEFINED non-owner audience (engineering/fyi): `quiet` never applies
+//     to these rows at all — drop it outright rather than carry over a
+//     stale `true` this row inherited from when it was still an owner row
+//     (a FIX<->ACT flip under the SAME dedupeKey, gbp-sync-health). `feed`
+//     is left exactly as this emission composed it ('activity', its own
+//     value) — never forced.
+function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
+  if (shouldRing) {
+    const merged = { ...existingMeta, ...metadata, rungAt: new Date().toISOString() };
+    // A DEFINED non-owner audience only — a caller outside ops-digest.js
+    // (most refreshOnDedupe dedupe rows) never sets `audience` at all, and
+    // that absence must keep today's plain behavior, not read as "not
+    // owner" and strip a `quiet` key those rows never gave meaning to.
+    if (merged.audience && merged.audience !== 'owner') {
+      const { quiet: _quiet, ...rest } = merged;
+      return rest;
+    }
+    return merged.quiet === true ? { ...merged, quiet: false, feed: null } : merged;
+  }
+  // rungAt is a RING stamp — a caller may carry a precomputed value (the
+  // ingest route's own fresh-insert metadata also feeds this merge on a
+  // refresh), but only the shouldRing branch above may ever advance it.
+  const { rungAt: _incomingRungAt, ...metadataNoRungAt } = metadata;
+  const audienceFlipped = Object.prototype.hasOwnProperty.call(metadataNoRungAt, 'audience')
+    && (existingMeta.audience ?? null) !== (metadataNoRungAt.audience ?? null);
+  if (audienceFlipped) return { ...existingMeta, ...metadataNoRungAt };
+  const { feed: _feed, quiet: _quiet, ...rest } = metadataNoRungAt;
+  return { ...existingMeta, ...rest };
+}
+
+// notifyAdmin's no-dedupeKey path (admin-alerts-ring scope 2026-09-28):
+// plain create(), unless the caller supplied `ringGate` — see notifyAdmin's
+// own doc comment for the full contract. Pulled out of notifyAdmin to keep
+// its own complexity down; `service` is `this` from the caller.
+function createPlainAdmin(service, { category, title, body, createOpts, ringGate, callerTrx }) {
+  if (typeof ringGate !== 'function') {
+    return service.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
+  }
+  const gated = async (conn) => {
+    const ring = await ringGate(conn);
+    // A ring stamps its own rungAt (admin-alerts-ring-v2 follow-up):
+    // findPriorRungRow's 7-day baseline reads this, not created_at, so a
+    // later refresh of a DIFFERENT row can find this one as "the prior
+    // ring" for its own window.
+    const meta = ring
+      ? { ...(createOpts.metadata || {}), rungAt: new Date().toISOString() }
+      : { ...(createOpts.metadata || {}), quiet: true, feed: 'activity' };
+    return service.create({ recipientType: 'admin', category, title, body, ...createOpts, metadata: meta, connection: conn });
+  };
+  return callerTrx ? gated(callerTrx) : db.transaction(gated);
+}
+
 const NotificationService = {
   scopeAdminFeedToRole,
+  // The admin row text exactly as create() would persist it (emoji-stripped,
+  // brevity-cut) — for a caller that rewrites a standing row
+  // directly instead of through notifyAdmin (google-business.js's
+  // same-signature digest refresh), so its stored text can't drift.
+  normalizeAdminText: normalizeAdminNotificationText,
+  // The `body` + `detail` columns for a direct rewrite of a standing admin row
+  // (setup-fee reconcile, manual-billing alert refresh): the one-sentence body
+  // and the full text, so the row's "Show full text" never keeps an obsolete
+  // instruction. `detail` is null when the body fits — the rewrite clears it.
+  adminBodyColumns(category, body) {
+    const { body: nextBody, detail } = normalizeAdminNotificationText({ category, title: '', body });
+    return { body: nextBody, detail };
+  },
   // Create a notification.
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
   // It only has effect while GATE_ADMIN_BELL_POLICY is on.
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, shouldContinue, connection = db }) {
+  async create({ recipientType, recipientId, category, title, body, detail, icon, link, metadata, bell, bellDefault, shouldContinue, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -144,16 +465,22 @@ const NotificationService = {
         } catch (err) {
           // Policy failure must never break notifications — fall through
           // and insert (fail-open matches gate-off behavior).
-          logger.warn(`[notifications] bell policy check failed: ${err.message}`);
+          logger.warn(`[notifications] bell policy check failed: ${safeErrorSummary(err)}`);
         }
       }
       // A title that was ONLY emoji falls back to the original rather than
       // inserting an empty string.
       const isAdmin = recipientType === 'admin';
+      // Admin brevity guard (owner ruling 2026-09-28): word-boundary cut
+      // title/body, full body (+ caller detail) preserved in `detail`.
+      // Customer-facing rows are untouched — no cut, no detail column use.
+      const normalized = isAdmin
+        ? normalizeAdminNotificationText({ category, title, body, detail })
+        : { title, body: body || null, detail: detail || null };
       // The bell exposes the same copy as native push. Recheck after any
       // preference/property lookup and dedupe lock, before persisting it.
       if (typeof shouldContinue === 'function') {
-        const verdict = await shouldContinue();
+        const verdict = await shouldContinue({ database: connection });
         const allowed = verdict === true || verdict?.ok === true;
         const hasDeadline = verdict && Object.prototype.hasOwnProperty.call(verdict, 'validUntil');
         const deadlineValid = !hasDeadline || (Number.isFinite(verdict.validUntil) && Date.now() < verdict.validUntil);
@@ -166,15 +493,18 @@ const NotificationService = {
         recipient_type: recipientType,
         recipient_id: recipientId || null,
         category,
-        title: isAdmin ? (stripEmoji(title) || title) : title,
-        body: (isAdmin ? stripEmoji(body) : body) || null,
+        title: normalized.title,
+        body: normalized.body,
+        // Only rows that carry a detail write the column: customer rows and
+        // short admin rows insert exactly the columns they did before it.
+        ...(normalized.detail ? { detail: normalized.detail } : {}),
         icon: icon || getCategoryIcon(category),
         link: link || null,
         metadata: metadata ? JSON.stringify(metadata) : null,
       }).returning('*');
       return notif;
     } catch (err) {
-      logger.error(`[notifications] Create failed: ${err.message}`);
+      logger.error(`[notifications] Create failed: ${safeErrorSummary(err)}`);
       return null;
     }
   },
@@ -199,16 +529,35 @@ const NotificationService = {
     // so a recurring signal (an estimate re-opened again tomorrow) can ring
     // again once the window passes while two opens inside it contend on the
     // same stable lock. One mechanism for every admin emitter (rule 15).
-    // trx (optional, with dedupeKey): run the lock + probe + insert on the
-    // CALLER's open transaction instead of one of our own, so a caller that
-    // retires earlier rows and raises the replacement commits both together
-    // (termite station retrieval: staff must never see the old instruction
-    // unread beside the new one). Errors then PROPAGATE — swallowing one
-    // inside a caller's transaction would leave it aborted and doom the
-    // commit — so the caller owns containment.
-    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    // trx (optional, with dedupeKey OR ringGate): run the lock + probe +
+    // insert on the CALLER's open transaction instead of one of our own, so
+    // a caller that retires earlier rows and raises the replacement commits
+    // both together (termite station retrieval: staff must never see the
+    // old instruction unread beside the new one). Errors then PROPAGATE —
+    // swallowing one inside a caller's transaction would leave it aborted
+    // and doom the commit — so the caller owns containment.
+    // ringOnRefresh (optional, with refreshOnDedupe; admin-alerts-ring scope
+    // 2026-09-28): `(existingRow, existingMeta) => boolean` — when the
+    // standing row's content changed, this decides whether the refresh also
+    // re-bells it (read_at cleared) or only updates its content quietly
+    // (read_at left as-is). Omitted, it defaults to true everywhere —
+    // BYTE-IDENTICAL to today's "any content change re-bells" behavior. When
+    // it returns false, the metadata merge below also drops `feed`/`quiet`
+    // from the caller's own metadata so an already-rung-or-quiet row keeps
+    // its current bell visibility — only a ringing refresh may flip it.
+    // ringGate (optional; admin-alerts-ring scope 2026-09-28):
+    // `(conn) => Promise<boolean>` — for a FRESH insert (a plain row, or a
+    // keyed row whose dedupeKey found no standing row), decides whether
+    // THIS insert rings: false rewrites the caller's own
+    // `quiet`/`feed` to `true`/`'activity'` (only those two keys — every
+    // other field the caller composed stands); true leaves the caller's
+    // metadata untouched (its own default already assumes it rings). Runs
+    // inside the SAME transaction as the insert (the caller's own `trx`
+    // when given, else one this call opens) so the lookup a gate performs
+    // and the row it gates can never observe each other's in-between state.
+    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
-      return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
+      return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
     const windowMs = Number(dedupeWindowMs);
     const metadata = { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) };
@@ -220,12 +569,19 @@ const NotificationService = {
         if (Number.isFinite(windowMs) && windowMs > 0) {
           existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
         }
-        const existing = await existingQuery.first();
+        // Newest row first: a key with a rolling window (or a duplicate left by
+        // an old race) can hold several rows, and the LATEST is the standing
+        // one — never an arbitrary older row.
+        const existing = await existingQuery.orderBy('created_at', 'desc').first();
         if (existing) {
-          // Compared and stored in create()'s admin form (emoji-stripped),
-          // or an emoji title would read as "changed" on every emission.
-          const nextTitle = stripEmoji(title) || title;
-          const nextBody = stripEmoji(body) || null;
+          // Compared and stored in create()'s admin form (emoji-stripped +
+          // brevity-cut), or a difference the guard itself introduces (an
+          // emoji title, an over-length body) would read as "changed" on
+          // every emission and re-bell for no real reason.
+          const normalized = normalizeAdminNotificationText({ category, title, body, detail: createOpts.detail });
+          const nextTitle = normalized.title;
+          const nextBody = normalized.body;
+          const nextDetail = normalized.detail;
           const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
           const existingMeta = typeof existing.metadata === 'string'
             ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
@@ -233,16 +589,48 @@ const NotificationService = {
           // A same-count backlog can contain new deadlines or reopened work.
           // Its optional version refreshes the one standing bell as well.
           const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
-          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
-            const refreshed = { title: nextTitle, body: nextBody, link: nextLink,
-              metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
+          // A standing row stored BEFORE the guard cut this category holds the
+          // whole text in `body` and no `detail`. The same text arriving again
+          // is not news: without this, every such row would re-ring once on
+          // the first emission after the guard went live.
+          const storedUncut = !existing.detail && Boolean(nextDetail) && existing.body === nextDetail;
+          // The mirror, after ADMIN_BODY_GUARD_ALL is killed: a row stored cut
+          // (full text in `detail`) and the same whole text arriving uncut.
+          // Only when the caller supplied no detail of its own, so the stored
+          // detail can only be the guard's copy of that body.
+          const storedCut = !createOpts.detail && Boolean(existing.detail) && !nextDetail && existing.detail === nextBody;
+          const sameText = storedUncut || storedCut;
+          const detailChanged = !sameText && (existing.detail || null) !== (nextDetail || null);
+          // Routing metadata is content too: a FIX -> ACT flip with identical
+          // text must still merge the new feed/kind/audience, or the owner's
+          // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
+          // #5236). Only keys this emission actually carries are compared.
+          const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
+            && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
+          // Ring-only-on-change stamps are content too (admin-alerts-ring-v2
+          // follow-up): count/newCount growing, or itemKeys naming a
+          // different item, must trigger the refresh (and ringOnRefresh's
+          // evaluation) even when title/body/link/routing are unchanged.
+          // Compared by JSON so an itemKeys array compares by value.
+          const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
+            && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(metadata[k] ?? null));
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
+            // A row that newly enters the owner audience (engineering/fyi ->
+            // owner) is news to the owner even at an equal count: it may
+            // have been read in Activity, so it must ring into the bell.
+            const enteredOwner = metadata.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
+            const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
+            const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
+            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
+              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
-            return { notification: { ...existing, ...refreshed, metadata: { ...existingMeta, ...metadata } }, deduped: true, refreshed: true };
+            return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
           return { notification: existing, deduped: true };
         }
-        const created = await this.create({
-          recipientType: 'admin', category, title, body, ...createOpts, metadata, connection: trx,
+        // A fresh keyed insert takes the same ring gate as a plain one.
+        const created = await createPlainAdmin(this, {
+          category, title, body, createOpts: { ...createOpts, metadata }, ringGate, callerTrx: trx,
         });
         // create() returns null on an insert failure (PR #3496 review P1):
         // spreading that null would report {deduped:false} as if a row
@@ -251,7 +639,7 @@ const NotificationService = {
         if (!created) throw new Error('admin notification insert failed');
         return { notification: created, deduped: false };
     };
-    const shape = (persisted) => ({ ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) });
+    const shape = (persisted) => ({ ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true, rung: persisted.rung } : {}) });
     if (callerTrx) return shape(await dedupeAndInsert(callerTrx));
     try {
       let callbackStamp;
@@ -292,7 +680,7 @@ const NotificationService = {
       if (receipt) relayFailureCall.onCommitted?.(receipt);
       return shape(persisted);
     } catch (err) {
-      logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
+      logger.warn(`[notifications] Admin notification dedupe failed: ${safeErrorSummary(err)}`);
       return null;
     }
   },
@@ -337,10 +725,7 @@ const NotificationService = {
     // byte for byte. No visit, no house: untouched.
     const PushService = require('./push-notifications');
     const scopeOn = require('./account-properties').appPropertyScopeEnabled();
-    const metadataRaw = createOptsRaw.metadata || {};
-    const visitId = scopeOn
-      ? (createOptsRaw.appointmentId || metadataRaw.appointmentId || metadataRaw.scheduledServiceId || null)
-      : null;
+    const visitId = scopeOn ? preferenceVisitId : null;
     // Nothing to resolve for a notification about no visit and no house (a
     // receipt, a document): no lookup at all.
     const notifiedPropertyId = scopeOn && (visitId || createOptsRaw.propertyId)
@@ -389,7 +774,7 @@ const NotificationService = {
       } catch (err) {
         // A failed lock/read cannot safely prove this event is new. Fail closed
         // instead of risking a duplicate bell + native push.
-        logger.warn(`[notifications] Customer notification dedupe failed: ${err.message}`);
+        logger.warn(`[notifications] Customer notification dedupe failed: ${safeErrorSummary(err)}`);
         return null;
       }
     } else {
@@ -398,6 +783,15 @@ const NotificationService = {
     if (!notification || notification.suppressed) return notification;
 
     if (!push || (deduped && !awaitPush)) return { ...notification, deduped, push: null };
+    // An event key identifies the committed bell's copy. In particular, a
+    // retry after a lost commit acknowledgement must not send a new quote
+    // natively while reusing the earlier bell or its provider acceptance.
+    if (deduped && ['category', 'title', 'body', 'link']
+      .some((field) => (notification[field] || null) !== (createArgs[field] || null))) {
+      return { ...notification, deduped, push: {
+        queued: false, accepted: 0, reason: 'dedupe_payload_changed',
+      } };
+    }
     let pushQueued = false;
     try {
       const dispatch = PushService.sendToCustomer(customerId, {
@@ -439,18 +833,63 @@ const NotificationService = {
       // Preserve the successful bell even if dispatch fails synchronously.
       logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
     }
-    return { ...notification, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
+    return { ...notification, deduped, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
   },
 
   // Get notifications for admin
-  async getAdminNotifications(limit = 50, offset = 0, { role } = {}) {
-    return scopeAdminFeedToRole(
-      db('notifications').where({ recipient_type: 'admin' }),
+  // before ({ at, id }): keyset cursor — rows strictly after it in feed
+  // order, plain created_at DESC, id DESC (indexable: notifications_admin_open_keyset_idx).
+  // The query also selects created_at_cursor (created_at::text, microseconds
+  // and offset included) so the route can build a cursor that never rounds
+  // away the sub-millisecond part: the ::timestamptz it round-trips through
+  // is exact, so rows sharing a millisecond are never skipped or repeated.
+  async getAdminNotifications(limit = 50, offset = 0, { role, before = null } = {}) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
+      role,
+    ));
+    if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
+    return query
+      .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'))
+      .orderByRaw('created_at DESC, id DESC')
+      .limit(limit).offset(offset);
+  },
+
+  // The current content version of one admin row (see NOTIFICATION_VERSION_SQL),
+  // or null when the row is gone. Done route: tells "changed under you" apart
+  // from "already done / not found" after a fenced markAdminDone matched nothing.
+  async getAdminNotificationState(id, { role } = {}) {
+    const row = await scopeAdminFeedToRole(
+      db('notifications').where({ id, recipient_type: 'admin' }),
+      role,
+    ).first('done_at', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`));
+    return row ? { done: row.done_at != null, version: row.version } : null;
+  },
+
+  // Recently done admin rows (the "Recently done" list, so an accidental Done
+  // can be reopened). Role-scoped like the bell list, but Activity-only rows
+  // are INCLUDED: Activity has its own Done and this is the one recovery
+  // path for an accidental one (a reopen puts it back pending in Activity).
+  // Newest done first,
+  // keyset-paged on (done_at, id) like the bell list, so every row in the
+  // window stays reachable however many closed after it. done_at_token is
+  // done_at::text at full precision: the cursor source, and the fence a
+  // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
+  async getAdminDoneNotifications({ role, limit = 20, days = 7, before = null } = {}) {
+    const query = scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
       role,
     )
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc')
-      .limit(limit).offset(offset);
+      .whereRaw("done_at >= now() - (? * interval '1 day')", [days]);
+    if (before) query.whereRaw('(done_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
+    return query
+      .select(
+        'id', 'title', 'body', 'link', 'category', 'done_at', 'done_by', 'resolution', 'created_at',
+        db.raw('done_at::text AS done_at_token'),
+        db.raw(`COALESCE(${PERSON_DONE_BY_SQL}, false) AS reopenable`),
+      )
+      .orderByRaw('done_at DESC, id DESC')
+      .limit(limit);
   },
 
   // Get unread count for admin
@@ -459,10 +898,10 @@ const NotificationService = {
   // advisory-lock transaction and must not borrow a second pool
   // connection while holding one.
   async getAdminUnreadCount({ role } = {}, trx = null) {
-    const [{ count }] = await scopeAdminFeedToRole(
-      (trx || db)('notifications').where({ recipient_type: 'admin' }),
+    const [{ count }] = await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+      (trx || db)('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
-    )
+    ))
       .whereNull('read_at')
       .count('* as count');
     return parseInt(count);
@@ -506,12 +945,60 @@ const NotificationService = {
     return updated > 0;
   },
 
+  // Mark admin rows done: the ONE id-addressed done writer (see doneColumns).
+  // Admin rows only, only those not already done, under the same role scope
+  // as mark-read. read_at is stamped too so every reader keyed on it agrees.
+  // `by`: an admin user id, 'claude', or a system component. Returns the
+  // number of rows marked.
+  // expectedVersion (single id only): the content version the caller saw
+  // (NOTIFICATION_VERSION_SQL). The row is marked only while it still has that
+  // version, so a refresh that rewrote the row since cannot be marked done
+  // unseen. Callers without it (Claude, system) mark whatever is standing.
+  async markAdminDone(ids, { by, resolution = null, role, expectedVersion = null } = {}, connection = db) {
+    const list = [...new Set([].concat(ids ?? []).filter(Boolean).map(String))];
+    if (!list.length || !by) return 0;
+    if (expectedVersion != null && list.length !== 1) return 0;
+    let query = scopeAdminFeedToRole(
+      connection('notifications').whereIn('id', list).where({ recipient_type: 'admin' }).whereNull('done_at'),
+      role,
+    );
+    if (expectedVersion != null) query = query.whereRaw(`${NOTIFICATION_VERSION_SQL} = ?`, [String(expectedVersion)]);
+    const updated = await query.update(doneColumns({ by, resolution, keepExisting: true, conn: connection }));
+    if (updated) logger.info(`[notifications] marked ${updated} admin notification(s) done`);
+    return updated;
+  },
+
+  // Put a done admin row back in the bell (read_at is left as it is).
+  // expectedDoneAt (required): the done_at token the Recently-done list served
+  // (done_at::text, full precision). A stale list must not clear a NEWER
+  // completion of the same row, so the row is reopened only while its done_at
+  // still equals the token. Only a row a PERSON closed can be reopened
+  // (PERSON_DONE_BY_SQL). Returns 'reopened', 'changed' (still done, but not
+  // by the close the caller saw), 'not_reopenable' (a system close) or
+  // 'not_found' (missing, or not done any more).
+  async reopenAdminDone(notificationId, { expectedDoneAt } = {}, connection = db) {
+    if (expectedDoneAt == null || expectedDoneAt === '') return 'changed';
+    const updated = await connection('notifications')
+      .where({ id: notificationId, recipient_type: 'admin' })
+      .whereNotNull('done_at')
+      .whereRaw('done_at = ?::timestamptz', [String(expectedDoneAt)])
+      .whereRaw(PERSON_DONE_BY_SQL)
+      .update(DONE_CLEARED);
+    if (updated > 0) return 'reopened';
+    const row = await connection('notifications')
+      .where({ id: notificationId, recipient_type: 'admin' })
+      .first('done_at', connection.raw('done_at = ?::timestamptz AS fence_ok', [String(expectedDoneAt)]));
+    if (!row || row.done_at == null) return 'not_found';
+    if (!row.fence_ok) return 'changed';
+    return 'not_reopenable';
+  },
+
   // Mark all read for admin
   async markAllReadAdmin({ role } = {}) {
-    await scopeAdminFeedToRole(
+    await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }),
       role,
-    ).whereNull('read_at').update({ read_at: new Date() });
+    )).whereNull('read_at').update({ read_at: new Date() });
   },
 
   // Mark a customer's inbound_sms admin bells read — the ONE writer for
@@ -532,7 +1019,8 @@ const NotificationService = {
     )
       .whereNull('read_at')
       .where('created_at', '<=', before);
-    if (customerId) q = q.where('link', `/admin/communications?thread=${customerId}`);
+    // The thread link, bare or with the alerted message (&message=<sid>, sms_reply).
+    if (customerId) q = q.whereRaw("split_part(link, '&message=', 1) = ?", [`/admin/communications?thread=${customerId}`]);
     if (sids.length) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [sids]);
     return q.update({ read_at: new Date() });
   },
@@ -569,12 +1057,11 @@ const NotificationService = {
     if (!callLogId) return 0;
     // Both triggers share the category; the caller must name which event
     // became obsolete so voicemail and booking cannot retire each other's bell.
-    return db('notifications')
+    return openToCloser(db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
-      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey])
-      .whereNull('read_at')
+      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey]), 'supersede')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
-      .update({ read_at: new Date() });
+      .update(doneColumns({ by: 'supersede', resolution: 'Superseded by a newer event on the same call', keepExisting: true }));
   },
 
   // Mark all read for customer
@@ -591,13 +1078,28 @@ function getCategoryIcon(category) {
     knowledge: '\u{1F4DA}',
     service: '\u{1F3E0}', appointment: '\u{1F4C5}', billing: '\u{1F4B3}', document: '\u{1F4C4}',
     lawn_health: '\u{1F331}', referral: '\u{1F381}', account: '\u{1F464}',
+    visit_prep_photos: '\u{1F4F7}',
   };
   return icons[category] || '\u{1F514}';
 }
 
 module.exports = NotificationService;
+module.exports.safeErrorSummary = safeErrorSummary;
 module.exports._private = {
   CUSTOMER_PREFERENCE_KEYS,
   customerPreferenceEnabled,
   existingCustomerNotification,
+  truncateAtWord,
+  applyAdminBrevityGuard,
+  normalizeAdminNotificationText,
+  excludeActivityOnlyFromBell,
+  NOTIFICATION_VERSION_SQL,
+  doneColumns,
+  openToCloser,
+  isPersonDoneBy,
+  PERSON_DONE_BY_SQL,
+  DONE_CLEARED,
+  MAX_ADMIN_TITLE_CHARS,
+  MAX_ADMIN_BODY_CHARS,
+  DIGEST_CATEGORY,
 };

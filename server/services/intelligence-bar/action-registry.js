@@ -6,7 +6,10 @@
 const Ajv = require('ajv');
 const addFormats = require('ajv-formats');
 const policy = require('./action-policy.json');
-const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('./write-gates');
+const {
+  UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
+  FULL_ACCESS_TWO_STEP_TOOL_NAMES,
+} = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
@@ -19,6 +22,7 @@ const MODULES = [
   ['tools', 'TOOLS', 'executeTool'],
   ['schedule-tools', 'SCHEDULE_TOOLS', 'executeScheduleTool'],
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
+  ['closeout-repair-tools', 'CLOSEOUT_REPAIR_TOOLS', 'executeCloseoutRepairTool'],
   ['dashboard-tools', 'DASHBOARD_TOOLS', 'executeDashboardTool'],
   ['seo-tools', 'SEO_TOOLS', 'executeSeoTool'],
   ['procurement-tools', 'PROCUREMENT_TOOLS', 'executeProcurementTool'],
@@ -54,6 +58,8 @@ const MODULES = [
   ['managed-agents-ops-tools', 'MANAGED_AGENTS_OPS_TOOLS', 'executeManagedAgentsOpsTool'],
   ['job-health-tools', 'JOB_HEALTH_TOOLS', 'executeJobHealthTool'],
   ['call-research-tools', 'CALL_RESEARCH_TOOLS', 'executeCallResearchTool'],
+  ['gap-report-tools', 'GAP_REPORT_TOOLS', 'executeGapReportTool'],
+  ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });
@@ -106,7 +112,7 @@ const DISCOVERY_TOOL = {
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
 const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list'.split(' '));
 
-function allowed(action, { role, context } = {}) {
+function allowed(action, { role, context, fullAccess } = {}) {
   if (!action) return false;
   if (context === 'agent_estimate' && !AGENT_ESTIMATE_TOOL_NAMES.has(action.id)) return false;
   if (role !== 'admin') return role === 'technician' && action.role === 'technician_or_admin';
@@ -116,6 +122,13 @@ function allowed(action, { role, context } = {}) {
   // The dedicated lead-drafting rail has its own per-user gate and narrower
   // business contract. The global assistant uses the ordinary estimate path.
   if (action.id === 'create_agent_estimate_draft' && context !== 'agent_estimate') return false;
+  // Outside-service writes (IB scope expansion item 1, owner ruling
+  // 2026-09-28): full-access-only, unlike every other yellow-tier
+  // (WRITE_TWO_STEP) tool, which any admin gets. Mirrors the
+  // CONFIRMED_ENDPOINT red-tier restriction below execute()'s own explicit
+  // refusal, but these ARE structurally two-step (a card), so they need
+  // their own check here rather than the blanket approval-kind refusal.
+  if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.id) && fullAccess !== true) return false;
   return true;
 }
 
@@ -159,7 +172,7 @@ function discover(input, scope) {
 
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
-  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads']);
+  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads', 'list_gap_reports', 'needs_me']);
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
@@ -168,7 +181,12 @@ function initialTools(context, scope) {
 
 function execute(name, input, { role, context, techContext, actionContext = {} } = {}) {
   const action = actions.get(name);
-  if (!allowed(action, { role, context })) return Promise.resolve({ error: 'Capability is unavailable to this actor', code: 'permission_denied' });
+  // fullAccess travels on actionContext (set by the route from the
+  // authenticated request, never from model input) rather than as its own
+  // top-level param, so every existing caller of execute() stays unchanged.
+  if (!allowed(action, { role, context, fullAccess: actionContext.fullAccess === true })) {
+    return Promise.resolve({ error: 'Capability is unavailable to this actor', code: 'permission_denied' });
+  }
   if (role === 'technician' && (typeof techContext?.techId !== 'string' || !techContext.techId.trim())) {
     return Promise.resolve({ error: 'A verified technician identity is required', code: 'permission_denied' });
   }
@@ -178,7 +196,7 @@ function execute(name, input, { role, context, techContext, actionContext = {} }
   if (action.kind !== 'read' && actionContext.confirmed !== true && !WRITE_TWO_STEP_TOOL_NAMES.has(name)) {
     return Promise.resolve({ error: 'Explicit approval is required', code: 'approval_required' });
   }
-  const invalid = validateInput(name, input, { role, context });
+  const invalid = validateInput(name, input, { role, context, fullAccess: actionContext.fullAccess === true });
   if (invalid) return Promise.resolve(invalid);
   // Server pins travel separately from schema-validated model arguments.
   // No input.confirmed/confirm or model-supplied hidden field can approve a

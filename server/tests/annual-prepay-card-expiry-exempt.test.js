@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true }, isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true }, isEnabled: jest.fn(() => false), stampedZeroFreeLive: jest.fn(() => false) }));
 jest.mock('../services/setup-fee-obligation', () => ({ findUnmintedSetupFeeObligation: jest.fn(async () => ({ owed: false })) }));
 jest.mock('../services/estimate-card-holds', () => ({ isCardHoldEnabled: jest.fn(() => true) }));
 
@@ -52,7 +52,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], paymentPlans = [], completionAttempts = [], estimates = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], collectionFlags = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], paymentPlans = [], completionAttempts = [], estimates = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [], cardHolds: [] };
   // the payment-pending hold query (getPaymentPendingCustomerIds) is the
   // only annual_prepay_terms query that JOINs invoices — route it to its
@@ -73,6 +73,8 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'payment_methods') return chain(paymentMethods, []);
     if (table === 'appointment_card_requests') return chain(apptCardRequests, []);
     if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
+    // B10: collections_flags collection_hold (extended-lane preflight)
+    if (table === 'collections_flags') return chain(collectionFlags, []);
     if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
     // the cap verdict reads the linked estimate's frozen setup fee
     if (table === 'estimates') return chain(estimates, []);
@@ -417,6 +419,48 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
+  test('B10: an active collections dispute hold means the extended lane will not charge → stays exempt', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }],
+      collectionFlags: [{ id: 'f1', flag: 'collection_hold' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('B10 (codex #5394): the hold exemption is customer-level - per-application, pending-mint and estimate-card-hold charges are exempt too', async () => {
+    const holdFlag = [{ id: 'f1', flag: 'collection_hold' }];
+    const scenarios = [
+      // per-application (reused open invoice)
+      { visits: [baseVisit({ billing_mode: 'per_application', per_application_fee: '120.00' })], invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }] },
+      // pending-mint (no invoice yet)
+      { visits: [baseVisit({})], invoices: [] },
+      // estimate card hold rail
+      { visits: [baseVisit({ is_recurring: false, customer_autopay_paused_until: HORIZON })], invoices: [], cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00' }] },
+    ];
+    for (const sc of scenarios) {
+      // control: with no hold the warning stays
+      route({ terms: coveredAlways(['c-prepaid']), ...sc });
+      expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+      route({ terms: coveredAlways(['c-prepaid']), ...sc, collectionFlags: holdFlag });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    }
+  });
+
+  test('B10: a hold-lookup FAILURE never rejects the exemption pass - the warning stays (not exempt)', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }],
+      throwOn: 'collections_flags',
+    });
+    await expect(getCardExpiryExemptCustomerIds(HORIZON)).resolves.toBeDefined();
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // handled AT the hold check (per visit), not by the pass-wide catch
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('collection-hold lookup failed'));
+  });
+
   test("a dying or missing Auto Pay method never proves its own warning unnecessary — the visit stays chargeable", async () => {
     // eligibility is the enrollment flag + pause, NOT the candidate card's
     // chargeability: an expired card reading as "no chargeable method"
@@ -723,6 +767,43 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       terms: coveredAlways(['c-prepaid']),
       visits: [baseVisit({ source_estimate_id: 'est-1' })],
       invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent', { scheduled_service_id: 'v-sibling' })] : []),
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  // Owner ruling (round 13, codex pre-push P2): "propagate the new void
+  // hold to billing projections". findFirstApplicationInvoiceForEstimateService's
+  // own query excludes 'void' entirely, so a voided combined invoice with
+  // no live replacement reports the SAME `{invoice: null}` as "nothing was
+  // ever minted" — before this fix, that read as a genuine 'none' verdict
+  // and this projection kept the card-expiry warning alive for a charge
+  // completion's own REFUSE AFTER A VOID guard actually holds for manual
+  // review. Keyed on the VISIT's shape (unpriced, estimate-linked, not a
+  // callback), never the customer's current billing_mode — see the lane
+  // test below.
+  test('a voided combined invoice with no live replacement (per_application lane) holds the projection — stays exempt', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({
+        billing_mode: 'per_application', per_application_fee: '98.00', source_estimate_id: 'est-1', estimated_price: null,
+      })],
+      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('void')] : []),
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  // Codex r12 P2 (PR #5023): the hold must NOT depend on the customer's
+  // CURRENT lane. Completion's REFUSE AFTER A VOID park checks only the
+  // visit's shape, so a customer moved from per_application to another
+  // lane after the void is still parked at completion — this projection
+  // has to agree, or it keeps a card-expiry warning alive for a charge
+  // completion never makes. Same voided-sibling shape on baseVisit's own
+  // default (annual_prepay) lane → held → exempt.
+  test('a voided combined invoice holds the projection whatever lane the customer sits in today — stays exempt', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ source_estimate_id: 'est-1', estimated_price: null })],
+      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('void')] : []),
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });

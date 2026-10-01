@@ -18,6 +18,8 @@ jest.mock('../services/collections/contact-policy', () => ({
 }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })),
+  // A system retire closes the card done (read is not done).
+  _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
 }));
 // Messaging spies — the sweep must NEVER reach any of these.
 jest.mock('../services/messaging/send-customer-message', () => ({
@@ -240,7 +242,7 @@ describe('case + card creation', () => {
     expect(body).toContain('WPC-2026-1100');
     expect(body).toContain('21 days past due');
     expect(body).toContain('inbound_sms');
-    expect(body).toContain('Waves Pest Control');
+    expect(body).toContain("it's Waves");
     expect(body).toContain('open balance');
     expect(body).toContain('no call will be placed');
     // Language rules: never "collections"/"delinquent", no emojis.
@@ -357,11 +359,12 @@ describe('resilience', () => {
 });
 
 describe('script text', () => {
-  test('the predicted opening uses billing-follow-up language and the exact company name', () => {
+  test('the predicted opening uses billing-follow-up language and just "Waves" (owner ruling 2026-09-28)', () => {
     const script = ShadowSweep.predictedOpeningScript({
       firstName: 'Sandy', amountDollars: '128.00', invoiceTitle: 'Quarterly Pest Control',
     });
-    expect(script).toContain('Waves Pest Control');
+    expect(script).toContain("it's Waves");
+    expect(script).not.toMatch(/Waves Pest Control/);
     expect(script).toContain('billing follow-up');
     expect(script).toContain('open balance of $128.00');
     expect(script).not.toMatch(/collection|delinquen/i);
@@ -438,8 +441,8 @@ describe('retirement + tier rotation', () => {
     expect(selectChain.whereNotIn).toHaveBeenCalledWith('customer_id', []);
     expect(updateChain.update).toHaveBeenCalledWith(expect.objectContaining({ current_state: 'lapsed' }));
     // The proposal card retires WITH the case (codex r5) — via the bell's
-    // own read_at mechanism, never a delete.
-    expect(cardChain.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
+    // own done mechanism, never a delete.
+    expect(cardChain.update).toHaveBeenCalledWith(expect.objectContaining({ done_at: expect.anything(), done_by: 'collections' }));
   });
 
   test('gh-r11: a case promoted between the lapse select and the fenced update keeps its card', async () => {
@@ -620,7 +623,7 @@ describe('r6: evaluation errors preserve, duplicate live cases self-heal', () =>
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(healUpdate.whereIn).toHaveBeenCalledWith('id', ['case-old']);
     expect(healUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ current_state: 'lapsed' }));
-    expect(healCard.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
+    expect(healCard.update).toHaveBeenCalledWith(expect.objectContaining({ done_at: expect.anything(), done_by: 'collections' }));
     // The surviving case reads unchanged with a standing card ⇒ pure no-op.
     expect(result.cardsFiled).toBe(0);
   });
@@ -650,7 +653,7 @@ test('rotating the case version retires the previous version card', async () => 
   });
   const result = await ShadowSweep.runShadowSweep({ now: NOW });
   expect(retireOld.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust-1:1:14']);
-  expect(retireOld.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
+  expect(retireOld.update).toHaveBeenCalledWith(expect.objectContaining({ done_at: expect.anything(), done_by: 'collections' }));
   expect(result.cardsFiled).toBe(1);
 });
 
@@ -755,6 +758,6 @@ describe('gh-r10: post-file card recheck', () => {
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(result.cardsFiled).toBe(1);
     expect(retireChain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust-1:1:14']);
-    expect(retireChain.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
+    expect(retireChain.update).toHaveBeenCalledWith(expect.objectContaining({ done_at: expect.anything(), done_by: 'collections' }));
   });
 });

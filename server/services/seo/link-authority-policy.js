@@ -30,6 +30,7 @@
 const crypto = require('crypto');
 const {
   ATTEMPT_PROVIDERS, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES, ACQUISITION_TYPES, CURRENCIES, FEE_SCOPES,
+  AI_CITATION_SOURCE_DETAIL_PREFIX,
 } = require('./link-registry');
 const { URL_REQUIRED_ACQUISITION_TYPES, OUTREACH_LINK_TYPES, SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 
@@ -204,6 +205,76 @@ const LEVELS = Object.freeze({
   OWNER_HUMAN_STEP: 'OWNER_HUMAN_STEP', OWNER_INPUT_REQUIRED: 'OWNER_INPUT_REQUIRED', DENY: 'DENY', INVALID: 'INVALID',
 });
 
+// §6.3 owner ruling (2026-09-27): DISCOVERY NEVER GRANTS AUTHORITY. A domain
+// whose first-touch provenance (link-registry.js ensureDomain never rewrites
+// it) is `ai_citation` — it was found because an AI answer engine cited it,
+// nothing more — can never be decided AUTO_FREE / AUTO_ACCOUNT / AUTO_OUTREACH
+// / AUTO_PAID_WITHIN_POLICY. Every AUTO_* level downgrades to its OWNER_
+// equivalent below (2a/2b/2c all funnel through the shared `push` — this is
+// the ONE place that rule is enforced for the decision; link-execution-
+// authority.js's authorize() carries the same check as a second, independent
+// gate at the actual claim). A domain later ALSO touched by a real feeder
+// keeps its unrelated first-touch source (ensureDomain's contract) and is
+// unaffected — this only ever fires for a domain `ai_citation` itself
+// discovered.
+const AI_CITATION_SOURCE = 'ai_citation';
+const AUTO_TO_OWNER_ON_DISCOVERY = Object.freeze({
+  AUTO_FREE: 'OWNER_FREE', AUTO_ACCOUNT: 'OWNER_ACCOUNT', AUTO_OUTREACH: 'OWNER_OUTREACH', AUTO_PAID_WITHIN_POLICY: 'OWNER_PAYMENT',
+});
+// PRIMARY durable signal (Codex P1 2026-09-28, THIRD round — fixed
+// structurally, no further migration): `domain.source` is exactly what
+// 20260928060000_link_source_ai_citation_rollback_safety.js's down() relabels
+// to `legacy_unknown` on a rollback, so a guard keyed on it alone stops
+// protecting a domain the moment a rollback (and any later reapply) happens.
+// `domain.source_detail`, in contrast, is set ONCE at first touch
+// (ensureDomain — link-registry.js — writes it only on INSERT, never on a
+// later touch) and NOTHING in this codebase ever rewrites an existing
+// domain's source_detail: not that rollback migration (it only touches
+// `source`, confirmed by reading its down() — see 20260928080000's header),
+// not link-registry-enrich.js's weekly job (it only ever writes `enrichment`,
+// never `source_detail`). link-registry-ai-citation-ingest.js's
+// citationDetail() writes every ai_citation domain's first-touch
+// source_detail starting with this exact prefix
+// (`ai_citation:<category>[:<subtype>] <sample cited urls>`), so it is at
+// least as durable as `source` itself, and MORE durable across the one
+// scenario (a schema rollback) that can actually clear `source`. The prefix
+// itself lives in link-registry.js (imported above), where ensureDomain
+// refuses any ai_citation touch without it — intake() included.
+// The feeder's EARLIER label format (Codex P1 2026-09-28, round 7): the
+// first pushes of link-registry-ai-citation-ingest.js (373b021243 through
+// f0d12744f5) wrote every new domain's first-touch source_detail as
+// `ai_citation_feeder · <category> · <n>x · <platforms>[ · <question>][ ·
+// local][ · <subtype>]`, sliced to 120 chars — only ever listing/editorial,
+// the two categories it enqueued. ensureDomain never rewrites a first-touch
+// detail, so a domain created then keeps that label forever; it is
+// recognized here exactly (anchored, the literal U+00B7 separators, a
+// positive count) rather than backfilled. Frozen — the same pattern string
+// is copied into 20260928110000_link_source_ai_citation_restore.js, and
+// link-source-ai-citation-restore-migration.test.js pins the two equal.
+const LEGACY_AI_CITATION_SOURCE_DETAIL_RE = /^ai_citation_feeder · (listing|editorial) · [0-9]+x · /;
+// BELT-AND-BRACES: the `enrichment` marker key
+// 20260928080000_link_source_ai_citation_rollback_marker.js's down() stamps
+// before 20260928060000's down() relabels `source` away — kept as a second
+// independent signal (a compound edge case — a rollback followed by a
+// routine enrich run, which REPLACES `enrichment` wholesale, could in theory
+// still clear this one even though source_detail survives everything).
+const AI_CITATION_ENRICHMENT_MARKER = 'ai_citation_discovered';
+function parsedEnrichment(domain) {
+  const e = domain && domain.enrichment;
+  if (!e) return null;
+  if (typeof e === 'object') return e;
+  if (typeof e === 'string') { try { return JSON.parse(e); } catch { return null; } }
+  return null;
+}
+const isDiscoveryOnlyDomain = (domain) => {
+  if (!domain) return false;
+  if (domain.source === AI_CITATION_SOURCE) return true;
+  if (typeof domain.source_detail === 'string'
+    && (domain.source_detail.startsWith(AI_CITATION_SOURCE_DETAIL_PREFIX) || LEGACY_AI_CITATION_SOURCE_DETAIL_RE.test(domain.source_detail))) return true;
+  const enrichment = parsedEnrichment(domain);
+  return Boolean(enrichment && enrichment[AI_CITATION_ENRICHMENT_MARKER] === true);
+};
+
 const isLiteralBoolean = (v) => v === true || v === false;
 const validLegalTermsHash = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
 // §3.2 / §6.3: a resolvable recipient identity is a checkout origin, a
@@ -361,7 +432,17 @@ function decideAuthority({ path, domain, policy, score, d30Confidence = null, mo
   const waived = floors.length ? `floors waived (${waiver.id}): ${floors.join('; ')}` : null;
 
   const instances = [];
-  const push = (dimension, instance_kind, level, reason) => instances.push({ dimension, instance_kind, level, reason: waived ? `${reason} · ${waived}` : reason });
+  const discoveryOnly = isDiscoveryOnlyDomain(domain);
+  const push = (dimension, instance_kind, level, reason) => {
+    let lvl = level;
+    let rsn = reason;
+    // discovery-only downgrade — see AUTO_TO_OWNER_ON_DISCOVERY above
+    if (discoveryOnly && AUTO_TO_OWNER_ON_DISCOVERY[lvl]) {
+      lvl = AUTO_TO_OWNER_ON_DISCOVERY[lvl];
+      rsn = `${reason} · discovery-only (ai_citation): owner decision required`;
+    }
+    instances.push({ dimension, instance_kind, level: lvl, reason: waived ? `${rsn} · ${waived}` : rsn });
+  };
   const type = path.acquisition_type;
   const outreach = OUTREACH_ACQUISITION_TYPES.includes(type);
 
@@ -425,4 +506,5 @@ module.exports = {
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
   requiredInstances, submitFirst, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
   DIMENSION_INPUT_FIELDS, floorInputs, floorInputsHash, decisionInputs, decisionInputsHash,
+  AI_CITATION_SOURCE, AI_CITATION_SOURCE_DETAIL_PREFIX, LEGACY_AI_CITATION_SOURCE_DETAIL_RE, AI_CITATION_ENRICHMENT_MARKER, AUTO_TO_OWNER_ON_DISCOVERY, isDiscoveryOnlyDomain,
 };

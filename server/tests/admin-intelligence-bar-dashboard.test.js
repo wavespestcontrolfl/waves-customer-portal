@@ -53,8 +53,11 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const users = {
-      admin: { id: 'admin-1', role: 'admin' },
-      tech: { id: 'tech-1', role: 'technician' },
+      // Full IB access (owner ruling 2026-09-28) is keyed off this email —
+      // the default allow-list when IB_FULL_ACCESS_EMAILS is unset.
+      admin: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
+      otheradmin: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+      tech: { id: 'tech-1', role: 'technician', email: 'tech@wavespestcontrol.com' },
     };
     const user = users[token];
     if (!user) return res.status(401).json({ error: 'Admin authentication required' });
@@ -233,6 +236,25 @@ describe('dashboard intelligence-bar guard', () => {
           confirmed: true,
         }),
       );
+    });
+  });
+
+  test('a non-owner admin login is refused the confirmed SEO action (owner ruling 2026-09-28)', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer otheradmin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'run_seo_pipeline',
+          params: { domain: 'wavespestcontrol.com' },
+          confirmed: true,
+          idempotency_key: 'seo-pipeline-test-other',
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(403);
+      expect(body.error).toBe('This action is limited to the owner account.');
+      expect(mockExecuteSeoTool).not.toHaveBeenCalled();
     });
   });
 

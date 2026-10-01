@@ -1,0 +1,1657 @@
+[
+  {
+    "slug": "queen-palm",
+    "kind": "host_plant",
+    "common_name": "Queen Palm",
+    "aka": [],
+    "aliases": [
+      "queen palm",
+      "syagrus romanzoffiana"
+    ],
+    "scientific_name": "Syagrus romanzoffiana",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": null,
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Smooth gray trunk, sometimes with a slight bulge partway up, ringed with old leaf-scar marks",
+      "Long, gracefully arching feather fronds with dark green leaflets",
+      "Large hanging clusters of small round orange fruit, sometimes over a thousand per cluster",
+      "No true crownshaft \u2014 new fronds emerge without a smooth green tube at the top of the trunk"
+    ],
+    "look_alikes": [
+      {
+        "slug": "foxtail-palm",
+        "difference": "Queen palm leaflets droop in loose, irregular groups, no crownshaft; foxtail leaflets radiate stiffly all around the rib like a bottlebrush.",
+        "next_photo": "A wide shot of the whole crown showing frond shape, plus a close-up of the trunk top for a crownshaft.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "coconut-palm",
+        "difference": "Queen palm has small round orange fruit in huge clusters and a slender trunk; coconut palm has large coconuts and a thicker, often curved trunk.",
+        "next_photo": "A close-up of the fruit size and color, plus a wide shot of the trunk shape.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fast-growing, widely planted landscape palm known for its graceful arching fronds. It's prone to several nutrient deficiencies, especially on Southwest Florida's alkaline soils, and a technician can tell a nutrition issue apart from a more serious trunk disease by which fronds are affected and how.",
+      "fact": "A single queen palm fruit cluster can carry more than a thousand seeds, which is why the fruit drop under one can be a real cleanup job.",
+      "blurb": "A fast-growing, gracefully arching landscape palm, prone to nutrient deficiencies on Southwest Florida's alkaline soils."
+    },
+    "tech_notes": "Prone to potassium, manganese, iron and boron deficiencies; distinguish nutrition issues from Fusarium wilt (one-sided frond death, reddish-brown petiole stripe) and Ganoderma butt rot (trunk conks) before recommending any nutrition correction, which stays within the local fertilizer rules.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST609"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "515627730c24986e573b23b417af410b8b0e9df43dd926a5b0d61b604c046b7c"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Smooth gray trunk, sometimes slightly bulging, with visible ring scars",
+        "No crownshaft \u2014 new fronds emerge directly from the trunk top",
+        "Long, arching feather fronds",
+        "Huge hanging clusters of small round orange fruit"
+      ],
+      "common_problems": [
+        "potassium-deficiency-palm",
+        "manganese-deficiency-palm",
+        "iron-deficiency-palm",
+        "boron-deficiency-palm",
+        "fusarium-wilt-of-palms",
+        "ganoderma-butt-rot"
+      ],
+      "frond_pattern_note": "Potassium deficiency shows first on the oldest, lowest fronds; manganese and boron problems show on the newest; fusarium kills one side of a frond at a time."
+    }
+  },
+  {
+    "slug": "foxtail-palm",
+    "kind": "host_plant",
+    "common_name": "Foxtail Palm",
+    "aka": [],
+    "aliases": [
+      "foxtail palm",
+      "wodyetia bifurcata"
+    ],
+    "scientific_name": "Wodyetia bifurcata",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": null,
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Leaflets grow whorled all the way around the frond's central rib, giving each frond a bushy, fox-tail look",
+      "Light gray to nearly white trunk, often slightly swollen mid-way up",
+      "Smooth, pale to blue-green crownshaft at the top of the trunk",
+      "Egg-shaped fruit that ripens from green to orange-red just below the crownshaft"
+    ],
+    "look_alikes": [
+      {
+        "slug": "queen-palm",
+        "difference": "Foxtail leaflets radiate stiffly around the rib like a bottlebrush, with a crownshaft; queen palm leaflets droop in loose, irregular groups, no crownshaft.",
+        "next_photo": "A wide shot of the whole crown showing frond shape, plus a close-up of the trunk top for a crownshaft.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "royal-palm",
+        "difference": "Foxtail palm has bushy, whorled leaflets and a slender trunk; royal palm has plain flat fronds, a much thicker gray trunk, and grows far taller.",
+        "next_photo": "A wide shot comparing overall height and trunk thickness, plus a close-up of the frond/leaflet arrangement.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "coconut-palm",
+        "difference": "Foxtail palm has a smooth crownshaft and bushy whorled leaflets; coconut palm has no crownshaft, a curved trunk, and large coconuts, not small orange fruit.",
+        "next_photo": "A close-up of the trunk top for a crownshaft, plus a wide shot of the fruit size.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A popular landscape palm named for its bushy, fox-tail-shaped fronds. Overhead irrigation hitting the fronds can encourage a fungal leaf spot, so a technician checks watering pattern along with the leaves themselves before recommending anything.",
+      "fact": "Its leaflets grow whorled all the way around the frond's central rib rather than lying flat in one plane, which is exactly what gives each frond its bushy, tail-like look.",
+      "blurb": "A landscape palm named for its bushy, fox-tail-shaped fronds \u2014 overhead watering can invite a leaf spot fungus."
+    },
+    "tech_notes": "Leaf spot fungus can worsen with overhead irrigation hitting the foliage; recommend base watering. Ganoderma butt rot is a trunk-level concern requiring closer inspection.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/FR304"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "The full nutrient-deficiency profile (manganese, boron) commonly cited for foxtail palm in horticultural sources is not confirmed on a UF/IFAS page opened in this pass; potassium deficiency was added to common_problems as a reasonable, lower-confidence addition.",
+      "approval_hash": "3875aa776e3c0fa06c9cb6246252f641998c7274ce70b362359b8035da9f4ae9"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Leaflets whorled around the frond's rib, giving a bushy, fox-tail look",
+        "Light gray to whitish trunk, sometimes slightly swollen mid-way up",
+        "Smooth, pale to blue-green crownshaft",
+        "Egg-shaped fruit ripening orange-red just below the crownshaft"
+      ],
+      "common_problems": [
+        "palm-leaf-spots",
+        "ganoderma-butt-rot",
+        "potassium-deficiency-palm"
+      ],
+      "frond_pattern_note": "Leaf spot fungus can appear on any frond, especially with overhead watering; potassium deficiency starts on the oldest fronds; Ganoderma affects the trunk, not one frond."
+    }
+  },
+  {
+    "slug": "royal-palm",
+    "kind": "host_plant",
+    "common_name": "Royal Palm",
+    "aka": [],
+    "aliases": [
+      "royal palm",
+      "roystonea regia"
+    ],
+    "scientific_name": "Roystonea regia",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": null,
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Tall, smooth, light gray trunk, sometimes with a slight bulge, up to two feet across",
+      "Bright green crownshaft, roughly five feet tall, sitting cleanly above the trunk",
+      "Large, plain, flat feather fronds, ten to fifteen feet long",
+      "Sheds one whole dead frond at a time on its own (self-cleaning) rather than holding dead fronds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "foxtail-palm",
+        "difference": "Royal palm is a much taller tree with plain flat fronds and a thick gray trunk; foxtail palm is smaller and slender with bushy, whorled 'foxtail' leaflets.",
+        "next_photo": "A wide shot comparing overall height and trunk thickness, plus a close-up of the frond/leaflet arrangement.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "christmas-palm",
+        "difference": "Royal palm is a large tree with a thick trunk and a tall green crownshaft; Christmas palm stays small, with a thin trunk and red holiday fruit.",
+        "next_photo": "A wide shot comparing overall size, plus a close-up of the fruit color if present.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tall, stately palm and a Florida landscape icon, known for dropping one whole dead frond at a time on its own rather than needing regular trimming. Its size means a falling frond can be genuinely heavy, and a technician checks the crown and trunk before recommending any work at height.",
+      "fact": "It drops its dead fronds cleanly on its own about once a month, but each one can weigh up to 50 pounds fresh, so a falling frond is a real hazard, not just a mess.",
+      "blurb": "A tall Florida landscape icon that self-cleans its own dead fronds \u2014 impressive, but a falling frond is genuinely heavy."
+    },
+    "tech_notes": "A tapering, 'pencil-pointing' trunk points to advanced potassium deficiency rather than normal growth. Royal palm bug damage is confined to the newest, still-folded fronds. Ganoderma and Thielaviopsis are trunk-level, specialist-referral concerns.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/st574"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "1ad7a30d24200df6ffc35b1ef46f930b767b7c915e02f56c5f58b178edf66a45"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Bright green crownshaft, roughly five feet tall, above a smooth gray trunk",
+        "Large, plain, flat feather fronds with no whorled or bushy look",
+        "Sheds one whole dead frond cleanly on its own each month",
+        "Grows much taller than most landscape palms, up to 50-70 feet"
+      ],
+      "common_problems": [
+        "potassium-deficiency-palm",
+        "royal-palm-bug",
+        "ganoderma-butt-rot"
+      ],
+      "frond_pattern_note": "Potassium deficiency shows on the oldest fronds; royal palm bug damage appears only in the newest, still-folded fronds near the top."
+    }
+  },
+  {
+    "slug": "cabbage-palm",
+    "kind": "host_plant",
+    "common_name": "Cabbage Palm",
+    "aka": [
+      "sabal palm",
+      "cabbage palmetto"
+    ],
+    "aliases": [
+      "cabbage palm",
+      "sabal palm",
+      "cabbage palmetto",
+      "sabal palmetto"
+    ],
+    "scientific_name": "Sabal palmetto",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": null,
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Fan-shaped (costapalmate) fronds split only about a third of the way to the base, with long thread-like fibers between segments",
+      "Trunk often still wearing old, crisscrossed leaf bases called 'boots,' especially on younger palms",
+      "Rounded, full canopy of many fronds rather than a sparse crown",
+      "Florida's state tree \u2014 the most common native palm in the landscape"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chinese-fan-palm",
+        "difference": "Cabbage palm has a rougher, often boot-covered trunk and fronds split partway with thread fibers; Chinese fan palm has a smoother trunk, drooping frond tips.",
+        "next_photo": "A close-up of the trunk (boots present or smooth) and the frond segment tips (stiff vs. drooping).",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "mexican-fan-palm",
+        "difference": "Cabbage palm is shorter and thicker with a rough, often boot-covered trunk; Mexican fan palm is tall, slender, with a smooth, strongly tapering trunk.",
+        "next_photo": "A wide shot comparing overall height and trunk taper, plus a close-up of the trunk surface.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Florida's state tree and the most common native palm in the landscape, tough and low-maintenance under normal conditions. Lethal bronzing is the serious concern to rule out on this species, so a technician looks at which fronds are affected and how the decline is progressing before saying more.",
+      "fact": "The palm's old leaf bases, called 'boots,' often host other plants living in the crevices \u2014 ferns, air plants, even a strangler fig seedling can get its start there.",
+      "blurb": "Florida's state tree and toughest common native palm \u2014 lethal bronzing is the main serious concern to rule out."
+    },
+    "tech_notes": "Lethal bronzing is the priority differential on this species; confirm frond-position pattern (oldest first, moving up) and check for premature fruit drop or spear leaf death before any referral. Salt in the root zone (not spray) stresses this species despite its toughness.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/palms-and-cycads/sabal-palmetto/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "8030c6b372628e2ee32a3ac251aacb06f4cd17608907babff1e74afb97d2f924"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Fan-shaped fronds split only a third of the way to the base, with thread-like fibers between segments",
+        "Trunk often still covered in old crisscrossed leaf-base 'boots'",
+        "Full, rounded canopy rather than a sparse crown",
+        "Very common as a native, unplanted volunteer as well as a landscape tree"
+      ],
+      "common_problems": [
+        "lethal-bronzing",
+        "ganoderma-butt-rot",
+        "palmetto-weevil",
+        "potassium-deficiency-palm"
+      ],
+      "frond_pattern_note": "Lethal bronzing and potassium deficiency start on the oldest, lowest fronds; Ganoderma affects the trunk; palmetto weevil attacks the crown, especially on transplants."
+    }
+  },
+  {
+    "slug": "coconut-palm",
+    "kind": "host_plant",
+    "common_name": "Coconut Palm",
+    "aka": [],
+    "aliases": [
+      "coconut palm",
+      "cocos nucifera"
+    ],
+    "scientific_name": "Cocos nucifera",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": null,
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Smooth, light grayish-brown trunk that is often distinctly curved or leaning, sometimes with a swollen base",
+      "Very large arching fronds, up to 18 feet long",
+      "Large, green-husked coconuts, often a foot or more long, hanging in clusters below the crown",
+      "No crownshaft \u2014 new fronds emerge directly from the trunk top"
+    ],
+    "look_alikes": [
+      {
+        "slug": "queen-palm",
+        "difference": "Coconut palm has large coconuts and a thicker, often curved trunk; queen palm has small round orange fruit in huge clusters and a slender, straighter trunk.",
+        "next_photo": "A close-up of the fruit size and color, plus a wide shot of the trunk shape.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "foxtail-palm",
+        "difference": "Coconut palm has no crownshaft, a curved trunk, and large coconuts; foxtail palm has a smooth blue-green crownshaft and small orange-red egg-shaped fruit.",
+        "next_photo": "A close-up of the trunk top for a crownshaft, plus a wide shot of the fruit size.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A coastal icon whose most serious threat is lethal yellowing, a disease that has no cure and typically kills the palm within months once yellowing sets in. A photo alone can't rule it out, so any yellowing that starts on the oldest fronds alongside dropping fruit is worth a closer look.",
+      "fact": "Lethal yellowing often shows up first as premature fruit drop and blackened flower stalks, before the fronds themselves ever turn yellow.",
+      "blurb": "A coastal icon whose main threat, lethal yellowing, has no cure \u2014 early fruit drop is often the first sign."
+    },
+    "tech_notes": "Lethal yellowing progresses from the oldest fronds upward with premature fruit drop and blackened inflorescences; there is no cure once advanced, only preventive trunk injection for nearby palms. Confirm before any customer conversation about removal.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/palms-and-cycads/coconut-palm"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3cfd153d82940ede5c44979e7a8c987c9fa4a6d938f16ca8b9f792f6e4902614"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Trunk is often distinctly curved or leaning, sometimes with a swollen base",
+        "No crownshaft \u2014 fronds emerge directly from the trunk top",
+        "Very large, arching fronds up to 18 feet long",
+        "Large green-husked coconuts hanging in clusters"
+      ],
+      "common_problems": [
+        "lethal-yellowing",
+        "lethal-bronzing",
+        "ganoderma-butt-rot",
+        "potassium-deficiency-palm",
+        "boron-deficiency-palm"
+      ],
+      "frond_pattern_note": "Lethal yellowing, lethal bronzing and potassium deficiency all start on the oldest fronds; boron deficiency shows on the newest fronds; Ganoderma affects the trunk."
+    }
+  },
+  {
+    "slug": "areca-palm",
+    "kind": "host_plant",
+    "common_name": "Areca Palm",
+    "aka": [
+      "butterfly palm"
+    ],
+    "aliases": [
+      "areca palm",
+      "butterfly palm",
+      "dypsis lutescens"
+    ],
+    "scientific_name": "Dypsis lutescens",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": null,
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Multiple slender stems (2-3 inches thick) clustered together from the base rather than one single trunk",
+      "Tightly packed rings on each stem, ranging from orange-yellow to dark green depending on sun exposure",
+      "Yellowish-green, gently arching feather fronds",
+      "Often planted and pruned as a dense privacy screen or accent clump"
+    ],
+    "look_alikes": [
+      {
+        "slug": "christmas-palm",
+        "difference": "Areca palm grows as a dense clump of many slender, ringed stems, no single trunk; Christmas palm has one curving trunk with red holiday fruit.",
+        "next_photo": "A wide shot of the base \u2014 multiple clustered stems (areca) vs. one single trunk (Christmas palm).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A popular clustering palm used for screening and accent plantings, made up of many slender stems rather than one trunk. Some yellowing of the lowest fronds is a normal part of its growth, but wider yellowing across the clump is worth a closer look, since it can point to a nutrient issue.",
+      "fact": "Every new shoot that emerges from the base starts out crumpled looking before it unfolds, which can look alarming even though it's completely normal for this species.",
+      "blurb": "A popular clustering privacy-screen palm \u2014 some lower-frond yellowing is normal, but wider yellowing is worth a look."
+    },
+    "tech_notes": "Distinguish normal age-related lower-frond yellowing from a nutrient deficiency or spider mite stippling before recommending anything; prune lower fronds mainly to reduce pest/fungus harborage in the stem cluster.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/FR309"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Potassium/manganese deficiency and spider mite susceptibility are well documented for areca palm in general horticultural sources but not spelled out on the UF/IFAS pages opened in this pass.",
+      "approval_hash": "49eee0858e05383e4f8b98a3c5cb0bc9361b0d421b8c3f0e15daf90620c24108"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "offsets"
+      ],
+      "id_cues": [
+        "Multiple slender stems clustered together, not one single trunk",
+        "Tightly packed rings on each stem, orange-yellow to dark green",
+        "Yellowish-green, gently arching fronds",
+        "New shoots look crumpled before unfolding \u2014 normal, not damage"
+      ],
+      "common_problems": [
+        "potassium-deficiency-palm",
+        "manganese-deficiency-palm",
+        "spider-mites"
+      ],
+      "frond_pattern_note": "Potassium deficiency shows first on the oldest fronds; manganese deficiency on the newest; spider mite stippling can appear on any frond in dry conditions."
+    }
+  },
+  {
+    "slug": "christmas-palm",
+    "kind": "host_plant",
+    "common_name": "Christmas Palm",
+    "aka": [],
+    "aliases": [
+      "christmas palm",
+      "adonidia merrillii",
+      "manila palm"
+    ],
+    "scientific_name": "Adonidia merrillii",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": null,
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Single, gently curving, slender trunk, usually 5-6 inches thick, often planted in small clumps of 2-4",
+      "Prominent crownshaft just below the fronds",
+      "Feather fronds with leaflets held in a distinctive V-shape along the central rib",
+      "Clusters of bright red, egg-shaped fruit that ripen in late fall into winter, giving the palm its name"
+    ],
+    "look_alikes": [
+      {
+        "slug": "royal-palm",
+        "difference": "Christmas palm stays small, with a thin trunk and red holiday fruit; royal palm is a large tree with a thick gray trunk and a tall green crownshaft.",
+        "next_photo": "A wide shot comparing overall size, plus a close-up of the fruit color if present.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "areca-palm",
+        "difference": "Christmas palm has one curving trunk with red holiday fruit; areca palm grows as a dense clump of many slender, ringed stems, no single trunk.",
+        "next_photo": "A wide shot of the base \u2014 one trunk with a crownshaft (Christmas palm) vs. multiple clustered stems (areca).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      10,
+      11,
+      12,
+      1
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A popular small landscape palm named for its clusters of bright red fruit that ripen around the holidays. Lethal yellowing is the serious disease to rule out on this species, so a technician looks at which fronds are affected before saying more.",
+      "fact": "Its bright red fruit clusters ripen right around the holiday season, which is exactly where the common name \"Christmas palm\" comes from.",
+      "blurb": "A popular small landscape palm whose red fruit ripens right around the holidays."
+    },
+    "tech_notes": "Lethal yellowing progresses from the oldest fronds upward; Ganoderma butt rot is a trunk-level, specialist-referral concern. Confirm frond pattern before any conversation about removal.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST658"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "cc83567e12d7510f318a54c81058ff7b25ad4f13866ee78f52fae7c442ca7fc8"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Single, slender, gently curving trunk, often in small clumps of 2-4",
+        "Prominent crownshaft just below the fronds",
+        "Leaflets held in a distinctive V-shape along the rib",
+        "Clusters of bright red, egg-shaped fruit ripening in late fall to winter"
+      ],
+      "common_problems": [
+        "lethal-yellowing",
+        "ganoderma-butt-rot"
+      ],
+      "frond_pattern_note": "Lethal yellowing starts on the oldest, lowest fronds and moves upward; Ganoderma butt rot affects the trunk, not one frond."
+    }
+  },
+  {
+    "slug": "pygmy-date-palm",
+    "kind": "host_plant",
+    "common_name": "Pygmy Date Palm",
+    "aka": [],
+    "aliases": [
+      "pygmy date palm",
+      "phoenix roebelenii",
+      "roebelenii palm"
+    ],
+    "scientific_name": "Phoenix roebelenii",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": "date-palms",
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small palm, usually under 12 feet, often grown as a clump of 2-4 closely spaced trunks",
+      "Slender, often slightly crooked trunk covered in distinctive peg-like old leaf bases",
+      "Lowest leaflets on each frond are modified into sharp 2-3 inch spines",
+      "Small reddish-brown fruit that turns black when ripe"
+    ],
+    "look_alikes": [
+      {
+        "slug": "sylvester-date-palm",
+        "difference": "Pygmy date palm stays small, under 12 feet, with a slender trunk; Sylvester date palm grows much larger with a thick, diamond-patterned trunk.",
+        "next_photo": "A wide shot comparing overall height and trunk thickness.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "canary-island-date-palm",
+        "difference": "Pygmy date palm is a small, often clustered palm under 12 feet tall; Canary Island date palm is massive, reaching 40-50 feet, thick diamond-patterned trunk.",
+        "next_photo": "A wide shot showing overall size and trunk diameter.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The lower leaflets are modified into sharp, stiff spines that can puncture skin; work around the base carefully, especially when pruning.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A small, popular accent palm, often planted in clusters near entryways and pools. It's prone to several nutrient deficiencies typical of palms, and a technician can tell those apart from a more serious leaf spot or trunk disease by which fronds are affected.",
+      "fact": "Despite looking like several separate small palms, a 'clump' of pygmy date palms is usually several individual, single-trunked plants grown close together rather than one multi-stemmed plant.",
+      "blurb": "A small, popular accent palm often clustered near entryways \u2014 its lower leaflets are sharp spines, not soft foliage."
+    },
+    "tech_notes": "Prone to potassium, manganese and boron deficiencies plus Pestalotiopsis leaf spot; distinguish from Ganoderma butt rot (trunk-level, specialist referral) before recommending any nutrition correction, which stays within the local fertilizer rules.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST441"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d82ce872aff1b4d37cadb4b3dfedef34f3e7b20b789956361f745ef1e476e27d"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Small size, usually under 12 feet, often in clumps of 2-4 trunks",
+        "Trunk covered in distinctive peg-like old leaf bases",
+        "Lowest leaflets modified into sharp 2-3 inch spines",
+        "Small fruit, reddish-brown turning black when ripe"
+      ],
+      "common_problems": [
+        "potassium-deficiency-palm",
+        "manganese-deficiency-palm",
+        "boron-deficiency-palm",
+        "palm-leaf-spots",
+        "ganoderma-butt-rot"
+      ],
+      "frond_pattern_note": "Potassium deficiency shows on the oldest fronds; manganese and boron problems, including stuck spear leaves, show on the newest."
+    }
+  },
+  {
+    "slug": "canary-island-date-palm",
+    "kind": "host_plant",
+    "common_name": "Canary Island Date Palm",
+    "aka": [
+      "CIDP"
+    ],
+    "aliases": [
+      "canary island date palm",
+      "cidp",
+      "phoenix canariensis"
+    ],
+    "scientific_name": "Phoenix canariensis",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": "date-palms",
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Massive, thick trunk, 2-3 feet across, with an attractive diamond-shaped pattern of old leaf scars",
+      "Large, stiff, deep-green fronds with up to 200 V-shaped leaflets per leaf",
+      "Lowest leaflets on each frond modified into long, sharp spines",
+      "Orange, edible (though not very tasty) fruit on orange flower stalks"
+    ],
+    "look_alikes": [
+      {
+        "slug": "sylvester-date-palm",
+        "difference": "Canary Island date palm has stiff, deep-green leaflets, a very thick trunk; Sylvester date palm has blue-green, drooping leaflets, a thinner trunk.",
+        "next_photo": "From a safe distance (zoom in rather than stepping close to the spines), a photo comparing leaflet color and stiffness, plus the trunk texture.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "pygmy-date-palm",
+        "difference": "Canary Island date palm is massive, reaching 40-50 feet, with a thick diamond-patterned trunk; pygmy date palm is small, often clustered, under 12 feet.",
+        "next_photo": "A wide shot showing overall size and trunk diameter.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The lowest leaflets on each frond are modified into long, sharp spines that can cause a serious puncture wound; keep a safe distance when working near the base of the fronds.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A massive, statement landscape palm valued for its imposing diamond-patterned trunk. Fusarium wilt is the serious disease to watch for, spread mainly on pruning tools, so a technician looks at which side of a frond is affected before saying more.",
+      "fact": "Its trunk develops that striking diamond pattern only after the old leaf bases eventually rot away on their own \u2014 they don't drop cleanly the way some other palms' do.",
+      "blurb": "A massive, statement palm known for its diamond-patterned trunk \u2014 Fusarium wilt is the serious disease to watch for."
+    },
+    "tech_notes": "Fusarium wilt spreads mainly via contaminated pruning tools \u2014 disinfect between palms. Graphiola false smut on the oldest fronds is cosmetic and often doesn't warrant treatment in a landscape setting.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST439"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "a6cce08c0657a364a54a08d1bbbcc58d5444a962155f7305f1a512bd2070c609"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Massive trunk, 2-3 feet across, with a diamond-shaped leaf-scar pattern",
+        "Large, stiff, deep-green fronds with up to 200 V-shaped leaflets",
+        "Lowest leaflets modified into long, sharp spines",
+        "Orange fruit on orange flower stalks"
+      ],
+      "common_problems": [
+        "fusarium-wilt-of-palms",
+        "graphiola-false-smut",
+        "ganoderma-butt-rot",
+        "magnesium-deficiency-palm",
+        "potassium-deficiency-palm",
+        "lethal-bronzing"
+      ],
+      "frond_pattern_note": "Graphiola false smut, magnesium/potassium deficiency and lethal bronzing all start on the oldest fronds; fusarium wilt kills one side of a frond at a time."
+    }
+  },
+  {
+    "slug": "sylvester-date-palm",
+    "kind": "host_plant",
+    "common_name": "Sylvester Date Palm",
+    "aka": [
+      "silver date palm",
+      "wild date palm"
+    ],
+    "aliases": [
+      "sylvester date palm",
+      "silver date palm",
+      "wild date palm",
+      "phoenix sylvestris"
+    ],
+    "scientific_name": "Phoenix sylvestris",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": "date-palms",
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Thick trunk with triangular leaf scars on younger growth that become diamond-shaped with age",
+      "Blue-green, somewhat drooping fronds, giving it a silvery cast compared to similar date palms",
+      "Long spiny petioles, about 3 feet, armed with sharp spines",
+      "Aerial roots often visible at the base of older trunks"
+    ],
+    "look_alikes": [
+      {
+        "slug": "canary-island-date-palm",
+        "difference": "Sylvester date palm has blue-green, drooping leaflets, a thinner trunk; Canary Island date palm has stiffer, deep-green leaflets, a much thicker trunk.",
+        "next_photo": "From a safe distance (zoom in rather than stepping close to the spines), a photo comparing leaflet color and stiffness, plus the trunk texture.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "pygmy-date-palm",
+        "difference": "Sylvester date palm grows much larger with a thick, diamond-patterned trunk; pygmy date palm stays small, under 12 feet, with a slender trunk.",
+        "next_photo": "A wide shot comparing overall height and trunk thickness.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Armed with sharp spines on the lower leaflets that can cause a serious puncture wound; keep a safe distance when working near the base of the fronds.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A large date palm valued for its silvery, blue-green fronds, but genuinely vulnerable to lethal bronzing, a serious disease with no cure. A photo alone can't confirm it, so a decline that starts on the oldest fronds and moves upward is worth a closer look.",
+      "fact": "In its native range this same species is tapped for sap that's boiled into sugar or fermented into a drink, though that's not something done with the ornamental palms grown here.",
+      "blurb": "A large, silvery-fronded date palm genuinely vulnerable to lethal bronzing, a disease with no cure."
+    },
+    "tech_notes": "Highly susceptible to lethal bronzing (formerly called Texas Phoenix palm decline) and to lethal yellowing; also considered relatively resistant to graphiola and fusarium wilt compared to P. canariensis. Confirm frond-position pattern before any removal conversation.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/fr308"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Range was judged common rather than occasional based on how widely this species is planted in SWFL developments; the cited species page makes no direct comparison to Canary Island date palm's relative prevalence.",
+      "approval_hash": "acf7aaaa443b6d31265c2ba9a0828908f652167e37603b7c1f46b1d7810caad9"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Triangular young leaf scars becoming diamond-shaped with age",
+        "Blue-green, somewhat drooping fronds with a silvery cast",
+        "Long, spiny petioles about 3 feet, armed with sharp spines",
+        "Aerial roots often visible at the base on older trunks"
+      ],
+      "common_problems": [
+        "lethal-bronzing",
+        "lethal-yellowing"
+      ],
+      "frond_pattern_note": "Lethal bronzing and lethal yellowing both start on the oldest, lowest fronds and move upward, ending with the spear leaf."
+    }
+  },
+  {
+    "slug": "chinese-fan-palm",
+    "kind": "host_plant",
+    "common_name": "Chinese Fan Palm",
+    "aka": [
+      "fountain palm"
+    ],
+    "aliases": [
+      "chinese fan palm",
+      "fountain palm",
+      "livistona chinensis"
+    ],
+    "scientific_name": "Livistona chinensis",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": "fan-palms",
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Fan-shaped fronds with segment tips that droop gracefully, like a fountain",
+      "Petioles are spiny on young palms but smooth on mature ones",
+      "Slow-growing, relatively slender, smooth trunk",
+      "Blue-green fruit that can weigh down the lower fronds, giving a two-tiered look"
+    ],
+    "look_alikes": [
+      {
+        "slug": "mexican-fan-palm",
+        "difference": "Chinese fan palm is shorter, slower-growing, drooping leaf tips, smooth trunk; Mexican fan palm is much taller, faster-growing, strongly tapering trunk.",
+        "next_photo": "A wide shot comparing overall height and trunk taper.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "cabbage-palm",
+        "difference": "Chinese fan palm has a smoother trunk and drooping frond tips; cabbage palm has a rougher, often boot-covered trunk, fronds split partway with thread fibers.",
+        "next_photo": "A close-up of the trunk (boots present or smooth) and the frond segment tips (stiff vs. drooping).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A slow-growing fan palm valued for its graceful, drooping frond tips, sometimes called the fountain palm for that reason. Potassium deficiency is its most common issue, and a technician can tell that apart from a more serious disease by which fronds show it.",
+      "fact": "Its heavy, blue-green fruit clusters can weigh down the lower fronds enough to give the whole crown a distinctive two-tiered, split look.",
+      "blurb": "A slow-growing fan palm with gracefully drooping frond tips, sometimes called the fountain palm."
+    },
+    "tech_notes": "Potassium deficiency (oldest fronds) is the most frequent issue; moderately susceptible to lethal yellowing. UF/IFAS lists this species as potentially invasive via bird-dispersed fruit \u2014 note if seedlings are spreading into natural areas.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST365"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3ebac4c5abe8d4c77e6f9a3e4289343cab7dce2e24ffc61db20c0fa68212cab9"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Fan-shaped fronds with gracefully drooping segment tips",
+        "Petioles spiny when young, smooth on mature palms",
+        "Slow-growing, relatively slender, smooth trunk",
+        "Blue-green fruit weighing down the lower fronds"
+      ],
+      "common_problems": [
+        "potassium-deficiency-palm",
+        "ganoderma-butt-rot",
+        "lethal-yellowing"
+      ],
+      "frond_pattern_note": "Potassium deficiency and lethal yellowing both show first on the oldest, lowest fronds; Ganoderma affects the trunk, not a single frond."
+    }
+  },
+  {
+    "slug": "mexican-fan-palm",
+    "kind": "host_plant",
+    "common_name": "Mexican Fan Palm",
+    "aka": [],
+    "aliases": [
+      "mexican fan palm",
+      "washingtonia robusta"
+    ],
+    "scientific_name": "Washingtonia robusta",
+    "rank": "species",
+    "group": "palms",
+    "subgroup": "fan-palms",
+    "site_category": "Palms",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Very tall, slender, strongly tapering trunk \u2014 nearly two feet across at the base, narrowing to under a foot near the top",
+      "Reddish-brown trunk that weathers to light gray with age",
+      "Fan-shaped fronds, 3-5 feet wide, on long petioles with sharp teeth along the edges",
+      "Often keeps a shaggy 'skirt' of dead, hanging fronds below the green crown unless trimmed"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chinese-fan-palm",
+        "difference": "Mexican fan palm is much taller, faster-growing, with a strongly tapering trunk; Chinese fan palm is shorter, slower-growing, with drooping leaf tips.",
+        "next_photo": "A wide shot comparing overall height and trunk taper.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "cabbage-palm",
+        "difference": "Mexican fan palm is tall and slender with a smooth, strongly tapering trunk; cabbage palm is shorter and thicker with a rough, often boot-covered trunk.",
+        "next_photo": "A wide shot comparing overall height and trunk taper, plus a close-up of the trunk surface.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "palm"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A very tall, fast-growing fan palm commonly used as a street or skyline tree, known for its strongly tapering trunk. A dead frond skirt is mostly a fire and appearance concern rather than a health issue, but a technician still checks the crown for signs of disease.",
+      "fact": "It can grow to 70 feet or more, and its trunk actually narrows noticeably from base to top, which is part of what gives mature specimens that dramatic, top-heavy silhouette.",
+      "blurb": "A very tall, fast-growing fan palm known for its dramatically tapering trunk \u2014 a common street and skyline tree."
+    },
+    "tech_notes": "Potassium deficiency is nearly universal on this species; distinguish from fusarium wilt (one-sided frond death) and bud rot (spear leaf failure) before recommending anything. A dead frond skirt is a fire/aesthetic concern the customer can decide on, not itself a health problem.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST670"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "4269ad7e6276c1c12d453630381008639a419a2f1c4230952c72a7c8cbd5304c"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "palm",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Very tall, slender trunk that tapers strongly from base to top",
+        "Reddish-brown trunk weathering to light gray with age",
+        "Fan-shaped fronds on petioles with sharp marginal teeth",
+        "Often carries a shaggy skirt of dead fronds unless trimmed"
+      ],
+      "common_problems": [
+        "potassium-deficiency-palm",
+        "fusarium-wilt-of-palms",
+        "palm-bud-rot",
+        "ganoderma-butt-rot"
+      ],
+      "frond_pattern_note": "Potassium deficiency shows on the oldest fronds; bud rot kills the newest spear leaf first; Ganoderma affects the trunk, not a single frond."
+    }
+  }
+]

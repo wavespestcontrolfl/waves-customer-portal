@@ -1,0 +1,439 @@
+[
+  {
+    "slug": "sting-nematode",
+    "kind": "organism",
+    "common_name": "Sting Nematode",
+    "aka": [],
+    "aliases": [
+      "sting nematode",
+      "sting nematodes",
+      "belonolaimus longicaudatus"
+    ],
+    "scientific_name": "Belonolaimus longicaudatus",
+    "rank": "species",
+    "group": "nematodes",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "size": "tiny",
+    "traits": [
+      "Irregularly shaped, slowly enlarging patches of yellowing, thinning or wilted turf",
+      "Roots are short, stubby and cropped off an inch or less below the surface",
+      "Turf under the patch feels thin and pulls up with little resistance",
+      "Damage worsens in the same sandy areas year after year"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "unverified",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A slowly enlarging patch of thin, yellowing turf with short, stubby roots can suggest sting nematode, but a photo cannot tell it apart from drought, compaction or a root disease. The only confirmation is a soil sample sent to a lab; a technician collects it.",
+      "fact": "Sting nematode feeds on root tips from outside the root and is considered the most damaging nematode on Florida lawns."
+    },
+    "tech_notes": "Ectoparasitic; feeds on root tips from outside the root. Collect 12-16 cores to 4 inches depth from the margin of declining turf (not the dead center) for a nematode assay; rule out drought, compaction and take-all root rot first.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ng039"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months are a general warm-season estimate; UF/IFAS residential lawn nematode guidance gives no Florida-specific seasonal calendar for sting nematode, so season_basis is set to unverified.",
+      "approval_hash": "0c96feebe3918fef4b781f5bfdb1b2757d315010552f74b07ff308ad81e52ef6"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Irregularly shaped, slowly enlarging patches of yellowing, wilted or thinning turf",
+        "Roots are short, stubby and cropped off an inch or less below the surface"
+      ],
+      "required_signature": {
+        "text": "No photo confirms sting nematode. The only confirmation is a soil sample submitted to a nematode assay lab.",
+        "elements": [
+          "Irregularly shaped, slowly enlarging patches of yellowing, wilted or thinning turf"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "take-all-root-rot",
+          "difference": "Take-all root rot roots are short and turn black with a rotted look; sting nematode roots are short and stubby but do not blacken or rot.",
+          "next_observation": "A technician compares a pulled root sample under magnification, or a lab distinguishes the two directly.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "white-grub",
+          "difference": "White grub turf lifts like a loose mat over grubs feeding on roots; sting nematode turf is thin with shortened roots but no grubs underneath.",
+          "next_observation": "A plug pull at the margin, or a technician checks beneath the turf for grubs.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage stays in hot, sunny spots with insects present; sting nematode damage spreads more slowly with no insects found.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs climbing up in a few minutes, or a technician checks.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph",
+        "infrequent_irrigation"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Recovery depends on the assay result and is often slow, over months, as damaged roots regrow."
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "group": "nematodes",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "size": "tiny",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "unverified",
+    "rank": "species",
+    "look_alikes": [],
+    "slug": "lance-nematode",
+    "common_name": "Lance Nematode",
+    "aliases": [
+      "lance nematode",
+      "lance nematodes",
+      "hoplolaimus galeatus"
+    ],
+    "scientific_name": "Hoplolaimus galeatus",
+    "traits": [
+      "Thin, slow-to-recover turf in patches, often yellowing or unthrifty",
+      "Roots are short with few feeder roots and dead-looking tips",
+      "Damage builds slowly and is worse under heat or drought stress",
+      "Mostly reported on St. Augustinegrass and bermudagrass"
+    ],
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "copy": {
+      "what_it_means": "Thin, slow-to-recover turf with short roots can suggest lance nematode, but a photo cannot tell it apart from drought, compaction or a root disease. The only confirmation is a lab soil sample; a technician collects it following the lab protocol.",
+      "fact": "Lance nematodes are described by UF/IFAS as the major nematode pest of St. Augustinegrass in the southeast."
+    },
+    "tech_notes": "Sample per the receiving lab's turf protocol before any product; rule out drought, compaction and root disease first. Do not diagnose from a photo.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN390"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). season_basis unverified: IN390 gives no Florida monthly calendar, so peak_months are empty. IN390 does not describe sampling steps; it points to the UF/IFAS nematode management guides."
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Patches of thin, yellowing or unthrifty turf that recover slowly",
+        "Short roots with few feeder roots and dead-looking tips"
+      ],
+      "required_signature": {
+        "text": "No photo confirms lance nematode. The only confirmation is a soil sample submitted to a nematode assay lab.",
+        "elements": [
+          "Patches of thin, yellowing or unthrifty turf that recover slowly"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "root-knot-nematode-turf",
+          "difference": "Lance nematode roots look short with dead tips; root-knot nematode can leave small galls on roots, though only a lab tells the two apart.",
+          "next_observation": "A technician submits a sample per the lab protocol, since only the assay separates them.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage stays in hot, sunny spots with insects present; lance nematode damage builds more slowly with no insects found.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs, or a technician checks.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "white-grub",
+          "difference": "White grub turf lifts like a loose mat over grubs; lance nematode turf is thin with short roots and no grubs underneath.",
+          "next_observation": "A plug pull at the margin, or a technician checks beneath the turf for grubs.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph",
+        "infrequent_irrigation"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Recovery depends on the assay result and is often slow, over months, as damaged roots regrow."
+    },
+    "verification": [
+      {
+        "claim": "Peak months and monthly seasonality",
+        "note": "None documented in IN390; entry keeps season_basis unverified with no peak months."
+      }
+    ]
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "group": "nematodes",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "size": "tiny",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "unverified",
+    "rank": "species",
+    "look_alikes": [],
+    "slug": "root-knot-nematode-turf",
+    "common_name": "Root-knot Nematode (turf)",
+    "aliases": [
+      "root knot nematode",
+      "root knot nematodes",
+      "grass root knot nematode",
+      "meloidogyne graminis"
+    ],
+    "scientific_name": "Meloidogyne graminis",
+    "traits": [
+      "Yellowing, wilting or thinning turf despite irrigation",
+      "Small galls on the roots on some grasses, with rotting roots below them",
+      "Weeds often move into thinning patches",
+      "Reported on bermudagrass, zoysia, St. Augustinegrass and other turf"
+    ],
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "copy": {
+      "what_it_means": "Yellowing and wilting turf that does not respond to irrigation can suggest root-knot nematode, but a photo cannot tell it apart from drought, compaction or root disease. The only confirmation is a lab test, and a technician follows the lab's turf sampling method.",
+      "fact": "A routine soil sample can miss grass root-knot nematode because it sits in the thatch and upper inch of soil, which is why the lab asks for turf plugs."
+    },
+    "tech_notes": "Follow the lab's turf root-knot protocol: turf plugs including thatch and the top inch of soil for mist extraction; a routine soil sample can miss it. Rule out drought, compaction and root disease first.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1231"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). season_basis unverified: IN1231 gives no monthly calendar. Host list in traits follows IN1231 (bermudagrass, St. Augustinegrass, zoysia, centipede, seashore paspalum, others; bahiagrass is listed only among forage grasses)."
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Small galls on the roots on some grasses, with rotting roots below them"
+      ],
+      "symptoms": [
+        "General decline, stunting and yellowing in irregular patches",
+        "Thinning turf with weeds moving in"
+      ],
+      "required_signature": {
+        "text": "No photo confirms root-knot nematode. The only confirmation is a turf sample submitted to a nematode assay lab; a routine soil sample can miss it.",
+        "elements": [
+          "General decline, stunting and yellowing in irregular patches"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "lance-nematode",
+          "difference": "Root-knot nematode can leave small galls on roots; lance nematode roots look short with dead tips. Only a lab assay separates them.",
+          "next_observation": "A technician submits a turf sample per the lab protocol, since only the assay separates them.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage stays in hot, sunny spots with insects present; root-knot nematode damage is slower and no insects are found.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs, or a technician checks.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "white-grub",
+          "difference": "White grub turf lifts like a loose mat over grubs; root-knot nematode turf is thin with rotting roots and no grubs underneath.",
+          "next_observation": "A plug pull at the margin, or a technician checks beneath the turf for grubs.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph",
+        "infrequent_irrigation"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Recovery depends on the assay result and is often slow, over months, as damaged roots regrow."
+    },
+    "verification": [
+      {
+        "claim": "Bahiagrass as a host",
+        "note": "Owner brief lists bahia; IN1231 lists bahiagrass only among forage grasses, so traits name bermudagrass, zoysia and St. Augustinegrass as the turf hosts."
+      }
+    ]
+  }
+]

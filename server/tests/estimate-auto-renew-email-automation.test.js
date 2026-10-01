@@ -10,6 +10,7 @@ const mockSendTemplate = jest.fn();
 const mockEmailSend = jest.fn();
 const mockIsConfigured = jest.fn();
 const mockIsEnabled = jest.fn();
+const mockEmailTemplateAutomationsMode = jest.fn();
 const mockGetTemplate = jest.fn();
 
 function query(result) {
@@ -65,6 +66,7 @@ jest.mock('../services/sendgrid-mail', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: mockIsEnabled,
+  emailTemplateAutomationsMode: mockEmailTemplateAutomationsMode,
 }));
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: mockGetTemplate,
@@ -179,6 +181,9 @@ describe('estimate auto-renew email automation cutover', () => {
     mockIsConfigured.mockReturnValue(true);
     // Every gate on — except the pricing-authority send gate (#3750).
     mockIsEnabled.mockImplementation((key) => key !== 'sendRequiresServerPricing');
+    // 'live' matches "every gate on" above — the executor path is what
+    // most of these tests exercise; the shadow/off tests below override it.
+    mockEmailTemplateAutomationsMode.mockReturnValue('live');
     mockProcessTrigger.mockResolvedValue({
       automation_count: 1,
       results: [{ run: { id: 'run-1', status: 'sent' } }],
@@ -247,6 +252,60 @@ describe('estimate auto-renew email automation cutover', () => {
     expect(mockEmailSend).not.toHaveBeenCalled();
   });
 
+  test('a partial automation failure (one sibling sent, one misconfigured) never falls back to a second email (codex #5418 r4)', async () => {
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+    mockProcessTrigger.mockRejectedValueOnce(Object.assign(new Error('active template not found'), {
+      automationFailures: [{ automation_key: 'broken', message: 'active template not found' }],
+      partialResults: [{ run: { id: 'run-1', status: 'sent' } }],
+    }));
+
+    await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('…while a fallback-classified failure with NO handled sibling still falls back', async () => {
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+    mockProcessTrigger.mockRejectedValueOnce(Object.assign(new Error('active template not found'), { partialResults: [] }));
+
+    await EstimateAutoRenew.checkAll();
+
+    // It takes the SMTP fallback branch (not the partial-success one).
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('falling back to SMTP'));
+    expect(mockLogger.error).not.toHaveBeenCalledWith(expect.stringContaining('partially failed'));
+  });
+
+  test.each([
+    ['a skipped run', [{ run: { id: 'r', status: 'skipped' } }]],
+    ['a shadow-only run', [{ run: { id: 'r', status: 'shadow' } }]],
+    ['a deduped replay', [{ run: { id: 'r', status: 'sent' }, deduped: true }]],
+  ])('a partial failure whose only sibling is %s still falls back (nothing reached the customer)', async (_label, partialResults) => {
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+    mockProcessTrigger.mockRejectedValueOnce(Object.assign(new Error('active template not found'), { partialResults }));
+
+    await EstimateAutoRenew.checkAll();
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('falling back to SMTP'));
+    expect(mockLogger.error).not.toHaveBeenCalledWith(expect.stringContaining('partially failed'));
+  });
+
+  test('a NON-fallback failure is not swallowed by a delivering sibling', async () => {
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+    mockProcessTrigger.mockRejectedValueOnce(Object.assign(new Error('connection terminated'), {
+      partialResults: [{ run: { id: 'r', status: 'sent' } }],
+    }));
+
+    await EstimateAutoRenew.checkAll().catch(() => {});
+
+    expect(mockLogger.error).not.toHaveBeenCalledWith(expect.stringContaining('partially failed'));
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
   test('a zero-comms opted-out estimate is never renewed or emailed (uncapped audit r4 P1)', async () => {
     // Publish-without-delivery mints (report click-to-estimate) stamp
     // estimate_data.noEngagementAutomation — renewal would both EXTEND the
@@ -285,6 +344,7 @@ describe('estimate auto-renew email automation cutover', () => {
 
   test('keeps the direct template send fallback when the automation gate is disabled', async () => {
     mockIsEnabled.mockReturnValue(false);
+    mockEmailTemplateAutomationsMode.mockReturnValue('off');
     const estimate = staleEstimate();
     // Codex round 3 on #4608 (group-aware guard): the FOR UPDATE lock read
     // plus annualHandoffGuard's own internal (unlocked) reread — two
@@ -306,6 +366,25 @@ describe('estimate auto-renew email automation cutover', () => {
         estimate_id: 'estimate-1',
         new_expires_at: expect.any(String),
       }),
+    }));
+  });
+
+  // Shadow must never change a LIVE send (#5154 coordinator finding): the
+  // boolean `emailTemplateAutomations` gate reads true in shadow too, but
+  // this producer must keep sending its direct extension notice exactly
+  // like it does with the gate off — only 'live' hands the send to the
+  // executor.
+  test('shadow mode still sends the direct extension notice, never the executor', async () => {
+    mockEmailTemplateAutomationsMode.mockReturnValue('shadow');
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+
+    await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+    expect(mockProcessTrigger).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'estimate.extension_notice',
+      to: 'sam@example.com',
     }));
   });
 

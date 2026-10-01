@@ -57,7 +57,12 @@ const LIVE_TONE = {
   noindex: "amber",
   missing: "red",
   error: "red",
+  // Shared live-status classifier (#5123): 5xx split out of `error`, plus
+  // body-aware verdicts — keep them in the same alert tones.
+  server_error: "red",
+  soft_404: "red",
   blocked: "amber",
+  challenge: "amber",
 };
 
 function labelize(value) {

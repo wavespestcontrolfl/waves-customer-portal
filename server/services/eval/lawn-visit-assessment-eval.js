@@ -25,6 +25,7 @@
  *     Gemini 3.8 line and stability has to be measured, not assumed
  */
 
+const { DEFAULTS } = require('../../config/models');
 const { applySeasonalAdjustment, getSeason } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores } = require('../lawn-visit-scores');
 const { contextHash, normalizePhotoZone } = require('../lawn-visit-input');
@@ -40,6 +41,17 @@ const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 const PRICES_PER_M = Object.freeze({
   'gemini-3.8-flash': { input: 0.75, output: 3.75, reasoningSeparate: true },
   'gpt-6-astra': { input: 10, output: 50, reasoningSeparate: false },
+  // Backup leg + second opinion since 2026-09-29 (OpenAI pricing page, short context).
+  'gpt-6-sol': { input: 2, output: 10, reasoningSeparate: false },
+  // Referee: the code-default Fable 5.1 id (keyed off models.js DEFAULTS, the
+  // one place Anthropic ids may be spelled), $10/$50 per the claude-api skill
+  // price table (2026-09-25). Anthropic's output_tokens already include
+  // thinking. An overridden referee model has no price here (costUsd null).
+  // Anthropic reports cache writes/reads OUTSIDE input_tokens (the adapter
+  // always sets a system-prompt breakpoint): 5-minute write 1.25x = $12.50,
+  // read $0.25 (claude-api skill, Fable 5.1). OpenAI/Gemini count cached
+  // tokens inside input_tokens, so they carry no cache fields here.
+  [DEFAULTS.LAWN_ASSESSMENT_REFEREE]: { input: 10, output: 50, reasoningSeparate: false, cacheWrite: 12.5, cacheRead: 0.25 },
 });
 
 // A pg DATE arrives as a Date (local midnight) or 'YYYY-MM-DD'; either way the
@@ -172,20 +184,29 @@ function costUsd(model, usage) {
   const outputBase = numberOrNull(usage.output_tokens);
   if (input == null || outputBase == null) return null;
   const output = outputBase + (price.reasoningSeparate ? (numberOrNull(usage.reasoning_tokens) || 0) : 0);
-  return Math.round(((input * price.input) + (output * price.output)) / 1e6 * 1e4) / 1e4;
+  const cache = price.cacheWrite == null ? 0
+    : ((numberOrNull(usage.cache_write_tokens) || 0) * price.cacheWrite) + ((numberOrNull(usage.cached_input_tokens) || 0) * price.cacheRead);
+  return Math.round(((input * price.input) + (output * price.output) + cache) / 1e6 * 1e4) / 1e4;
 }
 
 // Exclude only failures known to occur before dispatch. Executed requests
 // without token metadata may be billed, so their cost must remain unknown.
 const BEFORE_DISPATCH_FAILURES = new Set(['no_key', 'no_route', 'unsupported_pdf_provider', 'timeout_budget_exhausted']);
+const wasDispatched = (leg) => !!(leg && (leg.usage || leg.validator
+  || (!BEFORE_DISPATCH_FAILURES.has(leg.reason) && !String(leg.reason).startsWith('unknown_provider_'))));
 function billedLegs(analysis) {
-  const failed = (analysis.failures || []).filter((leg) => leg && (leg.usage || leg.validator
-    || (!BEFORE_DISPATCH_FAILURES.has(leg.reason) && !String(leg.reason).startsWith('unknown_provider_'))))
+  const failed = (analysis.failures || []).filter(wasDispatched)
     .map((leg) => ({ provider: leg.provider || null, model: leg.model || null, reason: leg.reason || null, usage: leg.usage || null }));
   const won = analysis.status === 'complete'
     ? [{ provider: analysis.provider || null, model: analysis.model || null, reason: null, usage: analysis.usage || null }]
     : [];
-  return [...failed, ...won];
+  // The gated referee's extra calls (GATE_LAWN_ASSESSMENT_REFEREE) are billed legs too.
+  const referee = analysis.referee || {};
+  const extra = [
+    referee.secondOpinion?.called ? { provider: null, model: referee.secondOpinion.model || null, reason: referee.secondOpinion.reason || null, usage: referee.secondOpinion.usage || null } : null,
+    referee.triggered ? { provider: 'anthropic', model: referee.referee?.model || null, reason: referee.referee?.reason || null, usage: referee.usage || null } : null,
+  ].filter(wasDispatched); // a referee leg that failed before dispatch (no_key …) was never billed
+  return [...failed, ...won, ...extra];
 }
 
 function sumUsage(legs) {
@@ -268,8 +289,9 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
     deltas,
     undeterminable,
     // Traceability/quality gates can downgrade the normalized confidence;
-    // naming discipline measures what the model actually claimed.
-    causeNamedBelowModerate: causeNamedBelowModerate(analysis.raw.findings),
+    // naming discipline measures what the model actually claimed — after a
+    // settled referee tie-break, the final claimed findings (Codex #5362 r4).
+    causeNamedBelowModerate: causeNamedBelowModerate(analysis.referee?.adjustedFindings || analysis.raw.findings),
     findings: (analysis.findings || []).map((finding) => ({
       finding_id: finding.finding_id, name: finding.name, label: finding.label, confidence: finding.confidence, severity: finding.severity,
       urgency: finding.urgency, photo_refs: finding.photo_refs, zone: finding.zone, can_determine: finding.can_determine,

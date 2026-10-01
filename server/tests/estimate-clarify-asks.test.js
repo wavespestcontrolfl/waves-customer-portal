@@ -293,7 +293,7 @@ describe('parkClarifyAsk', () => {
     expect(flags.toPhone).toBe('+19415550142');
     expect(flags.missing).toEqual(['street_address', 'specific_service']);
     expect(flags.lead_id).toBe('lead-1');
-    expect(insert.draft_response).toContain('Waves Pest Control');
+    expect(insert.draft_response).toContain("it's Waves");
     expect(insert.draft_response).toContain('service address');
     expect(insert.draft_response).toContain('which service');
   });
@@ -875,9 +875,9 @@ describe('_private.composeClarifyBody', () => {
     expect(both.length).toBeLessThan(300);
   });
 
-  test('company name is always the full legal marketing name', () => {
+  test('company name is always said, exactly once (owner ruling 2026-09-28: "it\'s Waves", not the fuller "Waves Pest Control")', () => {
     for (const missing of [['street_address'], ['specific_service'], ['street_address', 'specific_service']]) {
-      expect(_private.composeClarifyBody({ missing, firstName: 'A' })).toContain('Waves Pest Control');
+      expect(_private.composeClarifyBody({ missing, firstName: 'A' })).toContain("it's Waves");
     }
   });
 });
@@ -1267,11 +1267,11 @@ describe('unit_number ask (call pipeline lane)', () => {
 
   test('copy: the one-question unit ask names the building; combined asks append it', () => {
     const solo = _private.composeClarifyBody({ missing: ['unit_number'], firstName: 'Anna', unitAskBuilding: BUILDING });
-    expect(solo).toBe("Hi Anna, it's Waves Pest Control — one quick thing to finish your quote: what's the apartment or unit number at 1048 Example Lakes Cir?");
+    expect(solo).toBe("Hi Anna, it's Waves — one quick thing to finish your quote: what's the apartment or unit number at 1048 Example Lakes Cir?");
     const noBuilding = _private.composeClarifyBody({ missing: ['unit_number'], firstName: null });
     expect(noBuilding).toMatch(/what's the apartment or unit number\?$/);
     const combined = _private.composeClarifyBody({ missing: ['specific_service', 'unit_number'], firstName: null, unitAskBuilding: BUILDING });
-    expect(combined).toMatch(/^Hi, it's Waves Pest Control — glad to get you a quote\. Which service/);
+    expect(combined).toMatch(/^Hi, it's Waves — glad to get you a quote\. Which service/);
     expect(combined).toMatch(/ Also, what's the apartment or unit number at 1048 Example Lakes Cir\?$/);
   });
 

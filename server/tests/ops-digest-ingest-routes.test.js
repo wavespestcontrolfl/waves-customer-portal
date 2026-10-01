@@ -209,10 +209,322 @@ describe('payload', () => {
     expect(json.reason).toBe('invalid_payload');
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
+
+  test('headline: optional, 60 chars max, trimmed, blank -> null', () => {
+    expect(validateDigest({ ...good(), headline: 'Schedule — a call promise slipped' }).value.headline)
+      .toBe('Schedule — a call promise slipped');
+    expect(validateDigest({ ...good(), headline: '  ' }).value.headline).toBeNull();
+    expect(validateDigest({ ...good() }).value.headline).toBeNull();
+    expect(validateDigest({ ...good(), headline: 'h'.repeat(61) }).error).toMatch(/headline exceeds/);
+  });
+
+  test('count/newCount: an explicit null is rejected (only an omitted field falls back)', () => {
+    expect(validateDigest({ ...good(), count: null }).error).toMatch(/count must be a non-negative integer/);
+    expect(validateDigest({ ...good(), newCount: null }).error).toMatch(/newCount must be a non-negative integer/);
+    expect(validateDigest({ ...good() }).error).toBeUndefined();
+    expect(validateDigest({ ...good(), headline: 42 }).error).toMatch(/headline must be a string/);
+  });
+
+  test('summary: optional, 110 chars max, trimmed, blank -> null', () => {
+    expect(validateDigest({ ...good(), summary: 'Oldest is 3 days.' }).value.summary).toBe('Oldest is 3 days.');
+    expect(validateDigest({ ...good(), summary: '  ' }).value.summary).toBeNull();
+    expect(validateDigest({ ...good(), summary: 's'.repeat(111) }).error).toMatch(/summary exceeds/);
+    expect(validateDigest({ ...good(), summary: [] }).error).toMatch(/summary must be a string/);
+  });
+
+  test("audience: optional, one of owner/engineering/fyi", () => {
+    for (const audience of ['owner', 'engineering', 'fyi']) {
+      expect(validateDigest({ ...good(), audience }).value.audience).toBe(audience);
+    }
+    expect(validateDigest({ ...good() }).value.audience).toBeNull();
+    expect(validateDigest({ ...good(), audience: 'urgent' }).error).toMatch(/audience must be/);
+    // Trimmed like headline/summary; blank reads as omitted (the documented
+    // contract — codex r2 P0 on #5236).
+    expect(validateDigest({ ...good(), audience: ' owner ' }).value.audience).toBe('owner');
+    expect(validateDigest({ ...good(), audience: '   ' }).value.audience).toBeNull();
+    expect(validateDigest({ ...good(), audience: ' urgent ' }).error).toMatch(/audience must be/);
+    expect(validateDigest({ ...good(), audience: 3 }).error).toMatch(/audience must be/);
+  });
+});
+
+describe('the check -> destination map fills in what the caller did not send', () => {
+  test('a mapped owner check gets its own area headline and its own admin page, overriding the caller\'s Activity-feed link', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-map', deduped: false });
+    await post({ ...good(), key: 'b08-uncharged-collectibles:2026-09-11', link: '/admin/agents?tab=activity' });
+    const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Billing — schedule integrity — 3 overlapping visits');
+    expect(opts.link).toBe('/admin/invoices');
+    expect(opts.metadata.audience).toBe('owner');
+    expect(opts.metadata.feed).toBeNull();
+  });
+
+  test('an unmapped ACT check with no caller link falls back to the Activity feed, owner audience', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-unmapped', deduped: false });
+    await post({ ...good(), key: 'z99-brand-new-check:x', kind: 'ACT', link: undefined });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.link).toBe('/admin/agents?tab=activity');
+    expect(opts.metadata.audience).toBe('owner');
+    expect(opts.metadata.feed).toBeNull();
+  });
+
+  test('an unmapped FIX check is engineering-audience, Activity-only (good()\'s default kind)', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-unmapped-fix', deduped: false });
+    await post({ ...good(), key: 'z99-brand-new-check:x' });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.metadata.audience).toBe('engineering');
+    expect(opts.metadata.feed).toBe('activity');
+  });
+
+  test('the caller\'s own headline/summary/audience always win over the map', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-override', deduped: false });
+    await post({
+      ...good(), key: 'b08-uncharged-collectibles:2026-09-11',
+      headline: 'Billing — 5 invoices never charged', summary: '$1,253.75 with a card on file.', audience: 'fyi',
+    });
+    const [, title, body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Billing — 5 invoices never charged');
+    expect(body).toBe('$1,253.75 with a card on file.');
+    expect(opts.metadata.audience).toBe('fyi');
+    expect(opts.metadata.feed).toBe('activity');
+  });
+
+  test('the data-hygiene sweep\'s own headline(subject) parser wins over the generic fallback', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene', deduped: false });
+    await post({
+      ...good(), key: 'local:data-hygiene_sweep_2_fixed_66_exceptions_2_new_',
+      subject: 'data-hygiene sweep — 3 fixed, 66 exceptions (2 new)',
+      link: undefined,
+    });
+    const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Data hygiene — 2 new issues, 66 open');
+    expect(opts.link).toBe('/admin/agents?tab=activity'); // no better page than Activity for hygiene
+  });
+
+  // admin-alerts-ring scope (2026-09-28): the data-hygiene sweep's own
+  // subject already carries count + newCount ("N fixed, M exceptions (K
+  // new)") via config/ops-alert-routes.js's dataHygieneCounts — a "(0 new)"
+  // day with the SAME backlog size as the standing comparison row goes
+  // quiet; a "(2 new)" day always rings, whatever the backlog size did.
+  describe('data-hygiene end to end: "(K new)" drives the ring decision', () => {
+    test('"(0 new)" with an unchanged backlog size goes quiet — Activity-only, not new bell news', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-quiet', deduped: false });
+      mockStanding.row = { metadata: { count: 63 } }; // the last RUNG row's own backlog size
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_1_fixed_63_exceptions_0_new_',
+        subject: 'data-hygiene sweep — 1 fixed, 63 exceptions (0 new)',
+        link: undefined,
+      });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.count).toBe(63);
+      expect(opts.metadata.newCount).toBe(0);
+      expect(opts.metadata.quiet).toBe(true);
+      expect(opts.metadata.feed).toBe('activity'); // out of the bell list/unread count/read-all
+    });
+
+    test('"(2 new)" rings, even against the same or a larger standing backlog', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-ring', deduped: false });
+      mockStanding.row = { metadata: { count: 66 } };
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_3_fixed_66_exceptions_2_new_',
+        subject: 'data-hygiene sweep — 3 fixed, 66 exceptions (2 new)',
+        link: undefined,
+      });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.count).toBe(66);
+      expect(opts.metadata.newCount).toBe(2);
+      expect(opts.metadata.quiet).toBe(false);
+      expect(opts.metadata.feed).toBeNull(); // reaches the bell
+    });
+
+    test('a caller-supplied count/newCount always wins over the subject parse', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-override', deduped: false });
+      mockStanding.row = { metadata: { count: 63 } };
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_1_fixed_63_exceptions_0_new_',
+        subject: 'data-hygiene sweep — 1 fixed, 63 exceptions (0 new)',
+        link: undefined,
+        count: 90,
+        newCount: 5,
+      });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.count).toBe(90);
+      expect(opts.metadata.newCount).toBe(5);
+      expect(opts.metadata.quiet).toBe(false);
+    });
+
+    test('no standing row at all — the first post-deploy row for this class — rings once', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-first', deduped: false });
+      mockStanding.row = null;
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_1_fixed_63_exceptions_0_new_',
+        subject: 'data-hygiene sweep — 1 fixed, 63 exceptions (0 new)',
+        link: undefined,
+      });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.quiet).toBe(false);
+      expect(opts.metadata.feed).toBeNull();
+    });
+
+    // The FRESH-insert `quiet` above (decideRingForNewRow's 7-day lookback)
+    // and a REFRESH of an existing dedupeKey row (ringOnRefreshFrom, wired
+    // as opts.ringOnRefresh) are two different decisions — a refresh that
+    // rings must never end up hidden, and a quiet refresh must keep the
+    // standing row's own visibility (notification-service.js's
+    // mergeRefreshMetadata, unit-tested directly in
+    // notification-admin-dedupe-refresh.test.js). Here: the wired function
+    // itself, invoked against a fabricated existing row, agrees.
+    test('the wired ringOnRefresh rings when the backlog grew past the existing row, stays quiet when it did not', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-refresh', deduped: true, refreshed: true });
+      // "(0 new)" isolates the count-only comparison (newCount > 0 would
+      // otherwise always ring on its own, masking the count test below).
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_1_fixed_66_exceptions_0_new_',
+        subject: 'data-hygiene sweep — 1 fixed, 66 exceptions (0 new)',
+        link: undefined,
+      });
+      const { ringOnRefresh } = mockNotifyAdmin.mock.calls[0][3];
+      expect(ringOnRefresh({}, { count: 60 })).toBe(true); // backlog grew (60 -> 66)
+      expect(ringOnRefresh({}, { count: 66 })).toBe(false); // flat — the existing row's own visibility stands
+    });
+
+    test('an engineering-audience refresh gets no ringOnRefresh — notifyAdmin default re-surfaces any content change', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-eng-refresh', deduped: true, refreshed: true });
+      await post({ ...good(), key: 'z98-engineering-check:x', subject: '4 jobs failed', audience: 'engineering', link: undefined });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.audience).toBe('engineering');
+      expect(opts).not.toHaveProperty('ringOnRefresh');
+    });
+  });
+
+  // Follow-up to #5269 (codex r8 P1): e22's key is JUST `<check-id>:<finding>
+  // -<date>` — nothing else variable — so it collapses to the alert class
+  // once the date is stripped and proves nothing about which visits the
+  // finding names. `itemIds` lets the check hand over that identity itself.
+  describe('date-only ops-cron keys: itemIds carries the identity the key cannot', () => {
+    const { itemSetHashFor } = require('../services/ops-digest');
+
+    test('no count, no itemIds, a prior rung row of the same class -> rings (key alone proves nothing)', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-e22-i', deduped: false });
+      mockStanding.row = { metadata: { opsKey: 'e22-schedule-integrity:overlaps-2026-09-10' } };
+      await post(good()); // key: overlaps-2026-09-11 — same alertClass, subject has no leading count
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.quiet).toBe(false);
+      expect(opts.metadata.feed).toBeNull();
+    });
+
+    test('itemIds naming the same visits as the prior row -> quiet', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-e22-ii', deduped: false });
+      mockStanding.row = {
+        metadata: {
+          opsKey: 'e22-schedule-integrity:overlaps-2026-09-10',
+          itemKeys: ['0b9fce27', '11425c5f'],
+          itemSetHash: itemSetHashFor(['0b9fce27', '11425c5f']),
+        },
+      };
+      await post({ ...good(), itemIds: ['0b9fce27', '11425c5f'] });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.quiet).toBe(true);
+      expect(opts.metadata.feed).toBe('activity');
+      expect(opts.metadata.itemKeys).toEqual(['0b9fce27', '11425c5f']);
+      expect(opts.metadata.itemSetHash).toBe(itemSetHashFor(['0b9fce27', '11425c5f']));
+    });
+
+    test('itemIds with one new id at an equal (absent) count -> rings', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-e22-iii', deduped: false });
+      mockStanding.row = {
+        metadata: {
+          opsKey: 'e22-schedule-integrity:overlaps-2026-09-10',
+          itemKeys: ['0b9fce27', '11425c5f'],
+          itemSetHash: itemSetHashFor(['0b9fce27', '11425c5f']),
+        },
+      };
+      await post({ ...good(), itemIds: ['0b9fce27', '1a7f3f9a'] }); // 1a7f3f9a is new
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.quiet).toBe(false);
+    });
+
+    test('invalid itemIds -> 400', async () => {
+      expect((await post({ ...good(), itemIds: 'not-an-array' })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: null })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: [123] })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: [''] })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: ['x'.repeat(201)] })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: Array.from({ length: 2001 }, (_, i) => `id-${i}`) })).status).toBe(400);
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    });
+  });
+
+  // For an unmapped check with no route.counts(), the generic fallback is
+  // the first integer anywhere in the subject (never a newCount — a bare
+  // number's meaning isn't safely guessable for an unconverted check).
+  test('an unmapped check with no caller count falls back to the first integer in the subject', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-generic-count', deduped: false });
+    await post({ ...good(), key: 'z99-brand-new-check:x', subject: '7 things need attention', link: undefined });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.metadata.count).toBe(7);
+    expect(opts.metadata.newCount).toBeUndefined();
+  });
+
+  test('title never carries the KIND: prefix any more — kind rides in metadata only', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-noprefix', deduped: false });
+    await post(good());
+    const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).not.toMatch(/^(ACT|FIX):/);
+    expect(opts.metadata.kind).toBe('FIX');
+  });
+});
+
+describe('count fallback: only a LEADING number is a count', () => {
+  const { firstIntegerInSubject } = router._private;
+  test('a leading count is read; a date or time further in is not', () => {
+    expect(firstIntegerInSubject('42 scheduled-visit pair(s) overlap')).toBe(42);
+    expect(firstIntegerInSubject('promised on a call, NOT on the calendar — Mon 09-28 10:00 (…2108)')).toBeNull();
+    expect(firstIntegerInSubject('Drafts/call pipelines quiet: 47 stale draft(s)')).toBeNull();
+    expect(firstIntegerInSubject('')).toBeNull();
+  });
+});
+
+// admin-alerts-ring-v2 follow-up: count and newCount resolve INDEPENDENTLY
+// — a caller who supplies one but not the other must still get the
+// check-map's own value for the missing one, not have it replaced by the
+// parser's count (or dropped to null) just because the OTHER field was given.
+describe('resolveCounts: count and newCount resolve independently', () => {
+  const { resolveCounts } = router._private;
+  const dataHygieneSubject = 'Data hygiene sweep — 63 fixed, 66 exceptions (2 new)';
+  const dataHygieneRoute = { counts: (subject) => {
+    const m = /—\s*\d+\s+fixed,\s*(\d+)\s+exceptions?\s*\((\d+)\s+new\)/i.exec(subject);
+    return m ? { count: Number(m[1]), newCount: Number(m[2]) } : null;
+  } };
+  const noCountsRoute = { counts: null };
+
+  test('newCount alone: count still resolves from the check-map, not replaced by the parser or dropped to null', () => {
+    const result = resolveCounts({ count: null, newCount: 1, subject: dataHygieneSubject, route: dataHygieneRoute });
+    expect(result).toEqual({ count: 66, newCount: 1 });
+  });
+
+  test('count alone: newCount still resolves from the check-map', () => {
+    const result = resolveCounts({ count: 999, newCount: null, subject: dataHygieneSubject, route: dataHygieneRoute });
+    expect(result).toEqual({ count: 999, newCount: 2 });
+  });
+
+  test('neither given: both resolve from the check-map', () => {
+    const result = resolveCounts({ count: null, newCount: null, subject: dataHygieneSubject, route: dataHygieneRoute });
+    expect(result).toEqual({ count: 66, newCount: 2 });
+  });
+
+  test('both given: both are the caller\'s own values, verbatim', () => {
+    const result = resolveCounts({ count: 5, newCount: 1, subject: dataHygieneSubject, route: dataHygieneRoute });
+    expect(result).toEqual({ count: 5, newCount: 1 });
+  });
+
+  test('an unmapped check with no counts(): count falls back to the leading integer, newCount stays null even with a leading number', () => {
+    const result = resolveCounts({ count: null, newCount: null, subject: '42 scheduled-visit pair(s) overlap', route: noCountsRoute });
+    expect(result).toEqual({ count: 42, newCount: null });
+  });
 });
 
 describe('bell write', () => {
-  test('201: one ops_digest row, bell:true, opsKey/subject/kind/source metadata, rolling-day dedupe', async () => {
+  test('201: one ops_digest row, bell:true, opsKey/subject/kind/audience/source metadata, rolling-day dedupe', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n1', deduped: false });
     const { status, json } = await post(good());
     expect(status).toBe(201);
@@ -220,25 +532,50 @@ describe('bell write', () => {
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = mockNotifyAdmin.mock.calls[0];
     expect(category).toBe('ops_digest');
-    expect(title).toBe('FIX: schedule integrity — 3 overlapping visits');
-    expect(body).toBe('visit 0b9fce27 overlaps 11425c5f\nvisit 1a7f3f9a overlaps 1b0544b8');
+    // No caller headline and no prefix on the title any more (admin-alerts-
+    // brevity scope) — the check-map's own area ("e22-schedule-integrity" ->
+    // Schedule) fills the fallback `${area} — ${subject}`.
+    expect(title).toBe('Schedule — schedule integrity — 3 overlapping visits');
+    // No caller summary -> no bell body; the whole report is in `detail`.
+    expect(body).toBeNull();
+    expect(opts.detail).toBe('visit 0b9fce27 overlaps 11425c5f\nvisit 1a7f3f9a overlaps 1b0544b8');
     expect(opts).toEqual({
-      link: '/admin/agents?tab=activity',
+      // The caller's own link was the Activity feed itself, so the
+      // check-map's more specific page (Schedule -> /admin/dispatch) wins.
+      link: '/admin/dispatch',
       bell: true,
+      detail: 'visit 0b9fce27 overlaps 11425c5f\nvisit 1a7f3f9a overlaps 1b0544b8',
       dedupeKey: 'ops-crons:e22-schedule-integrity:overlaps-2026-09-11',
       dedupeWindowMs: 24 * 60 * 60 * 1000,
       // a later run's recurrence refreshes the standing row (observedAt above all)
       refreshOnDedupe: true,
+      // admin-alerts-ring scope: the ring-only-on-change decision for the
+      // dedupeKey's refresh path (never exercised on this FIRST insert).
+      ringOnRefresh: expect.any(Function),
       dedupeVersion: undefined,
       // probe + write share one advisory-locked transaction
       trx: expect.anything(),
       metadata: {
         check: { id: 'e22-schedule-integrity', title: 'Schedule integrity', cadence: 'daily' },
         opsKey: 'e22-schedule-integrity:overlaps-2026-09-11',
-        subject: 'FIX: schedule integrity — 3 overlapping visits',
+        subject: 'schedule integrity — 3 overlapping visits',
         kind: 'FIX',
+        // e22-schedule-integrity is a mapped OWNER check (Schedule ->
+        // /admin/dispatch), so this FIX finding still rings the bell.
+        audience: 'owner',
+        feed: null,
         source: 'ops-crons',
         observedAt: expect.any(String),
+        // admin-alerts-ring scope: the check id survives, its generated
+        // hash/date suffix is trimmed. No caller count, and this subject
+        // doesn't LEAD with a number, so no count is stored; this first-ever
+        // row for the class has no prior row to compare — rings.
+        alertClass: 'e22-schedule-integrity:overlaps',
+        quiet: false,
+        // admin-alerts-ring-v2 follow-up: a fresh insert that rings (not
+        // quiet) stamps its own rungAt — findPriorRungRow's 7-day baseline
+        // reads this, not created_at.
+        rungAt: expect.any(String),
       },
     });
   });
@@ -279,6 +616,15 @@ describe('bell write', () => {
     const opts = mockNotifyAdmin.mock.calls[0][3];
     expect(opts.metadata.observedAt).toBe('2026-09-11T13:00:00.000Z');
     expect(opts.dedupeVersion).toBe('2026-09-11T13:00:00.000Z');
+  });
+
+  test('a ringing row stamps rungAt at delivery time, never its (possibly old) observedAt', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-old-obs', deduped: false });
+    await post({ ...good(), observedAt: '2026-09-11T13:00:00Z' });
+    const { metadata } = mockNotifyAdmin.mock.calls[0][3];
+    expect(metadata.quiet).toBe(false);
+    expect(metadata.observedAt).toBe('2026-09-11T13:00:00.000Z');
+    expect(Date.now() - Date.parse(metadata.rungAt)).toBeLessThan(60_000);
   });
 
   test('T2 clean with zero standing rows suppresses delayed T1 but permits later T3', async () => {
@@ -346,17 +692,25 @@ describe('bell write', () => {
 
   test('metadata cannot override the seam fields or pre-resolve the finding', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n2', deduped: false });
-    await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI', resolved: true, resolvedAt: 'x', resolvedBy: 'y', dedupeKey: 'z', keep: 1 } });
+    await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI', audience: 'fyi', feed: 'not-activity', resolved: true, resolvedAt: 'x', resolvedBy: 'y', dedupeKey: 'z', rungAt: 'spoof', keep: 1 } });
     const opts = mockNotifyAdmin.mock.calls[0][3];
     expect(opts.metadata).toEqual({
       keep: 1,
       opsKey: 'e22-schedule-integrity:overlaps-2026-09-11',
-      subject: 'FIX: schedule integrity — 3 overlapping visits',
+      subject: 'schedule integrity — 3 overlapping visits',
       kind: 'FIX',
+      audience: 'owner',
+      feed: null,
       source: 'ops-crons',
       observedAt: expect.any(String),
+      alertClass: 'e22-schedule-integrity:overlaps',
+      quiet: false,
+      // admin-alerts-ring-v2 follow-up: the route's own stamp, not the
+      // caller's spoofed value (RESERVED_METADATA_KEYS strips it above).
+      rungAt: expect.any(String),
     });
     expect(opts.metadata.resolved).toBeUndefined();
+    expect(opts.metadata.rungAt).not.toBe('spoof');
     expect(validateDigest({ ...good(), metadata: { resolved: true } }).value.metadata).toEqual({});
   });
 });

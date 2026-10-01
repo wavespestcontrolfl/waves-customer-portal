@@ -16,7 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 
 vi.mock('./WdoIntelligenceBar', () => ({ default: () => null }));
-vi.mock('./DictationButton', () => ({ default: () => null }));
+// A non-interactive stub: data-disabled mirrors the prop, and a click on it
+// stands in for a transcript chunk arriving from the browser.
+vi.mock('./DictationButton', () => ({
+  default: (props) => (
+    <span data-testid="dictation-mock" data-disabled={props.disabled ? 'true' : 'false'} onClick={() => props.onAppend('late spoken words')} />
+  ),
+}));
 vi.mock('../AddressAutocomplete', () => ({ default: () => null }));
 // jsdom has no canvas — the real pad's initCanvas would throw. The mock
 // exposes the wiring the sign-step tests pin: which project it signs, the
@@ -247,6 +253,33 @@ describe('CreateProjectModal queued-photo exits', () => {
     expect(confirmClose).toHaveBeenCalledWith('Discard unsaved report edits?');
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByText('evidence.jpg')).toBeTruthy();
+  });
+});
+
+describe('CreateProjectModal dictation vs AI draft', () => {
+  it('stops the notes mic while an AI draft is in flight and drops a late chunk the draft would overwrite', async () => {
+    const draft = deferred();
+    fetch.mockImplementation((url) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/ai-write-preview')) return draft.promise;
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      return jsonResponse({});
+    });
+    renderWdoSheet({ allowAiDraft: true });
+    const notes = await screen.findByPlaceholderText(/Write raw notes/);
+    const notesMic = () => notes.parentElement.querySelector('[data-testid="dictation-mock"]');
+    fireEvent.change(notes, { target: { value: 'mud tubes on the east wall' } });
+    expect(notesMic().dataset.disabled).toBe('false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'AI draft' }));
+    await waitFor(() => expect(notesMic().dataset.disabled).toBe('true'));
+    fireEvent.click(notesMic()); // a chunk lands mid-request
+    expect(notes.value).toBe('mud tubes on the east wall');
+
+    draft.resolve({ ok: true, json: () => Promise.resolve({ report: 'WHAT WE INSPECTED: the east wall.' }) });
+    await waitFor(() => expect(notes.value).toBe('WHAT WE INSPECTED: the east wall.'));
+    expect(notesMic().dataset.disabled).toBe('false');
   });
 });
 
@@ -1005,6 +1038,44 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     expect(chargeBody.expectedTotal).toBe(437.33);
     expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/admin/projects/cert-1/send'))).toBe(true);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['an active dispute hold', () => jsonResponse({ holds: [{ id: 'hold-1', stops_charges: true, reason: 'dispute: synthetic' }] }), /BILLING HOLD: this customer disputed a bill/],
+    ['a failed hold lookup', () => Promise.reject(new TypeError('network down')), /Couldn't check for a billing hold — reload before charging/],
+  ])('the saved-card confirm names the billing hold (%s) before charging', async (_label, holdsReply, expected) => {
+    const confirmSpy = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmSpy);
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (u.includes('/admin/customers/9/cards')) {
+        return jsonResponse({ cards: [{ id: 'pm-card', method_type: 'card', brand: 'visa', last_four: '4242' }] });
+      }
+      if (u.includes('/admin/customers/9/collection-holds')) return holdsReply();
+      if (u.includes('/admin/projects/scheduled-service/55/application-prefill')) return jsonResponse({ applications: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
+      }
+      if (u.includes('/admin/projects/cert-1/send-with-invoice')) {
+        return jsonResponse({ prepared: true, invoice: { id: 'inv-card', total: 425, payer_billed: false } });
+      }
+      if (u.includes('/admin/invoices/inv-card/charge-card-quote')) {
+        return jsonResponse({ quote: { base: 425, surcharge: 0, total: 425 } });
+      }
+      return jsonResponse({});
+    }));
+
+    renderCertificateSheet({ onCreated: vi.fn(), onClose: vi.fn() });
+    await screen.findByRole('button', { name: 'Save Certificate' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Certificate' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Charge Visa •••• 4242 & finish service' }));
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+    expect(confirmSpy.mock.calls[0][0]).toMatch(expected);
+    // the operator declined: nothing was charged
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/charge-card'))).toBe(false);
   });
 
   it('does not offer an expired saved card as a completion payment method', async () => {

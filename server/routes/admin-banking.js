@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const logger = require('../services/logger');
 const StripeBanking = require('../services/stripe-banking');
 const BankingExport = require('../services/banking-export');
@@ -203,7 +204,7 @@ router.get('/payouts/:id', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 // POST /payouts/instant — request an instant payout
 // ═══════════════════════════════════════════════════════════════
-router.post('/payouts/instant', async (req, res) => {
+router.post('/payouts/instant', requireFullAccess, async (req, res) => {
   try {
     const amount = parsePayoutAmount(req.body.amount);
     if (amount == null) {
@@ -227,7 +228,7 @@ router.post('/payouts/instant', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 // POST /payouts/standard — request a standard manual payout
 // ═══════════════════════════════════════════════════════════════
-router.post('/payouts/standard', async (req, res) => {
+router.post('/payouts/standard', requireFullAccess, async (req, res) => {
   try {
     const amount = parsePayoutAmount(req.body.amount);
     if (amount == null) {

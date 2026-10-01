@@ -9,6 +9,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const { propertyDisplayLabel } = require('../utils/property-display');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 const { recordServiceContactChanges } = require('../services/service-contact-events');
 const {
@@ -543,7 +544,7 @@ function billingCandidateStranded(candidate, appAvailable) {
     && Boolean(String(candidate.customer?.phone || '').trim());
   return candidate.keys.some((key) => (key === 'paymentConfirmationChannels'
     && candidate.prefs.payment_receipt === false) || !candidate.channels[key].some((channel) =>
-    (channel === 'email' && candidate.emailAvailable && candidate.prefs.email_enabled !== false)
+    (channel === 'email' && candidate.emailAvailable)
     || (channel === 'sms' && textAvailable
       && (key !== 'paymentConfirmationChannels' || candidate.prefs.payment_confirmation_sms !== false))
     || (channel === 'push' && appAvailable)));
@@ -560,7 +561,9 @@ async function billingAvailabilityError({ req, trx, updates, propertyDbUpdates, 
   const prefsById = new Map(prefsRows.map((row) => [String(row.customer_id), row]));
   const customerById = new Map(customers.map((row) => [String(row.id), row]));
   const primaryPrefs = { ...(prefsById.get(String(primaryId)) || {}), ...channelDbUpdates };
-  const disabledChannels = [['emailEnabled', 'email'], ['smsEnabled', 'sms'], ['pushEnabled', 'push']]
+  // Turning email off never strands a billing category: payment emails are
+  // not governed by the portal-wide email switch (owner ruling 2026-09-26).
+  const disabledChannels = [['smsEnabled', 'sms'], ['pushEnabled', 'push']]
     .filter(([key]) => updates[key] === false).map(([, channel]) => channel);
   const candidates = [];
 
@@ -583,9 +586,8 @@ async function billingAvailabilityError({ req, trx, updates, propertyDbUpdates, 
       addsEmail: adds('email'), addsPush: adds('push') });
   }
 
-  if (candidates.some(({ addsEmail, emailAvailable, prefs }) => addsEmail
-    && (!emailAvailable || prefs.email_enabled === false))) {
-    return 'Add a billing email and enable email notifications before choosing Email.';
+  if (candidates.some(({ addsEmail, emailAvailable }) => addsEmail && !emailAvailable)) {
+    return 'Add a billing email before choosing Email.';
   }
   const needsApp = candidates.some(({ channels, keys, addsPush }) => addsPush
     || keys.some((key) => channels[key].includes('push')));
@@ -963,7 +965,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     delete updates.propertyId;
     const targetCustomer = await db('customers')
       .where({ id: req.params.customerId })
-      .first('id', 'profile_label', 'address_line1', 'city');
+      .first('id', 'profile_label', 'address_line1', 'address_line2', 'city', 'state', 'zip');
     const dbUpdates = { updated_at: new Date() };
     if (updates.appointmentConfirmation !== undefined) dbUpdates.appointment_confirmation = updates.appointmentConfirmation;
     if (updates.serviceReminder72h !== undefined) dbUpdates.service_reminder_72h = updates.serviceReminder72h;
@@ -1143,7 +1145,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     sendAccountUpdatedForPrefs({
       req,
       targetCustomerId: req.params.customerId,
-      propertyLabel: targetCustomer?.profile_label || targetCustomer?.address_line1 || targetCustomer?.city || 'Service property',
+      propertyLabel: propertyDisplayLabel(targetCustomer || {}),
       items: preferenceChangeItems(updates, existing || {}, payload, { scope: 'Property' }),
       section: 'Property notifications',
     });
@@ -1167,7 +1169,7 @@ async function savePropertyToggles(req, res, updates) {
   }
   const property = await db('customer_properties')
     .where({ id: updates.propertyId, customer_id: req.params.customerId })
-    .first('id', 'customer_id', 'is_primary', 'active', 'relationship', 'label', 'address_line1', 'city');
+    .first('id', 'customer_id', 'is_primary', 'active', 'relationship', 'label', 'address_line1', 'address_line2', 'city', 'state', 'zip');
   if (!property || property.active === false) {
     res.status(404).json({ error: 'Property is not available for this account' });
     return true;
@@ -1218,7 +1220,7 @@ async function savePropertyToggles(req, res, updates) {
   sendAccountUpdatedForPrefs({
     req,
     targetCustomerId: req.params.customerId,
-    propertyLabel: property.label || property.address_line1 || property.city || 'Service property',
+    propertyLabel: propertyDisplayLabel(property),
     items: preferenceChangeItems(updates, before, payload, { scope: 'Property' }),
     section: 'Property notifications',
   });

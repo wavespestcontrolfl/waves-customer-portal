@@ -10,7 +10,11 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // The real done writer: a system close is done, not just read (read is not done).
+  _private: { doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args) },
+}));
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
@@ -27,7 +31,7 @@ const schema = `sms_operations_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
   'conversations', 'messages', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'job_status_history', 'system_settings', 'messaging_audit_log'];
+  'emails', 'email_messages', 'estimates', 'invoices', 'payments', 'scheduled_services', 'job_status_history', 'system_settings', 'messaging_audit_log'];
 let mockPg;
 let admin;
 let message;

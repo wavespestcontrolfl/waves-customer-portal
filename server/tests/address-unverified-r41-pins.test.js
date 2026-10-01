@@ -51,11 +51,11 @@ describe('booking: address-verdict pair locks before the customer-comms fence (p
   test('the advisory pair locks are acquired ahead of lockCustomerComms in the self-booking transaction', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/booking'), 'utf8');
     const pairLock = src.indexOf("['address-verdict', key]");
-    const comms = src.indexOf('await lockCustomerComms(trx, custId);');
+    const comms = src.indexOf('for (const id of [...commsFenceIds].sort()) await lockCustomerComms(trx, id);', pairLock);
     expect(pairLock).toBeGreaterThan(0);
     expect(pairLock).toBeLessThan(comms);
     // …and the verdict's row locks still follow the fence.
-    expect(src.indexOf("const lockedDraft = await trx('estimates')")).toBeGreaterThan(comms);
+    expect(src.indexOf("const lockedDraft = await trx('estimates')", comms)).toBeGreaterThan(comms);
   });
 });
 

@@ -82,6 +82,7 @@ const SECURE_CARD_SHORT_TOKEN = /^[A-Za-z0-9_-]{22}$/;
 // generic rules below, so any segment under that parent is redacted.
 const CONSULTATION_TOKEN_PARENTS = new Set(['inspection']);
 
+
 function isTokenLikePathSegment(segment, previousSegment) {
   const decoded = decodeQueryPart(segment);
   if (CONSULTATION_TOKEN_PARENTS.has(String(previousSegment || '').toLowerCase())) return true;
@@ -110,7 +111,15 @@ function redactRequestPath(rawPath) {
   if (typeof rawPath !== 'string' || !rawPath) return rawPath;
   const segments = rawPath.split('/');
   for (let i = 0; i < segments.length; i += 1) {
-    if (segments[i] && isTokenLikePathSegment(segments[i], segments[i - 1])) {
+    // Link-preview images (routes/og-preview.js): under /og only a bare kind
+    // ("report") or a fixed card file ("pay.jpg") is kept (card names are
+    // short words; bearer tokens are 32+ characters); anything else —
+    // a token, with or without an encoded suffix or separator
+    // (/og/report%2F<token>.jpg) — is whatever a caller put there, so it is
+    // redacted. Case-insensitive: Express routes /OG/ here too.
+    const underOg = segments[0] === '' && String(segments[1] || '').toLowerCase() === 'og';
+    const ogFile = underOg && (i >= 3 || (i === 2 && !/^[a-z-]{1,20}(\.jpg)?$/i.test(segments[i] || '')));
+    if (segments[i] && (ogFile || isTokenLikePathSegment(segments[i], segments[i - 1]))) {
       segments[i] = REDACTED;
     }
   }

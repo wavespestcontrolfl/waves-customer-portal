@@ -5,7 +5,11 @@ function getGoogle() {
   return _googleapis;
 }
 const logger = require('./logger');
-const { deliverOpsDigest, readCleanWatermark } = require('./ops-digest');
+const { scrubSentryText } = require('../utils/sentry-scrub');
+const {
+  deliverOpsDigest, readCleanWatermark, digestRowFields, alertClassFor, ringOnRefreshFrom,
+  normalizeItemKeys, itemSetHashFor, itemKeysMetaFor,
+} = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
@@ -138,6 +142,81 @@ async function readJsonOrThrow(res, label) {
   }
   try { return JSON.parse(text); }
   catch (e) { throw new Error(`${label} returned malformed JSON (status ${res.status}): ${e.message}`); }
+}
+
+// The same-signature repeat path's digest rewrite: same row shape
+// deliverOpsDigest writes (short title/body, full report in `detail`,
+// kind/audience/feed), normalized exactly as create() persists it — a
+// rewrite in the old subject/body form would leave a superseded finding's
+// report in `detail` and a stale `feed` after a FIX <-> ACT flip (codex r2
+// P1 on #5236). Only the NEWEST unresolved digest is the standing row:
+// older unresolved duplicates (the pre-fix production state) must not all
+// flip back to unread on every detail change (codex r1 P2).
+//
+// Ring-only-on-change (owner audience only, admin-alerts-ring scope
+// 2026-09-28): this bypasses notifyAdmin entirely, so it applies the SAME
+// test ringOnRefreshFrom encodes by hand — a quiet standing row (no growth
+// in findings.length, no prior row to compare) keeps read_at and its own
+// feed/quiet; only a ringing rewrite may flip them. Engineering/fyi (anyFix)
+// never gates — notifyAdmin's own default behavior applies, byte-identical
+// to before this scope.
+//
+// Item identity (admin-alerts-ring follow-up, codex r8 P1): a same-count
+// finding swap (stats_stale on one location replaced by feed_degraded on
+// another, same total) must still ring — `itemKeys` is each finding's own
+// `<location id>:<class>` (the same pair the dedupe signature above sorts
+// and joins), normalized/hashed exactly like an ops-crons or in-process
+// sender's own itemKeys.
+//
+// An audience flip (owner<->engineering) changes which surface the row
+// belongs to, not merely whether it rings — the same rule
+// notification-service.js's mergeRefreshMetadata applies to notifyAdmin's
+// own refresh path. Without it, a FIX->ACT flip whose count hasn't grown
+// (shouldRing false) would leave the now-owner row hidden behind a stale
+// feed:'activity' (codex round-1). Guarded on the STANDING row actually
+// carrying an `audience` already — a legacy/pre-scope row with no such key
+// is a new field appearing, not a flip, and must not force a routing write
+// on every quiet repeat.
+async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary, observedAt, findings, itemKeys: rawItemKeys }) {
+  const fields = digestRowFields({ subject, text: body, headline, summary });
+  const next = NotificationService.normalizeAdminText({
+    category: 'ops_digest', title: fields.title, body: fields.body, detail: fields.detail,
+  });
+  const standingRow = await trx('notifications').select('id', 'title', 'body', 'detail', 'metadata')
+    .where({ recipient_type: 'admin', category: 'ops_digest' })
+    .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
+    .whereRaw("metadata->>'source' IS NULL")
+    .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+    .orderBy('created_at', 'desc').limit(1).first();
+  if (!standingRow) return;
+  const standingMeta = parseJsonObject(standingRow.metadata);
+  const contentChanged = standingRow.title !== next.title || next.body !== (standingRow.body ?? null)
+    || next.detail !== (standingRow.detail ?? null) || standingMeta.kind !== fields.kind;
+  if (!contentChanged) return;
+  const audienceFlipped = Object.prototype.hasOwnProperty.call(standingMeta, 'audience')
+    && standingMeta.audience !== fields.audience;
+  const itemKeys = normalizeItemKeys(rawItemKeys);
+  const itemSetHash = itemSetHashFor(rawItemKeys);
+  // FIX -> ACT is news to the owner even at an equal count (the FIX row may
+  // have been read in Activity), so entering the owner audience rings.
+  const shouldRing = fields.audience !== 'owner' || audienceFlipped
+    || ringOnRefreshFrom({ count: findings.length, itemKeys, itemSetHash, ringOnFirstIdentity: true })(standingRow, standingMeta);
+  const applyRouting = shouldRing || audienceFlipped;
+  await trx('notifications').where({ id: standingRow.id }).update({
+    title: next.title,
+    body: next.body,
+    detail: next.detail,
+    ...(shouldRing ? { read_at: null, done_at: null, done_by: null, resolution: null } : {}),
+    metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+      subject, observedAt, kind: fields.kind, audience: fields.audience,
+      alertClass: alertClassFor('gbp-sync-health', null), count: findings.length,
+      ...itemKeysMetaFor(rawItemKeys, itemKeys, itemSetHash),
+      ...(applyRouting ? { feed: fields.feed, quiet: false } : {}),
+      // Age baseline (admin-alerts-ring-v2 follow-up): findPriorRungRow
+      // reads the last RING, not created_at — only a genuine ring advances it.
+      ...(shouldRing ? { rungAt: new Date().toISOString() } : {}),
+    })]),
+  });
 }
 
 class GoogleBusinessService {
@@ -915,6 +994,12 @@ class GoogleBusinessService {
       synced_at: syncStart ? new Date(syncStart).toISOString() : db.fn.now(),
       ...replyFields,
     };
+    // The customer_id null->set transition here is now recorded as a durable
+    // intent marker (codex round 3 on #5154), not by stamping updated_at
+    // (round 2's fix — superseded: a sweep that reads updated_at cannot tell
+    // this genuine attribution apart from an unrelated repair that also
+    // bumps it). See the marker write inside the transaction below and
+    // email-template-automation-emitters.js's file banner.
     // Monotonic liveness: an older overlapping runner must never regress a
     // newer runner's synced_at — writing its earlier fetch start over a
     // fresher token would make the newer runner's reconcile see
@@ -924,6 +1009,13 @@ class GoogleBusinessService {
       ? db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [new Date(syncStart).toISOString()])
       : db.fn.now();
     let result;
+    // review.linked_5star's durable intent marker id for THIS review's
+    // attribution transition, if one happened in this call (codex round 3
+    // on #5154) — set inside whichever branch below actually writes the
+    // customer_id transition, threaded through to _applyPostWriteSideEffects
+    // so the direct emit call can settle the SAME marker it was recorded
+    // for, transactionally, instead of the sweep guessing from a timestamp.
+    let attributionIntentId = null;
     if (existing) {
       // A Places-first row that parked waiting for its GBP identity re-enters
       // the auto-reply queue once this authoritative sync attaches the name.
@@ -947,6 +1039,24 @@ class GoogleBusinessService {
           return 'yielded';
         }
         await trx('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
+        // review.linked_5star's durable intent marker (codex round 3 on
+        // #5154), written in this SAME transaction as the customer_id
+        // null->set transition, before any further processing — a rollback
+        // of this update rolls back the marker too. Five-star only: a
+        // marker for any other rating would never be settled (the direct
+        // emitter's own star_rating!==5 guard returns before touching a
+        // marker id) and would sit 'pending' forever.
+        if (!existing.customer_id && row.customer_id && Number(row.star_rating) === 5) {
+          const { recordAutomationIntent } = require('./email-template-automation-emitters');
+          const intent = await recordAutomationIntent(trx, {
+            triggerEventKey: 'review.linked_5star',
+            entityType: 'review',
+            entityId: existing.id,
+            occurredAt: new Date(),
+            payload: { review_id: existing.id, customer_id: row.customer_id, location_id: row.location_id, star_rating: row.star_rating },
+          });
+          attributionIntentId = intent?.id || null;
+        }
         // Conditional on the row STILL being parked for that reason (an admin
         // Skip in the meantime wins).
         await applyRequeueOnIdentity(existing.id, live, normalized, { conn: trx });
@@ -1000,8 +1110,27 @@ class GoogleBusinessService {
           review_created_at: normalized.review_created_at,
           star_rating: normalized.star_rating,
         });
-        const [insertedReview] = await db('google_reviews').insert({ ...row, ...autoReply }).returning('id');
-        result = { id: insertedReview?.id || insertedReview, inserted: true };
+        // A brand-new review the name matcher already tied to a customer is
+        // ALSO an attribution transition (codex round 3 on #5154) — the
+        // insert and the marker commit together so a rollback of one rolls
+        // back both.
+        const insertedId = await db.transaction(async (trx) => {
+          const [insertedReview] = await trx('google_reviews').insert({ ...row, ...autoReply }).returning('id');
+          const newId = insertedReview?.id || insertedReview;
+          if (row.customer_id && Number(row.star_rating) === 5) {
+            const { recordAutomationIntent } = require('./email-template-automation-emitters');
+            const intent = await recordAutomationIntent(trx, {
+              triggerEventKey: 'review.linked_5star',
+              entityType: 'review',
+              entityId: newId,
+              occurredAt: new Date(),
+              payload: { review_id: newId, customer_id: row.customer_id, location_id: row.location_id, star_rating: row.star_rating },
+            });
+            attributionIntentId = intent?.id || null;
+          }
+          return newId;
+        });
+        result = { id: insertedId, inserted: true };
       } catch (err) {
         // Overlapping runners (hourly job vs manual sync vs deploy instance)
         // can both miss the existence check for a newly arrived review; the
@@ -1023,13 +1152,28 @@ class GoogleBusinessService {
         // over the winner's newer content (codex r40): the provider-content
         // write and the reply sync apply only while this runner's fetch
         // start is at least as new as the stored liveness token.
-        const loserWrite = db('google_reviews').where({ id: winner.id });
-        if (syncStart) loserWrite.whereRaw('(synced_at IS NULL OR synced_at <= ?::timestamptz)', [new Date(syncStart).toISOString()]);
-        const loserUpdated = await loserWrite.update({
-          ...providerRow,
-          synced_at: monotonicSyncedAt,
-          // Same existing-link-first rule as the row build above.
-          customer_id: winner.customer_id || customerId || null,
+        const loserCustomerId = winner.customer_id || customerId || null;
+        const loserUpdated = await db.transaction(async (trx) => {
+          const loserWrite = trx('google_reviews').where({ id: winner.id });
+          if (syncStart) loserWrite.whereRaw('(synced_at IS NULL OR synced_at <= ?::timestamptz)', [new Date(syncStart).toISOString()]);
+          const updated = await loserWrite.update({
+            ...providerRow,
+            synced_at: monotonicSyncedAt,
+            // Same existing-link-first rule as the row build above.
+            customer_id: loserCustomerId,
+          });
+          if ((Array.isArray(updated) ? updated.length : updated) > 0 && !winner.customer_id && loserCustomerId && Number(providerRow.star_rating) === 5) {
+            const { recordAutomationIntent } = require('./email-template-automation-emitters');
+            const intent = await recordAutomationIntent(trx, {
+              triggerEventKey: 'review.linked_5star',
+              entityType: 'review',
+              entityId: winner.id,
+              occurredAt: new Date(),
+              payload: { review_id: winner.id, customer_id: loserCustomerId, location_id: providerRow.location_id, star_rating: providerRow.star_rating },
+            });
+            attributionIntentId = intent?.id || null;
+          }
+          return updated;
         });
         if ((Array.isArray(loserUpdated) ? loserUpdated.length : loserUpdated) > 0) {
           await applySyncReplyFields(winner.id, winnerReplyFields, { expectedReply: winner.review_reply ?? null });
@@ -1042,7 +1186,7 @@ class GoogleBusinessService {
         result = { id: winner.id, inserted: false };
       }
     }
-    await this._applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications });
+    await this._applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications, attributionIntentId });
     return result;
   }
 
@@ -1052,7 +1196,7 @@ class GoogleBusinessService {
   // (a failed reinstatement clear or suppression mark cannot skip the
   // attribution-moment thank-you), and the first failure is tagged on the
   // result for the caller to surface as gbp_side_effect.
-  async _applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications }) {
+  async _applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications, attributionIntentId = null }) {
     // Everything below is post-write: the row is stored and its synced_at
     // token advanced. A failure here must not read as a storage failure to
     // the caller (the loop skips the removal reconcile on storage failures
@@ -1132,6 +1276,20 @@ class GoogleBusinessService {
             source: 'google_review',
           });
         }, (outcome) => outcome && outcome.reason === 'error');
+        // review.linked_5star (email_template_automation, dark/shadow) —
+        // same attribution moment, 5-star only. Never throws (emitter's own
+        // contract); this is a SEPARATE catalog from the thank-you sequence
+        // above, so a failure here must never affect it. attributionIntentId
+        // is the durable marker THIS same transition's own transaction
+        // recorded (codex round 3 on #5154) — passed through so this call
+        // settles that marker (processed / pending-with-error /
+        // unrecoverable) instead of the sweep guessing from a timestamp.
+        await sideEffect('review.linked_5star emit', async () => {
+          const { emitReviewLinked5Star } = require('./email-template-automation-emitters');
+          return emitReviewLinked5Star({
+            reviewId: result.id, customerId: row.customer_id, locationId: row.location_id, starRating: row.star_rating,
+          }, attributionIntentId);
+        });
       }
     } else if (result.inserted) {
       // New review we couldn't tie to a customer — alert the office to match
@@ -1159,7 +1317,11 @@ class GoogleBusinessService {
     if (data.status !== 'OK') throw new Error(`Places API: ${data.status}`);
     const googleRating = data.result?.rating || null;
     const googleTotalReviews = data.result?.user_ratings_total || null;
-    if (!googleRating && !googleTotalReviews) return null;
+    // Returns the listing's public review count. Google answered and the
+    // listing has no reviews: nothing to store, but the 0 lets the health
+    // check tell a profile that has never had a review from a feed that went
+    // silent (a skipped or failed call yields no count at all).
+    if (!googleRating && !googleTotalReviews) return 0;
     const existing = await db('google_reviews').where({ google_review_id: `places_stats_${loc.id}` }).first();
     const statsData = JSON.stringify({ rating: googleRating, totalReviews: googleTotalReviews });
     if (existing) {
@@ -1175,7 +1337,7 @@ class GoogleBusinessService {
         synced_at: db.fn.now(),
       });
     }
-    return { rating: googleRating, totalReviews: googleTotalReviews };
+    return googleTotalReviews;
   }
 
   // `countedRowIds`: review row ids a breaker-tripped GBP store of this
@@ -1290,6 +1452,14 @@ class GoogleBusinessService {
       }
       const ownerReply = review.owner_response?.text || null;
       const customerId = await this._findCustomerIdByReviewerName(reviewerName);
+      // Named ahead of the branch below so the review.linked_5star emitter
+      // (after both branches) has the row's id either way — existing.id on
+      // the update path, the freshly inserted id on the insert path.
+      let placesReviewRowId = existing?.id || null;
+      // review.linked_5star's durable intent marker id, set inside whichever
+      // branch below actually writes the customer_id transition (codex
+      // round 3 on #5154) — mirrors _upsertGbpReview's attributionIntentId.
+      let placesAttributionIntentId = null;
       if (existing) {
         // A row in Google's CURRENT Places sample is proof a review is live —
         // but proof about THIS row only when the identity corroborates.
@@ -1315,6 +1485,11 @@ class GoogleBusinessService {
           // Existing link first — mirror of _upsertGbpReview (GH codex r1).
           customer_id: existing.customer_id || customerId,
         };
+        // The customer_id null->set transition here is recorded as a durable
+        // intent marker inside the transaction below (codex round 3 on
+        // #5154), not by stamping updated_at (round 2's fix — superseded,
+        // same reason as _upsertGbpReview: a sweep reading updated_at cannot
+        // tell a genuine attribution apart from an unrelated repair).
         // synced_at participates in the authoritative reconcile's claim
         // predicate (synced_at < syncStart ⇒ stampable) — refreshing it
         // asserts "seen live just now". An uncorroborated same-name match
@@ -1345,6 +1520,17 @@ class GoogleBusinessService {
             return 'yielded';
           }
           await trx('google_reviews').where({ id: existing.id }).update(upd);
+          if (!existing.customer_id && upd.customer_id && Number(upd.star_rating) === 5) {
+            const { recordAutomationIntent } = require('./email-template-automation-emitters');
+            const intent = await recordAutomationIntent(trx, {
+              triggerEventKey: 'review.linked_5star',
+              entityType: 'review',
+              entityId: existing.id,
+              occurredAt: new Date(),
+              payload: { review_id: existing.id, customer_id: upd.customer_id, location_id: loc.id, star_rating: upd.star_rating },
+            });
+            placesAttributionIntentId = intent?.id || null;
+          }
           // Owner reply first (a landed uncertain write becomes posted), then
           // the reviewer-edit reconciliation on the post-sync row (codex r39).
           // A Places owner reply that differs from the local one goes through
@@ -1404,20 +1590,39 @@ class GoogleBusinessService {
         // chance to enter the pipeline.
         const { autoReplyInsertFields } = require('./review-reply/runner');
         const placesCreatedAt = new Date(review.time * 1000).toISOString();
-        await db('google_reviews').insert({
-          google_review_id: googleId,
-          location_id: loc.id,
-          reviewer_name: reviewerName,
-          reviewer_photo_url: review.profile_photo_url || null,
-          star_rating: review.rating || 0,
-          review_text: review.text || null,
-          review_reply: ownerReply,
-          reply_updated_at: ownerReply ? new Date() : null,
-          review_created_at: placesCreatedAt,
-          customer_id: customerId,
-          synced_at: sampleSyncStart.toISOString(),
-          ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt, star_rating: review.rating || 0 }),
-        }).returning('id');
+        const insertStarRating = review.rating || 0;
+        placesReviewRowId = await db.transaction(async (trx) => {
+          const [insertedReview] = await trx('google_reviews').insert({
+            google_review_id: googleId,
+            location_id: loc.id,
+            reviewer_name: reviewerName,
+            reviewer_photo_url: review.profile_photo_url || null,
+            star_rating: insertStarRating,
+            review_text: review.text || null,
+            review_reply: ownerReply,
+            reply_updated_at: ownerReply ? new Date() : null,
+            review_created_at: placesCreatedAt,
+            customer_id: customerId,
+            synced_at: sampleSyncStart.toISOString(),
+            ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt, star_rating: insertStarRating }),
+          }).returning('id');
+          const newId = insertedReview?.id || null;
+          // A brand-new Places-sourced review the name matcher already tied
+          // to a customer is ALSO an attribution transition (codex round 3
+          // on #5154) — insert and marker commit together.
+          if (newId && customerId && Number(insertStarRating) === 5) {
+            const { recordAutomationIntent } = require('./email-template-automation-emitters');
+            const intent = await recordAutomationIntent(trx, {
+              triggerEventKey: 'review.linked_5star',
+              entityType: 'review',
+              entityId: newId,
+              occurredAt: new Date(),
+              payload: { review_id: newId, customer_id: customerId, location_id: loc.id, star_rating: insertStarRating },
+            });
+            placesAttributionIntentId = intent?.id || null;
+          }
+          return newId;
+        });
         newCount++;
       }
       // Existing-link-first, matching the persisted field above: a late name
@@ -1437,6 +1642,18 @@ class GoogleBusinessService {
             starRating: review.rating || 0,
             source: 'google_review_places',
           });
+          // review.linked_5star (email_template_automation, dark/shadow) —
+          // same attribution moment as the GBP feed path. Never throws
+          // (emitter's own contract); a failure here must not touch the
+          // thank-you sequence above (a separate catalog).
+          try {
+            const { emitReviewLinked5Star } = require('./email-template-automation-emitters');
+            await emitReviewLinked5Star({
+              reviewId: placesReviewRowId, customerId: effectiveCustomerId, locationId: loc.id, starRating: review.rating || 0,
+            }, placesAttributionIntentId);
+          } catch (emitErr) {
+            logger.warn(`[gbp] review.linked_5star emit failed for review ${placesReviewRowId}: ${scrubSentryText(emitErr && emitErr.message ? emitErr.message : emitErr)}`);
+          }
         }
       } else if (!existing) {
         // Newly inserted, unmatched → alert the office to match it. Deferred
@@ -1487,6 +1704,10 @@ class GoogleBusinessService {
     // codex #3298 r1).
     const pulledCounts = {};
     const gbpFailures = {};
+    // This run's public review count per location, from Places. A number
+    // only when Places answered this run; a skipped or failed call leaves
+    // null or undefined.
+    const placesTotals = {};
     // Unlinked-review notifications collected across the WHOLE run and fired
     // after every location's reviews are inserted/linked — the likely-reviewer
     // exclusion must see the full batch (codex #3264 r2).
@@ -1515,7 +1736,7 @@ class GoogleBusinessService {
         // newest information always rings last.
         const locRestored = [];
         if (GOOGLE_KEY) {
-          await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
+          placesTotals[loc.id] = await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
             logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
           });
         }
@@ -1654,7 +1875,7 @@ class GoogleBusinessService {
     // class the 2026-08-08 manual review-status backfill fixed by hand.
     // Best-effort: health
     // reporting must never break the sync itself.
-    await this._assessReviewSyncHealth(sources, pulledCounts, gbpFailures, observedAt).catch((err) => {
+    await this._assessReviewSyncHealth(sources, pulledCounts, gbpFailures, observedAt, placesTotals).catch((err) => {
       logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
     });
 
@@ -1671,16 +1892,18 @@ class GoogleBusinessService {
    *                      or a breaker trip that stored part of the GBP feed
    *                      and no Places sample landed (source gbp_partial)
    *   silent_empty  ACT  GBP pull succeeds but the feed has ZERO reviews
-   *                      (the Venice wipe class — mechanically "healthy")
+   *                      (the Venice wipe class — mechanically "healthy").
+   *                      Not raised for a profile that has never had a
+   *                      review: Places confirms zero this run and nothing
+   *                      was ever stored for it (no review row, no stats row)
    *   ingest_stale  ACT  Google shows more reviews than we ever ingested and
    *                      nothing new has landed in 14d — reviewers exist that
    *                      auto-mark can never see
    *   stats_stale   ACT  no _stats row, or Places stats older than 7d — the
    *                      totals cross-check above is running blind
    */
-  _classifyLocationSyncHealth({ hasResource, source, pulledCount, gbpFailure, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
+  _classifyLocationSyncHealth({ hasResource, source, pulledCount, gbpFailure, rowCount, storedCount, newestIngestAt, statsUpdatedAt, statsTotal, placesTotal, now = Date.now() }) {
     if (!hasResource) return null;               // not a GBP-tracked location
-    if (source === 'concurrent_skip') return null; // another runner owns this cycle
     const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
 
     const failureText = gbpFailure && gbpFailure !== 'no_client' ? String(gbpFailure).replace(/\s+/g, ' ').slice(0, 200) : null;
@@ -1705,13 +1928,20 @@ class GoogleBusinessService {
       const why = failureText ? failedWhat : 'GBP credentials are broken (client could not be initialized)';
       return { cls: 'feed_degraded', severity: 'ACT', detail: `${why} — running on the ~5-review Places sample; removals and most new reviews are invisible` };
     }
+    // The checks below judge a completed GBP pull; concurrent_skip means
+    // another runner owns this cycle.
+    if (source !== 'gbp') return null;
     // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
     // its historical rows (missing_since-stamped, never deleted), so a
     // stored-row count would read healthy forever after the wipe.
-    if (source === 'gbp' && Number(pulledCount) === 0) {
+    if (Number(pulledCount) === 0) {
+      // Nothing is missing from a profile that has never had a review. A
+      // wipe still alerts: its removal-stamped rows and its Places stats
+      // row stay stored.
+      if (placesTotal === 0 && storedCount === 0) return null;
       return { cls: 'silent_empty', severity: 'ACT', detail: 'the GBP pull succeeds but the feed returns ZERO reviews — profile wiped, suspended, or re-created (the Venice class)' };
     }
-    if (Number.isFinite(statsTotal) && statsTotal > rowCount && days(newestIngestAt) > 14) {
+    if (statsTotal > rowCount && days(newestIngestAt) > 14) {
       return { cls: 'ingest_stale', severity: 'ACT', detail: `Google shows ${statsTotal} reviews but only ${rowCount} were ever ingested and nothing new in ${Math.floor(days(newestIngestAt))}d — those reviewers can never auto-mark` };
     }
     if (days(statsUpdatedAt) > 7) {
@@ -1727,7 +1957,7 @@ class GoogleBusinessService {
    * backup channel, 24h-deduped via the notifications table. Kill switch:
    * REVIEW_SYNC_HEALTH_EMAIL=off (same convention as EMAIL_BOUNCE_RECOVERY).
    */
-  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}, gbpFailures = {}, observedAt = new Date().toISOString()) {
+  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}, gbpFailures = {}, observedAt = new Date().toISOString(), placesTotals = {}) {
     if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
     // A cycle split across overlapping runners (per-location locks) gives
     // each runner a PARTIAL fleet view — two different signatures would both
@@ -1744,6 +1974,12 @@ class GoogleBusinessService {
       // (codex #3298 r2). newest_ingest_at stays all-rows: ingestion recency
       // is about the pipeline moving, not the row's later removal.
       .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name != '_stats' AND missing_since IS NULL) AS row_count`))
+      // Every row ever stored for the location: review rows, removal-stamped
+      // ones included, plus the Places _stats row, which is written only
+      // once Google has shown a rating or review count and never cleared by
+      // a later zero. A wiped profile keeps them; a profile that never had
+      // a review has none.
+      .select(db.raw('COUNT(*) AS stored_count'))
       .select(db.raw(`MAX(created_at) FILTER (WHERE reviewer_name != '_stats') AS newest_ingest_at`))
       // _syncPlacesStatsForLocation stamps synced_at (updated_at has no
       // auto-touch trigger) — reading updated_at would mark every
@@ -1770,9 +2006,11 @@ class GoogleBusinessService {
         pulledCount: pulledCounts[loc.id],
         gbpFailure: gbpFailures[loc.id],
         rowCount: Number(agg.row_count) || 0,
+        storedCount: Number(agg.stored_count) || 0,
         newestIngestAt: agg.newest_ingest_at || null,
         statsUpdatedAt: agg.stats_updated_at || null,
         statsTotal: totals[loc.id],
+        placesTotal: placesTotals[loc.id],
       });
       if (verdict) findings.push({ loc, ...verdict });
     }
@@ -1796,7 +2034,12 @@ class GoogleBusinessService {
     // location's stats_stale suppress a DIFFERENT location going feed_down an
     // hour later. Same finding set → deduped 24h; any new/changed finding →
     // new title → sends immediately.
-    const signature = findings.map((f) => `${f.loc.id}:${f.cls}`).sort().join('|');
+    // Item identity (admin-alerts-ring follow-up, codex r8 P1): each
+    // finding's own `<location id>:<class>` — the same stable pair the
+    // dedupe signature sorts and joins, never a customer-facing value — so
+    // a same-count finding swap still rings (see rewriteStandingGbpDigest).
+    const itemKeys = findings.map((f) => `${f.loc.id}:${f.cls}`);
+    const signature = [...itemKeys].sort().join('|');
     const title = `Review sync health escalation [${signature}]`;
     const lines = findings.map((f) => `${f.severity} ${f.loc.name} [${f.cls}]: ${f.detail}`);
     const body = [
@@ -1806,6 +2049,12 @@ class GoogleBusinessService {
       'Remediation: reconnect the GBP account for credential failures (/admin/reviews sync status); for silent_empty confirm the profile state in Google Business Profile (removed/suspended listings need the support case); stats_stale usually means the Places API call is failing — check GOOGLE_MAPS_API_KEY quota/validity.',
     ].join('\n');
     const subject = `${anyFix ? 'FIX' : 'ACT'}: Google review sync — ${findings.length} location${findings.length === 1 ? '' : 's'} degraded or stale`;
+    // Admin-alerts-brevity scope (owner ruling 2026-09-28): the ACT variant
+    // is the owner's decision (reconnect/verify), so it gets short bell copy.
+    // The FIX variant (a Places API/credential problem an engineer chases)
+    // relies on ops-digest.js's default: FIX -> engineering, Activity-only.
+    const headline = anyFix ? null : `Reviews — ${findings.length} GBP location${findings.length === 1 ? '' : 's'} degraded`;
+    const summary = anyFix ? null : 'Review sync is stale or down. Reconnect or check the profile.';
     const lockKey = 'ops-digest:gbp-sync-health';
     let result;
     try {
@@ -1849,24 +2098,7 @@ class GoogleBusinessService {
           // is still unresolved (so no re-bell), but the standing digest
           // describes B. Rewrite the digest to the CURRENT findings when its
           // text differs, surfacing it unread again (pre-push audit P1).
-          // Only the NEWEST unresolved digest is the standing row: older
-          // unresolved duplicates (the pre-fix production state) must not all
-          // flip back to unread on every detail change (codex r1 P2).
-          const digestTitle = subject.slice(0, 200);
-          const standingDigest = trx('notifications').select('id')
-            .where({ recipient_type: 'admin', category: 'ops_digest' })
-            .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
-            .whereRaw("metadata->>'source' IS NULL")
-            .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-            .orderBy('created_at', 'desc').limit(1);
-          await trx('notifications').whereIn('id', standingDigest)
-            .where((q) => q.whereNot('title', digestTitle).orWhereNot('body', body).orWhereNull('body'))
-            .update({
-              title: digestTitle,
-              body,
-              read_at: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ subject, observedAt })]),
-            });
+          await rewriteStandingGbpDigest(trx, { subject, body, headline, summary, observedAt, findings, itemKeys });
           return { deduped: true };
         }
 
@@ -1897,6 +2129,13 @@ class GoogleBusinessService {
               key: 'gbp-sync-health',
               subject,
               text: body,
+              headline,
+              summary,
+              count: findings.length,
+              itemKeys,
+              // A standing digest from before item identity rings on its
+              // first identified refresh (see ringOnRefreshFrom).
+              ringOnFirstIdentity: true,
               link: '/admin/reviews',
               metadata: { observedAt },
               trx: savepoint,

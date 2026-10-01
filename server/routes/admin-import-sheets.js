@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { parse } = require('csv-parse/sync');
+const inventoryOperations = require('../services/inventory-operations');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -27,6 +28,23 @@ function missingActiveIngredient(value) {
 function missingEpaRegNumber(value) {
   const normalized = normalizedLabelField(value);
   return !normalized || EPA_REG_PLACEHOLDERS.has(normalized);
+}
+
+// Fields the pricing importer backfills onto an ALREADY-existing product —
+// shared by both ways this row's product can turn out to already exist: the
+// outer whereILike lookup (before the catalog lock), and a row another
+// writer just committed that this row's own insert attempt discovers only
+// once it takes the same lock (see POST /pricing below). Never overwrites a
+// value the catalog already has.
+function pricingRowEnrichment(record, { category, activeIngredient, epaRegNumber, sku, size, importedSizeOz }) {
+  const upd = {};
+  if ((!record.category || record.category === 'Uncategorized') && category) upd.category = category.substring(0, 100);
+  if (missingActiveIngredient(record.active_ingredient) && activeIngredient) upd.active_ingredient = activeIngredient;
+  if (missingEpaRegNumber(record.epa_reg_number) && epaRegNumber) upd.epa_reg_number = epaRegNumber;
+  if (!record.sku && sku) upd.sku = sku;
+  if (!record.container_size && size) upd.container_size = size;
+  if (!(parseFloat(record.unit_size_oz) > 0) && importedSizeOz > 0) upd.unit_size_oz = importedSizeOz;
+  return upd;
 }
 
 // POST /api/admin/import/sms — import SMS recordings from Google Sheet
@@ -307,23 +325,44 @@ router.post('/pricing', async (req, res, next) => {
           needs_pricing: !hasValidPrice,
         };
         if (sku) insertData.sku = sku;
-        // subcategory column may not exist yet — try with it, fall back without
-        try {
-          insertData.subcategory = subcategory || null;
-          [productRecord] = await db('products_catalog').insert(insertData).returning('*');
-        } catch (colErr) {
-          delete insertData.subcategory;
-          [productRecord] = await db('products_catalog').insert(insertData).returning('*');
+        // The same catalog-create advisory lock createCatalogProduct takes
+        // (the admin "add product" screen, the purchase-receipt inventory
+        // agent) — so this importer's insert never races either of them
+        // onto the same product name. Re-check the exact-active-name
+        // duplicate under the lock; a hit uses that row instead of
+        // inserting a second one — `existed` tells the caller which
+        // happened, so the SAME enrichment below runs either way (the
+        // outer whereILike hit and this lock-time hit are the same
+        // "already exists" case; the row must never miss out on it just
+        // because the duplicate was found a moment later than usual).
+        const outcome = await db.transaction(async (trx) => {
+          await inventoryOperations.lockCatalogCreate(trx);
+          const existingActive = await inventoryOperations.findActiveProductByExactName(trx, product);
+          if (existingActive) return { row: existingActive, existed: true };
+          // subcategory column may not exist yet — try with it, fall back
+          // without. The first attempt runs in a savepoint (a nested
+          // transaction), so its failure rolls back only that attempt and the
+          // fallback still runs; a failed statement would otherwise abort the
+          // whole transaction.
+          try {
+            const inserted = await trx.transaction(async (attempt) => {
+              const [row] = await attempt('products_catalog').insert({ ...insertData, subcategory: subcategory || null }).returning('*');
+              return row;
+            });
+            return { row: inserted, existed: false };
+          } catch (colErr) {
+            const [row] = await trx('products_catalog').insert(insertData).returning('*');
+            return { row, existed: false };
+          }
+        });
+        productRecord = outcome.row;
+        if (outcome.existed) {
+          const upd = pricingRowEnrichment(productRecord, { category, activeIngredient, epaRegNumber, sku, size, importedSizeOz });
+          if (Object.keys(upd).length > 0) await db('products_catalog').where({ id: productRecord.id }).update(upd);
         }
       } else {
         // Update if we have more info
-        const upd = {};
-        if ((!productRecord.category || productRecord.category === 'Uncategorized') && category) upd.category = (category).substring(0, 100);
-        if (missingActiveIngredient(productRecord.active_ingredient) && activeIngredient) upd.active_ingredient = activeIngredient;
-        if (missingEpaRegNumber(productRecord.epa_reg_number) && epaRegNumber) upd.epa_reg_number = epaRegNumber;
-        if (!productRecord.sku && sku) upd.sku = sku;
-        if (!productRecord.container_size && size) upd.container_size = size;
-        if (!(parseFloat(productRecord.unit_size_oz) > 0) && importedSizeOz > 0) upd.unit_size_oz = importedSizeOz;
+        const upd = pricingRowEnrichment(productRecord, { category, activeIngredient, epaRegNumber, sku, size, importedSizeOz });
         if (Object.keys(upd).length > 0) await db('products_catalog').where({ id: productRecord.id }).update(upd);
       }
 

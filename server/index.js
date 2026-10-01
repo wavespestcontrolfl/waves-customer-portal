@@ -151,15 +151,15 @@ const cspDirectives = {
   // PostHog (*.posthog.com) is loaded only on the public funnel pages
   // (/book, /estimate, /pay) and only after consent — see the client's
   // PublicFunnelTracking. Listing the host here is harmless when no key is set.
-  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com", "https://challenges.cloudflare.com"],
+  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com", "https://challenges.cloudflare.com", "https://cdn.plaid.com"],
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", "https://*.plaid.com"],
   // blob: — the customer portal's in-app document viewer renders Bearer-only
   // report PDFs through an iframe on a blob URL (Capacitor shell has no
   // download pipeline); blob frames are same-origin script-created only.
-  frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
+  frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com", "https://cdn.plaid.com"],
   // Authenticated call recordings are fetched with a Bearer header and played
   // from short-lived, script-created Blob URLs (revoked when the player leaves).
   mediaSrc: ["'self'", "https:", "blob:"],
@@ -228,7 +228,7 @@ app.use((req, res, next) => {
 // middleware terminates OPTIONS for non-allowlisted origins without an
 // Access-Control-Allow-Origin header, which would break third-party embeds.
 // (Approved public surface — see AGENTS.md.) Keep this above the global cors().
-app.use('/api/public/pest-forecast', (req, res, next) => {
+app.use(['/api/public/pest-forecast', '/api/public/yard-calendar'], (req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
@@ -269,6 +269,24 @@ app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, 
 // logger further down. Beacons are no-cors `text/plain` POSTs whose
 // response the page never reads, so this route sets no CORS headers.
 app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
+
+// /book "Can't find a time?" preferred-time request (GATE_BOOK_PREFERRED_TIME,
+// dark). The guard (no-store/noindex/no-referrer headers + the generic
+// unknown-route 404 while the gate is off) is mounted ABOVE the global cors()
+// (an allowed-origin OPTIONS preflight would answer 204 while dark), the global
+// `/api/` limiter (429) and the body parsers (400/413) — the same position the
+// other dark public routes use (codex P0 r1 on #5399). The route re-runs it.
+app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredTimePreParserGuard);
+
+// Signed satellite image proxy (lead-form lookup, service report, portal
+// station map): serves Google imagery WITHOUT the server Maps key ever
+// reaching a customer. Mounted ABOVE the global cors() (which would otherwise
+// answer an OPTIONS preflight with a bare 204 before this router's limiter and
+// privacy headers ran), the global `/api/` limiter and the body parsers. The
+// router stamps its privacy headers + its own limiter on every request under
+// the mount and ends in a terminal generic 404, so nothing falls through.
+// <img> loads need no CORS headers, so this route sets none.
+app.use('/api/public/map-image', require('./routes/public-map-image'));
 
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
@@ -385,6 +403,11 @@ app.use('/api/public/secure-card', (req, res, next) => {
   res.set('X-Robots-Tag', 'noindex');
   next();
 });
+// Live-tracking pre-parser guard (middleware/track-public-preparser.js):
+// privacy headers on every outcome incl. the GLOBAL /api limiter's 429s
+// (same reasoning as secure-card above), and POST /:token/view's malformed-
+// token 404 + body-ignore decided before the shared body parsers.
+app.use('/api/public/track', require('./middleware/track-public-preparser').trackPublicPreparser);
 // The public agent surfaces (MCP + A2A) carry the same unobservable-when-
 // dark contract as the funnels above: while their gates are off they must
 // read 404 even for an IP that already exhausted the global /api/ limiter
@@ -442,6 +465,12 @@ app.use('/api/public/appointment', require('./middleware/no-store').noStore, (re
   }
   next();
 });
+// The visit-prep photos sub-gate + token-shape check (the router's own
+// definition, mounted here a second time): a dark or malformed photos
+// request must 404 BEFORE the shared express.json/urlencoded parsers below,
+// which would otherwise answer an oversized or malformed application/json
+// body with their own 413/400 first (Codex #5176 r1 P0).
+app.use('/api/public/appointment', require('./routes/appointment-public').visitPrepPreParserGuard);
 app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req, res, next) => {
   if (!require('./config/feature-gates').isEnabled('reserviceSelfServe')) {
     return res.status(404).json({ error: 'Not found' });
@@ -449,6 +478,11 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
   next();
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
+
+// Estimate map-image proxy: privacy headers + the dark overlay 404 must land
+// BEFORE the global limiter, or an over-budget IP gets a 429 (and no
+// no-store/CORP) from a route that is supposed to be dark / generic.
+app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 
 app.use('/api/', limiter);
 
@@ -612,6 +646,13 @@ function requireCustomerPhotoIdGateOpen(req, res, next) {
 app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
 app.use('/api/photo-id', require('./middleware/large-body-auth').requireCustomerTokenForLargeBody);
 app.use('/api/photo-id', express.json({ limit: '30mb' }));
+// Per-link Open Graph preview images (/og/report/:token.jpg, /og/<kind>.jpg)
+// — the endpoint iMessage/SMS/email link-preview crawlers fetch, outside any
+// auth. Mounted BEFORE the global body parsers below: it reads no body, and
+// a junk body must never be parsed (or rejected) ahead of its privacy
+// headers and limiter. See server/routes/og-preview.js.
+app.use('/og', require('./routes/og-preview'));
+
 // Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
 // the verify hook stores them for /api/integrations/*-worker paths only.
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
@@ -669,6 +710,8 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Outside-link click redirect for prep guides — registered destinations only.
+app.use('/go', require('./routes/outbound-redirect'));
 // Digital business card — public token-scoped data + Save-contact vCard.
 app.use('/api/card', require('./routes/card-public'));
 // Universal-link association files (apple-app-site-association / assetlinks.json).
@@ -679,6 +722,8 @@ app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);
 app.use('/api/client-errors', require('./routes/client-errors'));
 app.use('/api/push', require('./routes/push'));
+// Customer activity beacons (GATE_PORTAL_ACTIVITY, dark) — authenticated, writes analytics rows only.
+app.use('/api/customer/activity', require('./routes/customer-activity'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
@@ -691,6 +736,8 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 // Mounted before adminCustomerRoutes so the customer router doesn't
 // shadow the turf-profile sub-routes. Both routers share the
 // /api/admin/customers prefix; Express tries them in mount order.
+app.use('/api/admin/schedule/:serviceId/property-areas', require('./routes/admin-property-service-areas').serviceRouter);
+app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require('./routes/admin-property-service-areas').propertyRouter);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
@@ -788,6 +835,7 @@ app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
+app.use('/api/public/yard-calendar', require('./routes/public-yard-calendar'));
 app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
@@ -910,6 +958,7 @@ app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
+app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 app.use('/api/billing/autopay', require('./routes/customer-autopay'));
 app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
@@ -982,9 +1031,9 @@ if (config.nodeEnv === 'production') {
   const fs = require('fs');
   const {
     applyHtmlMetadata,
-    loadServiceReportPageMetadata,
-    redactReportPath,
   } = require('./services/report-page-metadata');
+  const { loadLinkPreviewMetadata, redactLinkPreviewPath } = require('./services/link-preview-metadata');
+  const { portalUrl } = require('./utils/portal-url');
 
   // Per-section PWA shape. /admin and /tech each install as their own
   // home-screen icon with their own name/manifest/start_url, instead of
@@ -1023,6 +1072,21 @@ if (config.nodeEnv === 'production') {
     // surrounding handlers are already no-cache, so fresh reads keep
     // deploys snappy without a stale-cache footgun.
     let html = fs.readFileSync(path.join(clientBuild, 'index.html'), 'utf8');
+    // Every page gets a branded, absolute default og:image FIRST — before
+    // the section/link-preview overrides below, which is what lets a more
+    // specific override (title/description included) win for a page that
+    // has one, while an ordinary page keeps this default image with the
+    // static title/description index.html already carries (applyHtmlMetadata
+    // falls back to those same defaults when a field isn't given).
+    html = applyHtmlMetadata(html, {
+      previewTitle: 'Waves',
+      image: {
+        url: portalUrl('/og/default.jpg'),
+        width: 1200,
+        height: 630,
+        alt: 'Waves Pest Control',
+      },
+    });
     const section = pickSection(reqPath);
     if (section) {
       html = html.replace(/href="\/manifest\.json"/, `href="${section.manifest}"`);
@@ -1034,10 +1098,10 @@ if (config.nodeEnv === 'production') {
       });
     }
     try {
-      const reportMetadata = await loadServiceReportPageMetadata(reqPath);
-      if (reportMetadata) html = applyHtmlMetadata(html, reportMetadata);
+      const linkPreviewMetadata = await loadLinkPreviewMetadata(reqPath);
+      if (linkPreviewMetadata) html = applyHtmlMetadata(html, linkPreviewMetadata);
     } catch (err) {
-      logger.warn(`[report-meta] Failed to render report metadata for ${redactReportPath(reqPath)}: ${err.message}`);
+      logger.warn(`[link-preview] Failed to render link-preview metadata for ${redactLinkPreviewPath(reqPath)}: ${err.code || err.name}`);
     }
     return html;
   }
@@ -1174,7 +1238,20 @@ const primeCatalogNames = config.nodeEnv === 'test'
   ? Promise.resolve()
   : require('./services/service-catalog-names').startCatalogNameRefresh(logger);
 
-primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV === '1' ? '127.0.0.1' : undefined, () => {
+// Compile the shared re-entry claim patterns before accepting traffic, so
+// the first live voice turn or email draft doesn't pay V8's one-time regex
+// compilation (about a second, synchronous; #4905). Never blocks boot.
+const primeGuardrails = primeCatalogNames.then(() => {
+  if (config.nodeEnv === 'test') return;
+  try {
+    const ms = require('./services/content/content-guardrails').warmReentrySafetyPatterns();
+    logger.info(`[boot] re-entry claim patterns compiled in ${ms}ms`);
+  } catch (err) {
+    logger.warn(`[boot] re-entry claim pattern warm-up failed: ${err.message}`);
+  }
+});
+
+primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV === '1' ? '127.0.0.1' : undefined, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);

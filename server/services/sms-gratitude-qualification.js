@@ -52,6 +52,8 @@ const SOURCE_FILES = Object.freeze([
   'server/services/context-aggregator.js',
   'server/services/sms-auto-send.js',
   'server/services/sms-shadow-drafter.js',
+  'server/services/sms-company-facts.js',
+  'server/constants/business.js',
   'server/services/sms-draft-verifier.js',
   'server/services/llm/call.js',
   'server/services/llm/deep.js',
@@ -129,7 +131,14 @@ async function readCurrent({ dbi, sourceDigest }) {
   const pins = {
     policyVersion: GRATITUDE_POLICY_VERSION,
     fixtureSha256,
-    promptVersion: drafter.PROMPT_VERSION,
+    // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+    // P1): this is "which prompt is being examined right now", the exact
+    // question systemPromptSha256 below answers by hash — the label must
+    // agree with it, or a v11-labeled pin sitting next to a v12-rendered
+    // hash would be internally inconsistent. same()'s pins-drift check
+    // (evaluateGratitudeQualification) already catches a stale run via the
+    // hash alone; this keeps the human-readable label honest too.
+    promptVersion: drafter.currentPromptVersion(),
     routes,
     verifier: {
       enabled: drafter.VERIFY_ENABLED === true,
@@ -399,4 +408,5 @@ module.exports = {
   runGratitudeQualification,
   evaluateGratitudeQualification,
   WORKFLOW,
+  pinnedSourceFiles,
 };

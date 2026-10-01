@@ -289,6 +289,30 @@ describe('groundModelCommitments', () => {
     expect(out.kept[0].due_basis).toBe('stated');
   });
 
+  test('an AI time with an Eastern offset of either season is the wall clock it spells; other offsets are instants (#5081 follow-up)', () => {
+    const say = (due_at) => groundModelCommitments([
+      { party: 'waves', kind: 'callback', description: 'Call back at three', confidence: 0.8, due_at, evidence: [{ quote: 'someone will call you back tomorrow morning', speaker: 'agent' }] },
+    ], TRANSCRIPT).kept[0].due_at;
+    // July is EDT: 3 PM is 19:00Z. "-05:00" is the model's season slip —
+    // still 3 PM, never 4 PM. Seconds ride along.
+    expect(say('2026-07-10T15:00:00-04:00')).toBe('2026-07-10T19:00:00.000Z');
+    expect(say('2026-07-10T15:00:00-05:00')).toBe('2026-07-10T19:00:00.000Z');
+    expect(say('2026-07-10T15:00:30-0500')).toBe('2026-07-10T19:00:30.000Z');
+    // Fractional seconds never fall through to UTC parsing (pre-push audit P1).
+    expect(say('2026-07-10T15:00:00.000-04:00')).toBe('2026-07-10T19:00:00.000Z');
+    expect(say('2026-07-10T15:00:00.123456-05:00')).toBe('2026-07-10T19:00:00.000Z');
+    expect(say('2026-07-10T15:00')).toBe('2026-07-10T19:00:00.000Z');
+    // January is EST: the same rule the other way round.
+    expect(say('2026-01-10T15:00:00-04:00')).toBe('2026-01-10T20:00:00.000Z');
+    // The fall-back night repeats 1:00–2:00: both offsets are valid there
+    // and name different instants — each is kept as written (codex #5139 r2 P1).
+    expect(say('2026-11-01T01:30:00-04:00')).toBe('2026-11-01T05:30:00.000Z');
+    expect(say('2026-11-01T01:30:00-05:00')).toBe('2026-11-01T06:30:00.000Z');
+    // A UTC or other offset is a real instant.
+    expect(say('2026-07-10T20:00:00Z')).toBe('2026-07-10T20:00:00.000Z');
+    expect(say('2026-07-10T15:00:00-07:00')).toBe('2026-07-10T22:00:00.000Z');
+  });
+
   test('a nonempty due_at the parser rejects is not a stated deadline: kept, counted, and its wording rides in due_text (codex gh-r12 P2)', () => {
     const out = groundModelCommitments([
       { party: 'waves', kind: 'callback', description: 'Call back tomorrow morning', confidence: 0.8, due_at: 'tomorrow-ish', evidence: [{ quote: 'someone will call you back tomorrow morning', speaker: 'agent' }] },

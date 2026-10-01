@@ -1,3 +1,5 @@
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+
 // Billing-lane card for the appointment detail sheet: shows HOW this
 // customer pays and exactly what completing this visit will do to their
 // wallet — BEFORE the visit runs, so a phantom invoice (or a silently free
@@ -30,7 +32,7 @@ function money(n) {
   return `$${v.toFixed(2)}`;
 }
 
-function predictionLine(prediction) {
+function predictionLine(prediction, siblingCoverage) {
   if (!prediction) return null;
   switch (prediction.kind) {
     case 'covered_membership':
@@ -45,11 +47,48 @@ function predictionLine(prediction) {
       return { color: NEUTRAL.ink, text: `On completion: auto-charges the saved payment method ${money(prediction.amount)}.` };
     case 'invoice':
       return { color: NEUTRAL.ink, text: `On completion: sends the customer a ${money(prediction.amount)} invoice.` };
+    case 'covered_sibling_invoice': {
+      const sibling = prediction.siblingServiceType ? ` on the ${prediction.siblingServiceType} visit` : '';
+      const invoiceRef = prediction.invoiceNumber ? ` invoice ${prediction.invoiceNumber}` : ' an invoice';
+      // The server's own siblingCoverage verdict (billing-lane.js
+      // siblingCoverageForSchedule) decides settled vs. collectible —
+      // "no charge" either way let a technician walk off a job whose
+      // combined-trip invoice was still outstanding. siblingCoverageCopy is
+      // pure copy formatting of that verdict, never its own classifier.
+      const coverage = siblingCoverageCopy(siblingCoverage, { siblingServiceType: prediction.siblingServiceType });
+      if (coverage?.collectible) {
+        const due = coverage.amountDue != null ? ` ${money(coverage.amountDue)}` : '';
+        return {
+          color: WARN.ink,
+          text: `On completion: no NEW invoice for this visit —${invoiceRef} already covers it${sibling} (same trip), but${due} is still due on that invoice. Collect there, not here.`,
+        };
+      }
+      return { color: GREEN, text: `On completion: no charge —${invoiceRef} already covers this${sibling} (same trip).` };
+    }
+    // Codex round 5 P2: the same-trip sibling invoice this visit would
+    // otherwise defer to is refunded/terminal (or the lookup itself
+    // failed) — resolveScheduledServiceCharge refuses to charge this visit
+    // either way, so this must read as "go resolve it," never as a $ amount
+    // due or a false "covered."
+    case 'sibling_needs_review':
+      return { color: WARN.ink, text: 'On completion: this visit’s combined-trip invoice needs review before charging — resolve it on Customer 360.' };
     case 'no_charge':
       return { color: MUTED, text: 'On completion: nothing bills for this visit.' };
     default:
       return null;
   }
+}
+
+// "Includes X $Y (same trip)" lines for a combined first-application
+// invoice — either the RESERVED row explaining what its own invoice total
+// is made of, or the sibling-covered row's OWN line (already named in the
+// prediction text above, so its own entry is skipped there). See
+// billing-lane.js sameTripFirstApplicationBreakdown.
+function breakdownLines(prediction) {
+  if (!Array.isArray(prediction?.breakdown)) return [];
+  return prediction.breakdown
+    .filter((item) => item && item.amount != null && item.serviceType)
+    .map((item) => `${item.serviceType} ${money(item.amount)}`);
 }
 
 export default function BillingLaneCard({ billingLane, style, onSendCardLink, sendingCardLink }) {
@@ -58,8 +97,9 @@ export default function BillingLaneCard({ billingLane, style, onSendCardLink, se
   const rate = Number(billingLane.monthlyRate);
   const isMember = billingLane.mode === 'monthly_membership';
   const showRate = isMember && Number.isFinite(rate) && rate > 0;
-  const line = predictionLine(billingLane.prediction);
+  const line = predictionLine(billingLane.prediction, billingLane.siblingCoverage);
   const conflict = !!billingLane.prediction?.conflictStampedPrice;
+  const breakdown = breakdownLines(billingLane.prediction);
   // Present-tense money state: dues status for members, open balance for
   // everyone. duesPaidThisMonth null = unknown (older payloads) — show
   // nothing rather than guessing.
@@ -167,6 +207,14 @@ export default function BillingLaneCard({ billingLane, style, onSendCardLink, se
         {line && !gap && (
           <div style={{ fontSize: 13, color: line.color, marginTop: 6 }}>
             {line.text}
+          </div>
+        )}
+        {/* Only the RESERVED row's own line needs this spelled out — the
+            sibling-covered row's line above already names the other
+            service and says "same trip". */}
+        {breakdown.length > 0 && billingLane.prediction?.kind !== 'covered_sibling_invoice' && (
+          <div style={{ fontSize: 14, color: MUTED, marginTop: 4 }}>
+            Includes {breakdown.join(' + ')} (same trip).
           </div>
         )}
         {duesLine && (

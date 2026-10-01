@@ -13,9 +13,8 @@
  *     'conversational' alone is deliberately NOT exempt, because cold
  *     automated sends (the lead-webhook form auto-reply, the lead-response
  *     agent) reuse that policy for its consent/trust shape while being
- *     exactly the machine-initiated night texts the window fences (the
- *     dropped-call speed-play text has honored this same 8-8 fence since
- *     before the gate). It also serves sends whose purpose must stay
+ *     exactly the machine-initiated night texts the window fences. It
+ *     also serves sends whose purpose must stay
  *     stricter than the conversational policy (the reschedule-reply
  *     confirmation keeps purpose 'appointment' for its trust floor).
  *     Only inbound-reply handlers may set it; an automation/cron passing
@@ -107,6 +106,12 @@ const OPERATOR_ENTRY_POINTS = new Set([
 // (owner-confirmed 2026-08-29: the friend gets it immediately, not at
 // 8 AM). Same fail-closed posture as OPERATOR_ENTRY_POINTS: new
 // customer-action surfaces must opt in here. Deliberately ABSENT:
+//   - dropped_call_sms — serves BOTH inbound drops and eligible OUTBOUND
+//     return / lead-auto-bridge calls (owner ruling 2026-09-26). The
+//     inbound leg is the caller reaching us and passes at night under the
+//     2026-09-30 ruling via the customerInitiated marker the sender sets
+//     for inbound calls only; the outbound leg is our contact and stays
+//     fenced (pre-push codex P1).
 //   - stripe_webhook and invoice_receipt_sms — those entry points serve
 //     BOTH the customer's own payments AND machine-initiated off-session
 //     charges (autopay debits, completion/balance-sweep card-on-file
@@ -126,8 +131,17 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'estimate_accept_onetime_booking',
   'estimate_accept_onetime_confirmed',
   'estimate_deposit_receipt',
+  'estimate_service_details_send',
   'lead_response_auto_reply',
   'lead_webhook_auto_reply',
+  // Owner ruling 2026-09-28: a caller reaching out to us — a missed call or
+  // a voicemail — is a customer action just like a form submit (the same
+  // idea as the 2026-08-29 ruling above). Both automated first-touch texts
+  // go out immediately, at any hour: missed-call-text-back.js drops its own
+  // independent window check entirely (this exemption is what lets it),
+  // and voicemail-lead-sms.js's quiet-hours re-queue path (QUIET_HOURS_HOLD)
+  // simply never fires for this entry point any more.
+  'missed_call_text_back',
   'promotions_upsell_interest',
   'public_estimate_add_service_request',
   'public_estimate_extension_request',
@@ -135,6 +149,9 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'referral_engine_invite',
   'referrals_legacy_invite',
   'referrals_v2_invite',
+  // Owner ruling 2026-09-28 (see missed_call_text_back above) — same
+  // customer-action reasoning for the voicemail quote-link text-back.
+  'voicemail_lead_sms',
 ]);
 
 const ET_LABEL = new Intl.DateTimeFormat('en-US', {

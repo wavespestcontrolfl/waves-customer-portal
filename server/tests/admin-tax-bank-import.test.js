@@ -40,6 +40,9 @@ function bankBuilder() {
     where: jest.fn((c) => { wheres.push(c); return b; }),
     whereIn: jest.fn((c, v) => { wheres.push([c, v]); return b; }),
     whereRaw: jest.fn((sql, binds) => { wheres.push([sql, binds]); return b; }),
+    // the upload's feed-history read (days the feed imported rows for)
+    whereBetween: jest.fn(() => b),
+    distinct: jest.fn(() => Promise.resolve([])),
     first: jest.fn((...cols) => {
       // appliedRefundTotal aggregates refund credits (raw select with the
       // refundAmount sum) — resolve the staged total
@@ -100,6 +103,14 @@ function expensesBuilder() {
 // binding-less raw stays a plain string (the jsonb key-subtraction asserts)
 const mockDb = jest.fn((table) => {
   if (table === 'bank_transactions') return bankBuilder();
+  // the upload's feed-coverage read (plaid-sync.feedCoverageForLabel):
+  // no feed on any label in these tests
+  if (table === 'plaid_accounts as pa') {
+    const f = {};
+    for (const m of ['join', 'whereNot', 'whereNotIn', 'where', 'whereRaw', 'min']) f[m] = jest.fn(() => f);
+    f.first = jest.fn(() => Promise.resolve({ cutoff: null }));
+    return f;
+  }
   if (table === 'expenses') return expensesBuilder();
   if (table === 'expense_categories') {
     return { where: jest.fn(() => ({ first: jest.fn(() => Promise.resolve(state.category)) })) };

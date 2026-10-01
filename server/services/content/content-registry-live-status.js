@@ -1,11 +1,20 @@
+const http = require('http');
+const https = require('https');
 const db = require('../../models/db');
 const registry = require('./content-registry');
+const { classifyPageBody } = require('../seo/page-body-classifier');
+const { _internals: contactFinderInternals } = require('../seo/contact-finder');
+
+const { rejectingLookup } = contactFinderInternals;
 
 const DEFAULT_BASE_URL = 'https://www.wavespestcontrol.com';
 const DEFAULT_LIMIT = 200;
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_TIMEOUT_MS = 8000;
 const DEFAULT_STATUSES = ['db_published_missing_astro', 'conflict'];
+// Safety cap for the private-IP-pinned fetcher only (safeFetchImpl below) —
+// the registry sweep's own default fetchImpl (global.fetch) is unaffected.
+const DEFAULT_MAX_RESPONSE_BYTES = 1_500_000; // ~1.5MB
 
 const CHECK_FIELDS = [
   'id',
@@ -13,6 +22,7 @@ const CHECK_FIELDS = [
   'canonical_url_normalized',
   'live_url',
   'title',
+  'live_status_checked_at',
   'http_status',
   'live_status',
   'redirect_target_url',
@@ -51,7 +61,12 @@ function buildAbsoluteUrl(value, baseUrl = DEFAULT_BASE_URL) {
 }
 
 function targetUrlForRow(row, baseUrl = DEFAULT_BASE_URL) {
-  return buildAbsoluteUrl(row?.live_url || row?.canonical_url || row?.canonical_url_normalized, baseUrl);
+  return registry.registryLiveTargetUrl(row, baseUrl);
+}
+
+function fleetOrigin(value) {
+  if (!registry.isContentFleetUrl(value)) return '';
+  try { return new URL(String(value)).origin; } catch { return ''; }
 }
 
 function absoluteFromLocation(location, requestedUrl) {
@@ -102,14 +117,70 @@ function isNoindex(html) {
   return /\bnoindex\b/i.test(extractRobots(html));
 }
 
-function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, requestedUrl, noindex }) {
+// A response can noindex via the X-Robots-Tag header instead of (or as well
+// as) a meta tag — the documented health contract covers both. `headers`
+// is the fetch-Response-shaped object fetchText hands back (`.get(name)`).
+function isNoindexHeader(headers) {
+  if (!headers || typeof headers.get !== 'function') return false;
+  return /\bnoindex\b/i.test(String(headers.get('x-robots-tag') || ''));
+}
+
+// Body-aware signals a bare HTTP status can never see: a page that renders
+// the site's OWN "Page Not Found" template, or a bot-challenge interstitial,
+// under a 2xx status. Shared by the registry sweep and the owned cited-URL
+// health check (server/services/seo/owned-url-health.js) — ONE detector, not
+// two drifting copies. Challenge detection is interstitial-SPECIFIC evidence
+// only (local audit finding 2026-09-27 on the pre-extraction copy): a
+// healthy page with a `<div id="captcha">` widget, or "access denied" in its
+// own copy, must never read as blocked.
+function extractTitle(html) {
+  const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+}
+
+const SOFT_404_RE = /\b(page not found|404[\s:—-]|we can.?t find that page|this page (doesn.?t|does not) exist)\b/i;
+
+function visibleText(html) {
+  return String(html || '')
+    .replace(/<script\b[\s\S]*?<\/script>|<style\b[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Computed once per fetched body; harmless (and unused) for a non-2xx page.
+ * Challenge and non-document detection are the shared page-body classifier's
+ * strict mode (server/services/seo/page-body-classifier.js — also used by the
+ * link prospect verifier), not a second copy, fed the response's REAL
+ * Content-Type: a 200 JSON error, image or other non-HTML payload at a page
+ * URL is not the page (Codex r5 on #5123).
+ */
+function computeBodySignals(html, contentType) {
+  const title = extractTitle(html);
+  const kind = classifyPageBody(html, contentType, { strictChallenge: true });
+  return {
+    title,
+    challenge: kind === 'challenge',
+    nonHtml: kind === 'non_html',
+    softNotFound: SOFT_404_RE.test(title) || SOFT_404_RE.test(String(html || '').slice(0, 4000)),
+    visibleTextLength: visibleText(html).length,
+  };
+}
+
+function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, requestedUrl, noindex, challenge, softNotFound, nonHtml }) {
   if (!status) return 'unknown';
   const code = Number(status);
   if (code === 404 || code === 410) return 'missing';
-  if (code >= 500) return 'error';
+  if (code >= 500) return 'server_error';
   if (code >= 300 && code < 400) return redirectTargetUrl ? 'redirected' : 'error';
   if (code === 401 || code === 403) return 'blocked';
   if (code >= 400) return 'error';
+  // Body-aware verdicts, checked before noindex/canonicalized — a page that
+  // renders as a challenge, a not-found template or no document at all is
+  // neither of those.
+  if (challenge) return 'challenge';
+  if (softNotFound || nonHtml) return 'soft_404';
   if (noindex) return 'noindex';
   const requested = normalizeInternalTarget(requestedUrl);
   const canonical = normalizeInternalTarget(canonicalTargetUrl);
@@ -118,34 +189,214 @@ function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, req
   return 'unknown';
 }
 
-function classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex }) {
+function classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex, challenge, softNotFound, nonHtml }) {
   const code = Number(finalStatus);
   if (!code) return redirectTargetUrl ? 'redirected' : 'unknown';
+  // The followed chain ended on another 3xx (e.g. no Location on a later
+  // hop) — it never reached a page, so it is not a healthy "redirected".
+  if (code >= 300 && code < 400) return 'error';
   if (code === 404 || code === 410) return 'missing';
-  if (code >= 500) return 'error';
+  if (code >= 500) return 'server_error';
   if (code === 401 || code === 403) return 'blocked';
   if (code >= 400) return 'error';
+  // A redirect landing on a challenge or a soft-404 template is NOT the
+  // reassuring "redirected" verdict — this is what would have hidden the
+  // motivating case (a 301 chain landing on a "Page Not Found" 2xx page)
+  // from a bare status check.
+  if (challenge) return 'challenge';
+  if (softNotFound || nonHtml) return 'soft_404';
   if (noindex) return 'noindex';
   if (code >= 200 && code < 300 && redirectTargetUrl) return 'redirected';
-  return classifyLiveStatus({ status: finalStatus, redirectTargetUrl, noindex });
+  return classifyLiveStatus({ status: finalStatus, redirectTargetUrl, noindex, challenge, softNotFound, nonHtml });
 }
 
 async function fetchText(fetchImpl, url, { redirect = 'manual', timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    const res = await fetchImpl(url, {
-      redirect,
-      signal: controller?.signal,
-      headers: {
-        'User-Agent': 'WavesContentRegistry/1.0 (+https://www.wavespestcontrol.com)',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-    });
-    const text = res.status >= 200 && res.status < 300 ? await res.text() : '';
-    return { res, text };
+    let currentUrl = String(url || '');
+    for (let hop = 0; hop <= 5; hop++) {
+      if (!registry.isContentFleetUrl(currentUrl)) throw new Error('Live-check URL is outside the content fleet');
+      const res = await fetchImpl(currentUrl, {
+        // Native follow mode can cross onto an untrusted redirect host before
+        // application code sees it. Walk redirects manually so every hop is
+        // checked against the fleet allowlist first.
+        redirect: 'manual',
+        signal: controller?.signal,
+        headers: {
+          'User-Agent': 'WavesContentRegistry/1.0 (+https://www.wavespestcontrol.com)',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      });
+      const location = res.status >= 300 && res.status < 400
+        ? absoluteFromLocation(res.headers.get('location'), currentUrl)
+        : '';
+      if (redirect === 'follow' && location) {
+        currentUrl = location;
+        continue;
+      }
+      const text = res.status >= 200 && res.status < 300 ? await res.text() : '';
+      return { res, text, finalUrl: currentUrl };
+    }
+    throw new Error('Live-check redirect limit exceeded');
   } finally {
     if (timeout) clearTimeout(timeout);
+  }
+}
+
+/**
+ * SSRF-hardened fetchImpl: Node http/https with the private-IP DNS pin
+ * (contact-finder.js's rejectingLookup, reused rather than reimplemented)
+ * and a response-size cap. Matches the fetch(url, opts) -> Response-like
+ * contract fetchText expects (status, headers.get(name), text()); honors
+ * `signal` so fetchText's own per-call AbortController timeout still bounds
+ * the whole request (including a response trickling data — an absolute
+ * deadline, not just socket inactivity).
+ *
+ * The registry sweep's own default (global.fetch) is unaffected — this is
+ * opt-in for a caller that needs the harder guarantee (owned-url-health.js,
+ * whose target URLs are untrusted answer-engine citations rather than the
+ * registry's own known fleet inventory).
+ */
+function safeFetchImpl(url, { signal, headers = {}, maxBytes = DEFAULT_MAX_RESPONSE_BYTES } = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try { parsed = new URL(url); } catch (err) { return reject(err); }
+    const mod = parsed.protocol === 'http:' ? http : https;
+    let req;
+    try {
+      req = mod.request(parsed, { method: 'GET', lookup: rejectingLookup, headers }, (res) => {
+        const status = res.statusCode || 0;
+        const resHeaders = res.headers || {};
+        const headerGet = (name) => resHeaders[String(name || '').toLowerCase()] ?? null;
+        if (status >= 300 && status < 400) {
+          res.destroy();
+          return resolve({ status, headers: { get: headerGet }, text: async () => '', truncated: false });
+        }
+        let data = '';
+        let truncated = false;
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          if (truncated) return;
+          data += chunk;
+          if (Buffer.byteLength(data, 'utf8') >= maxBytes) {
+            truncated = true;
+            data = data.slice(0, maxBytes);
+            res.destroy();
+          }
+        });
+        res.on('end', () => resolve({ status, headers: { get: headerGet }, text: async () => data, truncated }));
+        res.on('close', () => resolve({ status, headers: { get: headerGet }, text: async () => data, truncated }));
+        res.on('error', (err) => reject(err));
+      });
+    } catch (err) {
+      return reject(err);
+    }
+    req.on('error', reject);
+    if (signal) {
+      if (signal.aborted) { req.destroy(new Error('aborted')); return; }
+      signal.addEventListener('abort', () => req.destroy(new Error('aborted')), { once: true });
+    }
+    req.end();
+  });
+}
+
+/**
+ * URL-level live-status checker — SHARED between the content-registry sweep
+ * (checkRegistryRowLiveStatus below) and the owned cited-URL health check
+ * (server/services/seo/owned-url-health.js), which maps this result into
+ * its own richer verdict vocabulary. One fetcher, one classifier — not two
+ * drifting copies (AGENTS.md "extend the existing mechanism").
+ *
+ * Returns the registry's existing live_status vocabulary (now including two
+ * body-aware members, 'challenge' and 'soft_404') PLUS the raw body signals
+ * (title, visibleTextLength) a caller with different empty-body rules can
+ * apply on top — a thin/near-empty body is not by itself wrong for a
+ * registry row (many legitimate pages are short), so that judgment call is
+ * deliberately left to the caller rather than baked into the shared verdict.
+ */
+async function checkUrlLiveStatus(requestedUrl, {
+  fetchImpl = global.fetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  sitemapPaths = null,
+  fallbackNoindex = false,
+} = {}) {
+  if (!fetchImpl) throw new Error('fetch implementation is required');
+  try {
+    const first = await fetchText(fetchImpl, requestedUrl, { redirect: 'manual', timeoutMs });
+    const status = String(first.res.status);
+    const redirectTargetUrl = absoluteFromLocation(first.res.headers.get('location'), requestedUrl);
+    let canonicalTargetUrl = extractCanonical(first.text, requestedUrl);
+    let noindex = isNoindex(first.text) || isNoindexHeader(first.res.headers);
+    let finalStatus = null;
+    let followError = null;
+    let finalUrl = requestedUrl;
+    let finalBody = first.text;
+    let finalContentType = first.res.headers.get('content-type');
+    let finalTruncated = Boolean(first.res.truncated);
+
+    if (redirectTargetUrl && first.res.status >= 300 && first.res.status < 400) {
+      try {
+        const follow = await fetchText(fetchImpl, redirectTargetUrl, { redirect: 'follow', timeoutMs });
+        finalStatus = String(follow.res.status);
+        canonicalTargetUrl = extractCanonical(follow.text, follow.finalUrl || redirectTargetUrl) || canonicalTargetUrl;
+        noindex = noindex || isNoindex(follow.text) || isNoindexHeader(follow.res.headers);
+        finalUrl = follow.finalUrl || redirectTargetUrl;
+        finalBody = follow.text;
+        finalContentType = follow.res.headers.get('content-type');
+        finalTruncated = Boolean(follow.res.truncated);
+      } catch (err) {
+        followError = `Redirect target check failed: ${err.message}`;
+      }
+    }
+
+    const bodySignals = followError ? null : computeBodySignals(finalBody, finalContentType);
+    const sitemap = sitemapSignal({ sitemapPaths, requestedUrl, redirectTargetUrl, canonicalTargetUrl });
+    const liveStatus = followError ? 'error' : redirectTargetUrl
+      ? classifyRedirectLiveStatus({
+        finalStatus, redirectTargetUrl, noindex,
+        challenge: bodySignals?.challenge, softNotFound: bodySignals?.softNotFound, nonHtml: bodySignals?.nonHtml,
+      })
+      : classifyLiveStatus({
+        status, redirectTargetUrl, canonicalTargetUrl, requestedUrl, noindex,
+        challenge: bodySignals?.challenge, softNotFound: bodySignals?.softNotFound, nonHtml: bodySignals?.nonHtml,
+      });
+
+    return {
+      target_url: requestedUrl,
+      final_url: redirectTargetUrl ? finalUrl : requestedUrl,
+      http_status: status,
+      final_http_status: finalStatus,
+      live_status: liveStatus,
+      redirect_target_url: redirectTargetUrl || null,
+      canonical_target_url: canonicalTargetUrl || null,
+      noindex_detected: noindex,
+      sitemap_present: sitemap.present,
+      sitemap_status: sitemap.status,
+      page_title: bodySignals?.title ?? null,
+      visible_text_length: bodySignals?.visibleTextLength ?? null,
+      content_type: finalContentType || null,
+      truncated: finalTruncated,
+      error: followError,
+    };
+  } catch (err) {
+    const sitemap = sitemapSignal({ sitemapPaths, requestedUrl, redirectTargetUrl: null, canonicalTargetUrl: null });
+    return {
+      target_url: requestedUrl,
+      final_url: null,
+      http_status: 'error',
+      final_http_status: null,
+      live_status: 'error',
+      redirect_target_url: null,
+      canonical_target_url: null,
+      noindex_detected: Boolean(fallbackNoindex),
+      sitemap_present: sitemap.present,
+      sitemap_status: sitemap.status,
+      page_title: null,
+      visible_text_length: null,
+      truncated: false,
+      error: err.message,
+    };
   }
 }
 
@@ -172,76 +423,23 @@ async function checkRegistryRowLiveStatus(row, {
     };
   }
 
-  try {
-    const first = await fetchText(fetchImpl, requestedUrl, { redirect: 'manual', timeoutMs });
-    const status = String(first.res.status);
-    const redirectTargetUrl = absoluteFromLocation(first.res.headers.get('location'), requestedUrl);
-    let canonicalTargetUrl = extractCanonical(first.text, requestedUrl);
-    let noindex = isNoindex(first.text);
-    let finalStatus = null;
-    let followError = null;
+  const result = await checkUrlLiveStatus(requestedUrl, {
+    fetchImpl, timeoutMs, sitemapPaths, fallbackNoindex: row.noindex_detected,
+  });
 
-    if (redirectTargetUrl && first.res.status >= 300 && first.res.status < 400) {
-      try {
-        const follow = await fetchText(fetchImpl, redirectTargetUrl, { redirect: 'follow', timeoutMs });
-        finalStatus = String(follow.res.status);
-        canonicalTargetUrl = extractCanonical(follow.text, follow.res.url || redirectTargetUrl) || canonicalTargetUrl;
-        noindex = noindex || isNoindex(follow.text);
-      } catch (err) {
-        followError = `Redirect target check failed: ${err.message}`;
-      }
-    }
-
-    const sitemap = sitemapSignal({
-      sitemapPaths,
-      requestedUrl,
-      redirectTargetUrl,
-      canonicalTargetUrl,
-    });
-    const liveStatus = followError ? 'error' : redirectTargetUrl
-      ? classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex })
-      : classifyLiveStatus({
-        status,
-        redirectTargetUrl,
-        canonicalTargetUrl,
-        requestedUrl,
-        noindex,
-      });
-
-    return {
-      id: row.id,
-      title: row.title || null,
-      target_url: requestedUrl,
-      http_status: status,
-      live_status: liveStatus,
-      redirect_target_url: redirectTargetUrl || null,
-      canonical_target_url: canonicalTargetUrl || null,
-      noindex_detected: noindex,
-      sitemap_present: sitemap.present,
-      sitemap_status: sitemap.status,
-      error: followError,
-    };
-  } catch (err) {
-    const sitemap = sitemapSignal({
-      sitemapPaths,
-      requestedUrl,
-      redirectTargetUrl: null,
-      canonicalTargetUrl: null,
-    });
-    return {
-      id: row.id,
-      title: row.title || null,
-      target_url: requestedUrl,
-      http_status: 'error',
-      live_status: 'error',
-      redirect_target_url: null,
-      canonical_target_url: null,
-      noindex_detected: Boolean(row.noindex_detected),
-      sitemap_present: sitemap.present,
-      sitemap_status: sitemap.status,
-      error: err.message,
-    };
-  }
+  return {
+    id: row.id,
+    title: row.title || null,
+    target_url: result.target_url,
+    http_status: result.http_status,
+    live_status: result.live_status,
+    redirect_target_url: result.redirect_target_url,
+    canonical_target_url: result.canonical_target_url,
+    noindex_detected: result.noindex_detected,
+    sitemap_present: result.sitemap_present,
+    sitemap_status: result.sitemap_status,
+    error: result.error,
+  };
 }
 
 function sitemapSignal({ sitemapPaths, requestedUrl, redirectTargetUrl, canonicalTargetUrl }) {
@@ -316,6 +514,7 @@ async function loadRegistryRows(database, { statuses, limit }) {
   let query = database('content_registry').select(CHECK_FIELDS);
   if (statuses && statuses.length) query = query.whereIn('reconciliation_status', statuses);
   return query
+    .orderByRaw('live_status_checked_at ASC NULLS FIRST')
     .orderByRaw(`CASE reconciliation_status
       WHEN 'db_published_missing_astro' THEN 1
       WHEN 'conflict' THEN 2
@@ -342,6 +541,7 @@ function liveUpdatePayload(row, result, now = new Date()) {
     noindex_detected: Boolean(result.noindex_detected),
     sitemap_present: nextSitemapPresent,
     sitemap_status: nextSitemapStatus,
+    live_status_checked_at: now,
     updated_at: now,
   };
   return updates;
@@ -415,20 +615,31 @@ async function runContentRegistryLiveStatusCheck({
     limit: boundedLimit,
   });
 
-  let sitemapPaths = null;
-  let sitemapError = null;
+  const sitemapPathsByOrigin = new Map();
+  const sitemapErrors = [];
   if (useSitemap) {
-    try {
-      sitemapPaths = await fetchSitemapPaths({ baseUrl, sitemapUrl, fetchImpl, timeoutMs });
-    } catch (err) {
-      sitemapError = err.message;
+    const baseOrigin = fleetOrigin(baseUrl);
+    const origins = new Set(rows.map((row) => fleetOrigin(targetUrlForRow(row, baseUrl))).filter(Boolean));
+    for (const origin of origins) {
+      try {
+        const paths = await fetchSitemapPaths({
+          baseUrl: origin,
+          sitemapUrl: sitemapUrl && origin === baseOrigin ? sitemapUrl : null,
+          fetchImpl,
+          timeoutMs,
+        });
+        sitemapPathsByOrigin.set(origin, paths);
+      } catch (err) {
+        sitemapPathsByOrigin.set(origin, null);
+        sitemapErrors.push(`${origin}: ${err.message}`);
+      }
     }
   }
 
   const results = await runWithConcurrency(rows, boundedConcurrency, (row) => checkRegistryRowLiveStatus(row, {
     baseUrl,
     fetchImpl,
-    sitemapPaths,
+    sitemapPaths: sitemapPathsByOrigin.get(fleetOrigin(targetUrlForRow(row, baseUrl))) || null,
     timeoutMs,
   }));
 
@@ -436,9 +647,11 @@ async function runContentRegistryLiveStatusCheck({
   if (commit) {
     for (let i = 0; i < rows.length; i++) {
       const updates = liveUpdatePayload(rows[i], results[i], now);
-      if (!liveFieldsChanged(rows[i], updates)) continue;
+      const changed = liveFieldsChanged(rows[i], updates);
+      // Always advance the durable check watermark, even when live fields are
+      // unchanged, so the bounded sweep rotates through the full corpus.
       await database('content_registry').where('id', rows[i].id).update(updates);
-      updatedCount += 1;
+      if (changed) updatedCount += 1;
     }
   }
 
@@ -448,7 +661,7 @@ async function runContentRegistryLiveStatusCheck({
     statuses: normalizedStatuses,
     limit: boundedLimit,
     base_url: baseUrl,
-    sitemap_error: sitemapError,
+    sitemap_error: sitemapErrors.length ? sitemapErrors.join('; ') : null,
     summary: summarizeResults(results, updatedCount),
     rows: results,
   };
@@ -459,6 +672,7 @@ module.exports = {
   DEFAULT_LIMIT,
   DEFAULT_CONCURRENCY,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_MAX_RESPONSE_BYTES,
   DEFAULT_STATUSES,
   normalizeStatuses,
   parsePositiveInt,
@@ -469,9 +683,17 @@ module.exports = {
   extractCanonical,
   extractRobots,
   isNoindex,
+  isNoindexHeader,
+  extractTitle,
+  visibleText,
+  computeBodySignals,
+  SOFT_404_RE,
   classifyLiveStatus,
   classifyRedirectLiveStatus,
+  safeFetchImpl,
+  checkUrlLiveStatus,
   checkRegistryRowLiveStatus,
+  runWithConcurrency,
   fetchSitemapPaths,
   fetchSitemapPathsFromUrl,
   extractSitemapLocs,

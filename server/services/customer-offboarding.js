@@ -225,9 +225,10 @@ async function previewCancelSignup(customerId) {
   // payment) is beyond the deposit stage — including already-completed
   // visits this flow won't touch. The mid-term/proration decision is the
   // owner's, not this flow's.
+  const InvoiceService = require('./invoice');
   const paidVisitInvoices = await db('invoices')
     .where({ customer_id: customerId })
-    .whereNotNull('scheduled_service_id')
+    .where((qb) => InvoiceService.whereVisitLinked(qb))
     .where((qb) => {
       qb.whereIn('status', ['paid', 'processing']).orWhereNotNull('payment_recorded_at');
     })
@@ -399,9 +400,7 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   // like 'sending' and money states like 'paid'/'processing' must all read
   // as unresolved — anything not void/refunded/cancelled still needs a
   // human before money leaves.
-  const unresolvedInvoices = await db('invoices')
-    .where({ scheduled_service_id: visit.id })
-    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
+  const unresolvedInvoices = await InvoiceService.unresolvedInvoicesForCancelledService(db, visit.id)
     .select('id', 'invoice_number', 'status');
   // One-time card holds: the waived release is the ONLY step that frees the
   // no-show hold — an exception or a lost race (held → charging) must gate
@@ -499,7 +498,7 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   // its visit is already cancelled.
   const lingering = await db('invoices')
     .where({ customer_id: customerId })
-    .whereNotNull('scheduled_service_id')
+    .where((qb) => InvoiceService.whereVisitLinked(qb))
     .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .select('id', 'invoice_number', 'status');
   for (const inv of lingering) {

@@ -43,7 +43,7 @@ const CONFLICT_RECOVERY_REASONS = new Set([
 ]);
 // History-spanning review queue: rows from BOTH decision versions must stay
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
-const { V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+const { withLockedRouteDecisions, leftJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_XMIN_TEXT, isListedRouteDecision, routeDecisionsListedScope } = require('../services/call-routing-gates');
 
 // A deny rejects the call's UNIT evidence only when it is a whole-call deny
 // (no wrong_fields) or names the address — a field-scoped deny (service,
@@ -152,25 +152,53 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 // Upsert the single current verdict for a call (re-review overwrites). Links to
 // the enforce-mode route_decision when one exists so calibration can attribute
 // the verdict to the flags that drove the gate.
-async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy }) {
-  const decision = await db('route_decisions')
-    .where({ call_log_id: callLogId, mode: 'enforce' })
-    .orderBy('created_at', 'desc')
-    .first('id');
-  await db('route_feedback')
-    .insert({
-      call_log_id: callLogId,
-      route_decision_id: decision?.id || null,
-      triage_item_id: triageItemId,
-      decision_kind: decisionKind,
-      verdict,
-      wrong_fields: JSON.stringify(verdict === 'deny' ? wrongFields : []),
-      note: note || null,
-      reviewed_by: reviewedBy || null,
-      updated_at: new Date(),
-    })
-    .onConflict('call_log_id')
-    .merge(['route_decision_id', 'triage_item_id', 'decision_kind', 'verdict', 'wrong_fields', 'note', 'reviewed_by', 'updated_at']);
+// The decision row is resolved AND locked (FOR UPDATE) in the same transaction as
+// the feedback write, through the shared withLockedRouteDecisions door: a
+// reprocess refresh (upsertRouteDecision) takes the same row lock, so a verdict
+// and a refresh serialize instead of the verdict attaching to a row that was
+// refreshed under the reviewer (codex #5371 r9 P1). The auto-routed review sends
+// the decision id it DISPLAYED (`routeDecisionId`): that row is checked under the
+// lock, and a submission for a decision that is no longer the newest one (a
+// reprocess since the page loaded) or is not one of the call's decisions is
+// REJECTED (409, STALE_ROUTE_DECISION) instead of landing on a decision the
+// reviewer never saw; so is one whose row was refreshed IN PLACE since it loaded
+// (the same id, a new revision: `routeDecisionRevision`, the row's xmin). No id (an older client, the triage-card verdicts): a verdict
+// that wins the lock freezes the row it names; one that loses attaches to the
+// refreshed newest row it now reads, as before.
+async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy, routeDecisionId = null, routeDecisionRevision = null }) {
+  await withLockedRouteDecisions(db, { callLogId, mode: 'enforce' }, async (trx, rows) => {
+    // Newest first, read AFTER the locks are granted (created_at is refreshed).
+    // The current decision is picked from the SAME set the auto-routed list shows
+    // (isListedRouteDecision / routeDecisionsListedScope share one definition), so
+    // a displayed row is never judged "stale" against a row the list excludes (codex
+    // #5446 r2 P2). Only the auto-routed review is scoped that way: a triage-card verdict
+    // sends no displayed id, so it keeps the true newest enforce row, as before — a
+    // newer version an upgraded pod wrote mid-deploy must never be skipped (#5446 r3).
+    const inScope = decisionKind === 'auto_routed' ? isListedRouteDecision : () => true;
+    const newestOf = (list) => [...list].filter(inScope).sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
+    const picked = resolveDisplayedRouteDecision(rows, routeDecisionId, newestOf, routeDecisionRevision);
+    if (picked.missing || picked.stale) {
+      const err = new Error('This decision changed since it loaded — review the refreshed decision before answering.');
+      err.statusCode = 409;
+      err.code = STALE_ROUTE_DECISION;
+      throw err;
+    }
+    const decision = picked.decision;
+    await trx('route_feedback')
+      .insert({
+        call_log_id: callLogId,
+        route_decision_id: decision?.id || null,
+        triage_item_id: triageItemId,
+        decision_kind: decisionKind,
+        verdict,
+        wrong_fields: JSON.stringify(verdict === 'deny' ? wrongFields : []),
+        note: note || null,
+        reviewed_by: reviewedBy || null,
+        updated_at: new Date(),
+      })
+      .onConflict('call_log_id')
+      .merge(['route_decision_id', 'triage_item_id', 'decision_kind', 'verdict', 'wrong_fields', 'note', 'reviewed_by', 'updated_at']);
+  });
 }
 
 // GET /api/admin/triage?status=open  → list items + per-status counts
@@ -275,6 +303,32 @@ router.get('/', async (req, res) => {
       if (counts[r.status] !== undefined) counts[r.status] = parseInt(r.n, 10);
     }
 
+    // A street-level address hold's read-back dialog must show the visit's LIVE service address
+    // (corrections after booking change it), not only the address captured on the card. One batched
+    // read for the hold cards on this page, admin-only like the card's confirm action.
+    if (req.techRole === 'admin') {
+      const parse = (v) => { if (v && typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
+      const holds = items.filter((i) => i.reason_code === 'outbound_booking_review')
+        .map((i) => ({ item: i, payload: parse(i.payload) }))
+        .filter((h) => h.payload?.street_level_address && h.payload.scheduled_service_id);
+      if (holds.length) {
+        try {
+          const rows = await db('scheduled_services')
+            .whereIn('id', [...new Set(holds.map((h) => String(h.payload.scheduled_service_id)))])
+            .select('id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+          const byId = new Map(rows.map((r) => [String(r.id), r]));
+          for (const { item, payload } of holds) {
+            const r = byId.get(String(payload.scheduled_service_id));
+            if (!r) continue;
+            const line = require('../services/street-level-hold').visitServiceAddressLine(r);
+            if (line) item.visit_address = line;
+          }
+        } catch (addrErr) {
+          logger.warn(`[admin-triage] hold visit address read failed: ${addrErr.code || addrErr.name || 'error'}`);
+        }
+      }
+    }
+
     res.json({ items, counts });
   } catch (err) {
     logger.error(`[admin-triage] list failed: ${err.message}`);
@@ -346,6 +400,34 @@ async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTa
   return new Date(lead.email_confirmed_at).getTime() > new Date(cardCreatedAt).getTime();
 }
 
+// A street-level address hold (call-recording-processor): the office-review
+// card whose payload.street_level_address is set. It is settled by the linked
+// visit — confirmed (runOutboundReviewConfirmHook resolves it), corrected, or
+// cancelled — never by a generic call verdict / Resolve / Dismiss, which would
+// hide the work while the visit stays pending. Protected until the activation
+// finishes: office confirm commits status 'confirmed' BEFORE the hook stamps
+// customer_confirmed (and a transient hook failure leaves it unstamped), and
+// the hook is what files the owed follow-up, so the key is customer_confirmed
+// = false — not status = 'pending'. A cancelled / skipped / rescheduled visit
+// releases the card.
+// COALESCE keeps the predicate two-valued: a card with no such key must read
+// FALSE here, never NULL (NOT NULL would drop it from the bulk resolve).
+const STREET_LEVEL_HOLD_OPEN_SQL = `(triage_items.reason_code = 'outbound_booking_review'
+  AND COALESCE(triage_items.payload->>'street_level_address', '') = 'true'
+  AND COALESCE(triage_items.payload->>'closed_out', '') = ''
+  AND EXISTS (SELECT 1 FROM scheduled_services hold_ss
+    WHERE hold_ss.id::text = triage_items.payload->>'scheduled_service_id'
+      AND hold_ss.customer_confirmed = false
+      AND hold_ss.status NOT IN ('cancelled', 'skipped', 'rescheduled')))`;
+async function streetLevelHoldStillPending(conn, item) {
+  if (!item || item.reason_code !== 'outbound_booking_review') return false;
+  const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+  if (!payload?.street_level_address || !payload.scheduled_service_id || payload.closed_out) return false;
+  const svc = await conn('scheduled_services').where({ id: payload.scheduled_service_id }).first('status', 'customer_confirmed');
+  return !!svc && !svc.customer_confirmed && !['cancelled', 'skipped', 'rescheduled'].includes(String(svc.status || ''));
+}
+const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending visit: confirm the address with the customer, then confirm (or correct or cancel) the visit itself. It resolves when the visit does.';
+
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
@@ -388,6 +470,19 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // r33 guarantee against the email-correction fanout, which pre-locks
     // the same way.
     await lockTriageCall(trx, item.call_log_id);
+    // A street-level address hold settles with its visit, never by Resolve /
+    // Dismiss. Checked HERE, under the per-call lock and inside the
+    // transaction, so the decision and the write cannot straddle a concurrent
+    // office confirm.
+    // The card is re-read UNDER the lock and the guard judges its LIVE payload: a promotion
+    // (call reprocess) can turn a plain outbound_booking_review card into a street-level hold while
+    // this action waited for the lock, and the route's pre-lock snapshot would miss it.
+    const liveCard = ['resolved', 'dismissed'].includes(nextStatus)
+      ? await trx('triage_items').where({ id }).first('reason_code', 'payload')
+      : null;
+    if (['resolved', 'dismissed'].includes(nextStatus) && await streetLevelHoldStillPending(trx, liveCard ? { ...item, ...liveCard } : item)) {
+      throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE), { statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+    }
     if (holdsTable) {
       await trx('first_touch_holds')
         .where({ call_log_id: item.call_log_id })
@@ -1730,6 +1825,10 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'attached_booking_followup_unbooked') {
       return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
     }
+    // A street-level address hold is settled by its visit, not by a verdict.
+    if (await streetLevelHoldStillPending(db, item)) {
+      return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });
+    }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
     // one update. The affected-row count is the win check — the first verdict
@@ -1976,6 +2075,9 @@ router.post('/:id/verdict', async (req, res) => {
         // open, and they must be reviewed on their own (codex r33 P1).
         .modify((q) => { if (item.reason_code === 'auto_booking_skipped_after_approval') q.where({ id: item.id }); })
         .whereRaw("payload->'reschedule_proposal' IS NULL")
+        // …and a street-level address hold whose visit is still pending: the
+        // verdict is a call judgment, the hold is settled by its visit.
+        .whereRaw(`NOT ${STREET_LEVEL_HOLD_OPEN_SQL}`)
         .whereIn('status', OPEN_STATES)
         .update({
           status: 'resolved',
@@ -2195,19 +2297,20 @@ router.post('/:id/verdict', async (req, res) => {
 router.get('/auto-routed', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-    const rows = await db('route_decisions')
+    const rows = await leftJoinRouteFeedback(db('route_decisions')
       .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
-      .leftJoin('customers', 'call_log.customer_id', 'customers.id')
-      .leftJoin('route_feedback', 'route_decisions.call_log_id', 'route_feedback.call_log_id')
+      .leftJoin('customers', 'call_log.customer_id', 'customers.id'))
+      // A verdict shows against the decision it judged (leftJoinRouteFeedback,
+      // the ONE join every reader uses): only the row it points at, or a legacy
+      // verdict with no link. A newer pass's row is a new decision nobody has
+      // judged, so it reads unreviewed.
       // One row per call: a reprocessed call carries BOTH decision versions;
       // only its NEWEST supported enforce decision represents current state.
       // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the
       // DISTINCT ON subquery spans both versions), but a superseded stale
       // decision never duplicates or shadows the fresh one.
-      .whereIn('route_decisions.id', db('route_decisions')
-        .select(db.raw('DISTINCT ON (call_log_id) id'))
-        .whereIn('decision_version', V2_DECISION_VERSIONS)
-        .where('mode', 'enforce')
+      .whereIn('route_decisions.id', routeDecisionsListedScope(db('route_decisions')
+        .select(db.raw('DISTINCT ON (call_log_id) id')))
         .orderByRaw('call_log_id, created_at DESC'))
       .where('route_decisions.final_action_taken', 'auto_route')
       .orderBy('route_decisions.created_at', 'desc')
@@ -2218,6 +2321,9 @@ router.get('/auto-routed', async (req, res) => {
         'route_decisions.created_scheduled_service_id',
         'route_decisions.sms_enqueued',
         'route_decisions.created_at',
+        // the revision the review displays and sends back (xmin; changes on EVERY
+        // update of the row, e.g. a reprocess refresh or the outcome update)
+        db.raw(`${ROUTE_DECISION_XMIN_TEXT} AS route_decision_revision`),
         'call_log.lead_synopsis',
         'call_log.call_summary',
         'call_log.from_phone',
@@ -2251,6 +2357,21 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
     const call = await db('call_log').where({ id: callLogId }).first('id');
     if (!call) return res.status(404).json({ error: 'Call not found' });
 
+    // The decision the reviewer was LOOKING at (the list's route_decision_id). A
+    // malformed id is a 400, never silently ignored; absent = an older client.
+    const rawDecisionId = req.body?.route_decision_id == null ? '' : String(req.body.route_decision_id).trim();
+    if (rawDecisionId && !UUID_RE.test(rawDecisionId)) {
+      return res.status(400).json({ error: 'route_decision_id must be a UUID' });
+    }
+
+    // ...and the revision it displayed (the row's xmin as text): a decision row is
+    // updated IN PLACE after it is shown (a reprocess refresh, the outcome update),
+    // so the id alone is not a revision. Absent = an older client.
+    const rawRevision = req.body?.route_decision_revision == null ? '' : String(req.body.route_decision_revision).trim();
+    if (rawRevision && !/^\d{1,12}$/.test(rawRevision)) {
+      return res.status(400).json({ error: 'route_decision_revision must be a revision token' });
+    }
+
     await upsertFeedback({
       callLogId,
       decisionKind: 'auto_routed',
@@ -2258,9 +2379,13 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
       wrongFields: sanitizeWrongFields(req.body?.wrong_fields),
       note: typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null,
       reviewedBy: req.technicianId,
+      routeDecisionId: rawDecisionId || null,
+      routeDecisionRevision: rawRevision || null,
     });
     res.json({ ok: true, call_log_id: callLogId, verdict });
   } catch (err) {
+    // A stale view: the decision was refreshed or superseded since it loaded.
+    if (err?.code === STALE_ROUTE_DECISION) return res.status(409).json({ error: err.message, code: STALE_ROUTE_DECISION });
     logger.error(`[admin-triage] auto-routed verdict failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to record verdict' });
   }
@@ -2270,4 +2395,4 @@ module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
   heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
-  clearCallbackNumberHold, emailDisagreementConfirmed };
+  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL };

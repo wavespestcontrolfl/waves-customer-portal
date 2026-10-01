@@ -9,12 +9,8 @@
  */
 const {
   REQUIRED_FINDINGS_FIELDS,
-  TYPE_NEXT_STEP_CHIPS,
-  NEXT_STEP_CHIPS,
   customerLabelForValue,
   findBannedCustomerCopy,
-  nextStepRequiredForType,
-  validateNextStepChips,
   validateTypedFindings,
   buildTodaysResult,
   buildTypedReportSnapshot,
@@ -65,7 +61,8 @@ describe('tree & shrub schema', () => {
     expect(REQUIRED_FINDINGS_FIELDS.tree_shrub).toEqual([
       'plant_groups', 'landscape_condition',
     ]);
-    expect(nextStepRequiredForType('tree_shrub')).toBe(true);
+    // Next-step chip picker/requirement retired (owner ruling 2026-09-27).
+    expect(findingsSchemaForType('tree_shrub').nextStepRequired).toBeUndefined();
   });
 
   test('simplified-closeout field flags (owner directives 2026-07-21 / 2026-07-23)', () => {
@@ -149,20 +146,17 @@ describe('tree & shrub schema', () => {
     expect(byKey.customer_recommendations.internal).toBe(false);
   });
 
-  test('every tree_shrub next-step chip has a sentence', () => {
-    for (const chip of TYPE_NEXT_STEP_CHIPS.tree_shrub) {
-      expect({ chip, hasSentence: !!NEXT_STEP_CHIPS[chip] }).toEqual({ chip, hasSentence: true });
-    }
+  test('the schema slice no longer serves the retired next-step chip list', () => {
+    expect(findingsSchemaForType('tree_shrub').nextStepChips).toBeUndefined();
   });
 });
 
 describe('owner template composition', () => {
-  test('condition-led headline + scope + treatments + next step', () => {
+  test('condition-led headline + scope + treatments, no next-step sentence (picker retired 2026-09-27)', () => {
     const result = buildTodaysResult({
       projectType: 'tree_shrub',
       reportTypeLabel: 'Tree & Shrub Service Summary',
       values: BASE_VALUES,
-      chips: ['Continue Tree & Shrub program', 'Monitor plant response'],
       activity: null,
       visitSequence: 1,
     });
@@ -170,7 +164,7 @@ describe('owner template composition', () => {
     expect(result.body).toContain('Completed Tree & Shrub service for the palms, shrubs and ornamentals.');
     expect(result.body).toContain('applied ornamental fertilizer');
     expect(result.body).toContain('applied palm fertilizer');
-    expect(result.body).toContain('We will continue your Tree & Shrub care program.');
+    expect(result.nextStep).toBeNull();
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
@@ -212,7 +206,9 @@ describe('owner template composition', () => {
       activity: null,
       visitSequence: 1,
     });
-    expect(flagged.headline).toBe('Overall landscape condition is declining — see the recommendations below.');
+    // No pointer to recommendations the visit may not carry (owner ruling
+    // 2026-09-27 retired the chips; Codex r5 #5116).
+    expect(flagged.headline).toBe('Overall landscape condition is declining.');
     expect(flagged.body).toContain('A possible Ganoderma conk was observed on a palm — an arborist evaluation is recommended.');
 
     const trunkConcern = buildTodaysResult({
@@ -352,7 +348,6 @@ describe('snapshot', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'tree_shrub',
       values: { ...BASE_VALUES, pollinator_status: 'No blooms or no bees', irac_frac_logged: 'Yes' },
-      nextStepChips: ['Continue Tree & Shrub program'],
       serviceKey: 'tree_shrub_program',
       serviceLabel: 'Tree & Shrub Care Program',
       visitSequence: 1,
@@ -644,34 +639,6 @@ describe('companion context (combined visits — codex P2)', () => {
       type: 'tree_shrub', values, expectedType: 'tree_shrub', enforceRequired: true,
     });
     expect(primary.ok).toBe(true);
-  });
-});
-
-describe('Customer action needed chip requires a recommendation (codex P2 r6)', () => {
-  test('chip beside empty customer_recommendations is rejected', () => {
-    const result = validateNextStepChips(
-      ['Customer action needed'], 'tree_shrub',
-      { plant_groups: 'Shrubs', landscape_condition: 'Good', customer_recommendations: '' },
-    );
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/recorded customer recommendation/);
-  });
-
-  test('chip with a recorded recommendation passes', () => {
-    const result = validateNextStepChips(
-      ['Customer action needed'], 'tree_shrub',
-      { customer_recommendations: 'Adjust irrigation' },
-    );
-    expect(result.ok).toBe(true);
-    expect(result.chips).toEqual(['Customer action needed']);
-  });
-
-  test('other chips stay valid without recommendations', () => {
-    const result = validateNextStepChips(
-      ['Continue Tree & Shrub program'], 'tree_shrub',
-      { customer_recommendations: '' },
-    );
-    expect(result.ok).toBe(true);
   });
 });
 

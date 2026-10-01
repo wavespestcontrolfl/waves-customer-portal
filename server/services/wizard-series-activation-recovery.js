@@ -24,6 +24,12 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const {
+  loadEstimateOwnershipSnapshots,
+  estimateOwnershipCustomerIds,
+  lockCustomerAccountRows,
+  estimateOwnershipMatchesLockedRows,
+} = require('./customer-account-ownership');
 
 // Only look at bookings old enough that no in-flight request is still
 // racing toward its own activation. Deliberately NO upper age bound
@@ -214,6 +220,9 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
     processed += 1;
     try {
       const didStrip = await database.transaction(async (trx) => {
+        const draftOwnershipSnapshot = (
+          await loadEstimateOwnershipSnapshots(trx, [parent.source_estimate_id])
+        )[0];
         // Re-validate the ENTIRE stranded predicate under the comms lock
         // and a parent row lock (codex #3504 r6 hook): everything can have
         // moved since the sweep's unlocked read — a slow in-flight request
@@ -222,7 +231,16 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         // promoted (in which case the bell's "live convertible quote"
         // promise would be false). Any drift → touch nothing; a still-
         // stranded row is re-noticed next sweep.
-        await lockCustomerComms(trx, parent.customer_id);
+        const ownershipCustomerIds = estimateOwnershipCustomerIds(
+          draftOwnershipSnapshot,
+          parent.customer_id,
+        );
+        for (const id of ownershipCustomerIds) await lockCustomerComms(trx, id);
+        const lockedOwnershipCustomers = await lockCustomerAccountRows(
+          trx,
+          ownershipCustomerIds,
+          { forUpdate: true },
+        );
         const fresh = await trx('scheduled_services')
           .where({ id: parent.id })
           .forUpdate()
@@ -232,6 +250,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           || fresh.is_recurring
           || fresh.payment_method_preference !== 'pay_at_visit'
           || fresh.create_invoice_on_complete !== true
+          || String(fresh.customer_id || '') !== String(parent.customer_id || '')
           // Reconciled (or kept-on-purpose) between discovery and this
           // lock — e.g. the pest funnel's duplicate-kept stamp landing
           // after the unlocked read: never strip a marked row.
@@ -284,7 +303,12 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         // full-program rebook), and anything else is a newer quote whose
         // link must survive. Unstamped rows fail closed (never retire).
         const draftRepresentsParent = draftLive
-          && String(freshDraft.customer_id || '') === String(fresh.customer_id || '')
+          && estimateOwnershipMatchesLockedRows(
+            draftOwnershipSnapshot,
+            freshDraft,
+            fresh.customer_id,
+            lockedOwnershipCustomers,
+          )
           && !!fresh.source_estimate_generation
           && !!freshDraft.updated_at
           && new Date(freshDraft.updated_at).getTime() === new Date(fresh.source_estimate_generation).getTime();

@@ -50,6 +50,44 @@ describe('preserved recurring visit staff alert', () => {
   );
 });
 
+describe('superseded series move card', () => {
+  // The successor owns the preserved and overlap work; the old operation's
+  // card is about the conflicts still windowless, and stores only those — the
+  // items admin-alert-relevance.js settles the card by.
+  test('a card-only pass stores only the conflicts it rings for', async () => {
+    jest.clearAllMocks();
+    db.fn = { now: () => new Date() };
+    db.mockImplementation((table) => {
+      if (table === 'series_moves') {
+        return {
+          where: jest.fn().mockReturnThis(),
+          whereNull: jest.fn().mockReturnThis(),
+          first: jest.fn().mockResolvedValue({ status: 'superseded', conflict_card_at: null, reminders_synced_at: new Date(), notified_at: new Date() }),
+          update: jest.fn(async () => 1),
+        };
+      }
+      if (table === 'scheduled_services') {
+        const q = { whereIn: jest.fn(() => q), whereNull: jest.fn(() => q), whereNotIn: jest.fn(() => q), select: jest.fn(async () => [{ id: 'visit-3' }]) };
+        return q;
+      }
+      throw new Error(`Unexpected table ${table}`);
+    });
+    notifyAdmin.mockResolvedValue({ id: 'card' });
+    await applySeriesMoveEffects({
+      result: {
+        seriesMoveId: 'move-2', notifyRequested: false,
+        rescheduledOccurrences: [{ id: 'visit-3', date: '2099-02-03', conflicted: true }],
+        preservedOccurrences: [{ id: 'visit-2', date: '2099-02-01' }],
+        overlapDates: ['2099-02-05'],
+      },
+      serviceId: 'visit-1', newDate: '2099-01-01', newWindow: { start: '09:00', end: '10:00' },
+    });
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.any(String), expect.any(String), expect.objectContaining({
+      metadata: { scheduledServiceId: 'visit-1', seriesMoveId: 'move-2', conflicts: [{ id: 'visit-3', date: '2099-02-03' }], overlapDates: [], preservedOccurrences: [] },
+    }));
+  });
+});
+
 describe('recurring confirmation describes the recorded placement policy', () => {
   test.each([
     [3, 'appointment_recurring_placement_confirmed'],

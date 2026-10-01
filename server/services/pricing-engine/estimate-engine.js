@@ -209,14 +209,18 @@ function serviceCreditTargetsLine(credit = {}, item = {}) {
   const itemService = normalizeServiceCreditServiceKey(item.service);
   const itemName = normalizedDiscountText(item.displayName || item.label || item.name || item.service);
   if (targetKeys.length > 0) {
-    if (targetKeys.includes(itemService)) return true;
-    if (targetKeys.includes('termite_inspection') && itemService === 'wdo_inspection') return true;
-    if (targetKeys.includes('wdo_inspection') && itemService === 'termite_inspection') return true;
-    return false;
+    // No cross-aliasing: the WaveGuard member perk is a free annual termite
+    // inspection and never zeroes a real-estate WDO inspection, or the
+    // reverse (owner 2026-09-28).
+    return targetKeys.includes(itemService);
   }
   const creditName = normalizedDiscountText(credit.catalogName || credit.label || credit.name);
-  return (creditName.includes('termite inspection') || creditName.includes('wdo'))
-    && (itemService === 'wdo_inspection' || itemService === 'termite_inspection' || itemName.includes('termite inspection') || itemName.includes('wdo'));
+  const creditIsWdo = creditName.includes('wdo');
+  const itemIsWdo = itemService === 'wdo_inspection' || itemName.includes('wdo');
+  const itemIsTermiteInspection = itemService === 'termite_inspection' || (!itemIsWdo && itemName.includes('termite inspection'));
+  if (creditIsWdo) return itemIsWdo;
+  if (creditName.includes('termite inspection')) return itemIsTermiteInspection;
+  return false;
 }
 
 function serviceCreditLinePrice(item = {}) {
@@ -2774,4 +2778,4 @@ function quickQuote(input) {
   };
 }
 
-module.exports = { generateEstimate, quickQuote };
+module.exports = { generateEstimate, quickQuote, _test: { serviceCreditTargetsLine } };

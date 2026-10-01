@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "98606d7fda90e0504c3e761ef52ac07269b88a68047ecc72839660ec9c7ecbf9"
     },
     "slug": "aphid",
     "common_name": "Aphid",
@@ -120,7 +121,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "829a355954c8fc6d5c132029b9d3d4ed6a3e0e76f256921d34ef487382a72767"
     },
     "slug": "mealybug",
     "common_name": "Mealybug",
@@ -224,7 +226,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "301c1b1b485153a7540f7df5d79c7dbf53423cf638a83fac0a6c7a31e1a4afec"
     },
     "slug": "spiraling-whitefly",
     "common_name": "Rugose Spiraling Whitefly",
@@ -336,7 +339,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "bcbaf8f6cdc7d919af756492ae581a33e3a70976c61b37bad8d608df196a70ed"
     },
     "slug": "tea-scale",
     "common_name": "Tea Scale",
@@ -425,5 +429,1547 @@
     "action": "monitor",
     "season_basis": "year_round",
     "verification": []
+  },
+  {
+    "slug": "ficus-whitefly",
+    "kind": "organism",
+    "common_name": "Ficus Whitefly",
+    "aka": [],
+    "aliases": [
+      "ficus whitefly",
+      "ficus whiteflies",
+      "singhiella simplex"
+    ],
+    "scientific_name": "Singhiella simplex",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "whiteflies",
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "pupa",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny (about 1/16 inch), moth-like white insect that flies up in a cloud when a ficus hedge is disturbed",
+      "Undersides of ficus leaves dotted with small, flat, pale oval nymphs and pupae",
+      "Heavy yellowing and leaf drop on ficus hedges, sometimes leaving branches bare within weeks",
+      "Sticky honeydew and black sooty mold build up on leaves and anything below the hedge"
+    ],
+    "look_alikes": [
+      {
+        "slug": "spiraling-whitefly",
+        "difference": "Ficus whitefly sticks to ficus and leaves no pattern in its wax; rugose spiraling whitefly leaves spiral-shaped rings of white wax and also attacks palms",
+        "next_photo": "A close-up of the leaf underside checking for spiral rings of wax versus a random scatter",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "small-fly",
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A fast-spreading pest of ficus hedges that can strip a hedge of leaves within weeks once it takes hold. A ficus hedge that's suddenly yellowing and dropping leaves is worth a tree & shrub look before it goes bare.",
+      "fact": "It was first found in Florida in 2007 and spread across the state within a couple of years, mainly by attacking the ubiquitous ficus hedge."
+    },
+    "tech_notes": "Confirm host is Ficus (especially F. benjamina) and check leaf undersides for nymphs/pupae; systemic treatment timing matters since defoliation can be rapid once established.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis-news.ifas.ufl.edu/2018/05/pest-identification-guide-ficus-whitefly-singhiella-simplex"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "8b65b3c40eacf7222efa86adc3c186b39fe786bec7bce80d5dd88069834e9fdf"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "cycad-aulacaspis-scale",
+    "kind": "organism",
+    "common_name": "Cycad Aulacaspis Scale (king sago scale)",
+    "aka": [
+      "King Sago Scale",
+      "Cycad Scale"
+    ],
+    "aliases": [
+      "cycad aulacaspis scale",
+      "king sago scale",
+      "cycad scale",
+      "aulacaspis yasumatsui"
+    ],
+    "scientific_name": "Aulacaspis yasumatsui",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "scale-insects",
+    "site_category": "Plant pests",
+    "stages": [
+      "crawler",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny, white, pear-shaped scales that build up into a thick white crust on fronds and stems",
+      "Orange insect body and eggs visible if the white waxy covering is scraped away",
+      "Fronds show yellow or bleached spots first, then turn brown and dry-looking",
+      "Found mainly on king sago and other cycads (not true palms), often on the underside of leaflets first"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-wax-scale",
+        "difference": "Cycad scale forms a flat white crust only on cycads; Florida wax scale is a raised pinkish-white dome found on citrus, holly and many other shrubs, not cycads",
+        "next_photo": "A close-up of the scale and a wider shot of the whole plant to confirm it's a cycad",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "This scale can kill a king sago that goes untreated, since it also colonizes roots underground and keeps rebuilding its white crust after dead scales are cleaned off. A cycad turning bleached or brown and crusty is worth a prompt look.",
+      "fact": "This scale first appeared on cycads in a Miami nursery in 1996 and spread statewide within a few years."
+    },
+    "tech_notes": "Confirm host is a cycad (not a palm) and check for root-zone colonization in heavy infestations; horticultural oil coverage and repeat treatments are typically needed since dead scales persist visually.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN253"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "14f32ce8a2debb66953a594fb3d8d6e018197b7e5d90d22b860463d1e3f800ea"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "florida-wax-scale",
+    "kind": "organism",
+    "common_name": "Florida Wax Scale",
+    "aka": [],
+    "aliases": [
+      "florida wax scale",
+      "florida wax scales",
+      "wax scale",
+      "ceroplastes floridensis"
+    ],
+    "scientific_name": "Ceroplastes floridensis",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "scale-insects",
+    "site_category": "Plant pests",
+    "stages": [
+      "crawler",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (1/8 to 1/6 inch), dome-shaped bump coated in thick pinkish-white to gray wax",
+      "Young scales look star-shaped from ridges in the wax before rounding out",
+      "Found fixed in clusters on twigs and leaf undersides of citrus, holly and other shrubs",
+      "Sticky honeydew and black sooty mold often build up on leaves below an infestation"
+    ],
+    "look_alikes": [
+      {
+        "slug": "lobate-lac-scale",
+        "difference": "Florida wax scale is a rounded pinkish-white waxy dome on leaves/twigs; lobate lac scale is flatter, reddish-brown, X-shaped, blending into bark",
+        "next_photo": "A close-up of one scale's shape and color against the twig or leaf it's on",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A common, slow-moving scale that mostly causes cosmetic honeydew and sooty mold rather than serious plant decline. Light numbers are worth watching; heavier clusters on citrus or holly are worth a tree & shrub look.",
+      "fact": "Once a young crawler settles and starts building its waxy dome, it never moves again for the rest of its life."
+    },
+    "tech_notes": "Confirm crawler stage timing for oil/soap treatment windows; check for ant activity tending honeydew, which can mean populations are being protected from natural predators.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/119491"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "0ba4178c25034ad2eb1c97c8395204f35d128c6898178997f0cbd41746daa11f"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "lobate-lac-scale",
+    "kind": "organism",
+    "common_name": "Lobate Lac Scale",
+    "aka": [],
+    "aliases": [
+      "lobate lac scale",
+      "lobate lac scales",
+      "paratachardina pseudolobata"
+    ],
+    "scientific_name": "Paratachardina pseudolobata",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "scale-insects",
+    "site_category": "Plant pests",
+    "stages": [
+      "crawler",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny (about 1/16 inch), reddish-brown scale shaped like an X or bow tie, blending in with bark",
+      "Packed in dense rows and clusters along twigs and small branches",
+      "Found on a very wide range of woody shrubs and trees, not just one plant type",
+      "Heavy infestations bring branch dieback along with thick black sooty mold underneath"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-wax-scale",
+        "difference": "Lobate lac scale is flatter, reddish-brown and X-shaped, blending into bark; Florida wax scale is a rounded pinkish-white waxy dome on leaves and twigs",
+        "next_photo": "A close-up of one scale's shape and color against the twig or leaf it's on",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "This scale spreads to an unusually wide range of shrubs and trees and can build up so densely on branches that it kills them outright. Dense reddish-brown clusters on twigs, especially with dieback starting, are worth a prompt tree & shrub look.",
+      "fact": "It has been documented feeding on several hundred different plant species since showing up in Broward County in 1999, an unusually broad host range for a scale insect."
+    },
+    "tech_notes": "Confirm the X/bow-tie shape and dense packing along twigs; document extent of branch dieback and host range affected, since this species can move to nearby unrelated plants.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN471",
+      "https://gardeningsolutions.ifas.ufl.edu/home/care/pests-and-diseases/pests/lobate-lac-scale"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Source corrected to IN471 (the actual Lobate Lac Scale Featured Creature). IN471 documents spread from Broward County (1999) through Miami-Dade and Palm Beach; UF/IFAS Gardening Solutions broadens this to 'a potentially damaging landscape pest in southern Florida.' Neither source names a Southwest Florida county, so SWFL-specific density stays unconfirmed; range is kept at 'occasional' as the cautious, source-consistent regional default (southern Florida generally), not a specific SWFL claim. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "2791fed5abbc83b3f738734075bacb711d6b6d8fcbe05f99540a985155cef556"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "sooty-mold",
+    "kind": "sign",
+    "common_name": "Sooty Mold",
+    "aka": [],
+    "aliases": [
+      "sooty mold",
+      "sooty molds"
+    ],
+    "scientific_name": "Capnodiaceae and related fungi",
+    "rank": "family",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [],
+    "sign_of": [
+      "aphid",
+      "mealybug",
+      "ficus-whitefly",
+      "florida-wax-scale"
+    ],
+    "traits": [
+      "Black, powdery or crusty coating over the tops and undersides of leaves, twigs, and surfaces underneath the plant",
+      "Wipes or flakes off in dry, sooty smudges rather than staining like ground-in dirt",
+      "Sticky, clear honeydew or its residue may be visible nearby, even when the sap-feeding insects are no longer present",
+      "Leaves underneath look shaded and grow more slowly, but the mold itself isn't infecting the plant"
+    ],
+    "look_alikes": [
+      {
+        "slug": "lobate-lac-scale",
+        "difference": "Sooty mold is a black coating that wipes or flakes off the leaf surface; lobate lac scale is fixed reddish-brown bumps you'd have to scrape off",
+        "next_photo": "A close-up trying to wipe the black material with a finger or cloth to see if it comes off as soot or stays fixed as a bump",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "sign",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Sooty mold itself doesn't harm the plant directly; it's just growing on sugary honeydew left behind by a sap-feeding insect. The real fix is finding and treating whichever aphid, mealybug, scale or whitefly is feeding above it.",
+      "fact": "The fungi that cause sooty mold grow only on the surface and never actually infect the leaf underneath."
+    },
+    "tech_notes": "Identify the causal sap-feeder (check for aphids, mealybugs, scale, or whitefly on the plant or overhanging tree) before treating; mold typically clears once the insect source is controlled and washed off.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/okaloosaco/sooty-mold/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "sign_of list is illustrative of common causes, not exhaustive; any sap-feeding, honeydew-producing insect on the plant or an overhanging tree can be the true source. Returned to draft after correcting the visible trait so an old honeydew deposit does not require live feeders to remain visible; owner re-approval is required. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "2242d788855f8b080bc3ab9f063a33a341a5ec8466aeab03231ad4276105b9e1"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "chilli-thrips",
+    "kind": "organism",
+    "common_name": "Chilli Thrips",
+    "aka": [
+      "Yellow Tea Thrips"
+    ],
+    "aliases": [
+      "chilli thrips",
+      "chili thrips",
+      "yellow tea thrips",
+      "scirtothrips dorsalis"
+    ],
+    "scientific_name": "Scirtothrips dorsalis",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Extremely tiny (under 1/50 inch), pale yellow, slender insect, hard to see without a hand lens",
+      "New leaves, buds and flowers look scorched, bronzed, curled or twisted, worst at the growing tips",
+      "Damage shows up on the newest growth first, unlike spider mite damage on older leaves",
+      "Found tucked inside furled new leaves and flower buds rather than out in the open"
+    ],
+    "look_alikes": [
+      {
+        "slug": "spider-mites",
+        "difference": "Chilli thrips damage concentrates on curled new growth and buds; spider mite damage is fine stippling with webbing on older leaves",
+        "next_photo": "A close-up of the newest leaf tips versus the underside of an older leaf, checking for webbing or tiny moving specks",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A pest so small it's usually diagnosed by its damage rather than the insect itself: scorched, curled new growth on roses, viburnum and many other ornamentals. Repeated dieback on new flush across a plant is worth a tree & shrub look.",
+      "fact": "Despite its name, it attacks far more than chilli peppers; roses and viburnum hedges are common targets in home landscapes."
+    },
+    "tech_notes": "Confirm damage pattern on newest growth and inspect furled leaves/buds with a hand lens for tiny yellow larvae; distinguish from spider mite and herbicide-drift symptoms.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/IN833"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "30324b91087f9258cfb417192d5b165f143f1210054c90a362c6380d2bcd107e"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "spider-mites",
+    "kind": "organism",
+    "common_name": "Spider Mites",
+    "aka": [
+      "Red Spider Mite",
+      "Twospotted Spider Mite"
+    ],
+    "aliases": [
+      "spider mites",
+      "spider mite",
+      "red spider mite",
+      "twospotted spider mite",
+      "tetranychidae"
+    ],
+    "scientific_name": "Tetranychidae",
+    "rank": "family",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Extremely tiny (pinhead-sized or smaller) reddish, greenish or yellowish specks, easiest to see in groups",
+      "Fine silk webbing on the underside of leaves and between stems in heavier infestations",
+      "Leaves show a fine, light stippling or a bronzed, bleached look rather than solid brown patches",
+      "Tapping a leaf over white paper knocks loose tiny specks that crawl, confirming mites rather than dust"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chilli-thrips",
+        "difference": "Spider mite damage is fine stippling with webbing on older leaves; chilli thrips damage concentrates on curled, scorched new growth and buds",
+        "next_photo": "A close-up of the underside of an older leaf checking for webbing or tiny moving specks, versus the newest leaf tips",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A hot, dry-weather pest that thrives on stressed plants and can be knocked back with a strong hose spray at low numbers. Light stippling is worth watching; heavy webbing or bronzed leaves on a shrub or tree is worth a closer look.",
+      "fact": "A single female can start an infestation of hundreds within a couple of weeks in warm weather, since spider mites develop so quickly."
+    },
+    "tech_notes": "Confirm with a hand lens or paper-tap test; heat and drought stress worsen outbreaks, so irrigation/plant health is part of the fix alongside any miticide.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/in307"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months follow the cited 'hot, dry summer and fall' pattern for twospotted spider mite; Florida's summer is also rainy season, which can knock populations down, so actual SWFL peak timing may vary by year.",
+      "approval_hash": "9578e60a1d0da4ede4d06763a76fd681f421b3643d844341419c465fec7f6119"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "asian-citrus-psyllid",
+    "kind": "organism",
+    "common_name": "Asian Citrus Psyllid",
+    "aka": [],
+    "aliases": [
+      "asian citrus psyllid",
+      "citrus psyllid",
+      "diaphorina citri"
+    ],
+    "scientific_name": "Diaphorina citri",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (about 1/8 inch), mottled tan-brown, wedge-shaped insect that feeds with its rear end raised at roughly a 30 to 45 degree angle",
+      "A living adult looks dusty from a whitish, waxy coating over its body",
+      "Nymphs are yellow-orange with red eyes and trail curly, white waxy tubules",
+      "Found clustered on new citrus flush (young leaf growth), not on older hardened leaves"
+    ],
+    "look_alikes": [
+      {
+        "slug": "aphid",
+        "difference": "Psyllid feeds tilted up at a steep angle and nymphs trail curly waxy tubules; aphids sit flatter on the leaf and lack those curly tubules",
+        "next_photo": "A close-up from the side of the insect on the stem to check its feeding angle, plus a look at any nymphs for curly threads",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "true-bug",
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "This insect itself does only minor feeding damage, but it spreads citrus greening disease, which has devastated citrus trees across Florida. Finding it on a backyard citrus tree's new growth is worth a look, especially if the tree also shows blotchy, yellow leaves.",
+      "fact": "The bacteria it spreads move so slowly inside a tree that trees can look healthy for a year or more before greening symptoms show up."
+    },
+    "tech_notes": "Confirm feeding angle and waxy nymph tubules on new flush; note any blotchy mottled leaf yellowing (possible HLB/citrus greening) for follow-up, since this psyllid is the primary HLB vector in Florida.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN160",
+      "https://ask.ifas.ufl.edu/topic_asian_citrus_psyllid"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "disease_vector safety flag set to false since it vectors a plant disease (citrus greening/HLB), not a human or pet disease; flagged here so the owner can confirm that's the intended use of that field.",
+      "approval_hash": "2b914e837af38122b996c9fe6e60b53e8418406ad7dce9653039c149c798fff9"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "pink-hibiscus-mealybug",
+    "kind": "organism",
+    "common_name": "Pink Hibiscus Mealybug",
+    "aka": [],
+    "aliases": [
+      "pink hibiscus mealybug",
+      "pink mealybug",
+      "hibiscus mealybug",
+      "maconellicoccus hirsutus"
+    ],
+    "scientific_name": "Maconellicoccus hirsutus",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "mealybugs",
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (about 1/8 inch), pink body showing through a thin, patchy white waxy coating",
+      "Males are smaller, winged, and trail two long white waxy tail filaments",
+      "Found in dense clusters on new growth, leaf undersides and flower buds, especially on hibiscus",
+      "Feeding twists and stunts new growth into a bushy, deformed 'witch's broom' look at branch tips"
+    ],
+    "look_alikes": [
+      {
+        "slug": "mealybug",
+        "difference": "Pink mealybug fluid is pink when crushed and causes twisted 'witch's broom' growth; common mealybugs are colorless and don't cause that twisting",
+        "next_photo": "Gently press one on a white paper towel to check fluid color, plus a photo of the twisted new-growth tip",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": true,
+      "irritant": false
+    },
+    "safety_line": "A regulated invasive pest with an unusually wide host range; note where you saw it so the sighting can be reported and tracked.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": "report_fdacs"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "This mealybug attacks an unusually wide range of ornamentals and fruit trees and can quickly deform new growth into a tangled 'witch's broom.' Twisted new growth with pink-tinged clusters underneath is worth a report and a tree & shrub look.",
+      "fact": "It was first found in Florida in Broward County in 2002 and is now managed mainly with the help of a tiny introduced parasitic wasp."
+    },
+    "tech_notes": "Confirm pink body fluid and witch's-broom deformity on new growth; this is a regulated pest of concern, so document and follow current agency reporting guidance for suspected finds outside its known range.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN156",
+      "https://blogs.ifas.ufl.edu/collierco/files/2018/03/Pink-Hibiscus-Mealybug.pdf"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "SWFL presence confirmed this session: UF/IFAS EDIS IN156 documents first Florida detection in Broward County (2002), then Miami-Dade, with expectation of statewide spread; separately, a UF/IFAS Collier County Extension \"Pest Alert!\" (Doug Caldwell, Commercial Landscape Horticulture Extension, Collier County) exists specifically warning Collier County residents about PHM, with a local Extension helpline and Plant Clinic contact for suspected finds -- this is direct evidence the local Collier County (SWFL) Extension office treats it as a real, present concern in this catalog's own service area, not just a southeast-Florida phenomenon. Range 'occasional' is consistent with a recognized-but-not-yet-dominant SWFL presence.",
+      "approval_hash": "89068bc1f04b5bbfeb8432df347dd54bcd83bcc2f678ef82c1e1faf21785dd95"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "report",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "cuban-laurel-thrips",
+    "kind": "organism",
+    "common_name": "Cuban Laurel Thrips",
+    "aka": [
+      "Leaf-gall Thrips of Ficus"
+    ],
+    "aliases": [
+      "cuban laurel thrips",
+      "leaf gall thrips",
+      "ficus leaf gall thrips",
+      "gynaikothrips ficorum"
+    ],
+    "scientific_name": "Gynaikothrips ficorum",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "New ficus leaves roll or fold tightly along the midrib into a curled gall",
+      "Sunken purplish-red spots on the tender new leaves",
+      "Curled leaves turn tough and yellow as they age",
+      "Small black thrips and pale larvae live inside the rolled leaf"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ficus-whitefly",
+        "difference": "Ficus whitefly causes yellowing and leaf drop with pale nymphs on flat leaf undersides; Cuban laurel thrips cause tightly curled, purple-spotted new leaves.",
+        "next_photo": "A close-up of a curled leaf and a flat leaf underside on the same hedge.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "chilli-thrips",
+        "difference": "Chilli thrips scorch and bronze new growth without rolling it into tight galls; Cuban laurel thrips roll leaves into a tube with dark thrips inside.",
+        "next_photo": "A close-up of a curled new leaf, then a photo of the leaf gently unrolled.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Tightly curled new leaves with purple spots on a Ficus microcarpa hedge or tree can suggest Cuban laurel thrips, mostly a cosmetic problem. A photo cannot confirm it; a technician unrolls a curled leaf to look for the thrips inside.",
+      "fact": "Cuban laurel thrips live and breed inside the rolled leaf, so a full generation can develop within a single curled gall."
+    },
+    "tech_notes": "Unroll a curled leaf and look for black adult thrips and pale larvae inside; the damage is mainly cosmetic. Check that the plant is Ficus microcarpa (Cuban laurel), the main host.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN599"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). IN599 says breeding is continuous through the year with no monthly calendar, so peak_months [3, 4, 5, 9, 10] come from the owner brief."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Peak months [3, 4, 5, 9, 10]",
+        "note": "From the owner brief; IN599 documents year-round breeding (about 30 days per generation) but no monthly peak."
+      }
+    ],
+    "condition": {
+      "hosts": [
+        "shrubs"
+      ],
+      "signs": [],
+      "symptoms": [
+        "New ficus leaves roll or fold tightly along the midrib into a curled gall",
+        "Sunken purplish-red spots on the tender new leaves"
+      ],
+      "required_signature": {
+        "text": "No photo confirms Cuban laurel thrips. A technician unrolls curled ficus leaves and looks for the thrips inside.",
+        "elements": [
+          "New ficus leaves roll or fold tightly along the midrib into a curled gall"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "ficus-whitefly",
+          "difference": "Ficus whitefly causes yellowing and leaf drop with pale nymphs on flat leaf undersides; Cuban laurel thrips cause tightly curled, purple-spotted new leaves.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "chilli-thrips",
+          "difference": "Chilli thrips scorch and bronze new growth without rolling it into tight galls; Cuban laurel thrips roll leaves into a tube with dark thrips inside.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "manageable",
+      "recovery_note": "Damaged leaves stay curled; new growth comes in clean once thrips numbers drop."
+    }
+  },
+  {
+    "slug": "magnolia-white-scale",
+    "kind": "organism",
+    "common_name": "Magnolia White Scale",
+    "aka": [
+      "False Oleander Scale"
+    ],
+    "aliases": [
+      "magnolia white scale",
+      "false oleander scale",
+      "pseudaulacaspis cockerelli"
+    ],
+    "scientific_name": "Pseudaulacaspis cockerelli",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "scale-insects",
+    "site_category": "Plant pests",
+    "stages": [
+      "crawler",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Flat, white to grayish crusts stuck to leaves and stems",
+      "Yellow spots on the upper leaf surface, larger than the scales beneath",
+      "Heavy infestations can cause yellowing and leaf drop, especially on croton",
+      "Found on many hosts, including croton, gardenia and magnolia"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cycad-aulacaspis-scale",
+        "difference": "Cycad aulacaspis scale coats the fronds of king sago and other cycads; magnolia white scale is found on broadleaf shrubs such as croton and gardenia.",
+        "next_photo": "A wide shot of the whole plant, then a close-up of the crusts on one leaf.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "tea-scale",
+        "difference": "Tea scale is brown flecking on leaf undersides, mostly camellia and holly; magnolia white scale forms white crusts on leaves and stems of many hosts.",
+        "next_photo": "A close-up of the crust color and whether it is on the leaf top, underside or stem.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "crawler",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "White crusts on the leaves and stems of croton, gardenia or magnolia can suggest magnolia white scale, and heavy infestations can cause leaf drop. A technician checks whether the scales are alive and whether live crawlers are present before choosing a next step.",
+      "fact": "False oleander scale is a poor name for it; UF/IFAS records more than 100 host plants in Florida, including croton, gardenia and magnolia."
+    },
+    "tech_notes": "Crush a crust to see whether the scale underneath is alive (dead scales stay on the plant); check for live crawlers, since they are the vulnerable stage. Note the host and any leaf drop.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/in306"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). peak_months left empty: no Florida monthly peak is documented in IN306."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "crapemyrtle-aphid",
+    "kind": "organism",
+    "common_name": "Crapemyrtle Aphid",
+    "aka": [],
+    "aliases": [
+      "crapemyrtle aphid",
+      "crape myrtle aphid",
+      "crepe myrtle aphid",
+      "tinocallis kahawaluokalani"
+    ],
+    "scientific_name": "Tinocallis kahawaluokalani",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Sticky, shiny honeydew coating leaves and stems, and anything under the tree",
+      "Black sooty mold growing on the honeydew",
+      "Pale to bright yellow aphids with black markings, feeding on the leaf surface",
+      "Found on crape myrtle, often building up as the season warms"
+    ],
+    "look_alikes": [
+      {
+        "slug": "aphid",
+        "difference": "Other aphids are green, black or orange and cluster on many plants; crapemyrtle aphids are pale yellow with black spots and stay on crape myrtle.",
+        "next_photo": "A close-up of the insects on a leaf, and a wide shot showing the plant is crape myrtle.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "sooty-mold",
+        "difference": "Sooty mold is only the black coating; the crapemyrtle aphid is the sap-feeding insect whose honeydew feeds it.",
+        "next_photo": "A close-up of the leaf surface checking for small yellow insects among the black coating.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Sticky leaves with a black sooty coating on a crape myrtle can suggest crapemyrtle aphid, which is mostly a cosmetic problem. A technician checks the leaves for the small yellow aphids that leave the honeydew behind.",
+      "fact": "The black coating on crape myrtle is a mold growing on aphid honeydew, so it often shows up before anyone spots the small yellow insects."
+    },
+    "tech_notes": "Look for pale yellow aphids with black markings on the leaf surface; the honeydew and sooty mold usually show first. UF/IFAS notes populations typically escape natural enemies in late July and August, so peak_months may run later than listed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/in663"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Owner brief placed the aphids on leaf undersides; IN663 describes them feeding on the upper leaf surface, so the entry follows the source."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [
+      {
+        "claim": "Peak months [5, 6, 7]",
+        "note": "From the owner brief. IN663 says populations escape natural enemies near the end of July and early August in Florida, so the peak may include August."
+      }
+    ]
+  },
+  {
+    "slug": "citrus-rust-mite",
+    "kind": "organism",
+    "common_name": "Citrus Rust Mite",
+    "aka": [],
+    "aliases": [
+      "citrus rust mite",
+      "rust mite",
+      "phyllocoptruta oleivora"
+    ],
+    "scientific_name": "Phyllocoptruta oleivora",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Bronzed or russeted, rough-looking rind on citrus fruit",
+      "Damage on young fruit can look like rough, sharkskin-like russeting",
+      "Damage is mostly to the surface of the rind; the fruit inside is usually fine",
+      "Mites are far too small to see without a hand lens"
+    ],
+    "look_alikes": [
+      {
+        "slug": "spider-mites",
+        "difference": "Spider mites stipple and web leaves; citrus rust mites mark the fruit rind (and sometimes leaves) with bronzing or russeting and no webbing.",
+        "next_photo": "A close-up of the fruit rind and of a nearby leaf underside, checking for webbing.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "florida-wax-scale",
+        "difference": "Wax scale forms raised, waxy pinkish bumps on twigs and leaves; rust mite damage is a flat bronzed or rough discoloration of the rind.",
+        "next_photo": "A close-up of the rind and a nearby twig, checking for raised waxy bumps.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A bronzed or rough, russeted rind on citrus fruit can suggest citrus rust mite, which usually affects how the fruit looks rather than what is inside. A photo cannot confirm it; a technician checks the fruit surface with a hand lens.",
+      "fact": "Citrus rust mites are far too small to see unaided, so the bronzed or russeted rind is usually the first sign anyone notices."
+    },
+    "tech_notes": "Check the fruit surface with a 10x hand lens; damage is mainly cosmetic on fruit for home use. UF/IFAS reports populations rising in May to July.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/cg002"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Source is the commercial citrus production guide; months match its May-July rise and possible late-October increase."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "condition": {
+      "hosts": [
+        "citrus"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Bronzed or russeted, rough-looking rind on citrus fruit",
+        "Damage on young fruit can look like rough, sharkskin-like russeting"
+      ],
+      "required_signature": {
+        "text": "No photo confirms citrus rust mite. A technician checks the fruit surface under a hand lens.",
+        "elements": [
+          "Bronzed or russeted, rough-looking rind on citrus fruit"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "spider-mites",
+          "difference": "Spider mites stipple and web leaves; citrus rust mites mark the fruit rind (and sometimes leaves) with bronzing or russeting and no webbing.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "florida-wax-scale",
+          "difference": "Wax scale forms raised, waxy pinkish bumps on twigs and leaves; rust mite damage is a flat bronzed or rough discoloration of the rind.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "manageable",
+      "recovery_note": "Russeted rind stays marked, but it is cosmetic and new fruit can stay clean."
+    }
   }
 ]

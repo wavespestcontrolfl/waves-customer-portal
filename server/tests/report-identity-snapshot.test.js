@@ -14,6 +14,7 @@ const {
 const {
   attachApprovedReportProductFacts,
   buildReportV1Data,
+  resolveApplicatorFdacsId,
 } = require('../services/service-report/report-data');
 
 function stubKnex(fixtures = {}) {
@@ -58,6 +59,8 @@ const FROZEN_FACTS = {
   irrigationRequired: null,
   labelVerifiedAt: '2026-05-30',
   labelVersion: '2026-label',
+  // New completions freeze the resolved watering rule (null = unknown).
+  wateringRule: null,
 };
 
 function snapshotFixture(overrides = {}) {
@@ -208,6 +211,79 @@ describe('applyReportIdentitySnapshot', () => {
     const once = applyReportIdentitySnapshot(liveJoinedRow({ reportIdentitySnapshot: snapshotFixture() }));
     expect(applyReportIdentitySnapshot(once)).toEqual(once);
   });
+
+  // FDACS applicator identification card number (F.S. 482.2265(1)(b)):
+  // liveJoinedRow's joined technician_name ('Someone Else') disagrees with
+  // the frozen snapshot name ('Alex Benson') — the number must never print
+  // beside a name it may not belong to.
+  test('nulls technician_fdacs_id and technician_license_expiry when the frozen name differs from the joined technician', () => {
+    const live = {
+      ...liveJoinedRow({ reportIdentitySnapshot: snapshotFixture() }),
+      technician_fdacs_id: 'JB1234567',
+      technician_license_expiry: '2027-01-01',
+    };
+    const out = applyReportIdentitySnapshot(live);
+    expect(out.technician_name).toBe('Alex Benson');
+    expect(out.technician_fdacs_id).toBeNull();
+    expect(out.technician_license_expiry).toBeNull();
+  });
+
+  test('keeps technician_fdacs_id when the frozen name matches the joined technician', () => {
+    const snapshot = snapshotFixture({ technicianName: 'Someone Else' });
+    const live = {
+      ...liveJoinedRow({ reportIdentitySnapshot: snapshot }),
+      technician_fdacs_id: 'JB1234567',
+      technician_license_expiry: '2027-01-01',
+    };
+    const out = applyReportIdentitySnapshot(live);
+    expect(out.technician_name).toBe('Someone Else');
+    expect(out.technician_fdacs_id).toBe('JB1234567');
+    expect(out.technician_license_expiry).toBe('2027-01-01');
+  });
+});
+
+describe('resolveApplicatorFdacsId', () => {
+  test('present and on file with no expiry recorded is active', () => {
+    expect(resolveApplicatorFdacsId('JB1234567', null, '2026-06-11')).toBe('JB1234567');
+  });
+
+  test('blank/whitespace-only id is null', () => {
+    expect(resolveApplicatorFdacsId('', '2027-01-01', '2026-06-11')).toBeNull();
+    expect(resolveApplicatorFdacsId('   ', '2027-01-01', '2026-06-11')).toBeNull();
+    expect(resolveApplicatorFdacsId(null, '2027-01-01', '2026-06-11')).toBeNull();
+  });
+
+  test('expired before the service date is null', () => {
+    expect(resolveApplicatorFdacsId('JB1234567', '2026-01-01', '2026-06-11')).toBeNull();
+  });
+
+  test('expiry the same day as the service date is still active', () => {
+    expect(resolveApplicatorFdacsId('JB1234567', '2026-06-11', '2026-06-11')).toBe('JB1234567');
+  });
+
+  test('expiry after the service date is active', () => {
+    expect(resolveApplicatorFdacsId('JB1234567', '2026-12-31', '2026-06-11')).toBe('JB1234567');
+  });
+
+  // pg returns DATE columns as UTC-midnight Date objects — String() of one
+  // starts with the weekday name, which compared lexically withheld a valid
+  // Dec 31 expiry for a Jun 11 visit (codex pre-push P1).
+  test('pg Date values compare as calendar days, never as weekday-prefixed text', () => {
+    const pgDate = (ymd) => new Date(`${ymd}T00:00:00.000Z`);
+    expect(resolveApplicatorFdacsId('JB1234567', pgDate('2026-12-31'), pgDate('2026-06-11'))).toBe('JB1234567');
+    expect(resolveApplicatorFdacsId('JB1234567', pgDate('2026-01-01'), pgDate('2026-06-11'))).toBeNull();
+    expect(resolveApplicatorFdacsId('JB1234567', pgDate('2026-06-11'), '2026-06-11')).toBe('JB1234567');
+  });
+
+  test('a timestamp visit date (project created_at fallback) is judged on its ET day', () => {
+    // 2026-06-12 02:00Z is still Jun 11 in Eastern time
+    expect(resolveApplicatorFdacsId('JB1234567', '2026-06-11', new Date('2026-06-12T02:00:00.000Z'))).toBe('JB1234567');
+    expect(resolveApplicatorFdacsId('JB1234567', '2026-06-10', new Date('2026-06-12T02:00:00.000Z'))).toBeNull();
+  });
+
+  test('an unparseable date judges nothing rather than throwing', () => {
+    expect(resolveApplicatorFdacsId('JB1234567', 'not-a-date', '2026-06-11')).toBe('JB1234567');
+  });
 });
 
 describe('applyReportIdentitySnapshotToLegacyPdf (documents.js generator inputs)', () => {
@@ -299,6 +375,59 @@ describe('attachApprovedReportProductFacts with frozen facts', () => {
     expect(products[1].approved_report_product_facts).toBeUndefined();
   });
 
+  test('a legacy frozen fact with no wateringRule key gets the live rule on a COPY; the snapshot is never mutated', async () => {
+    const { wateringRule: _omit, ...legacyFacts } = FROZEN_FACTS;
+    const frozenMap = { [PRODUCT_ID]: legacyFacts };
+    const before = JSON.parse(JSON.stringify(frozenMap));
+    const chain = {
+      whereIn: jest.fn(() => chain),
+      select: jest.fn(() => Promise.resolve([{
+        id: PRODUCT_ID, name: 'Celsius WG', category: 'herbicide', formulation: 'WG',
+        application_method: null, irrigation_required: false, rainfast_minutes: 60,
+        post_application_watering: null,
+      }])),
+    };
+    const knex = jest.fn(() => chain);
+    const [product] = await attachApprovedReportProductFacts(knex, [{ product_id: PRODUCT_ID }], { frozenFacts: frozenMap });
+    expect(chain.whereIn).toHaveBeenCalledWith('id', [PRODUCT_ID]);
+    expect(product.approved_report_product_facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24, source: 'default' });
+    expect(product.approved_report_product_facts).not.toBe(legacyFacts);
+    expect(Object.prototype.hasOwnProperty.call(legacyFacts, 'wateringRule')).toBe(false);
+    expect(frozenMap).toEqual(before);
+  });
+
+  test('the live fallback prefers a stored rule over the derivation', async () => {
+    const { wateringRule: _omit, ...legacyFacts } = FROZEN_FACTS;
+    const chain = {
+      whereIn: jest.fn(() => chain),
+      select: jest.fn(() => Promise.resolve([{
+        id: PRODUCT_ID, name: 'Celsius WG', category: 'herbicide', formulation: 'WG',
+        irrigation_required: false, rainfast_minutes: 60,
+        post_application_watering: { mode: 'hold', hold_hours: 6, source: 'label', label_note: 'Do not irrigate until the spray has dried.' },
+      }])),
+    };
+    const [product] = await attachApprovedReportProductFacts(jest.fn(() => chain), [{ product_id: PRODUCT_ID }], { frozenFacts: { [PRODUCT_ID]: legacyFacts } });
+    expect(product.approved_report_product_facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 6, source: 'label' });
+  });
+
+  test('a frozen null (unapproved at completion) and a frozen wateringRule: null never hit the catalog', async () => {
+    const knex = jest.fn(() => { throw new Error('catalog must not be queried'); });
+    const products = await attachApprovedReportProductFacts(knex, [
+      { product_id: PRODUCT_ID },
+      { product_id: 'not-approved-at-completion' },
+    ], { frozenFacts: { [PRODUCT_ID]: FROZEN_FACTS, 'not-approved-at-completion': null } });
+    expect(knex).not.toHaveBeenCalled();
+    expect(products[0].approved_report_product_facts.wateringRule).toBeNull();
+    expect(products[1].approved_report_product_facts).toBeUndefined();
+  });
+
+  test('a failed live rule lookup leaves the frozen facts exactly as they were', async () => {
+    const { wateringRule: _omit, ...legacyFacts } = FROZEN_FACTS;
+    const chain = { whereIn: jest.fn(() => chain), select: jest.fn(() => Promise.reject(new Error('db down'))) };
+    const [product] = await attachApprovedReportProductFacts(jest.fn(() => chain), [{ product_id: PRODUCT_ID }], { frozenFacts: { [PRODUCT_ID]: legacyFacts } });
+    expect(product.approved_report_product_facts).toEqual(legacyFacts);
+  });
+
   test('ids absent from the frozen map still resolve live', async () => {
     const chain = {
       whereIn: jest.fn(() => chain),
@@ -335,7 +464,14 @@ describe('buildReportV1Data renders identity from the snapshot', () => {
 
   test('snapshot wins over renamed customer, edited service_type, renamed tech, edited catalog', async () => {
     const data = await buildReportV1Data(
-      liveJoinedRow({ reportIdentitySnapshot: snapshotFixture() }),
+      {
+        ...liveJoinedRow({ reportIdentitySnapshot: snapshotFixture() }),
+        // The joined technician_name ('Someone Else') disagrees with the
+        // frozen snapshot name ('Alex Benson') — applicatorFdacsId must be
+        // withheld even though the id is present and unexpired on file.
+        technician_fdacs_id: 'JB1234567',
+        technician_license_expiry: '2027-01-01',
+      },
       'token-1',
       stubKnex(liveFixtures),
     );
@@ -346,15 +482,34 @@ describe('buildReportV1Data renders identity from the snapshot', () => {
     expect(data.serviceAddress).not.toContain('999 New Home');
     // Map centre follows the frozen address, not the live customer row.
     expect(data.mapCenter).toBeNull();
+    expect(data.applicatorFdacsId).toBeNull();
     const application = (data.applications || []).find((a) => a.productId === PRODUCT_ID || a.product_id === PRODUCT_ID)
       || (data.applications || [])[0];
     expect(JSON.stringify(application)).toContain('432-1507');
     expect(JSON.stringify(application)).not.toContain('999-9999');
   });
 
+  test('the public payload carries no watering rule (frozen or live)', async () => {
+    const rule = { mode: 'hold', hold_hours: 6, source: 'label', label_note: 'Do not irrigate until the spray has dried.', verified_at: null, verified_by: null };
+    const data = await buildReportV1Data(
+      liveJoinedRow({ reportIdentitySnapshot: snapshotFixture({ productFacts: { [PRODUCT_ID]: { ...FROZEN_FACTS, wateringRule: rule } } }) }),
+      'token-rule',
+      stubKnex({
+        ...liveFixtures,
+        products_catalog: [{ ...liveFixtures.products_catalog[0], post_application_watering: rule }],
+      }),
+    );
+    const json = JSON.stringify(data);
+    expect(json).not.toMatch(/wateringRule|post_application_watering|hold_hours|Do not irrigate until/);
+  });
+
   test('legacy record (no snapshot) keeps the live join behavior', async () => {
     const data = await buildReportV1Data(
-      liveJoinedRow({ protocol: {} }),
+      {
+        ...liveJoinedRow({ protocol: {} }),
+        technician_fdacs_id: 'JB1234567',
+        technician_license_expiry: '2027-01-01',
+      },
       'token-2',
       stubKnex(liveFixtures),
     );
@@ -362,5 +517,34 @@ describe('buildReportV1Data renders identity from the snapshot', () => {
     expect(data.serviceDisplayName).toBe('Renamed Lawn Service');
     expect(data.technicianName).toBe('Someone E.');
     expect(data.serviceAddress).toContain('999 New Home');
+    // No snapshot to disagree with, id on file and not yet expired at the
+    // visit's service_date ('2026-06-11') — applicatorFdacsId flows through.
+    expect(data.applicatorFdacsId).toBe('JB1234567');
+  });
+
+  test('applicatorFdacsId is null when the license expired before the visit\'s service date', async () => {
+    const data = await buildReportV1Data(
+      {
+        ...liveJoinedRow({ protocol: {} }),
+        technician_fdacs_id: 'JB1234567',
+        technician_license_expiry: '2026-01-01',
+      },
+      'token-3',
+      stubKnex(liveFixtures),
+    );
+    expect(data.applicatorFdacsId).toBeNull();
+  });
+
+  test('applicatorFdacsId is null when the id on file is blank', async () => {
+    const data = await buildReportV1Data(
+      {
+        ...liveJoinedRow({ protocol: {} }),
+        technician_fdacs_id: '',
+        technician_license_expiry: null,
+      },
+      'token-4',
+      stubKnex(liveFixtures),
+    );
+    expect(data.applicatorFdacsId).toBeNull();
   });
 });

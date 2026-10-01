@@ -756,9 +756,109 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     const StripeService = require('../services/stripe');
     const chargeSpy = jest.spyOn(StripeService, 'charge').mockResolvedValue({ id: 'pay-1' });
     await StripeService.chargeOneTime('cust-1', 25, 'Flea add-on', 'key-1', { initiated_by: 'machine' });
-    expect(chargeSpy).toHaveBeenCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time', initiated_by: 'machine' }, 'key-1');
+    expect(chargeSpy).toHaveBeenCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time', initiated_by: 'machine' }, 'key-1', { operatorOverride: false });
     await StripeService.chargeOneTime('cust-1', 25, 'Flea add-on');
-    expect(chargeSpy).toHaveBeenLastCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time' }, null);
+    expect(chargeSpy).toHaveBeenLastCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time' }, null, { operatorOverride: false });
     chargeSpy.mockRestore();
+  });
+});
+
+// Codex #4971 r10 P1s — the provider boundary's own locked checks:
+//   - a payer stamped on the invoice (the unlocked read, or the LOCKED row
+//     when a writer raced it) refuses with PAYER_BILLED_GUARD, whatever the
+//     customer's current default payer says;
+//   - a deleted customer's Auto Pay is not armed (requireAutopayForCustomerId,
+//     every caller): CUSTOMER_DELETED under the customer row lock.
+describe('chargeInvoiceWithSavedCard — invoice Bill-To and deleted accounts under the lock', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  function load({ invoiceReads, customer }) {
+    const card = {
+      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
+    };
+    let invoiceRead = 0;
+    let chargeAttempt = null;
+    const db = jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
+        chain[method] = jest.fn((arg) => {
+          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          return chain;
+        });
+      });
+      chain.first = jest.fn(async () => {
+        if (table === 'invoices') {
+          const row = invoiceReads[Math.min(invoiceRead, invoiceReads.length - 1)];
+          invoiceRead += 1;
+          return row;
+        }
+        if (table === 'payment_methods') return card;
+        if (table === 'customers') return customer;
+        if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
+        return null;
+      });
+      chain.insert = jest.fn((payload) => {
+        if (table === 'stripe_invoice_charge_attempts') chargeAttempt = { ...payload, created_at: new Date(), resolved_at: null };
+        return chain;
+      });
+      chain.returning = jest.fn(async () => (chargeAttempt ? [chargeAttempt] : []));
+      chain.update = jest.fn(async (payload) => {
+        if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
+        return 1;
+      });
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      return chain;
+    });
+    db.transaction = jest.fn(async (callback) => callback(db));
+    db.fn = { now: jest.fn(() => 'NOW') };
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const stripeClient = { paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn() } };
+    const resolveForInvoice = jest.fn(async () => ({ payerId: null })); // the customer's CURRENT default: self-pay
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/payer', () => ({ resolveForInvoice }));
+    return { StripeService: require('../services/stripe'), stripeClient };
+  }
+
+  const openInvoice = (over = {}) => ({
+    id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
+    subtotal: '249.00', total: '249.00', discount_amount: '0.00',
+    credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null, ...over,
+  });
+  const liveAutopayCustomer = (over = {}) => ({
+    id: 'cust-1', stripe_customer_id: 'cus-1', autopay_enabled: true, autopay_paused_until: null,
+    autopay_payment_method_id: 'pm-1', ach_status: null, deleted_at: null, ...over,
+  });
+  const renewalOptions = { customerInitiated: false, requireAutopayForCustomerId: 'cust-1', requireSelfPayCustomerId: 'cust-1' };
+
+  test('an invoice stamped to a payer refuses with PAYER_BILLED_GUARD even when the customer default reads self-pay', async () => {
+    const { StripeService, stripeClient } = load({ invoiceReads: [openInvoice({ payer_id: 'payer-1' })], customer: liveAutopayCustomer() });
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', renewalOptions))
+      .rejects.toMatchObject({ code: 'PAYER_BILLED_GUARD', message: expect.stringContaining('third-party payer') });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('a payer stamped between the unlocked read and the invoice lock refuses under the lock (PAYER_BILLED_GUARD)', async () => {
+    const { StripeService, stripeClient } = load({
+      invoiceReads: [openInvoice(), openInvoice({ payer_id: 'payer-1' })],
+      customer: liveAutopayCustomer(),
+    });
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', renewalOptions))
+      .rejects.toMatchObject({ code: 'PAYER_BILLED_GUARD' });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('a customer who deleted their account: Auto Pay is not armed — CUSTOMER_DELETED under the customer lock, never charged', async () => {
+    const { StripeService, stripeClient } = load({ invoiceReads: [openInvoice()], customer: liveAutopayCustomer({ deleted_at: new Date() }) });
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', renewalOptions))
+      .rejects.toMatchObject({ code: 'CUSTOMER_DELETED' });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 });

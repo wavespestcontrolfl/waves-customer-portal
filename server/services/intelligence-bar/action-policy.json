@@ -87,10 +87,26 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "cancel_pending_payout": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "confirmed_endpoint",
+    "scope": "none"
+  },
   "cancel_plan": {
     "module": "tools.js",
     "domain": "customers",
     "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "cancel_queued_message": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
@@ -415,6 +431,14 @@
     "approval": null,
     "scope": "record"
   },
+  "repair_closeout": {
+    "module": "closeout-repair-tools.js",
+    "domain": "closeout",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "get_cloudflare_edge_errors": {
     "module": "cloudflare-ops-tools.js",
     "domain": "cloudflare-ops",
@@ -439,6 +463,22 @@
     "approval": null,
     "scope": "none"
   },
+  "purge_cloudflare_cache": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "retry_cloudflare_pages_build": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "get_commit_info": {
     "module": "github-ops-tools.js",
     "domain": "github-ops",
@@ -446,6 +486,30 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "rerun_failed_github_checks": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "add_github_pr_label": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "request_codex_review": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
   },
   "get_content_decay_alerts": {
     "module": "seo-tools.js",
@@ -871,6 +935,38 @@
     "approval": null,
     "scope": "none"
   },
+  "redeploy_railway_service": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "restart_railway_service": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "set_railway_gate": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "set_growthbook_feature_environment": {
+    "module": "growthbook-tools.js",
+    "domain": "growthbook",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "get_recent_completions": {
     "module": "tools.js",
     "domain": "customers",
@@ -990,6 +1086,30 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "resolve_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "ignore_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "assign_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
   },
   "get_service_history": {
     "module": "tech-tools.js",
@@ -1279,6 +1399,22 @@
     "approval": null,
     "scope": "broad"
   },
+  "list_gap_reports": {
+    "module": "gap-report-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
+  "needs_me": {
+    "module": "needs-me-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
   "list_open_closeouts": {
     "module": "closeout-tools.js",
     "domain": "closeout",
@@ -1286,6 +1422,22 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "list_pending_payouts": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
+  "list_queued_messages": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
   },
   "lookup_property": {
     "module": "estimate-tools.js",
@@ -1597,6 +1749,14 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
+    "scope": "none"
+  },
+  "submit_gsc_sitemap": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
     "scope": "none"
   },
   "set_estimate_presentation": {

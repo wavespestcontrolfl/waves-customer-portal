@@ -1,3 +1,9 @@
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/autopay-eligibility', () => ({
   ...jest.requireActual('../services/autopay-eligibility'),
@@ -233,8 +239,10 @@ describe('collections-policy replay eligibility', () => {
   test('gate-off skips the ledger and policy; gate-on denial refuses', async () => {
     const database = databaseWith({ collections_contact_ledger: ledger });
     await expect(billingEmailReplayEligible(meta, database)).resolves.toEqual({ eligible: true });
+    // Gate off: no ledger read, but the rail-guard consult still runs (it applies a
+    // collections dispute hold regardless of the gate and permits otherwise).
     expect(database).not.toHaveBeenCalled();
-    expect(collectionsChannelPermitted).not.toHaveBeenCalled();
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ excludeLedgerIds: [], detail: true }));
 
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     collectionsChannelPermitted.mockResolvedValueOnce({ allowed: false, durable: true });
@@ -257,3 +265,15 @@ test('an unreadable eligibility dependency fails closed for retry', async () => 
   databaseWith({ customers: new Error('database unavailable') })))
     .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
 });
+
+test.each(['previsit-quote-changed', 'balance-reminder-copy-stale', 'balance-reminder-visit-changed', null])(
+  'previsit replay preserves only a declared supersession signal (%s)', async (supersessionReason) => {
+    const reason = 'collections policy denied selected channel before dispatch';
+    const guard = jest.spyOn(require('../services/previsit-balance-reminder'), 'previsitReplayQuoteEligible')
+      .mockResolvedValue({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason, supersessionReason, retryable: true });
+    try {
+      await expect(billingEmailReplayEligible({ source_entry_point: 'previsit_balance_reminder' }, databaseWith()))
+        .resolves.toEqual({ eligible: false, reason: supersessionReason || reason, retryable: true });
+    } finally { guard.mockRestore(); }
+  },
+);

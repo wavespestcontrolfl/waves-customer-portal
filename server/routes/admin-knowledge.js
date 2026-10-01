@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const WikiCompiler = require('../services/knowledge/wiki-compiler');
 const WikiQA = require('../services/knowledge/wiki-qa');
+const { withoutSavedGaps } = require('../services/knowledge/knowledge-gaps-weekly');
 const WikiLinter = require('../services/knowledge/wiki-linter');
 const logger = require('../services/logger');
 
@@ -106,7 +107,7 @@ router.post('/query', async (req, res, next) => {
 // GET /api/admin/knowledge/queries — recent queries
 router.get('/queries', async (req, res, next) => {
   try {
-    const queries = await db('knowledge_queries')
+    const queries = await withoutSavedGaps(db('knowledge_queries'))
       .orderBy('created_at', 'desc')
       .limit(30);
     res.json({ queries });

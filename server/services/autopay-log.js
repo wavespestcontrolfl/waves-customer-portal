@@ -36,6 +36,8 @@ async function logAutopay(customerId, eventType, opts = {}) {
       payment_method_id: opts.paymentMethodId ?? null,
       payment_id: opts.paymentId ?? null,
       details: opts.details ? JSON.stringify(opts.details) : null,
+      // An earlier visible App event repairs progress at its original time.
+      ...(opts.createdAt ? { created_at: opts.createdAt } : {}),
     };
     await (opts.db || db)('autopay_log').insert(row);
   } catch (err) {
@@ -81,4 +83,16 @@ async function eventExistsRecently(customerId, eventType, withinDays = 30, payme
   return !!row;
 }
 
-module.exports = { logAutopay, getRecent, eventExistsRecently };
+// Expired cards recur after the cooldown. Use one durable row for both the
+// cooldown and the next episode's identity, so a failed progress insert cannot
+// advance an App event key just because the calendar crossed a boundary.
+async function latestExpiredCardProgress(customerId, paymentMethodId, expMonth, expYear) {
+  return db('autopay_log')
+    .where({ customer_id: customerId, event_type: 'card_expired', payment_method_id: paymentMethodId })
+    .whereRaw("(details->>'reminder_stage' IS NULL OR details->>'reminder_stage' = 'expired')")
+    .whereRaw("(details->>'exp_month' IS NULL OR CASE WHEN details->>'exp_month' ~ '^[0-9]{1,2}$' THEN (details->>'exp_month')::int END = ?)", [Number(expMonth)])
+    .whereRaw("(details->>'exp_year' IS NULL OR CASE WHEN details->>'exp_year' ~ '^[0-9]{2,4}$' THEN CASE WHEN (details->>'exp_year')::int < 100 THEN (details->>'exp_year')::int + 2000 ELSE (details->>'exp_year')::int END END = ?)", [Number(expYear)])
+    .orderBy('created_at', 'desc').orderBy('id', 'desc').first('id', 'created_at');
+}
+
+module.exports = { logAutopay, getRecent, eventExistsRecently, latestExpiredCardProgress };

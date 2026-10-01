@@ -159,6 +159,36 @@ describe('hand-scheduled one-time mosquito lot-ladder default', () => {
     expect(pricing.finalPrice).toBe(expected);
   });
 
+  // Codex r2 on #5093 (P1): a tierless customer with LIVE RECURRING COVERAGE
+  // (the "or recurring customers" half of the owner's 2026-09-27 rule) is
+  // not a hasMembership() member, so the IB mosquito booking path threads
+  // that evidence in as recurringMembershipBooking. The ladder must OR it
+  // into its own membership check, not just the WaveGuard-plan-sale flag
+  // bookingCreatesWaveGuardCoverage already sets for OTHER callers.
+  test('recurringMembershipBooking (live recurring coverage, no tier/rate) also gets the member ladder rate', async () => {
+    const lotSqFt = 12000;
+    const customer = { id: 'customer-1', lot_sqft: lotSqFt, waveguard_tier: null, monthly_rate: 0 };
+    const nonMemberPricing = await buildAppointmentPricing({
+      serviceRecord: mosquitoService,
+      estimatedPrice: null,
+      primaryLinePrice: null,
+      serviceAddons: [],
+      customer,
+    });
+    const recurringCoveragePricing = await buildAppointmentPricing({
+      serviceRecord: mosquitoService,
+      estimatedPrice: null,
+      primaryLinePrice: null,
+      serviceAddons: [],
+      customer,
+      recurringMembershipBooking: true,
+    });
+
+    const memberExpected = priceOneTimeMosquito({ lotSqFt }, { isRecurringCustomer: true }).price;
+    expect(memberExpected).toBeLessThan(nonMemberPricing.finalPrice);
+    expect(recurringCoveragePricing.finalPrice).toBe(memberExpected);
+  });
+
   test('non-mosquito services keep the catalog base fallback untouched', async () => {
     const pricing = await buildAppointmentPricing({
       serviceRecord: { service_key: 'general_pest', category: 'pest_control', base_price: 150 },

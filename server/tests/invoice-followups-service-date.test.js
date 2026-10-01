@@ -9,6 +9,12 @@
  * Mocking pattern copied from server/tests/invoice-followups-email.test.js.
  * Run: cd server && TZ=UTC npx jest --runInBand tests/audit-repro/r1-timezone-2.test.js
  */
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
@@ -33,6 +39,22 @@ jest.mock('../services/email-template-library', () => ({
 }));
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
+}));
+// The follow-up email rides the shared billing email authority (owner ruling
+// 2026-09-27); its locks and rechecks are pinned in its own suites. Here it
+// authorizes the same billing recipient the customer-contact mock returns.
+jest.mock('../services/billing-channel-email-authority', () => ({
+  loadBillingEmailContext: jest.fn(async () => ({
+    category: 'invoice',
+    recipient: { email: 'billing@example.com', name: 'Taylor' },
+    recipientEmail: 'billing@example.com',
+  })),
+  dispatchUnderBillingEmailAuthority: jest.fn(async ({ dispatch, state }) => {
+    state.handoffStarted = true;
+    await dispatch();
+    state.providerAccepted = true;
+    return { ok: true };
+  }),
 }));
 
 const db = require('../models/db');

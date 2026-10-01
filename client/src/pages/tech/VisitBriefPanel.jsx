@@ -28,6 +28,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
+import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
+import { formatETDateTime } from '../../lib/timezone';
 import {
   fmtMoney,
   lawnGateLabels,
@@ -164,6 +166,295 @@ function AccessSection({ alerts, access }) {
           <span style={{ color: DARK.muted }}>{label}: </span>{value}
         </p>
       ))}
+    </>
+  );
+}
+
+// Customer photos sent before the visit (PR 3a, GATE_VISIT_PREP_PHOTOS —
+// facts.customerFlagged). Stop-level, not per-member: deterministicVisitFacts
+// resolves the CURRENT stop membership server-side, so every member's own
+// facts carry the SAME list — the caller (the main render below) passes
+// whichever member's brief answered it, and its service.id doubles as the
+// id for the thumbnails fetch (the server resolves the same stop from any
+// of its member ids). PR 5 (GATE_VISIT_PREP_PEST_READ) adds `entry.read` —
+// built server-side from ONLY fixed pest-engine fields (never free model
+// text) — rendered by formatVisitPrepReadLine/renderVisitPrepRead below.
+const VISIT_PREP_TOPIC_LABELS = {
+  pest: 'Pest',
+  lawn: 'Lawn',
+  tree_shrub: 'Tree & shrub',
+  other: 'Something else',
+};
+
+// Same VALID_LOCATIONS set the customer service-request form's picker
+// uses (PortalPage.jsx's ReportIssueOverlay locationOptions) — kept as a
+// small local map rather than importing that component-local array.
+const VISIT_PREP_LOCATION_LABELS = {
+  front_yard: 'Front yard',
+  back_yard: 'Back yard',
+  side_yard: 'Side yard',
+  inside_home: 'Inside home',
+  garage_lanai: 'Garage / lanai',
+  garden_beds: 'Garden beds',
+  other: 'Other',
+};
+
+// PR 5 (GATE_VISIT_PREP_PEST_READ) — the automatic pest read on a customer
+// visit-prep submission. `entry.read` carries ONLY fixed server-computed
+// fields (see visit-prep.js's readFactsFromContract): a wording tier (a
+// fixed enum), an APPROVED catalog common name, the catalog's own
+// matched/still-needed trait strings, a referral kind, and boolean hazard
+// flags. This module authors every LABEL below itself — no free text from
+// the model ever reaches this line, and no product or rate guidance rides
+// here.
+const VISIT_PREP_READ_WORDING_LABELS = {
+  pretty_sure: "We're pretty sure",
+  likely: 'Likely',
+  group_only: 'Looks like',
+  unknown: "Couldn't tell",
+};
+
+const VISIT_PREP_READ_HAZARD_LABELS = {
+  stinging: 'stinging',
+  venomous: 'venomous',
+  structural_threat: 'structural threat',
+  disease_vector: 'disease vector',
+};
+
+function formatVisitPrepReadLine(read) {
+  if (!read || read.status !== 'done') return null;
+  const parts = [];
+  const wordingLabel = VISIT_PREP_READ_WORDING_LABELS[read.wordingTier] || 'AI read';
+  if (read.commonName) parts.push(`${wordingLabel}: ${read.commonName}.`);
+  else if (read.groupLabel) parts.push(`Looks like: ${read.groupLabel}.`);
+  else if (read.groupHeadline) parts.push(`${read.groupHeadline}.`);
+  else parts.push('No species named from these photos.');
+  if (read.matches?.length) parts.push(`Matches: ${read.matches.join('; ')}.`);
+  if (read.stillNeed?.length) parts.push(`Still need: ${read.stillNeed.join('; ')}.`);
+  const hazards = Object.keys(VISIT_PREP_READ_HAZARD_LABELS).filter((k) => read.hazards?.[k]).map((k) => VISIT_PREP_READ_HAZARD_LABELS[k]);
+  if (hazards.length) parts.push(`Hazard: ${hazards.join(', ')}.`);
+  if (read.referralKind) parts.push(`Refer: ${String(read.referralKind).replace(/_/g, ' ')}.`);
+  return parts.join(' ');
+}
+
+// GATE_VISIT_PREP_PLANT_READ — the lawn / tree & shrub counterpart of the
+// pest read above. `entry.read.kind === 'plant'` carries ONLY fixed
+// server-computed fields too (see visit-prep.js's plantReadFactsFromResult):
+// a wording tier, APPROVED catalog common names, a fixed headline template,
+// the catalog's own `fits`/`notYet` strings, the catalog's own fixed
+// every catalog `safetyLines` entry, and fixed next-step/referral text. Same rule as the pest
+// line: every label here is this module's own, no free model text.
+function formatVisitPrepPlantReadLine(read) {
+  if (!read || read.status !== 'done') return null;
+  const parts = [];
+  parts.push(`${read.headline || "We couldn't tell from these photos"}.`);
+  if (read.plantCommonName && read.plantCommonName !== read.conditionName) parts.push(`Plant: ${read.plantCommonName}.`);
+  if (read.weedNames?.length) parts.push(`Weeds: ${read.weedNames.join(', ')}.`);
+  if (read.fits?.length) parts.push(`Fits: ${read.fits.join('; ')}.`);
+  if (read.notYet?.length) parts.push(`Not yet seen: ${read.notYet.join('; ')}.`);
+  for (const line of read.safetyLines || []) parts.push(line);
+  if (read.nextStepText) parts.push(read.nextStepText);
+  if (read.referralKind) parts.push(`Refer: ${String(read.referralKind).replace(/_/g, ' ')}.`);
+  return parts.join(' ');
+}
+
+// A combined Lawn & Pest visit (owner ruling 2026-09-30) carries BOTH notes on
+// one read: `read.kind === 'combo'`, `read.pest` (a pest read's fixed fields)
+// and `read.plant` (a plant read's), either of which is null when that part
+// produced nothing. Each renders as its own line under the same rules as the
+// single reads above, labelled with what it is a read of.
+const VISIT_PREP_PLANT_SUBJECT_LABELS = { lawn: 'lawn', tree_shrub: 'tree & shrub' };
+
+function VisitPrepReadLine({ read }) {
+  if (!read) return null;
+  if (read.status === 'done' && read.kind === 'combo') {
+    const pestLine = formatVisitPrepReadLine(read.pest ? { ...read.pest, status: 'done' } : null);
+    const plantLine = formatVisitPrepPlantReadLine(read.plant ? { ...read.plant, status: 'done' } : null);
+    const plantLabel = VISIT_PREP_PLANT_SUBJECT_LABELS[read.plant?.subjectType] || 'lawn';
+    if (!pestLine && !plantLine) return null;
+    return (
+      <>
+        {pestLine && <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read — pest (AI suggestion, not confirmed): {pestLine}</p>}
+        {plantLine && <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read — {plantLabel} (AI suggestion, not confirmed): {plantLine}</p>}
+      </>
+    );
+  }
+  if (read.status === 'done') {
+    const line = read.kind === 'plant' ? formatVisitPrepPlantReadLine(read) : formatVisitPrepReadLine(read);
+    if (!line) return null;
+    return <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read (AI suggestion, not confirmed): {line}</p>;
+  }
+  if (read.status === 'pending') return <p style={factMutedStyle}>Photo read pending</p>;
+  // none / unsupported / failed: stay quiet — no line at all (scope doc
+  // §5.4: the mock's "pending for lawn" wording only covers a topic with
+  // no engine adapter, and the owner's "keep it simple and truthful"
+  // steer landed on omitting the line entirely rather than a hedge for
+  // every non-done state).
+  return null;
+}
+
+function formatFlaggedSentAt(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return formatETDateTime(d, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+// Thumbnails are fetched lazily, once, from GET /:id/visit-prep-photos —
+// the SAME ownership-scoped endpoint the server pairs with this facts key
+// (technicianCurrentVisitFilter + the reassignment recheck), so a fetch
+// from a technician the stop was reassigned away from 404s exactly like
+// the facts key itself would have been withheld. A fetch failure just
+// leaves the placeholder boxes — never an error banner over a section
+// that is otherwise informative (the note/topic/location still render).
+// `photoSignature` (the current photo ids, joined) re-runs the fetch when a
+// brief refresh brings a new submission, so its thumbnails load without
+// reopening the panel (Codex #5239 r1 P2).
+// The server signs these for one hour (visit-prep.js
+// TECH_PHOTO_VIEW_TTL_SECONDS); the panel can stay open longer, so the links
+// are re-fetched before they expire (Codex #5239 r4 P2).
+const VISIT_PREP_URL_REFRESH_MS = 50 * 60 * 1000;
+
+function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
+  const [links, setLinks] = useState({ byId: {}, fetchedAt: 0 });
+  const [refreshTick, setRefreshTick] = useState(0);
+  const fetchedAtRef = useRef(0);
+  useEffect(() => {
+    if (!active || !serviceId || typeof request !== 'function') return;
+    let cancelled = false;
+    request(`/admin/schedule/${serviceId}/visit-prep-photos`)
+      .then((data) => {
+        if (cancelled) return;
+        const next = {};
+        for (const p of (data?.photos || [])) { if (p?.id) next[p.id] = p.url; }
+        fetchedAtRef.current = Date.now();
+        setLinks({ byId: next, fetchedAt: fetchedAtRef.current });
+      })
+      .catch(() => {});
+    const refresh = setTimeout(() => setRefreshTick((n) => n + 1), VISIT_PREP_URL_REFRESH_MS);
+    return () => { cancelled = true; clearTimeout(refresh); };
+  }, [serviceId, active, request, photoSignature, refreshTick]);
+  // A backgrounded tab or a locked phone can suspend the timer above past
+  // the links' expiry. On resume, stale links are withheld at once (so a tap
+  // never opens an expired url) and re-fetched (Codex #5239 r6 P2).
+  useEffect(() => {
+    if (!active || typeof document === 'undefined') return undefined;
+    const onResume = () => {
+      if (document.visibilityState === 'hidden') return;
+      const at = fetchedAtRef.current;
+      if (!at || Date.now() - at < VISIT_PREP_URL_REFRESH_MS) return;
+      fetchedAtRef.current = 0;
+      setLinks({ byId: {}, fetchedAt: 0 });
+      setRefreshTick((n) => n + 1);
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('focus', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('focus', onResume);
+    };
+  }, [active]);
+  const fresh = links.fetchedAt && Date.now() - links.fetchedAt < VISIT_PREP_URL_REFRESH_MS;
+  return fresh ? links.byId : {};
+}
+
+// While a photo read is running the brief says "Photo read pending"; nothing
+// pushes the finished read, so re-read the brief every 30 s (the parent's
+// retry keeps the loaded data on screen) for at most the 15 minutes after
+// which the server stops calling a read pending (Codex #5305 r1 P2).
+const READ_PENDING_POLL_MS = 30 * 1000;
+const READ_PENDING_MAX_POLLS = 30;
+const READ_START_GRACE_MS = 2 * 60 * 1000;
+// A read the server says the recovery sweep may still start (`awaiting`)
+// is waited on at a slower pace: the sweep runs every 15 minutes, so 30
+// polls a minute apart cover its next two passes (Codex #5320 r10 P2).
+const READ_AWAITING_POLL_MS = 60 * 1000;
+
+function useRefreshWhileReadPending(customerFlagged, onRefresh) {
+  // The budget belongs to the set of reads being waited on: a new pending
+  // read (another submission, another visit) starts a fresh 30 polls.
+  // A submission sent in the last two minutes whose read has not started
+  // yet ('none' — the deferred trigger hasn't claimed a slot) is waited on
+  // too, so a brief fetched in that gap still picks up the result
+  // (Codex #5305 r11). Nothing extra is shown for it.
+  const now = Date.now();
+  const soon = (entry) => entry.read?.status === 'pending'
+    || (entry.read?.status === 'none' && now - new Date(entry.sentAt).getTime() < READ_START_GRACE_MS);
+  const entries = customerFlagged || [];
+  const waited = entries.filter((entry) => soon(entry) || (entry.read?.status === 'none' && entry.read?.awaiting));
+  // Keyed by status too: an awaited read the sweep claims (none → pending)
+  // starts a fresh budget at the faster pace (Codex #5320 r11 P2).
+  const pendingKey = waited.map((entry) => `${entry.id}:${entry.read?.status}`).join(',');
+  const pollMs = waited.some(soon) ? READ_PENDING_POLL_MS : READ_AWAITING_POLL_MS;
+  const polls = useRef({ key: '', count: 0 });
+  if (polls.current.key !== pendingKey) polls.current = { key: pendingKey, count: 0 };
+  // The latest callback in a ref: parent re-renders (inline retry callbacks,
+  // socket-driven refreshes) must not restart the 30 s timer, or a busy
+  // screen would never poll (Codex #5305 r10 P2).
+  const refreshRef = useRef(onRefresh);
+  refreshRef.current = onRefresh;
+  // `refreshTick` re-arms the timer after each fired poll for the same set.
+  const [refreshTick, setRefreshTick] = useState(0);
+  useEffect(() => {
+    if (!pendingKey || polls.current.count >= READ_PENDING_MAX_POLLS) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      polls.current.count += 1;
+      // Re-arm only after this refresh settles, so a slow connection never
+      // stacks refreshes (Codex #5305 r18 P2).
+      Promise.resolve(typeof refreshRef.current === 'function' ? refreshRef.current() : null)
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setRefreshTick((n) => n + 1); });
+    }, pollMs);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [pendingKey, refreshTick, pollMs]);
+}
+
+function CustomerFlaggedSection({ serviceId, customerFlagged, request, onRefresh }) {
+  const photoSignature = (customerFlagged || []).flatMap((entry) => entry.photoIds || []).join(',');
+  const photoUrls = useVisitPrepPhotoUrls(serviceId, !!customerFlagged?.length, request, photoSignature);
+  useRefreshWhileReadPending(customerFlagged, onRefresh);
+  if (!customerFlagged?.length) return null;
+  return (
+    <>
+      <SectionLabel>Customer flagged</SectionLabel>
+      {customerFlagged.map((entry) => {
+        const meta = [VISIT_PREP_LOCATION_LABELS[entry.locationOnProperty], VISIT_PREP_TOPIC_LABELS[entry.topic]]
+          .filter(Boolean).join(' · ');
+        return (
+          <div key={entry.id} style={{ marginBottom: 10 }}>
+            <p style={factMutedStyle}>sent {formatFlaggedSentAt(entry.sentAt)}</p>
+            {entry.note && <p style={{ ...factRowStyle, fontStyle: 'italic' }}>&ldquo;{entry.note}&rdquo;</p>}
+            {meta && <p style={factMutedStyle}>{meta}</p>}
+            <VisitPrepReadLine read={entry.read} />
+            {entry.photoIds?.length > 0 && (
+              <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                {entry.photoIds.map((photoId) => {
+                  const url = photoUrls[photoId];
+                  if (!url) {
+                    return (
+                      <div key={photoId} aria-hidden="true" style={{
+                        width: 56, height: 56, borderRadius: 6, background: DARK.card, border: `1px solid ${DARK.border}`,
+                      }} />
+                    );
+                  }
+                  return (
+                    <button
+                      key={photoId}
+                      type="button"
+                      onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}
+                      aria-label="Open customer photo"
+                      style={{ padding: 0, border: `1px solid ${DARK.border}`, borderRadius: 6, background: 'transparent', cursor: 'pointer', lineHeight: 0 }}
+                    >
+                      <img src={url} alt="Customer-sent photo" style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 5, display: 'block' }} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </>
   );
 }
@@ -338,13 +629,22 @@ function WdoBriefSection({ brief }) {
 }
 
 // One protocol-window / history product line — label facts only, exactly
-// as the brief stored them.
+// as the brief stored them, but never in mL (rateText).
 function productLine(p) {
   const bits = [p?.name];
-  if (p?.ratePer1000 != null && p?.rateUnit) bits.push(`${p.ratePer1000} ${p.rateUnit}/1000 sq ft`);
-  else if (p?.rate != null && p?.rateUnit) bits.push(`${p.rate} ${p.rateUnit}`);
+  if (p?.ratePer1000 != null && p?.rateUnit) bits.push(`${rateText(p.ratePer1000, p.rateUnit)}/1000 sq ft`);
+  else if (p?.rate != null && p?.rateUnit) bits.push(rateText(p.rate, p.rateUnit));
   if (p?.role) bits.push(p.role);
   return bits.filter(Boolean).join(' · ');
+}
+
+// A stored rate in its stored unit, except a rate in mL, which reads in fl oz
+// on its own basis ("5 ml/gal" is "0.169 fl oz/gal"): nothing a tech sees is
+// in mL (owner ruling 2026-09-29).
+function rateText(value, unit) {
+  if (!isMlUnit(unit)) return `${value} ${unit}`;
+  const basis = String(unit).split('/').slice(1).join('/').trim();
+  return `${mlToFlOz(value)} fl oz${basis ? `/${basis}` : ''}`;
 }
 
 // The served generic visit brief's guidance the tech actually preps from:
@@ -673,6 +973,13 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // code changed since generation would otherwise show stale next to the
   // freshly-built alert text.
   const access = memberBits.map((m) => m.facts?.access || m.visitBrief?.access).find(Boolean) || null;
+  // Customer-sent photos before the visit — same "first member that
+  // answered carries it" dedup as access (deterministicVisitFacts resolves
+  // ONE stop-level list, identical on every member's own facts). Keep the
+  // member alongside the entries: its service.id is what the thumbnails
+  // fetch uses (any current member id resolves the same stop server-side).
+  const customerFlaggedMember = memberBits.find((m) => m.facts?.customerFlagged?.length) || null;
+  const customerFlagged = customerFlaggedMember?.facts?.customerFlagged || null;
   // Estimates dedupe by id: siblings booked from ONE estimate render it
   // once; separately-quoted siblings each render their own.
   const estimates = [];
@@ -719,6 +1026,13 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       {address && <p style={{ ...factMutedStyle, marginTop: 8 }}>{address}</p>}
 
       <AccessSection alerts={alerts} access={access} />
+
+      <CustomerFlaggedSection
+        serviceId={customerFlaggedMember?.service?.id}
+        customerFlagged={customerFlagged}
+        request={request}
+        onRefresh={onRetry}
+      />
 
       {memberBits.map((m) => (m.wdo ? (
         <div key={`wdo-${m.service.id}`}>

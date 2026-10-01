@@ -4,11 +4,13 @@ import { WAVES_FL_LICENSE_LINE } from '../../constants/business';
 const YEAR = new Date().getFullYear();
 const RIGHTS_LINE = `© ${YEAR} Waves Pest Control, LLC. All rights reserved.`;
 const TRUST_LINE = `Licensed & insured · ${WAVES_FL_LICENSE_LINE} · Backed by the Waves Guarantee`;
+const NO_GUARANTEE_TRUST_LINE = `Licensed & insured · ${WAVES_FL_LICENSE_LINE} · Written estimate scope and terms apply`;
+const UNKNOWN_GUARANTEE_TRUST_LINE = `Licensed & insured · ${WAVES_FL_LICENSE_LINE}`;
 // Same URLs the quote wizard's consent line links to.
 const PRIVACY_URL = 'https://wavespestcontrol.com/privacy-policy/';
 const TERMS_URL = 'https://wavespestcontrol.com/terms-of-service/';
 
-export default function TrustFooter({ tone = 'dark', align = 'center', variant = 'customer' }) {
+export default function TrustFooter({ tone = 'dark', align = 'center', variant = 'customer', noGuarantee = false }) {
   const color =
     tone === 'light' ? 'rgba(255, 255, 255, 0.6)' : 'var(--text-subtle)';
   const linkColor =
@@ -46,7 +48,7 @@ export default function TrustFooter({ tone = 'dark', align = 'center', variant =
         <a href={TERMS_URL} target="_blank" rel="noopener noreferrer" style={link}>Terms of Service</a>
       </div>
       <div>{RIGHTS_LINE}</div>
-      <div>{TRUST_LINE}</div>
+      <div>{noGuarantee === null ? UNKNOWN_GUARANTEE_TRUST_LINE : noGuarantee ? NO_GUARANTEE_TRUST_LINE : TRUST_LINE}</div>
     </div>
   );
 }

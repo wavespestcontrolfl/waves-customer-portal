@@ -38,7 +38,7 @@ import { estimateCard } from '../components/estimate/cardStyles';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
-import SchedulePicker from '../components/booking/SchedulePicker';
+import SchedulePicker, { sameSlot } from '../components/booking/SchedulePicker';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -165,6 +165,20 @@ function shortDayLabel(dateStr) {
   }
 }
 
+// The fresh row for a held pick in a new availability's days (slotId when
+// both carry one, else date + start time), stamped the way a tap stamps it —
+// or null when that time is no longer offered.
+function findSlotInDays(days, held) {
+  for (const day of days || []) {
+    if (day.date !== held.date) continue;
+    const hit = (day.slots || []).find((sl) => (sl.slotId && held.slotId
+      ? sl.slotId === held.slotId
+      : sl.start_time === held.start_time));
+    if (hit) return { ...hit, date: day.date, fullDate: day.fullDate };
+  }
+  return null;
+}
+
 function formatTimeLabel(hhmm) {
   if (!hhmm) return '';
   const [h, m] = String(hhmm).split(':').map(Number);
@@ -230,7 +244,7 @@ function HelpCard({ children }) {
   );
 }
 
-function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, onRetry }) {
+function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequired, onRetry }) {
   // Inspection GET can answer state:'ok' with availability:null and
   // service_area_unavailable:true (the county lookup itself failed, not a
   // verdict either way — Codex pre-push P1, 2026-09-24). Same recoverable
@@ -251,6 +265,16 @@ function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, onRetry }) {
           >
             Try again
           </button>
+        </div>
+        <ContactRow />
+      </Card>
+    );
+  }
+  if (locationReviewRequired) {
+    return (
+      <Card>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
+          We need to confirm your service address before we can schedule this re-service online. Text or call us and we&apos;ll take care of it.
         </div>
         <ContactRow />
       </Card>
@@ -798,9 +822,15 @@ function ReserviceCoveredView({ data }) {
 }
 
 // Hero (eyebrow → title → intro) plus the "what needs another look"
-// card: the lane choice when more than one plan family is bookable, and the
-// optional details line the tech preps from.
-function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, details, onDetails }) {
+// card: the lane choice when more than one plan family is bookable, the
+// optional one-tap pest chips (GATE_RESERVICE_PEST_CHIPS — data.pestChoices
+// absent entirely while the gate is dark, so this renders nothing extra),
+// and the details line the tech preps from.
+function ReserviceHero({
+  data, bookableLanes, selectedLane, onSelectLane, details, onDetails,
+  selectedPests, onTogglePest,
+}) {
+  const pestChoices = data?.pestChoices?.[selectedLane] || null;
   return (
     <>
       <div style={{ margin: '8px 2px 20px' }}>
@@ -811,8 +841,11 @@ function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, detail
           {data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pests back between visits?
         </h1>
         <div style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
-          Breakthrough activity between regular visits is covered — pick a time
-          below and we&apos;ll send a tech back out at <strong style={{ color: S.text }}>no charge</strong>.
+          {data?.location_review_required ? (
+            <>Your re-service is covered at <strong style={{ color: S.text }}>no charge</strong>. We need to confirm the service address before we can schedule it.</>
+          ) : (
+            <>Breakthrough activity between regular visits is covered — pick a time below and we&apos;ll send a tech back out at <strong style={{ color: S.text }}>no charge</strong>.</>
+          )}
         </div>
       </div>
       <Card>
@@ -847,8 +880,45 @@ function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, detail
             </div>
           </div>
         ) : null}
+        {pestChoices ? (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>What are you seeing?</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {pestChoices.map((pest) => {
+                const active = selectedPests.includes(pest.key);
+                return (
+                  <button
+                    key={pest.key}
+                    type="button"
+                    aria-pressed={active}
+                    {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
+                    onClick={() => onTogglePest(pest.key)}
+                    style={{
+                      background: active ? COLORS.glassNavy : '#fff',
+                      color: active ? COLORS.white : S.text,
+                      border: `2px solid ${active ? COLORS.glassNavy : '#E7E2D7'}`,
+                      borderRadius: 999,
+                      padding: '9px 16px',
+                      minHeight: 44,
+                      cursor: 'pointer',
+                      fontFamily: FONT_BODY,
+                      fontSize: 14,
+                      fontWeight: 700,
+                    }}
+                  >
+                    {pest.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
         <label htmlFor="reservice-details" style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 6 }}>
-          What are you seeing? <span style={{ fontWeight: 500, color: S.body }}>(optional — helps your tech prep)</span>
+          {pestChoices ? (
+            <>Anything else? <span style={{ fontWeight: 500, color: S.body }}>(optional)</span></>
+          ) : (
+            <>What are you seeing? <span style={{ fontWeight: 500, color: S.body }}>(optional — helps your tech prep)</span></>
+          )}
         </label>
         <textarea
           id="reservice-details"
@@ -1113,7 +1183,50 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
   );
 }
 
-function InspectionHero({ data, details, onDetails, onChangeAddress }) {
+// Inspection only: the time a lead tapped in the new-lead email, shown right
+// under the greeting with its own Book button. The picker's inline Book sits
+// below the search card, the best-times strip and the day grid — two to three
+// phone screens down — and a lead who arrived with Saturday 2 PM already
+// picked searched instead and never booked (2026-09-30). Renders only while
+// that emailed pick is still the selection; a commit error that cleared it
+// (SLOT_TAKEN) keeps the card up with the error, so the reason is never
+// rendered only at the bottom of the page.
+function EmailPickCard({ slot, movedNotice, error: submitError, showError, submitting, onBook, onPickAnother }) {
+  const error = showError ? submitError : null;
+  if (!slot && !error) return null;
+  return (
+    <Card data-inspection-email-pick="">
+      <div data-gt="eyebrow" style={DOC_EYEBROW}>Your time</div>
+      {slot ? (
+        <>
+          <div style={{ fontSize: 20, fontWeight: 700, fontFamily: FONTS.heading, color: S.text }}>{slot.fullDate || formatDateLabel(slot.date)}</div>
+          <div style={{ marginTop: 4, fontSize: 15, color: S.body }}>Arrival {arrivalWindowLabel(slot.start_time)}</div>
+          {movedNotice ? <div data-glass="soft" style={{ ...SOFT_NOTE, marginTop: 12 }}>{movedNotice}</div> : null}
+          <button
+            type="button"
+            data-glass-accent=""
+            className="wpk-action-btn"
+            onClick={onBook}
+            disabled={submitting}
+            style={{ width: '100%', marginTop: 14 }}
+          >
+            {submitting ? 'Booking…' : `Book ${shortDayLabel(slot.date)} ${arrivalWindowLabel(slot.start_time)}`}
+          </button>
+        </>
+      ) : null}
+      {error ? <div className="wpk-error" role="alert" style={{ marginTop: 12 }}>{error}</div> : null}
+      <button
+        type="button"
+        onClick={onPickAnother}
+        style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 0, padding: 0, font: 'inherit', fontSize: 14, fontWeight: 700, color: COLORS.glassNavy, textDecoration: 'underline', cursor: 'pointer' }}
+      >
+        {slot ? 'Pick a different time' : 'Pick another time'}
+      </button>
+    </Card>
+  );
+}
+
+function InspectionHero({ data, details, onDetails, onChangeAddress, topCard = null }) {
   const lead = data?.lead || {};
   return (
     <>
@@ -1126,6 +1239,7 @@ function InspectionHero({ data, details, onDetails, onChangeAddress }) {
           {data?.durationMinutes ? `About ${data.durationMinutes} minutes. ` : ''}We arrive in a 2-hour window.
         </div>
       </div>
+      {topCard}
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 16, fontWeight: 600, color: S.text }}>
@@ -1246,11 +1360,14 @@ const FLOWS = {
     Success: ({ result }) => <ReserviceSuccessCard result={result} />,
     canConfirm: ({ lane }) => !!lane,
     actionLabel: ({ submitting, lane }) => (submitting ? 'Booking…' : !lane ? 'Pick what needs another look above' : `Book ${'→'} free`),
-    payload: ({ slot, lane, details }) => ({
+    payload: ({ slot, lane, details, pests }) => ({
       lane,
       date: slot.date,
       start_time: slot.start_time,
       details: details.trim() || undefined,
+      // Only sent when at least one chip is selected (GATE_RESERVICE_PEST_CHIPS
+      // absent/off customers never see chips, so this is always undefined then).
+      ...(pests && pests.length ? { pests } : {}),
     }),
     // ALREADY_BOOKED / NOT_ELIGIBLE: office booked one, plan lapsed.
     stateChangedCodes: ['ALREADY_BOOKED', 'NOT_ELIGIBLE'],
@@ -1311,12 +1428,9 @@ const FLOWS = {
     // it unconditionally for every flow).
     stateChangedCodes: [],
     stateChangedMessage: null,
-    // ?slot= preselect fallback (email link): "we moved you" is a picked-slot
-    // note like reschedule's ReanchorNote, sourced from page state via the
-    // third ctx arg (this flow is the only one that uses it).
-    pickedNote: (_data, _slot, ctx) => (ctx?.slotMovedNotice
-      ? <div className="wpk-picked-note"><div data-glass="soft" style={SOFT_NOTE}>{ctx.slotMovedNotice}</div></div>
-      : null),
+    // The ?slot= preselect's "we moved you" note lives in EmailPickCard at
+    // the top, with the emailed pick it describes — never under the picker.
+    pickedNote: () => null,
   },
 };
 
@@ -1343,15 +1457,31 @@ export default function ScheduleFlowPage({ flow }) {
   // the filter — a stale "Two openings Tuesday afternoon" line must not sit
   // above the unfiltered calendar.
   const [aiSession, setAiSession] = useState(0);
-  // Re-service only: which plan family and the optional details line.
+  // Re-service only: which plan family, the optional details line, and any
+  // one-tap pest chips selected (GATE_RESERVICE_PEST_CHIPS). Chips are kept
+  // per lane, so a lawn selection can never ride into a pest booking.
   const [selectedLane, setSelectedLane] = useState(null);
   const [details, setDetails] = useState('');
+  const [pestsByLane, setPestsByLane] = useState({});
+  const selectedPests = pestsByLane[selectedLane] || [];
   // Inspection only: the out-of-area stop (STOPs the page like `blocked`,
   // but it's raised from a POST response rather than the GET's own state)
   // and the ?slot= preselect's "we moved you" notice.
   const [searchParams] = useSearchParams();
   const [outOfArea, setOutOfArea] = useState(null);
   const [slotMovedNotice, setSlotMovedNotice] = useState(null);
+  // The ?slot= preselect's own pick (EmailPickCard). Cleared the moment the
+  // customer taps any other time; a search that keeps the pick keeps it.
+  const [emailPick, setEmailPick] = useState(null);
+  // Set when the commit ran from EmailPickCard, so its error shows there.
+  const [bookedFromTop, setBookedFromTop] = useState(false);
+  const pickerRef = useRef(null);
+  // The "we moved you" note describes the emailed pick only — it goes
+  // whenever that pick does (another time picked, search dropped it,
+  // SLOT_TAKEN, address change), never left under a later pick.
+  useEffect(() => {
+    if (!emailPick) setSlotMovedNotice(null);
+  }, [emailPick]);
   // The address text the gate resolved (never persisted until commit) —
   // carried into the commit payload alongside the picked slot.
   const [resolvedAddress, setResolvedAddress] = useState('');
@@ -1400,13 +1530,28 @@ export default function ScheduleFlowPage({ flow }) {
     return () => loadAbortRef.current?.abort();
   }, [load]);
 
+  // Keep the pick across an availability swap (AI search, "Show all open
+  // times", address merge) when that exact time is still offered — re-stamped
+  // from the fresh row — and drop it only when it's gone. A search used to
+  // clear the pick unconditionally, so a lead who searched for the very time
+  // already picked had to find and tap it again.
+  // The emailed pick (EmailPickCard) follows the same rule on its own.
+  const selectedSlotRef = useRef(null);
+  selectedSlotRef.current = selectedSlot;
+  const emailPickRef = useRef(null);
+  emailPickRef.current = emailPick;
   useEffect(() => {
     const days = data?.availability?.days || [];
+    const held = selectedSlotRef.current;
+    const kept = held ? findSlotInDays(days, held) : null;
+    if (held && !kept) setSelectedSlot(null);
+    else if (kept) setSelectedSlot(kept);
+    if (emailPickRef.current) setEmailPick(findSlotInDays(days, emailPickRef.current));
     if (!days.length) {
       setSelectedDate(null);
       return;
     }
-    setSelectedDate((prev) => (days.some((d) => d.date === prev) ? prev : days[0].date));
+    setSelectedDate((prev) => (kept ? kept.date : days.some((d) => d.date === prev) ? prev : days[0].date));
   }, [data]);
 
   // Re-service: keep the lane selection valid whenever eligibility changes —
@@ -1418,6 +1563,7 @@ export default function ScheduleFlowPage({ flow }) {
       return bookable.length === 1 ? bookable[0].key : null;
     });
   }, [data]);
+
 
   // Inspection only: ?slot=YYYY-MM-DD|HH:MM preselect (the new-lead email's
   // three slot buttons link with one). Applies once, the first time real
@@ -1436,8 +1582,10 @@ export default function ScheduleFlowPage({ flow }) {
     const day = days.find((d) => d.date === wantDate);
     const slot = day?.slots?.find((s) => s.start_time === wantTime);
     if (slot) {
+      const stamped = { ...slot, date: day.date, fullDate: day.fullDate };
       setSelectedDate(day.date);
-      setSelectedSlot({ ...slot, date: day.date, fullDate: day.fullDate });
+      setSelectedSlot(stamped);
+      setEmailPick(stamped);
       return;
     }
     // The first opening AT OR AFTER the requested time (Codex #4737 r17
@@ -1447,8 +1595,10 @@ export default function ScheduleFlowPage({ flow }) {
     const later = openings.find(({ day: d, slot: sl }) => d.date > wantDate || (d.date === wantDate && sl.start_time >= wantTime));
     const pick = later || openings[0];
     if (pick) {
+      const stamped = { ...pick.slot, date: pick.day.date, fullDate: pick.day.fullDate };
       setSelectedDate(pick.day.date);
-      setSelectedSlot({ ...pick.slot, date: pick.day.date, fullDate: pick.day.fullDate });
+      setSelectedSlot(stamped);
+      setEmailPick(stamped);
       setSlotMovedNotice(later
         ? 'That time just filled. We moved you to the next open time.'
         : "That time just filled, and there's nothing later this week. Here's the earliest open time.");
@@ -1460,6 +1610,14 @@ export default function ScheduleFlowPage({ flow }) {
   const mergeData = useCallback((patch) => {
     setData((prev) => (prev ? { ...prev, ...patch } : prev));
   }, []);
+
+  const showReserviceLocationReview = useCallback(() => {
+    setSelectedSlot(null);
+    setAiFiltered(false);
+    setAiSession((n) => n + 1);
+    mergeData({ availability: null, location_review_required: true });
+    setSubmitError(null);
+  }, [mergeData]);
 
   // Inspection only — the ONE client helper that refreshes availability on
   // any post-load path (Codex pre-push P1, 2026-09-24): "Show all open
@@ -1519,6 +1677,10 @@ export default function ScheduleFlowPage({ flow }) {
     });
     const body = await res.json().catch(() => ({}));
     if (signal?.aborted) throw new Error('search superseded');
+    if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
+      showReserviceLocationReview();
+      return { summary: null };
+    }
     if (!res.ok) throw new Error(body.error || 'search failed');
     // Inspection: a terminal state (already_booked / converted / gone) from
     // the server's eligibility re-check replaces the page, exactly as the
@@ -1528,8 +1690,9 @@ export default function ScheduleFlowPage({ flow }) {
       return { summary: null };
     }
     if (body.availability) {
+      // The pick survives when the results still offer it (see the
+      // availability effect above); otherwise that effect clears it.
       setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
-      setSelectedSlot(null);
       setSubmitError(null);
       setAiFiltered(true);
     }
@@ -1541,7 +1704,6 @@ export default function ScheduleFlowPage({ flow }) {
   // full-window response is applied: on failure the filtered calendar is
   // still what's on screen, so the reset link must survive for another try.
   const showAllTimes = async () => {
-    setSelectedSlot(null);
     const signal = loadAbortRef.current?.signal;
     try {
       await refreshInspectionAvailability({ signal });
@@ -1551,11 +1713,15 @@ export default function ScheduleFlowPage({ flow }) {
     } catch { /* keep the filtered calendar + reset link */ }
   };
 
-  const confirm = async () => {
-    if (!selectedSlot || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
+  // The slot is explicit: the inline Book passes the selection, EmailPickCard
+  // its own emailed time — still bookable after the customer browsed another
+  // day (which clears the selection). fromTop routes errors to that card.
+  const confirm = async (slotToBook, fromTop) => {
+    if (!slotToBook || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
+    setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
-    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details, address: resolvedAddress });
+    const payload = cfg.payload({ slot: slotToBook, data, lane: selectedLane, details, pests: selectedPests, address: resolvedAddress });
     try {
       const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, {
         method: 'POST',
@@ -1602,8 +1768,17 @@ export default function ScheduleFlowPage({ flow }) {
         setData(body);
         return;
       }
+      if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
+        showReserviceLocationReview();
+        return;
+      }
       if (body.code === 'SLOT_TAKEN') {
         setSelectedSlot(null);
+        // The taken time may be the emailed one: drop it here, not only via
+        // a later availability update — the refresh is best-effort and can
+        // leave `data` untouched, which would re-arm the card's Book button
+        // on a known-unavailable time.
+        setEmailPick((prev) => (sameSlot(prev, slotToBook) ? null : prev));
         setAiFiltered(false); // refreshed availability spans the full window
         setAiSession((n) => n + 1); // remount the card — its recap is stale too
         // Inspection only: a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY
@@ -1692,6 +1867,26 @@ export default function ScheduleFlowPage({ flow }) {
         }}
         details={details}
         onDetails={setDetails}
+        // Inspection's Hero only; emailPick is only ever set by its ?slot=.
+        topCard={(
+          <EmailPickCard
+            slot={emailPick}
+            movedNotice={slotMovedNotice}
+            error={submitError}
+            showError={bookedFromTop}
+            submitting={submitting}
+            onBook={() => confirm(emailPick, true)}
+            onPickAnother={() => pickerRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })}
+          />
+        )}
+        selectedPests={selectedPests}
+        onTogglePest={(key) => setPestsByLane((prev) => {
+          const current = prev[selectedLane] || [];
+          return {
+            ...prev,
+            [selectedLane]: current.includes(key) ? current.filter((k) => k !== key) : [...current, key],
+          };
+        })}
         // Inspection only: re-open the address form to correct the address
         // (Codex #4737 r5 P1 — an explicitly typed address wins on the
         // server, so a corrected retry books there).
@@ -1703,6 +1898,9 @@ export default function ScheduleFlowPage({ flow }) {
           loadAbortRef.current = new AbortController();
           setAiFiltered(false);
           setSelectedSlot(null);
+          // The emailed time was offered for the old address.
+          setEmailPick(null);
+          setBookedFromTop(false);
           mergeData({ needs_address: true });
         }}
       />
@@ -1712,7 +1910,10 @@ export default function ScheduleFlowPage({ flow }) {
       {flow === 'reservice' && !selectedLane ? (
         <Card><p style={{ margin: 0, fontSize: 14, color: S.body }}>Choose a service above to see available times.</p></Card>
       ) : (<>
-        <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
+        {flow === 'reservice' && data?.location_review_required
+          ? null
+          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />}
+        <div ref={pickerRef} />
         <SchedulePicker
           availability={data?.availability}
           // Every other flow hides "Our best times for you" once an AI
@@ -1736,7 +1937,16 @@ export default function ScheduleFlowPage({ flow }) {
             setSubmitError(null);
           }}
           selectedSlot={selectedSlot}
-          onSelectSlot={(slot) => { setSelectedSlot(slot); setSubmitError(null); }}
+          onSelectSlot={(slot) => {
+            setSelectedSlot(slot);
+            setSubmitError(null);
+            // Another time replaces the emailed one — its top card (and its
+            // "we moved you" note) no longer describe what Book will book.
+            if (!sameSlot(slot, emailPick)) {
+              setEmailPick(null);
+              setBookedFromTop(false);
+            }
+          }}
           submitError={submitError}
           pickedAction
           pickedExtra={(slot) => (
@@ -1745,24 +1955,27 @@ export default function ScheduleFlowPage({ flow }) {
                 type="button"
                 data-glass-accent=""
                 className="wpk-action-btn"
-                onClick={confirm}
+                onClick={() => confirm(selectedSlot, false)}
                 disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
               >
                 {cfg.actionLabel({ submitting, lane: selectedLane, slot })}
               </button>
-              {cfg.pickedNote(data, slot, { slotMovedNotice })}
+              {cfg.pickedNote(data, slot)}
             </>
           )}
           empty={(
             <EmptyTimesCard
               aiFiltered={aiFiltered}
               serviceAreaUnavailable={flow === 'inspection' && !!data?.service_area_unavailable}
+              locationReviewRequired={flow === 'reservice' && !!data?.location_review_required}
               onRetry={load}
             />
           )}
         />
       </>)}
-      <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>
+      {flow === 'reservice' && data?.location_review_required
+        ? null
+        : <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>}
     </Page>
   );
 }

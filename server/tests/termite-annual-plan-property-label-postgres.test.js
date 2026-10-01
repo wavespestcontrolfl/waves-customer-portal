@@ -41,7 +41,10 @@ async function createScratchDb() {
   await db.raw(`CREATE TABLE annual_prepay_terms (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid NOT NULL,
-    source_estimate_id uuid
+    source_estimate_id uuid,
+    -- A renewal successor resolves its label through its lineage (Codex
+    -- #4971 successor property scope) — the real table carries it.
+    renewed_from_term_id uuid
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }

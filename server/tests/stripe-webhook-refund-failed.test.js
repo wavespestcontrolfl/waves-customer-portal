@@ -50,7 +50,7 @@ jest.mock('../services/invoice-helpers', () => ({ ...jest.requireActual('../serv
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
-jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
+jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(), acquireTermiteGateForCharge: jest.fn(async () => []), withTermiteGateForCharge: jest.fn(async (_keys, fn) => fn()) }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 // Fee-lane detection's guarded fallback retrieves the PI when no local
 // pointer row exists; model Stripe answering "not a fee PI" so the
@@ -66,7 +66,11 @@ const {
   _handleRefundFailed: handleRefundFailed,
   _handleChargeRefunded: handleChargeRefunded,
   _resolveOrphanSucceededPaymentIntentIfSettled: resolveOrphanSucceededPaymentIntentIfSettled,
+  _withDisputeRenewalGate: withDisputeRenewalGate,
 } = require('../routes/stripe-webhook');
+
+// The admin brevity guard keeps a long notification's whole text in `detail`.
+const fullText = (row) => row.detail || row.body;
 
 describe('resolveOrphanSucceededPaymentIntentIfSettled', () => {
   beforeEach(() => {
@@ -219,7 +223,7 @@ describe('handleRefundFailed', () => {
     const note = notificationInsert.mock.calls[0][0];
     expect(note.recipient_type).toBe('admin');
     expect(note.title).toContain('102.90');
-    expect(note.body).toContain('reverted to collected');
+    expect(fullText(note)).toContain('reverted to collected');
   });
 
   test('partial bounce keeps the earlier cleared partial (no status flip)', async () => {
@@ -280,7 +284,7 @@ describe('handleRefundFailed', () => {
     await handleRefundFailed(failedRefund());
 
     expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
-    expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0001 was restored to paid');
+    expect(fullText(notificationInsert.mock.calls[0][0])).toContain('WPC-2026-0001 was restored to paid');
     // No payment_intent.succeeded ever fires for a bounce — the handler is
     // the only place coverage can re-sync.
     expect(AnnualPrepay.syncTermForInvoicePayment).toHaveBeenCalledWith('inv-1');
@@ -296,7 +300,7 @@ describe('handleRefundFailed', () => {
 
     expect(trxInvoices.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1', status: 'refunded' }));
     expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
-    expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0001 was restored to paid');
+    expect(fullText(notificationInsert.mock.calls[0][0])).toContain('WPC-2026-0001 was restored to paid');
   });
 
   test('reaches a charge-only linked invoice via invoices.stripe_charge_id', async () => {
@@ -310,7 +314,7 @@ describe('handleRefundFailed', () => {
 
     expect(dbInvoices.where).toHaveBeenCalledWith({ stripe_charge_id: 'ch_1' });
     expect(trxInvoices.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-2', status: 'refunded' }));
-    expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0002 was restored to paid');
+    expect(fullText(notificationInsert.mock.calls[0][0])).toContain('WPC-2026-0002 was restored to paid');
   });
 
   test('names a refund-cancelled prepay term in the alert (revival is dispute-marker-gated)', async () => {
@@ -318,7 +322,7 @@ describe('handleRefundFailed', () => {
     dbPrepayTerms.first.mockResolvedValue({ id: 'term-9' });
     await handleRefundFailed(failedRefund());
 
-    const body = notificationInsert.mock.calls[0][0].body;
+    const body = fullText(notificationInsert.mock.calls[0][0]);
     expect(body).toContain('term term-9 was CANCELLED');
     expect(body).toContain('reactivate it manually');
   });
@@ -388,7 +392,7 @@ describe('handleRefundFailed', () => {
     expect(args.status).toBeUndefined();
     expect(JSON.parse(args.metadata).failed_refund_ids).toEqual(['re_new']);
     expect(notificationInsert).toHaveBeenCalledTimes(1);
-    expect(notificationInsert.mock.calls[0][0].body).toContain('left untouched');
+    expect(fullText(notificationInsert.mock.calls[0][0])).toContain('left untouched');
   });
 
   test('replay (same refund id already recorded) changes nothing and does NOT re-notify', async () => {
@@ -434,7 +438,7 @@ describe('handleRefundFailed', () => {
       failed_refund_ids: JSON.stringify(['re_fail']),
     }));
     expect(notificationInsert).toHaveBeenCalledTimes(1);
-    expect(notificationInsert.mock.calls[0][0].body).toContain('Deposit dep-1');
+    expect(fullText(notificationInsert.mock.calls[0][0])).toContain('Deposit dep-1');
 
     // Replay: fence already contains the id → no transaction, no re-notify.
     depositRow.failed_refund_ids = ['re_fail'];
@@ -552,7 +556,7 @@ describe('handleRefundFailed', () => {
       stripe_payment_intent_id: 'pi_1',
     }));
     expect(notificationInsert).toHaveBeenCalledTimes(1);
-    expect(notificationInsert.mock.calls[0][0].body).toContain('fenced');
+    expect(fullText(notificationInsert.mock.calls[0][0])).toContain('fenced');
 
     // Replay: the fence row exists → no second insert, no re-notify.
     fenceRow.current = { stripe_refund_id: 're_fail' };
@@ -653,6 +657,24 @@ describe('handleRefundFailed', () => {
 
     expect(db.transaction).not.toHaveBeenCalled();
     expect(notificationInsert).toHaveBeenCalledTimes(1);
-    expect(notificationInsert.mock.calls[0][0].body).toContain('deposit ledger');
+    expect(fullText(notificationInsert.mock.calls[0][0])).toContain('deposit ledger');
+  });
+});
+
+// Codex #4971 r11 P1: the dispute handlers run under the renewal gate for the
+// disputed money's termite terms (resolved from the charge / PaymentIntent),
+// held across their separate ledger and invoice transactions.
+describe('dispute handlers hold the renewal gate', () => {
+  test('withDisputeRenewalGate resolves the gate from the disputed charge and PaymentIntent and runs the handler inside it', async () => {
+    const handler = jest.fn(async () => 'handled');
+    await expect(withDisputeRenewalGate({ id: 'dp_1', charge: 'ch_1', payment_intent: 'pi_1' }, handler)).resolves.toBe('handled');
+    expect(AnnualPrepay.withTermiteGateForCharge).toHaveBeenCalledWith({ chargeId: 'ch_1', paymentIntentId: 'pi_1' }, handler);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  test('both charge.dispute.created and charge.dispute.closed dispatch through it (source contract)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
+    expect(src).toContain("case 'charge.dispute.created':\n          await withDisputeRenewalGate(event.data.object, () => handleDisputeCreated(event.data.object));");
+    expect(src).toContain("case 'charge.dispute.closed':\n          await withDisputeRenewalGate(event.data.object, () => handleDisputeClosed(event.data.object));");
   });
 });

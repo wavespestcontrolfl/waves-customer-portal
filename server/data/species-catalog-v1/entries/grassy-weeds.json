@@ -1,0 +1,1112 @@
+[
+  {
+    "slug": "crabgrass",
+    "kind": "weed",
+    "common_name": "Crabgrass",
+    "aka": [],
+    "aliases": [
+      "crabgrass",
+      "digitaria"
+    ],
+    "scientific_name": "Digitaria spp.",
+    "rank": "genus",
+    "group": "grassy-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Seed head with several finger-like branches spreading out from one point",
+      "Sprawling, low, star-shaped growth radiating outward from a central point",
+      "Coarser, lighter green blades than most surrounding turf",
+      "Stems root wherever they touch soil, thickening the patch over a season"
+    ],
+    "look_alikes": [
+      {
+        "slug": "goosegrass",
+        "difference": "Crabgrass has a flat, star-shaped habit with a rounded stem; goosegrass has a flattened rosette with a whitish-silvery base and stiffer blades.",
+        "next_photo": "A close-up of the base of the plant, checking for a white or silvery flattened crown.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "bahiagrass",
+        "difference": "Crabgrass is a sprawling annual with finger-like seed branches and no rhizomes; bahiagrass is a perennial with a Y-shaped seed stalk and thick rhizomes.",
+        "next_photo": "A close-up of the seed head shape and whether digging at the base reveals thick rhizomes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A common warm-season weed that moves into thin spots and spreads out fast once established, producing huge amounts of seed. A technician looks at how thin the turf is, the season, and coverage before recommending an approach, since a thicker lawn is the best long-term defense.",
+      "fact": "A single crabgrass plant can produce thousands of seeds in a season, which is why a few missed patches can turn into a lawn-wide problem the following year.",
+      "blurb": "A fast-spreading summer weed that fills in thin turf and produces huge amounts of seed."
+    },
+    "tech_notes": "Cold-sensitive annual — dies back with the first hard frost, but seed persists in the soil for the next season. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/crabgrass/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "570abb4528b73e249a60472f967854802d095c6d5aee3c9a6c07a393ac71e6a6"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Seed head has several finger-like branches radiating from one point",
+        "Grows low and star-shaped, spreading out from a central point",
+        "Coarser, lighter green than the surrounding lawn",
+        "Stems root at the nodes wherever they touch soil"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "goosegrass",
+    "kind": "weed",
+    "common_name": "Goosegrass",
+    "aka": [
+      "silver crabgrass"
+    ],
+    "aliases": [
+      "goosegrass",
+      "silver crabgrass",
+      "eleusine indica"
+    ],
+    "scientific_name": "Eleusine indica",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Flattened, whitish-to-silvery crown at the base where the blades emerge, visible when parted",
+      "Coarse, stiff, dark green blades in a low, flattened rosette",
+      "Zipper-like seed head with two or more spikes joined near the tip",
+      "Common in compacted, wet, high-traffic areas like paths and driveway edges"
+    ],
+    "look_alikes": [
+      {
+        "slug": "crabgrass",
+        "difference": "Goosegrass has a whitish-silvery flattened crown at the base and stiffer blades; crabgrass has a rounder stem, no silvery crown, a looser sprawling habit.",
+        "next_photo": "A close-up of the base of the plant checking for a white or silvery flattened crown.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "crowfootgrass",
+        "difference": "Goosegrass has longer zipper spikes and a silvery flattened crown; crowfootgrass has short spikes with a bare tip, hairy margins, no silvery base.",
+        "next_photo": "A close-up comparing the base (silvery crown or not) and the seed head shape (zipper vs. radiating spikes).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tough, compaction-loving weed that shows up most in high-traffic areas, along paths, and near driveway edges where soil is packed hard and stays wet. A technician looks at how compacted and thin the turf is, the season, and coverage before recommending an approach.",
+      "fact": "Its silvery-white, flattened base is a dead giveaway once you know to look for it — few other lawn weeds have that same crown color right where the blades emerge from the ground.",
+      "blurb": "A tough weed that thrives in compacted, high-traffic soil along paths and driveway edges."
+    },
+    "tech_notes": "Compaction is the underlying driver — aeration alongside any treatment addresses the cause rather than just the symptom. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "df9685bc08f4c183b06738b0a2aa3474b8e0c0c453818d0c8f78bfddc0b4277a"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Flattened, whitish-to-silvery crown at the base, visible when the blades are parted",
+        "Coarse, stiff, dark green blades in a low, flattened rosette",
+        "Zipper-like seed head with two or more spikes joined near the tip",
+        "Found in compacted, wet spots — paths, driveway edges, high-traffic areas"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "torpedograss",
+    "kind": "weed",
+    "common_name": "Torpedograss",
+    "aka": [],
+    "aliases": [
+      "torpedograss",
+      "panicum repens"
+    ],
+    "scientific_name": "Panicum repens",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Stiff, sharply pointed rhizome tips (the \"torpedo\") that can pierce bare skin if handled",
+      "Coarser, more upright, grayish-green blades than surrounding St. Augustine or bahia",
+      "Deep, tough, wide-ranging rhizome network that can run many feet from the visible patch",
+      "Forms a distinct patch that stands out in texture and color from the lawn around it"
+    ],
+    "look_alikes": [
+      {
+        "slug": "st-augustinegrass",
+        "difference": "Torpedograss has coarser, grayish-green blades and hard, sharp rhizome tips; St. Augustine has wide, blunt blades on soft surface runners, no sharp points.",
+        "next_photo": "A close-up comparing blade texture and color, plus a dug-up rhizome tip checked for a hard, sharp point; wear sturdy gloves, since the tip can pierce skin.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "bermudagrass",
+        "difference": "Torpedograss has stiffer blades and sharply pointed rhizome tips that can pierce skin; bermudagrass has fine, soft blades and blunt, thin rhizomes throughout.",
+        "next_photo": "Wearing sturdy gloves, a close-up of a dug-up rhizome tip — a hard, sharp point that can pierce skin (torpedograss) versus a blunt, thin rhizome (bermuda).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "One of the most invasive grasses in Florida, spreading on deep, tough rhizomes that run for many feet and are genuinely difficult to fully remove from a lawn. A technician evaluates the weed, turf type, season, and coverage to explain why this one needs a different, more patient approach than an ordinary grassy weed.",
+      "fact": "Its rhizomes are unusually tough and deep-running, which is part of why it's considered one of Florida's most invasive plants.",
+      "blurb": "An aggressive, deep-rhizomed grass that's genuinely hard to remove once it establishes in a lawn."
+    },
+    "tech_notes": "Deep rhizome network makes spot treatment unreliable; set expectations for a longer-term, staged approach rather than a single application. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "982f6356b025c9793cb998f4435e50620c11bb18bbc6f6aa12f178ff4280d833"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "rhizomes",
+        "seed"
+      ],
+      "id_cues": [
+        "Dig up a rhizome tip — hard, sharp, and torpedo-shaped, capable of piercing skin",
+        "Coarser, more upright, grayish-green blades than surrounding turf",
+        "Forms a visibly different-textured, different-colored patch in the lawn",
+        "Rhizomes run deep and can extend many feet from the visible patch"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "alexandergrass",
+    "kind": "weed",
+    "common_name": "Alexandergrass",
+    "aka": [],
+    "aliases": [
+      "alexandergrass",
+      "urochloa plantaginea"
+    ],
+    "scientific_name": "Urochloa plantaginea",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Flat, broadly linear, yellow-green leaf blades with rough margins and fine hairs",
+      "Stems lie flat with the tips turning upward, rooting at the nodes as they spread",
+      "Seed head has several angled, flag-like branches along a central stalk",
+      "Low, sprawling, creeping growth typical of a summer annual"
+    ],
+    "look_alikes": [
+      {
+        "slug": "crabgrass",
+        "difference": "Alexandergrass has flat, hairy, yellow-green blades and flag-like seedhead branches; crabgrass has smoother blades and finger-like branches from one point.",
+        "next_photo": "A close-up of the leaf surface (hairy vs. smoother) and the seed head branch pattern.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "tropical-signalgrass",
+        "difference": "Alexandergrass has broader, hairier, yellow-green blades; tropical signalgrass has narrower blades and low, mat-forming stems rooting densely at every node.",
+        "next_photo": "Not reliably separable from a photo alone — a technician checks leaf hairiness and how densely the stems root along the ground.",
+        "photo_can_confirm": false
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A summer annual grassy weed that favors moist, open ground and spreads by creeping, rooting stems. A technician looks at how thin the turf is, the season, and coverage before recommending an approach.",
+      "fact": "Its seed head branches fan out at an angle like small signal flags, which is part of why it's sometimes confused with its close relative, signalgrass.",
+      "blurb": "A creeping summer annual grass that spreads through moist, open turf on rooting stems."
+    },
+    "tech_notes": "Closely related to tropical signalgrass; confirm which is present since management timing can differ. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://erec.ifas.ufl.edu/weed-id/alexander-grass/",
+      "https://plant-directory.ifas.ufl.edu/plant-directory/urochloa-plantaginea"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d84ff7fbd6ab23cf48241eedd973ca2485fbf9eebc0422ec4b3fa88399e28f45"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed",
+        "stolons"
+      ],
+      "id_cues": [
+        "Flat, yellow-green blades with rough, hairy margins",
+        "Stems lie flat, tips turning upward, rooting at the nodes",
+        "Seed head has several angled, flag-like branches",
+        "Grows in moist, open, sunny ground"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "crowfootgrass",
+    "kind": "weed",
+    "common_name": "Crowfootgrass",
+    "aka": [],
+    "aliases": [
+      "crowfootgrass",
+      "crowfoot grass",
+      "dactyloctenium aegyptium"
+    ],
+    "scientific_name": "Dactyloctenium aegyptium",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Seed head with three to five thick spikelets radiating from a single point — a true crow's-foot shape",
+      "Blades with fine, outward-pointing hairs along the margins",
+      "Stems bend and root at the lower nodes, with tips rising up to about two feet",
+      "Common in dry, sandy, disturbed soil and thin turf"
+    ],
+    "look_alikes": [
+      {
+        "slug": "goosegrass",
+        "difference": "Crowfootgrass has short spikes with a bare tip and hairy leaf margins, no silvery base; goosegrass has longer zipper spikes and a silvery flattened crown.",
+        "next_photo": "A close-up comparing the seed head (radiating spikes vs. zipper shape) and the base of the plant for a silvery crown.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "crabgrass",
+        "difference": "Crowfootgrass has thick, radiating spikelets and hairy leaf margins; crabgrass has thinner finger-like branches and a smoother, sprawling, star-shaped habit.",
+        "next_photo": "A close-up of the seed head branch thickness and whether the leaf margins are noticeably hairy.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A warm-season annual that favors dry, sandy, thin turf and disturbed soil, named for the crow's-foot shape of its seed head. A technician looks at how thin the turf is, the season, and coverage before recommending an approach.",
+      "fact": "Its seed head really does look like a bird's foot, with three to five thick spikelets fanning out from a single point at the top of the stalk.",
+      "blurb": "A dry-soil summer weed named for its distinctive crow's-foot-shaped seed head."
+    },
+    "tech_notes": "Favors dry, sandy, thin turf; improving turf density is the underlying long-term fix. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://florida.plantatlas.usf.edu/plant/species/429"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "816ab67d7ff3f0e4395b857c25b52c7bf9c4a6cafefd12520ded118501e7f2e1"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Seed head with three to five thick spikelets radiating from one point",
+        "Fine hairs pointing outward along the leaf margins",
+        "Stems bend and root at the lower nodes",
+        "Common in dry, sandy, thin turf and disturbed soil"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "thin-paspalum",
+    "kind": "weed",
+    "common_name": "Thin Paspalum",
+    "aka": [],
+    "aliases": [
+      "thin paspalum",
+      "paspalum setaceum"
+    ],
+    "scientific_name": "Paspalum setaceum",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Leaf margins with evenly spaced hairs running at least a third of the blade's length",
+      "Seed head is a slanted spike with two rows of seed along one side of the stem",
+      "Flowering stalks stay slanted even in a regularly mowed lawn",
+      "Tolerates close mowing better than many other grassy weeds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "crabgrass",
+        "difference": "Thin paspalum has evenly spaced leaf-margin hairs and one slanted seed spike; crabgrass has smoother margins and finger-like branches from one point.",
+        "next_photo": "A close-up of the leaf margin for evenly spaced hairs and the seed head shape.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "smutgrass",
+        "difference": "Thin paspalum has a slanted, two-rowed seed spike and a low sprawling habit; smutgrass grows as a tight upright bunch, its seed head often blackened by fungus.",
+        "next_photo": "A wide shot of the growth habit (sprawling vs. tight upright bunch) and a close-up of the seed head for black fungus.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A grassy weed that can tolerate closer mowing than most others, which is part of why it can persist in well-kept lawns. A technician looks at coverage, turf type, and season before recommending an approach.",
+      "fact": "Its flowering stalks stay slanted to one side even in a lawn that's mowed regularly, which is a helpful, easy tell once you know to look for it.",
+      "blurb": "A grassy weed that tolerates close mowing better than most, letting it persist in well-kept lawns."
+    },
+    "tech_notes": "Tolerates lower mowing heights than most grassy weeds, which can let it persist in otherwise well-maintained turf. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://plants.sc.egov.usda.gov/DocumentLibrary/factsheet/pdf/fs_pase5.pdf"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "SWFL-specific range and seasonal peak are a best-estimate judgment call; the cited USDA NRCS fact sheet gives only a broad Atlantic/Gulf Coastal Plain range with no Florida county-level detail.",
+      "approval_hash": "637da06f7933be4e88c3894b6c169416fc4fe7c0d0bfa3a691964d1cdbcda9b5"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Leaf margins have evenly spaced hairs along at least a third of the blade",
+        "Seed spike is slanted with two rows of seed along one side",
+        "Flowering stalk stays slanted even when mowed regularly",
+        "Grows low and tolerates close mowing better than most grassy weeds"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "smutgrass",
+    "kind": "weed",
+    "common_name": "Smutgrass",
+    "aka": [],
+    "aliases": [
+      "smutgrass",
+      "sporobolus indicus"
+    ],
+    "scientific_name": "Sporobolus indicus",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Tight, upright bunch grass, roughly 8-10 inches across at the base",
+      "Narrow, compact seedhead that is often coated in a black fungus (the \"smut\")",
+      "Stiff, wiry blades distinct in texture from surrounding turf",
+      "Grows as a distinct clump rather than spreading into a mat"
+    ],
+    "look_alikes": [
+      {
+        "slug": "thin-paspalum",
+        "difference": "Smutgrass grows as a tight upright bunch with a narrow, often black, fungus-coated seedhead; thin paspalum sprawls low with a slanted, two-rowed seed spike.",
+        "next_photo": "A wide shot of the growth habit (tight bunch vs. sprawling) and a close-up of the seedhead for black fungus.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A tough, tufted grass that forms distinct clumps and is genuinely difficult to control once established, since ordinary mowing barely slows it down. A technician evaluates coverage, turf type, and season to explain the different approach this one usually needs compared to an ordinary grassy weed.",
+      "fact": "Its seedhead is often coated in a black fungus, which is where the name \"smutgrass\" comes from.",
+      "blurb": "A tough, clump-forming grass with a telltale black, fungus-coated seedhead — genuinely hard to control once established."
+    },
+    "tech_notes": "Established clumps are notably persistent; set expectations for a staged approach and repeat monitoring rather than a single application. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/aa261"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bbfb873a1611b3db408aadee4f6044a651f2e1c57fe352440b37ed24946bd0cb"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Tight, upright bunch about 8-10 inches across at the base",
+        "Narrow seedhead often coated in black fungus",
+        "Stiff, wiry blade texture distinct from surrounding turf",
+        "Grows as a standalone clump rather than a spreading mat"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "tropical-signalgrass",
+    "kind": "weed",
+    "common_name": "Tropical Signalgrass",
+    "aka": [],
+    "aliases": [
+      "tropical signalgrass",
+      "urochloa subquadripara"
+    ],
+    "scientific_name": "Urochloa subquadripara",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Low, mat-forming growth with trailing stems that root densely at every node",
+      "Narrow blades on stems that creep and branch just above the soil surface",
+      "Seed head with several small, angled branches along a slender central stalk",
+      "Forms a dense, tangled mat that can be hard to tell from turf at a glance"
+    ],
+    "look_alikes": [
+      {
+        "slug": "alexandergrass",
+        "difference": "Tropical signalgrass has narrow blades and low, densely rooting, mat-forming stems; alexandergrass has broader, hairier, yellow-green blades, a looser habit.",
+        "next_photo": "Not reliably separable from a photo alone — a technician checks leaf hairiness and how densely the stems root along the ground.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "st-augustinegrass",
+        "difference": "Tropical signalgrass has narrower blades and a small seed head with angled branches; St. Augustine has wide, blunt blades, no visible seed head when mowed.",
+        "next_photo": "A close-up of blade width and whether a small, branched seed head is present above the turf.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A warm-season perennial grass that spreads on densely rooting stems, forming a thick mat that's hard to distinguish from turf until well established. A technician looks at how far it has spread, turf type, season, and coverage, since it's one of the more persistent grassy weeds in Florida lawns.",
+      "fact": "It roots so readily at the nodes that a single mowed-off fragment left on the lawn can start a brand-new patch elsewhere.",
+      "blurb": "A mat-forming grassy weed that spreads readily by rooting stems and can be hard to spot until well established."
+    },
+    "tech_notes": "One of the more persistent grassy weeds in FL turf per UF/IFAS EDIS ENH1132/EP393; field germination occurs once soil temperatures reach about 77°F and needs soil pH 5-6, which is common in Florida soils. Per label if herbicide is used; mower sanitation helps limit spread from fragments.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/119122",
+      "https://ask.ifas.ufl.edu/ep141"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f584084083e5c8c24634a0f6ebbb4465fee50807ac823cfbb9e2cd79c6427f6a"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "stolons"
+      ],
+      "id_cues": [
+        "Low, mat-forming growth with trailing stems rooting at every node",
+        "Narrow blades on creeping, branching stems just above the soil",
+        "Small seed head with several angled branches on a slender stalk",
+        "Forms a dense, tangled mat easy to mistake for turf at first glance"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "kind": "weed",
+    "aka": [
+      "Poa annua",
+      "Winter Grass"
+    ],
+    "stages": [],
+    "sign_of": [],
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [
+      {
+        "claim": "Leaf-tip and seed-head description",
+        "note": "General botany, not stated in the EP141 lawn weed guide. Confirm against a UF/IFAS page at review."
+      }
+    ],
+    "slug": "annual-bluegrass",
+    "common_name": "Annual Bluegrass",
+    "aliases": [
+      "annual bluegrass",
+      "poa annua",
+      "winter grass"
+    ],
+    "scientific_name": "Poa annua",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "traits": [
+      "Light green, soft-bladed clumps that stand out against darker turf",
+      "White to pale seed heads showing up in winter, even on very short growth",
+      "Boat-shaped leaf tips, with blades often crinkled across the blade",
+      "Most common in compacted or continuously wet soil"
+    ],
+    "look_alikes": [
+      {
+        "slug": "crabgrass",
+        "difference": "Annual bluegrass is a light green winter clump with pale seed heads; crabgrass is a warm-season sprawler with finger-like seed branches.",
+        "next_photo": "A close-up of the seed head and a note of the month the photo was taken.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "goosegrass",
+        "difference": "Goosegrass is a warm-season weed with a flattened, silvery-white base; annual bluegrass is a cool-season, light green tuft with pale seed heads.",
+        "next_photo": "A close-up of the base of the plant and a note of the month.",
+        "photo_can_confirm": true
+      }
+    ],
+    "active_months": [
+      11,
+      12,
+      1,
+      2,
+      3
+    ],
+    "peak_months": [
+      12,
+      1,
+      2
+    ],
+    "copy": {
+      "what_it_means": "A light green winter grass that forms soft clumps with pale seed heads in bermudagrass and zoysia while those lawns are dormant or slow. A technician checks soil moisture, compaction, the season and coverage before recommending an approach.",
+      "fact": "Annual bluegrass is a winter annual: it sprouts in fall, sets seed through winter, and is gone by spring, but the seed stays behind for next year.",
+      "blurb": "A light green winter grass with pale seed heads, most common in wet or compacted soil."
+    },
+    "tech_notes": "Winter annual grass; UF/IFAS advises a pre-emergent when night temperatures drop to 55-60 F for several days, late October to early November in central and south Florida. Compaction and constant moisture favor it. Per label if herbicide is used.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep141"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). EP141 confirms the winter-annual life cycle, the wet or compacted soil preference and the late-October pre-emergent window. Owner brief listed bermuda and zoysia as the affected lawns; EP141 says it is a problem in multiple Florida turf types."
+    },
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "annual_cool",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Light green, soft-bladed clumps",
+        "White to pale seed heads in winter",
+        "Boat-shaped leaf tips",
+        "Common in compacted or wet soil"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  }
+]

@@ -231,6 +231,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       serviceKey,
       timeline,
       leadSource,
+      heardAbout,
+      heardAboutPrompt,
       signHost,
     } = intake;
     // The visitor's declared timeline sets urgency directly; null when the
@@ -343,6 +345,17 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         sourceRecord = await db('lead_sources')
           .where('source_type', 'marketplace')
           .where('channel', 'social_organic')
+          .where('is_active', true)
+          .first();
+      }
+      // AI-assistant referral (seed: 20260928030000_ai_assistant_lead_source).
+      // Without this the leadSource.source==='ai_assistant' bucket never
+      // resolves a lead_source_id — it would carry the correct funnel display
+      // name (SOURCE_NAMES) but lose the admin source badge/filter and trip
+      // the unattributed-leads alert (codex pre-push P1).
+      if (!sourceRecord && leadSource.source === 'ai_assistant') {
+        sourceRecord = await db('lead_sources')
+          .where('source_type', 'ai_assistant')
           .where('is_active', true)
           .first();
       }
@@ -558,6 +571,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // The visitor just submitted from a browser carrying this unit id — a
       // call-pipeline lead attaching to a web submission gains the join too.
       ...(anonId ? { anon_id: anonId } : {}),
+      ...(heardAbout ? { heard_about: heardAbout } : {}),
+      ...(heardAboutPrompt ? { heard_about_prompt: heardAboutPrompt } : {}),
     });
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
@@ -965,6 +980,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           fbc: fbc || null,
           fbp: fbp || null,
           anon_id: anonId || null,
+          heard_about: heardAbout || null,
+          heard_about_prompt: heardAboutPrompt || null,
           is_residential: true,
         }).returning('*');
         leadRecord = newLead;
@@ -1106,10 +1123,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               // (jsonb_strip_nulls drops a key the row never had) so the triage
               // snapshot — whose schema has none of them — can't erase the
               // extra-property ask, the "Wants service" line or the sign host.
+              // The form's stage and normalized address ride along too: the call
+              // pipeline reads them to tell a web-form address from a call's.
               updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
                 : db.raw(
-                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host')) || ?::jsonb",
+                  "jsonb_strip_nulls(jsonb_build_object('stage', COALESCE(extracted_data, '{}'::jsonb)->'stage', 'address', COALESCE(extracted_data, '{}'::jsonb)->'address', 'additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host')) || ?::jsonb",
                   [JSON.stringify(triageResult.extractedData)]
                 );
             }
@@ -1572,6 +1591,12 @@ function getLeadWebhookAttribution(body = {}) {
   return {
     pageUrl: body.page_url || body['Page Url'] || body.referrer || attr.referrer || synthesizedFromDomain || '',
     landingUrl: body.landing_url || body['Landing Url'] || attr.landing_url || synthesizedFromDomain || '',
+    // Distinct from pageUrl above (which falls back to the referrer only when
+    // no page_url/landing_url is present) — the AI-assistant classifier branch
+    // needs the RAW document.referrer even when a landing_url won the pageUrl
+    // fallback race, so a ChatGPT/Perplexity/etc. referred visit that landed
+    // on a tracked page is still detected by referrer host.
+    referrer: body.referrer || attr.referrer || '',
     utmSource: body.utm_source || body['Utm Source'] || attrUtm.source || '',
     utmMedium: body.utm_medium || body['Utm Medium'] || attrUtm.medium || '',
     utmCampaign: body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '',
@@ -1611,6 +1636,38 @@ function normalizeSignHost(value) {
     .replace(/\s+/g, ' ')
     .trim();
   return Array.from(cleaned).slice(0, SIGN_HOST_MAX_LENGTH).join('').trim();
+}
+
+// "How did you hear about us?" — self-reported discovery channel from the
+// optional quote-form question (owner-approved 2026-09-27). Validated against
+// a FIXED allowlist shared with the Astro quote form's select options — any
+// other value (including free text) is silently dropped, never stored. Kept
+// SEPARATE from leadSource: leadSource is technically-observed attribution
+// (UTM/referrer/click-id); this is what the visitor typed themselves, and
+// unknown stays unknown (null) rather than being guessed at.
+const HEARD_ABOUT_OPTIONS = new Set([
+  'google_search', 'google_maps', 'chatgpt', 'other_ai',
+  'facebook_instagram', 'nextdoor', 'yelp', 'friend_neighbor',
+  'truck_yard_sign', 'other',
+]);
+
+function sanitizeHeardAbout(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return HEARD_ABOUT_OPTIONS.has(key) ? key : null;
+}
+
+// Optional follow-up to the AI choices above ("What did you ask it?"). Stored
+// as typed — no redaction — but only for chatgpt / other_ai, and normalized to
+// one printable line (whitespace collapsed) capped at 500 chars. Anything else
+// (non-string, empty, or a non-AI heard_about) resolves to null.
+const HEARD_ABOUT_PROMPT_MAX = 500;
+const HEARD_ABOUT_PROMPT_KEYS = new Set(['chatgpt', 'other_ai']);
+
+function sanitizeHeardAboutPrompt(value, heardAbout) {
+  if (!HEARD_ABOUT_PROMPT_KEYS.has(heardAbout)) return null;
+  if (typeof value !== 'string') return null;
+  const text = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return text ? text.slice(0, HEARD_ABOUT_PROMPT_MAX).trim() : null;
 }
 
 function buildLeadWebhookIntake(body = {}) {
@@ -1654,8 +1711,10 @@ function buildLeadWebhookIntake(body = {}) {
     attribution.gclid,
     attribution.wbraid,
     attribution.gbraid,
+    attribution.referrer,
   );
 
+  const heardAbout = sanitizeHeardAbout(body.heard_about);
   return {
     email,
     rawPhone,
@@ -1673,6 +1732,8 @@ function buildLeadWebhookIntake(body = {}) {
     serviceKey,
     timeline,
     leadSource,
+    heardAbout,
+    heardAboutPrompt: sanitizeHeardAboutPrompt(body.heard_about_prompt, heardAbout),
     // Exact key only, like `message` below — and kept OUT of `message`.
     signHost: normalizeSignHost(body.sign_host),
     // Free-prose message body — the readiness gate's commercial-signal scan
@@ -2066,4 +2127,6 @@ module.exports._test = {
   determineLeadSource,
   isHoneypotTripped,
   enrollNewLeadAutomation,
+  sanitizeHeardAbout,
+  sanitizeHeardAboutPrompt,
 };

@@ -334,7 +334,11 @@ ${JSON.stringify(INVESTIGATION_SCHEMA)}`;
 /** One call + one repair retry. Returns { ok, data } | { ok:false, reason }. */
 async function investigateWithModel(llmDispatch, prompt) {
   const route = { provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.WORKHORSE };
-  const payload = { laneId: 'link_investigator', system: SYSTEM_PROMPT, jsonMode: true, maxTokens: 4096, temperature: 0, timeoutMs: LLM_TIMEOUT_MS };
+  // maxTokens 8192 (was 4096, 2026-09-26): Sonnet 5 thinks by default and
+  // thinking spends from this same cap ahead of the JSON reply — 3 of 106
+  // prod calls were truncating at 4096 with the overflow being thinking, not
+  // the investigation JSON.
+  const payload = { laneId: 'link_investigator', system: SYSTEM_PROMPT, jsonMode: true, maxTokens: 8192, temperature: 0, timeoutMs: LLM_TIMEOUT_MS };
   let res = await llmDispatch(route, { ...payload, text: prompt });
   let calls = 1;
   let check = res.ok && res.json ? validateInvestigation(res.json) : { valid: false, errors: [res.reason || 'no_json'] };

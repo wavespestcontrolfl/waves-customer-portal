@@ -42,7 +42,13 @@ jest.mock('../services/project-report-hold', () => ({ scheduleHoldReleaseSweep: 
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 jest.mock('../services/payment-plans', () => ({ completeActivePlansForInvoice: jest.fn(async () => undefined) }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn(async () => true) }));
-jest.mock('../services/receipt-delivery-queue', () => ({ enqueueReceiptDelivery: jest.fn(async () => ({ enqueued: true })), scheduleReceiptDeliveryDrain: jest.fn() }));
+jest.mock('../services/receipt-delivery-queue', () => ({
+  enqueueReceiptDelivery: jest.fn(async () => ({ enqueued: true })),
+  scheduleReceiptDeliveryDrain: jest.fn(),
+  claimReceiptJobForOperatorSend: jest.fn(async () => ({ id: 'job-1', token: 'claim-1', prior: null })),
+  recordOperatorReceiptDelivered: jest.fn(async () => undefined),
+  releaseOperatorReceiptClaim: jest.fn(async () => undefined),
+}));
 
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
@@ -459,6 +465,61 @@ describe('recordManualPayment — settlement', () => {
     settle(openInvoice());
     const out = await recordManualPayment('inv-1', { method: 'cash', via: 'email' });
     expect(out.receipt).toEqual({ email: { ok: true }, sms: null });
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  });
+
+  test('the inline receipt holds the invoice\'s receipt-job claim around both legs and hands it back with the email outcome', async () => {
+    settle(openInvoice());
+    await recordManualPayment('inv-1', { method: 'cash' });
+    expect(ReceiptDeliveryQueue.claimReceiptJobForOperatorSend).toHaveBeenCalledWith('inv-1', { sawUnsent: true });
+    expect(ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mock.invocationCallOrder[0]).toBeLessThan(sendReceiptEmail.mock.invocationCallOrder[0]);
+    expect(ReceiptDeliveryQueue.releaseOperatorReceiptClaim).toHaveBeenCalledWith(
+      { id: 'job-1', token: 'claim-1', prior: null },
+      expect.objectContaining({ emailDelivered: true }),
+    );
+    expect(ReceiptDeliveryQueue.releaseOperatorReceiptClaim.mock.invocationCallOrder[0]).toBeGreaterThan(InvoiceService.sendReceipt.mock.invocationCallOrder[0]);
+  });
+
+  test('each delivered inline leg is recorded on the claim', async () => {
+    settle(openInvoice());
+    await recordManualPayment('inv-1', { method: 'cash' });
+    expect(ReceiptDeliveryQueue.recordOperatorReceiptDelivered.mock.calls.map(([, leg]) => leg)).toEqual(['email', 'sms']);
+  });
+
+  test('another OPERATOR send holding the claim is no promise this receipt goes out: reported unsent, never queued', async () => {
+    settle(openInvoice());
+    ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockResolvedValueOnce({ inFlight: true, byOperator: true });
+    const out = await recordManualPayment('inv-1', { method: 'cash' });
+    expect(out.receipt).toEqual({ email: { ok: false, error: expect.stringMatching(/another receipt send/) }, sms: null });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  });
+
+  test('a receipt job the drain is delivering right now: nothing sent inline, reported as queued', async () => {
+    settle(openInvoice());
+    ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockResolvedValueOnce({ inFlight: true });
+    const out = await recordManualPayment('inv-1', { method: 'cash' });
+    expect(out.receipt).toEqual({ queued: true });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  });
+
+  test('a receipt the claim step found already delivered is not sent again', async () => {
+    settle(openInvoice());
+    ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockResolvedValueOnce({ alreadySent: true });
+    const out = await recordManualPayment('inv-1', { method: 'cash' });
+    expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt already sent' }, sms: null });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  });
+
+  test('a claim failure skips the receipt but never fails the recorded payment', async () => {
+    settle(openInvoice());
+    ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockRejectedValueOnce(new Error('db blip'));
+    const out = await recordManualPayment('inv-1', { method: 'cash' });
+    expect(out.invoice).toBeTruthy();
+    expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt claim failed: db blip' }, sms: null });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
   });
 });

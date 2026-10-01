@@ -66,39 +66,6 @@ describe('public pricing ranges', () => {
     }
   });
 
-  test('rodent bait sweeps the LIVE bracket ladder — an operator-added narrow bracket is sampled (codex #3591 r9 P2)', () => {
-    const constants = require('../services/pricing-engine/constants');
-    const original = constants.RODENT.baitBrackets;
-    constants.RODENT.baitBrackets = [{ maxSqFt: 900, stations: 3, perVisit: 59 }, ...original];
-    try {
-      const refreshed = computePublicPricingRanges({ refresh: true });
-      const row = refreshed.services.find((svc) => svc.key === 'rodent_bait_program');
-      // 900 sf is not a hardcoded sample point; only the live ladder reaches it.
-      expect(row.low).toBeLessThanOrEqual(59);
-      // ...and the DISCOUNTED sweep reaches it too (codex #3591 r15 P2).
-      const constants2 = require('../services/pricing-engine/constants');
-      const maxTier = Math.max(...Object.values(constants2.WAVEGUARD.tiers).map((t) => t.discount || 0));
-      expect(row.low).toBeLessThanOrEqual(Math.round(59 * (1 - maxTier) * 100) / 100 + 0.01);
-    } finally {
-      constants.RODENT.baitBrackets = original;
-      computePublicPricingRanges({ refresh: true });
-    }
-  });
-
-  test('a bracket boundary beyond the 20,000 sf public cap is never sampled (codex #3591 r26 P2)', () => {
-    const constants = require('../services/pricing-engine/constants');
-    const original = constants.RODENT.baitBrackets;
-    // 20,000 sf itself prices at the last bracket a public quote can reach
-    // ($300); the 50,000 sf boundary ($999) is beyond the cap and never sampled.
-    constants.RODENT.baitBrackets = [...original, { maxSqFt: 20000, stations: 20, perVisit: 300 }, { maxSqFt: 50000, stations: 40, perVisit: 999 }];
-    try {
-      const row = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'rodent_bait_program');
-      expect(row.high).toBe(300);
-    } finally {
-      constants.RODENT.baitBrackets = original;
-      computePublicPricingRanges({ refresh: true });
-    }
-  });
 
   test('rodent bait note tracks the live setup fee to the cent and disappears when the fee is disabled (codex #3591 r10 P2)', () => {
     const constants = require('../services/pricing-engine/constants');
@@ -131,10 +98,10 @@ describe('public pricing ranges', () => {
     for (const s of payload.services) {
       expect(Number.isFinite(s.low)).toBe(true);
       expect(Number.isFinite(s.high)).toBe(true);
-      // wasp_hornet_removal legitimately floors at $0 (bundled inclusion
-      // with a recurring plan); everything else must price above zero.
-      if (s.key === 'wasp_hornet_removal') expect(s.low).toBeGreaterThanOrEqual(0);
-      else expect(s.low).toBeGreaterThan(0);
+      // Owner ruling 2026-09-27: the sweep no longer merges the $0
+      // recurring-plan wasp floor into any row's values, so every published
+      // low (wasp_hornet_removal included) must price above zero.
+      expect(s.low).toBeGreaterThan(0);
       expect(s.high).toBeGreaterThanOrEqual(s.low);
     }
   });
@@ -201,6 +168,43 @@ describe('public pricing ranges', () => {
     expect(payload.disclaimer).toContain('/pest-control-calculator/');
     expect(payload.currency).toBe('USD');
     expect(new Date(payload.generatedAt).getTime()).not.toBeNaN();
+  });
+
+  test('general-pest range is a typical-home list-price range, not an envelope (owner ruling 2026-09-27)', () => {
+    const sp = require('../services/pricing-engine/service-pricing');
+    const pest = payload.services.find((s) => s.key === 'general_pest_quarterly');
+    // A 6,000 sq ft home loaded with every add-on quotes well above a
+    // typical home's price — the published HIGH must stay below it, or the
+    // sweep has silently widened back into an envelope of every quote.
+    const worstCase = sp.pricePestControl(
+      {
+        footprint: 6000,
+        propertyType: 'single_family',
+        attachedGarage: true,
+        nearWater: true,
+        features: {
+          shrubs: 'heavy', trees: 'heavy', complexity: 'complex', indoor: true,
+          poolCage: true, poolCageSize: 'oversized',
+        },
+      },
+      { frequency: 'quarterly' },
+    );
+    const worstCasePerApp = Math.max(...worstCase.tiers.map((t) => t.perApp));
+    expect(pest.high).toBeLessThan(worstCasePerApp);
+
+    // The published LOW is the list-price typical minimum — a WaveGuard
+    // bundle discount must never lower it.
+    // Smallest typical footprint (10th percentile, light landscaping), list price.
+    const listMin = Math.min(...sp.pricePestControl(
+      { footprint: 1085, propertyType: 'single_family', features: { shrubs: 'light', trees: 'light', complexity: 'simple' } },
+      { frequency: 'quarterly' },
+    ).tiers.map((t) => t.perApp));
+    expect(pest.low).toBe(Math.floor(listMin));
+
+    // Nor does the recurring-customer perk: the German roach initial series
+    // is sold inside a recurring plan, but its published price is still list.
+    const roachInitial = payload.services.find((s) => s.key === 'german_roach_initial');
+    expect(roachInitial.low).toBe(sp.priceGermanRoachInitial({ isRecurringCustomer: false }).price);
   });
 
   test('cache serves between syncs and refreshes when a sync applied', () => {

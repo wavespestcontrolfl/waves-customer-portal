@@ -55,9 +55,9 @@ const FEED = {
   ],
 };
 
-function renderTab() {
+function renderTab(initialEntries = ["/"]) {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={initialEntries}>
       <AgentActivityTab />
     </MemoryRouter>,
   );
@@ -108,6 +108,73 @@ describe("AgentActivityTab", () => {
     const links = await screen.findAllByRole("link", { name: "Review" });
     fireEvent.click(links[0]);
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n9/read", { method: "PUT" }));
+  });
+
+  describe("Done on a digest", () => {
+    const VERSION = "a1".repeat(16);
+    const pendingFeed = (extra = {}) => ({
+      ...FEED,
+      items: [{
+        id: "digest:n5", kind: "digest", agent: "Waves Ops", notificationId: "n5", version: VERSION,
+        title: "2 voicemails unreturned", subtitle: "voicemail · needs you",
+        status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: null, detail: "Pat Tester", ...extra,
+      }],
+    });
+
+    it("sends the served version, then refetches the feed without navigating", async () => {
+      adminFetch.mockImplementation(async (path) => (path.startsWith("/admin/agents/activity") ? pendingFeed() : { success: true }));
+      renderTab();
+      const buttons = await screen.findAllByRole("button", { name: "Done" });
+      fireEvent.click(buttons[0]);
+      await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/notifications/n5/done", {
+        method: "PUT",
+        body: JSON.stringify({ version: VERSION }),
+      }));
+      await waitFor(() => expect(adminFetch.mock.calls.filter(([p]) => p.startsWith("/admin/agents/activity")).length).toBe(2));
+      expect(screen.queryByText(/That item changed/)).not.toBeInTheDocument();
+    });
+
+    it("on 409 refetches and shows the short changed note", async () => {
+      adminFetch.mockImplementation(async (path) => {
+        if (path.startsWith("/admin/agents/activity")) return pendingFeed();
+        throw Object.assign(new Error("changed"), { status: 409 });
+      });
+      renderTab();
+      fireEvent.click((await screen.findAllByRole("button", { name: "Done" }))[0]);
+      expect(await screen.findByText("That item changed — the feed was refreshed.")).toBeInTheDocument();
+      await waitFor(() => expect(adminFetch.mock.calls.filter(([p]) => p.startsWith("/admin/agents/activity")).length).toBe(2));
+    });
+
+    it("offers no Done without a version (done or resolved rows) or on non-digest rows", async () => {
+      adminFetch.mockResolvedValue(pendingFeed({ version: null }));
+      renderTab();
+      await screen.findByText("2 voicemails unreturned");
+      expect(screen.queryByRole("button", { name: "Done" })).not.toBeInTheDocument();
+    });
+
+    it("an Activity-only row (no link, so no Review) still offers Done", async () => {
+      adminFetch.mockResolvedValue(pendingFeed({ link: null }));
+      renderTab();
+      expect((await screen.findAllByRole("button", { name: "Done" })).length).toBeGreaterThan(0);
+      expect(screen.queryByRole("link", { name: "Review" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("a done digest reads Done and shows its one-line resolution", async () => {
+    adminFetch.mockResolvedValueOnce({
+      ...FEED,
+      items: [{
+        id: "digest:n7", kind: "digest", agent: "Waves Ops", notificationId: "n7",
+        title: "Schedule: price the series", subtitle: "schedule · done", doneAt: "2026-09-02T11:00:00Z",
+        resolution: "Series priced", status: "completed", startedAt: "2026-09-02T10:00:00Z", finishedAt: "2026-09-02T11:00:00Z",
+        durationMs: null, steps: [], stepsDone: 1, stepsTotal: 1, link: "/admin/schedule", detail: null,
+      }],
+    });
+    renderTab();
+    expect(await screen.findByText("Done")).toBeInTheDocument();
+    expect(screen.queryByText("Completed")).toBeNull();
+    expect(screen.getByText(/Series priced/)).toBeInTheDocument();
   });
 
   it("a FIX digest keeps its remediation link as Open and marks read on follow", async () => {
@@ -170,5 +237,56 @@ describe("AgentActivityTab", () => {
     expect(screen.getByText("impact verdict digest")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/Window/), { target: { value: "168" } });
     await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith("/admin/agents/activity?hours=168"));
+  });
+
+  // The bell's deep link (client/src/components/NotificationBell.jsx)
+  // appends &focus=<notification id> when an ops_digest row's own link is
+  // this shared feed. digestItem's id is `digest:<that same id>`.
+  it("?focus=<notification id> expands and scrolls to that digest item on load", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    adminFetch.mockResolvedValue({
+      ...FEED,
+      items: [
+        {
+          id: "digest:n9", kind: "digest", agent: "Waves Ops", notificationId: "n9",
+          title: "3 promised quotes not sent", subtitle: "promised estimate · needs you",
+          status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+          steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/pipeline", detail: "the whole report for n9",
+        },
+        {
+          id: "digest:n8", kind: "digest", agent: "Waves Ops", notificationId: "n8",
+          title: "Sends — duplicate detection failing", subtitle: "d17 duplicate sends · needs a fix",
+          status: "failed", startedAt: "2026-09-02T09:00:00Z", finishedAt: null, durationMs: null,
+          steps: [], stepsDone: 0, stepsTotal: 1, link: null, detail: "the whole report for n8",
+        },
+      ],
+    });
+    renderTab(["/?focus=n9"]);
+    // The focused item (n9) is already expanded — its detail shows with no click.
+    expect(await screen.findByText("the whole report for n9")).toBeInTheDocument();
+    // The other item (n8) stays collapsed.
+    expect(screen.queryByText("the whole report for n8")).not.toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalled();
+    // The fetch itself carries ?focus= through, so the server can load that
+    // ONE row even when it's read and older than the window.
+    expect(adminFetch).toHaveBeenCalledWith("/admin/agents/activity?hours=24&focus=n9");
+  });
+
+  it("no focus param: nothing is pre-expanded", async () => {
+    adminFetch.mockResolvedValue({
+      ...FEED,
+      items: [{
+        id: "digest:n9", kind: "digest", agent: "Waves Ops", notificationId: "n9",
+        title: "3 promised quotes not sent", subtitle: "promised estimate · needs you",
+        status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/pipeline", detail: "the whole report for n9",
+      }],
+    });
+    renderTab();
+    await screen.findByText("3 promised quotes not sent");
+    expect(screen.queryByText("the whole report for n9")).not.toBeInTheDocument();
+    // No &focus= on the fetch when the route carries none.
+    expect(adminFetch).toHaveBeenCalledWith("/admin/agents/activity?hours=24");
   });
 });

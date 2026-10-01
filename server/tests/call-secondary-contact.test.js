@@ -228,7 +228,7 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
         email: null, relationship_to_property: 'other', on_site_authorization: true, decision_maker_present: true,
         preferred_contact_method: 'phone',
       },
-      consent: { sms_consent_given: true, sms_consent_quote: 'you can send notifications to the buyer and myself', call_recording_disclosed: true, do_not_contact_request: false },
+      consent: { sms_consent_given: true, sms_consent_quote: 'you can send notifications to the buyer and myself', call_recording_disclosed: true, do_not_contact_request: false, sms_declined: false },
       property: {
         service_address: { raw_text: '11530 Water Poppy Terrace', street_line_1: '11530 Water Poppy Terrace', street_line_2: null, city: 'Bradenton', state: 'FL', postal_code: '34202', county: 'Manatee', subdivision_or_community: 'Lakewood Ranch', normalization_status: 'not_attempted' },
         property_type: 'single_family', hoa_community_flag: true, hoa_common_area_service: false,
@@ -266,8 +266,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.14.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.14.0');
+  test('current SCHEMA_VERSION is 1.21.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.21.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {

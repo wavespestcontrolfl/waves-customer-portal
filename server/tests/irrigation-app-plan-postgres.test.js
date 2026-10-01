@@ -130,6 +130,22 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await loadCustomerWateringPlan(customerId, { now: new Date('2026-09-14T14:05:00Z') })).toBeNull();
   }, 30000);
 
+  test('an irrigation_email tag adds a customer without lawn service; the seasonal-tips opt-out still wins', async () => {
+    const pestOnly = randomUUID();
+    await mockTransaction('customers').insert({ id: pestOnly, first_name: 'Sample', phone: '9415550101',
+      email: 'pest-only@example.invalid', active: true, pipeline_stage: 'active_customer',
+      address_line1: '102 Fixture Lane', city: 'Sarasota', zip: '34236', latitude: 27.3, longitude: -82.5 });
+    await mockTransaction('scheduled_services').insert({ customer_id: pestOnly, scheduled_date: '2026-09-10',
+      service_type: 'Quarterly Pest Control Service', status: 'confirmed', is_recurring: true });
+    expect(await findEligibleCustomers({ now, customerId: pestOnly })).toHaveLength(0);
+    await mockTransaction('customer_tags').insert({ customer_id: pestOnly, tag: 'irrigation_email' });
+    expect(await findEligibleCustomers({ now, customerId: pestOnly })).toHaveLength(1);
+    // The lawn customer is still in without a tag.
+    expect(await findEligibleCustomers({ now, customerId })).toHaveLength(1);
+    await mockTransaction('notification_prefs').insert({ customer_id: pestOnly, seasonal_tips: false });
+    expect(await findEligibleCustomers({ now, customerId: pestOnly })).toHaveLength(0);
+  }, 30000);
+
   test('current database settings and home identity invalidate the saved instructions', async () => {
     await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ sent_at: now });
     expect(await loadCustomerWateringPlan(customerId, { now })).not.toBeNull();

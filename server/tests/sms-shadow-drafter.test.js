@@ -110,6 +110,7 @@ describe('sms shadow drafter — response parsing', () => {
       intended_actions: [],
       auto_send_safe: true,
       missing_info: null,
+      offered_times: [],
     });
   });
 
@@ -136,6 +137,29 @@ describe('sms shadow drafter — response parsing', () => {
       expect(parsed.intended_actions).toEqual([]);
       // ...but the raw-derived safety flag still refuses auto-send.
       expect(parsed.auto_send_safe).toBe(false);
+    });
+
+    // Codex round-3 P2 (send-time re-service revalidation): confirms the
+    // premise the fix relies on — a re-service-offer reply NEVER reaches
+    // maybeAutoSend/claimAutoSend, so reservicePromiseStillEligible only
+    // needs to guard the reviewed-card and scheduled-send paths, not the
+    // auto-send executor.
+    describe('a re-service-offer reply is NEVER auto_send_safe (confirms it never reaches the auto-send executor)', () => {
+      test('with the required send_reservice_link escalate action present (a well-formed promise)', () => {
+        const parsed = parseShadowResponse(JSON.stringify({
+          reply: "Good news — we'll send your free re-service link now.",
+          intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }],
+        }));
+        expect(parsed.auto_send_safe).toBe(false);
+      });
+
+      test('with an empty action list (a broken promise) — the extra reservice-promise check forces it false too', () => {
+        const parsed = parseShadowResponse(JSON.stringify({
+          reply: "Good news — we'll send your free re-service link now.",
+          intended_actions: [],
+        }));
+        expect(parsed.auto_send_safe).toBe(false);
+      });
     });
   });
 
@@ -168,6 +192,30 @@ describe('sms shadow drafter — response parsing', () => {
     expect(parseShadowResponse('no json here at all')).toBeNull();
     expect(parseShadowResponse('{"intended_actions":[]}')).toBeNull(); // missing reply
     expect(parseShadowResponse('{"reply": 7}')).toBeNull(); // non-string reply
+  });
+
+  describe('offered_times — the structural offered-slot declaration (owner-directed fix)', () => {
+    test('absent field → empty array, not undefined', () => {
+      expect(parseShadowResponse('{"reply":"hi"}').offered_times).toEqual([]);
+    });
+
+    test('a well-formed entry passes through', () => {
+      const parsed = parseShadowResponse(
+        '{"reply":"How about Tuesday 9-11?","offered_times":[{"date":"Tuesday, September 29","window":"9:00 AM - 11:00 AM"}]}'
+      );
+      expect(parsed.offered_times).toEqual([{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }]);
+    });
+
+    test('a malformed entry (non-string date/window, or missing one) is dropped, not crashed on', () => {
+      const parsed = parseShadowResponse(
+        '{"reply":"hi","offered_times":[{"date":42,"window":"9-11"},{"date":"Tuesday"},{},"not an object"]}'
+      );
+      expect(parsed.offered_times).toEqual([]);
+    });
+
+    test('a non-array offered_times → empty array', () => {
+      expect(parseShadowResponse('{"reply":"hi","offered_times":"Tuesday 9-11"}').offered_times).toEqual([]);
+    });
   });
 
   test('empty reply is a valid "no reply warranted" draft', () => {
@@ -755,11 +803,14 @@ describe('sms shadow drafter — structural unsendability', () => {
   });
 });
 
-describe('sealed-lane dispatch budget (08-15 tuning)', () => {
-  test('pinned sealed drafts dispatch with maxTokens 1000, the :sealed suffix, and no fallback', async () => {
+describe('sealed-lane dispatch budget (08-15 tuning, raised again 2026-09-26)', () => {
+  test('pinned sealed drafts dispatch with maxTokens 2000, the :sealed suffix, and no fallback', async () => {
     // 600 truncated 2-4 sealed-exam legs/day in prod ("unparseable
     // (response truncated at max_tokens=600)") — pin the raised budget so
-    // a silent revert can't reintroduce false provider failures.
+    // a silent revert can't reintroduce false provider failures. Raised
+    // again 600 -> 2000 on 2026-09-26: Sonnet 5 thinks by default and
+    // thinking spends from this same cap ahead of the ~270-token real
+    // draft (10 of 71 live calls were hitting 600, overflow was thinking).
     jest.resetModules();
     const dispatched = [];
     jest.doMock('../services/llm/call', () => ({
@@ -774,12 +825,12 @@ describe('sealed-lane dispatch budget (08-15 tuning)', () => {
     jest.dontMock('../services/llm/call');
     expect(dispatched).toHaveLength(1);
     // r46: sealed legs measure the LIVE cap — the exam gates live behavior.
-    expect(dispatched[0].payload.maxTokens).toBe(600);
+    expect(dispatched[0].payload.maxTokens).toBe(2000);
     expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+:sealed$/);
     expect(dispatched[0].policy.fallback).toBeUndefined();
   });
 
-  test('live drafts keep the 600 cap — it is the composer card\'s last length guard (codex #3423 r2)', async () => {
+  test('live drafts keep the same cap as the sealed exam — it still gates real draft length before comms-lint\'s segment check (codex #3423 r2)', async () => {
     jest.resetModules();
     const dispatched = [];
     jest.doMock('../services/llm/call', () => ({
@@ -793,14 +844,14 @@ describe('sealed-lane dispatch budget (08-15 tuning)', () => {
     await drafter.generateDraftOnce({}, 'sys', 'user', MODELS.ROUTES.smsDraftDefault, { pinned: false });
     jest.dontMock('../services/llm/call');
     expect(dispatched).toHaveLength(1);
-    expect(dispatched[0].payload.maxTokens).toBe(600);
+    expect(dispatched[0].payload.maxTokens).toBe(2000);
     expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+$/);
     expect(dispatched[0].policy.fallback).toBeTruthy();
   });
 });
 
 describe('auto-send fallback publication', () => {
-  async function runDraft(autoSendResult) {
+  async function runDraft(autoSendResult, draftArgs = {}) {
     jest.resetModules();
     process.env.SHADOW_DRAFT_VERIFY = 'false';
     process.env.SHADOW_FEWSHOT = 'false';
@@ -822,14 +873,15 @@ describe('auto-send fallback publication', () => {
 
     jest.doMock('../models/db', () => mockDb);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const getContextForCustomer = jest.fn(async () => ({
+      summary: 'QA customer',
+      flags: [],
+      smsHistory: [],
+      customer: { billingLane: null },
+      billing: { outstandingBalance: 0, recentPayments: [] },
+    }));
     jest.doMock('../services/context-aggregator', () => ({
-      getContextForCustomer: jest.fn(async () => ({
-        summary: 'QA customer',
-        flags: [],
-        smsHistory: [],
-        customer: { billingLane: null },
-        billing: { outstandingBalance: 0, recentPayments: [] },
-      })),
+      getContextForCustomer,
       authorizedDuesCents: jest.fn(() => []),
     }));
     jest.doMock('../services/voice-profile-distiller', () => ({
@@ -868,8 +920,9 @@ describe('auto-send fallback publication', () => {
       customer: { id: 'customer-1' },
       smsLogId: 'sms-1',
       intent: { intent: 'general_customer_sms_needs_review', confidence: 0.9 },
+      ...draftArgs,
     });
-    return { id, insertedRows, maybeAutoSend, publishSuggestion, supersedeStaleSuggestions, resolveDeliveryMode };
+    return { id, insertedRows, maybeAutoSend, publishSuggestion, supersedeStaleSuggestions, resolveDeliveryMode, getContextForCustomer };
   }
 
   test('provider uncertainty stays shadow; a definitive failure still publishes the human fallback', async () => {
@@ -890,6 +943,52 @@ describe('auto-send fallback publication', () => {
       expect(definitive.resolveDeliveryMode).toHaveBeenCalledTimes(2);
       expect(definitive.supersedeStaleSuggestions).not.toHaveBeenCalled();
     } finally {
+      if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
+      else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+      if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
+      else process.env.SHADOW_FEWSHOT = priorFewshot;
+    }
+  });
+
+  // Codex round-2 P2: getContextForCustomer defaults to skipping the LIVE
+  // ETA GPS lookup — draftShadowReply renders the fact into buildFactsBlock,
+  // so it must opt in explicitly rather than silently losing it.
+  test('opts into LIVE ETA resolution when building context for a matched customer', async () => {
+    const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+    const priorFewshot = process.env.SHADOW_FEWSHOT;
+    try {
+      // Codex round-16 P2: the opt-in also requires the release gate — gate-off
+      // is byte-identical (no live-row query).
+      const off = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
+      expect(off.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false });
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      const { getContextForCustomer } = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
+      expect(getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true });
+    } finally {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
+      else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+      if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
+      else process.env.SHADOW_FEWSHOT = priorFewshot;
+    }
+  });
+
+  // Codex round-12 P2 (PR #5334): a gratitude-only "thanks" is answered with
+  // the fixed approved reply — a LIVE ETA (GPS + paid Distance Matrix) could
+  // never affect delivery, so the lookup must not run for it.
+  test('a gratitude candidate does NOT request the LIVE ETA lookup', async () => {
+    const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+    const priorFewshot = process.env.SHADOW_FEWSHOT;
+    try {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      const { getContextForCustomer } = await runDraft(
+        { sent: false, reason: 'provider_uncertain', ambiguous: true },
+        { inboundMessage: 'Thank you!', source: 'live_webhook', customer: { id: 'customer-1', first_name: 'Test' } },
+      );
+      expect(getContextForCustomer).toHaveBeenCalledTimes(1);
+      expect(getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'customer-1' }), { includeLiveEta: false });
+    } finally {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
       else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
       if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
