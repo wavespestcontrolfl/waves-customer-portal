@@ -136,8 +136,9 @@ function proposalCallbackTermsEligible(proposal, estimateId = null) {
 // Two pieces of persisted evidence, either suffices (codex #5434 r3 P1):
 // the acceptance drawer snapshot, or the accept's own document stamp
 // (estimate_data.rateReviewDisclosedAtAccept — written atomically with the
-// acceptance whenever the open document carried the line, including accepts
-// that record no drawer snapshot: the gate off, the annual prepay lane).
+// acceptance, itself only on evidence the customer was SERVED the line while
+// the estimate was open: the drawer snapshot or the served marker below —
+// never on plan eligibility alone).
 function documentCarriesRateReviewTerms(estimate, acceptance = null) {
   if (!estimateIsPriceLocked(estimate)) return true;
   let data = estimate?.estimate_data;
@@ -161,6 +162,75 @@ function proposalRateReviewTermsEligible(proposal, estimateId = null, { estimate
   if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
   if (!proposalHasRecurringVisit(proposal)) return false;
   return estimate ? documentCarriesRateReviewTerms(estimate, acceptance) : true;
+}
+
+// ── Served-disclosure evidence (pre-push Codex on #5434's merge head) ──────
+// The accept's frozen-document stamp must never rest on plan eligibility
+// alone: an older tab (a bundle that predates the line, the acceptance gate
+// off) can accept without rendering any rate review copy, and its frozen
+// document must not GAIN a line the customer never saw. So every
+// customer-facing render that prints the disclosure on an OPEN estimate —
+// the /pdf document download (browser or pdfkit renderer) and the legacy
+// page's plan-terms card — marks estimate_data.rateReviewTermsServed with
+// the copy version it printed, and the accept stamps
+// rateReviewDisclosedAtAccept only on that marker at the CURRENT version or
+// on the recorded 'plan' drawer snapshot. Idempotent; never on a frozen
+// estimate (guarded in SQL too); never throws — a missed marker costs a
+// frozen document its line, never the download or the page.
+const RATE_REVIEW_TERMS_SERVED_KEY = 'rateReviewTermsServed';
+function parseEstimateDataLoose(data) {
+  if (typeof data === 'string') { try { return JSON.parse(data); } catch { return null; } }
+  return data && typeof data === 'object' ? data : null;
+}
+function rateReviewTermsServedIsCurrent(estimateData) {
+  const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+  const data = parseEstimateDataLoose(estimateData);
+  return !!data && data[RATE_REVIEW_TERMS_SERVED_KEY] === RATE_REVIEW_TERMS_VERSION;
+}
+async function recordRateReviewTermsServed(estimate, { database = db } = {}) {
+  if (!estimate?.id || estimateIsPriceLocked(estimate)) return false;
+  if (rateReviewTermsServedIsCurrent(estimate.estimate_data)) return false;
+  const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+  try {
+    const updated = await database('estimates')
+      .where({ id: estimate.id })
+      .whereNull('price_locked_at')
+      .whereNotIn('status', [...FROZEN_DOCUMENT_STATUSES])
+      .update({
+        estimate_data: database.raw(
+          `jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{${RATE_REVIEW_TERMS_SERVED_KEY}}', to_jsonb(?::text))`,
+          [RATE_REVIEW_TERMS_VERSION],
+        ),
+      });
+    return Number(updated) > 0;
+  } catch (err) {
+    logger.warn(`[estimate-proposal] rate review served marker not written for estimate ${estimate.id}: ${err.message}`);
+    return false;
+  }
+}
+// Whether the document THIS server prints for an open estimate carries the
+// line right now — the /pdf route's question for both renderers: the same
+// decision /data projects to the browser document and the pdfkit fallback
+// prints by. A pre-resolved billing context may be passed to avoid a second
+// resolution.
+async function documentPrintsRateReviewTerms(estimate, { billing = null } = {}) {
+  if (!estimate || estimateIsPriceLocked(estimate)) return false;
+  const { normalizeProposal } = require('./estimate-proposal');
+  const context = billing || await resolveProposalBillingContext(estimate);
+  const proposal = normalizeProposal(estimate, {
+    recurringMode: context?.billsPerApplication === true ? 'per_application' : 'legacy',
+    livePricing: context?.livePricing || null,
+  });
+  return proposalRateReviewTermsEligible(proposal, estimate.id, { estimate, acceptance: null });
+}
+async function recordRateReviewTermsServedByDocument(estimate, { billing = null, database = db } = {}) {
+  try {
+    if (!(await documentPrintsRateReviewTerms(estimate, { billing }))) return false;
+  } catch (err) {
+    logger.warn(`[estimate-proposal] rate review document check failed for estimate ${estimate?.id || 'unknown'}: ${err.message}`);
+    return false;
+  }
+  return recordRateReviewTermsServed(estimate, { database });
 }
 
 // An estimate with no customer_id still links at accept through the SAME
@@ -360,6 +430,10 @@ module.exports = {
   proposalMakesNoGuaranteeClaim,
   proposalRateReviewTermsEligible,
   documentCarriesRateReviewTerms,
+  documentPrintsRateReviewTerms,
+  rateReviewTermsServedIsCurrent,
+  recordRateReviewTermsServed,
+  recordRateReviewTermsServedByDocument,
   proposalRowTermsScope,
   resolveLivePricing,
   resolveProposalBillingContext,

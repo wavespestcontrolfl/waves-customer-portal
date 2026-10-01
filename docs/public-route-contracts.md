@@ -3128,13 +3128,21 @@ no "lawn"/"tree" word). Frozen documents keep their original terms: on an
 accepted or declined estimate (`estimateIsPriceLocked`) the disclosure prints
 only on persisted evidence that the customer saw it — the recorded
 acceptance's verbatim snapshot carried the sentence (the 'plan' drawer
-below), or the accept stamped `estimate_data.rateReviewDisclosedAtAccept`
-(written atomically with every recurring-residential-plan acceptance, so an
-accept that records no drawer snapshot — the gate off, the terms-neutral
-annual prepay lane — still keeps the line its open document showed). A
-document accepted before this disclosure existed, accepted under the 'base'
-drawer, or declined never acquires it; an open estimate is sold under the
-current terms and prints it.
+below), or the accept stamped `estimate_data.rateReviewDisclosedAtAccept` —
+written atomically with a recurring-residential-plan acceptance ONLY on
+persisted evidence that the customer was served the line while the estimate
+was open: that same recorded 'plan' drawer snapshot, or
+`estimate_data.rateReviewTermsServed` at the current shared
+`RATE_REVIEW_TERMS_VERSION`, which the `/pdf` download (either renderer) and
+the legacy page's plan-terms card write when they print the disclosure
+(idempotent; never on a frozen estimate; never fatal to the download or the
+page). Plan eligibility alone never stamps: an accept from a tab that rendered
+no rate copy (a bundle that predates the line with the gate off, the
+terms-neutral annual prepay lane with nothing downloaded) leaves the frozen
+document without the line rather than claiming a disclosure that was never
+shown. A document accepted before this disclosure existed, accepted under the
+'base' drawer, or declined never acquires it; an open estimate is sold under
+the current terms and prints it.
 The acceptance terms (`acceptanceTerms`, GATE_ESTIMATE_ACCEPTANCE_TERMS)
 carry the same rule as a SCOPE on one version: `scope: 'plan'` — the
 Services drawer line ends with the rate review sentence ("Rates are reviewed

@@ -262,6 +262,15 @@ jest.mock('../services/estimate-card-holds', () => ({
   cardHoldNoShowFee: jest.fn(() => 49),
   cardHoldCancelWindowHours: jest.fn(() => 24),
 }));
+// The public /pdf download, pdfkit path: the real generator streams a PDF
+// through pdfkit; here it only needs to end the response so the served
+// marker written beside it can be asserted.
+jest.mock('../services/pdf/estimate-pdf', () => ({
+  generateEstimateProposalPDF: jest.fn((estimate, res) => {
+    res.set('Content-Type', 'application/pdf');
+    res.end('%PDF-1.4 test');
+  }),
+}));
 jest.mock('../services/lead-estimate-link', () => ({
   markLinkedLeadEstimateAccepted: jest.fn(async () => ({})),
   markLinkedLeadEstimateViewed: jest.fn(async () => ({})),
@@ -1644,29 +1653,83 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
   });
 
-  // codex #5434 r3 P1: the accept stamps the document fact independently of
-  // the drawer record — here with the acceptance gate OFF (no drawer at all).
-  test('a recurring plan accept stamps rateReviewDisclosedAtAccept atomically, even with the acceptance gate off; a rodent accept does not', async () => {
+  // codex #5434 r3 P1 + the merge-head pre-push P1: the accept stamps the
+  // frozen-document fact only on persisted evidence the customer was SERVED
+  // the disclosure — the served marker (/pdf download, legacy page card) or
+  // the recorded 'plan' drawer snapshot — never on plan eligibility alone.
+  test('gate off: a plan accept stamps rateReviewDisclosedAtAccept only when the served marker is current; rodent never', async () => {
     mockGateState.acceptanceTerms = false;
-    seed({ id: 'est-stamp-1', token: 'tok-stamp-1-x0123456789' });
-    conversionOk();
-    const plan = await putAccept('tok-stamp-1-x0123456789', {});
-    expect(plan.status).toBe(200);
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
     const stampOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'));
+    const planData = (extra = {}) => JSON.stringify({
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      ...extra,
+    });
+
+    // No evidence at all (an older tab, nothing downloaded): unstamped.
+    seed({ id: 'est-stamp-0', token: 'tok-stamp-0-x0123456789' });
+    conversionOk();
+    expect((await putAccept('tok-stamp-0-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    // The document or page served the current line: stamped, still no drawer row.
+    seed({ id: 'est-stamp-1', token: 'tok-stamp-1-x0123456789', estimate_data: planData({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION }) });
+    conversionOk();
+    expect((await putAccept('tok-stamp-1-x0123456789', {})).status).toBe(200);
     expect(stampOps()).toHaveLength(1);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
 
+    // A marker from an older copy version is no evidence for this line.
+    seed({ id: 'est-stamp-2', token: 'tok-stamp-2-x0123456789', estimate_data: planData({ rateReviewTermsServed: 'v2025-01' }) });
+    conversionOk();
+    expect((await putAccept('tok-stamp-2-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
+
+    // Rodent: no rate to review, marker or not.
     seed({
       id: 'est-stamp-r',
       token: 'tok-stamp-r-x0123456789',
       monthly_total: 40,
       annual_total: 480,
-      estimate_data: JSON.stringify({ result: { recurring: { discount: 0, services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }] }, oneTime: { items: [], membershipFee: 0 } } }),
+      estimate_data: JSON.stringify({
+        result: { recurring: { discount: 0, services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }] }, oneTime: { items: [], membershipFee: 0 } },
+        rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION,
+      }),
     });
     conversionOk();
-    const rodent = await putAccept('tok-stamp-r-x0123456789', {});
-    expect(rodent.status).toBe(200);
+    expect((await putAccept('tok-stamp-r-x0123456789', {})).status).toBe(200);
     expect(stampOps()).toHaveLength(0);
+  });
+
+  test("gate on: the recorded 'plan' drawer snapshot is evidence on its own (no served marker)", async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-stamp-d', token: 'tok-stamp-d-x0123456789' });
+    conversionOk();
+    const res = await putAccept('tok-stamp-d-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
+    expect(res.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(1);
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'))).toHaveLength(1);
+  });
+
+  test('GET /:token/pdf marks the served disclosure for an open recurring plan (pdfkit path) and never for a frozen estimate', async () => {
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    const servedOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'));
+    // The synthesized document prints the engine lines (estimate_data.lineItems),
+    // the same shape the /data projection tests use for an eligible plan.
+    const documentData = JSON.stringify({
+      lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+    });
+    seed({ id: 'est-pdf-1', token: 'tok-pdf-1-x0123456789', estimate_data: documentData });
+    const open = await fetch(`${base}/api/estimates/tok-pdf-1-x0123456789/pdf`);
+    expect(open.status).toBe(200);
+    expect(servedOps()).toHaveLength(1);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    // Frozen: still downloadable, but the marker is never written.
+    seed({ id: 'est-pdf-2', token: 'tok-pdf-2-x0123456789', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData });
+    expect((await fetch(`${base}/api/estimates/tok-pdf-2-x0123456789/pdf`)).status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
   });
 
   test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {

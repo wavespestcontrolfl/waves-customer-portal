@@ -37,6 +37,8 @@ const {
   proposalMakesNoGuaranteeClaim,
   proposalRateReviewTermsEligible,
   documentCarriesRateReviewTerms,
+  rateReviewTermsServedIsCurrent,
+  recordRateReviewTermsServed,
   proposalRowTermsScope,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
@@ -450,5 +452,59 @@ describe('pricing authority', () => {
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
       .toEqual({ billsPerApplication: false, livePricing: null });
     expect(mockBuildPricingBundle).not.toHaveBeenCalled();
+  });
+});
+
+// Served-disclosure evidence (pre-push Codex on #5434's merge head): the
+// accept stamps the frozen document only on proof the customer was served
+// the line — this marker (written by the /pdf download and the legacy page
+// card) or the recorded 'plan' drawer snapshot.
+describe('served-disclosure evidence (estimate_data.rateReviewTermsServed)', () => {
+  const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+
+  test('rateReviewTermsServedIsCurrent: the current version only, string or object data', () => {
+    expect(rateReviewTermsServedIsCurrent({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION })).toBe(true);
+    expect(rateReviewTermsServedIsCurrent(JSON.stringify({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION }))).toBe(true);
+    expect(rateReviewTermsServedIsCurrent({ rateReviewTermsServed: 'v2025-01' })).toBe(false);
+    expect(rateReviewTermsServedIsCurrent({})).toBe(false);
+    expect(rateReviewTermsServedIsCurrent(null)).toBe(false);
+    expect(rateReviewTermsServedIsCurrent('not json')).toBe(false);
+  });
+
+  function stubEstimatesUpdate(update) {
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereNotIn: jest.fn(() => chain), update };
+    mockDb.mockImplementation((table) => {
+      if (table === 'estimates') return chain;
+      throw new Error(`unexpected table ${table}`);
+    });
+    mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    return chain;
+  }
+
+  test('an open estimate is stamped with the current version under the frozen-status guards', async () => {
+    const update = jest.fn(async () => 1);
+    const chain = stubEstimatesUpdate(update);
+    await expect(recordRateReviewTermsServed({ id: 'e1', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe(true);
+    expect(chain.where).toHaveBeenCalledWith({ id: 'e1' });
+    expect(chain.whereNull).toHaveBeenCalledWith('price_locked_at');
+    expect(chain.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['accepted', 'declined']));
+    const [{ estimate_data }] = update.mock.calls[0];
+    expect(estimate_data.__raw).toContain("'{rateReviewTermsServed}', to_jsonb(?::text)");
+    expect(estimate_data.bindings).toEqual([RATE_REVIEW_TERMS_VERSION]);
+  });
+
+  test('a frozen estimate, or one already marked at the current version, is never written', async () => {
+    const update = jest.fn(async () => 1);
+    stubEstimatesUpdate(update);
+    await expect(recordRateReviewTermsServed({ id: 'e2', status: 'accepted', price_locked_at: null, estimate_data: '{}' })).resolves.toBe(false);
+    await expect(recordRateReviewTermsServed({ id: 'e3', status: 'sent', price_locked_at: '2026-09-01T00:00:00Z', estimate_data: '{}' })).resolves.toBe(false);
+    await expect(recordRateReviewTermsServed({ id: 'e4', status: 'sent', price_locked_at: null, estimate_data: { rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION } })).resolves.toBe(false);
+    await expect(recordRateReviewTermsServed(null)).resolves.toBe(false);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a database failure is swallowed — the page or download never fails on the marker', async () => {
+    stubEstimatesUpdate(jest.fn(async () => { throw new Error('db down'); }));
+    await expect(recordRateReviewTermsServed({ id: 'e5', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe(false);
   });
 });

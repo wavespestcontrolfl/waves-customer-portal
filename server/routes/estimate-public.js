@@ -5690,6 +5690,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // plan terms: termite, unknown, rodent or commercial work anywhere leaves
   // only the factual refund details (AGENTS.md estimate truth scope).
   const planTermsNeutral = pageGuaranteeScope !== 'all';
+  // Served-disclosure evidence (pre-push Codex on #5434's merge head): tell
+  // the caller when this render PRINTS the "Rate reviewed once a year" item,
+  // so the view handler persists that the customer was shown it
+  // (recordRateReviewTermsServed) — the accept's frozen-document stamp keys
+  // on that marker, never on plan eligibility alone. Callback, not a return
+  // value: renderPage stays a pure HTML builder for every other caller.
+  if (showBillingCard && !planTermsNeutral && typeof opts.onRateReviewTermsRendered === 'function') opts.onRateReviewTermsRendered();
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
     <h2>${planTermsNeutral ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
@@ -9031,6 +9038,7 @@ async function handleEstimateView(req, res, next) {
       }
     }
 
+    let rateReviewTermsRendered = false;
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
@@ -9089,7 +9097,20 @@ async function handleEstimateView(req, res, next) {
       // record even with the gate off (codex #3338 r15 sibling) — same
       // committed definition the snapshot reconciler uses.
       committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
-    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate, payAfterFirstVisitCopy });
+    }), {
+      showYourWork,
+      prepayBaseRate,
+      monthlyBilledEstimate,
+      payAfterFirstVisitCopy,
+      // renderPage reports whether this page PRINTS the rate review item.
+      onRateReviewTermsRendered: () => { rateReviewTermsRendered = true; },
+    });
+    if (rateReviewTermsRendered) {
+      // Served-disclosure evidence (pre-push Codex on #5434's merge head):
+      // the page just sent showed the customer the annual rate review item,
+      // so persist it — after the response, idempotent, never fatal.
+      await require('../services/estimate-proposal-billing').recordRateReviewTermsServed(estimate);
+    }
   } catch (err) { next(err); }
 }
 
@@ -11503,16 +11524,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // so an estimate can never be accepted without its record (or vice
       // versa). Retries of an already-accepted estimate never reach here
       // (the guarded UPDATE above 409s first).
-      // Frozen-document stamp (codex #5434 r3 P1): the proposal document of
-      // a recurring residential plan carried the annual rate review
-      // disclosure while this estimate was open, whether or not the
-      // acceptance drawer recorded it (gate off, or the terms-neutral annual
-      // prepay lane records nothing). Stamp that fact atomically with the
-      // acceptance so the accepted document keeps the line it showed —
-      // persisted evidence, independent of the drawer snapshot. A rodent,
-      // one-time-only or one-time-toggle accept carries no rate to review
-      // and gets no stamp.
-      if (acceptTermsScope === 'plan') {
+      // Frozen-document stamp (codex #5434 r3 P1; evidence rule from the
+      // pre-push Codex on the merge head): the accepted document keeps the
+      // annual rate review line ONLY when this accept can prove the customer
+      // was served it while the estimate was open — the recorded 'plan'
+      // drawer snapshot (gate on), or estimate_data.rateReviewTermsServed at
+      // the current copy version (the /pdf document download or the legacy
+      // page's plan-terms card printed it). Plan eligibility alone never
+      // stamps: an older tab's unattested accept (a bundle that predates the
+      // line, the gate off) must not make its frozen document GAIN a line it
+      // never showed. A rodent, one-time-only or one-time-toggle accept
+      // carries no rate to review and gets no stamp either way.
+      const { rateReviewTermsServedIsCurrent } = require('../services/estimate-proposal-billing');
+      const rateReviewDisclosureEvidence = (recordAcceptanceTerms && recordedTermsScope === 'plan')
+        || rateReviewTermsServedIsCurrent(rawEstData);
+      if (acceptTermsScope === 'plan' && rateReviewDisclosureEvidence) {
         await trx('estimates').where({ id: estimate.id }).update({
           estimate_data: trx.raw(
             "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{rateReviewDisclosedAtAccept}', 'true'::jsonb)",
@@ -26674,7 +26700,15 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // EstimateProposalDocument, rendered through the headless pipeline. Any
     // failure falls through to the legacy pdfkit proposal below — the
     // download must never 500 on a browser hiccup.
+    // Served-disclosure evidence (pre-push Codex on #5434's merge head):
+    // whichever renderer serves it, a document that prints the annual rate
+    // review line for an OPEN estimate marks estimate_data.rateReviewTermsServed
+    // — the accept's frozen-document stamp keys on that marker (or the
+    // recorded drawer snapshot), never on plan eligibility alone. Never
+    // throws; a missed marker never fails the download.
+    const { recordRateReviewTermsServedByDocument, resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
     if (featureGates.isEnabled('estimateDocPdf')) {
+      let browserDocumentSent = false;
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
         const { normalizeProposal } = require('../services/estimate-proposal');
@@ -26685,10 +26719,15 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
         const fileName = `proposal-${String(preparedFor).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves'}.pdf`;
         res.set('Content-Type', 'application/pdf');
         res.set('Content-Disposition', `inline; filename="${fileName}"`);
-        return res.send(buffer);
+        res.send(buffer);
+        browserDocumentSent = true;
       } catch (e) {
         const { sanitizeRenderError } = require('../services/pdf/estimate-doc-pdf');
         logger.warn(`[estimate-pdf] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${sanitizeRenderError(e)}`);
+      }
+      if (browserDocumentSent) {
+        await recordRateReviewTermsServedByDocument(estimate);
+        return;
       }
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
@@ -26696,9 +26735,10 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // Resolve the LIVE billing lane, exactly like the page's pricing bundle —
     // persisted snapshot flags freeze at send time and would let this document
     // contradict the estimate the customer is looking at.
-    const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    const billing = await resolveProposalBillingContext(estimate);
+    await recordRateReviewTermsServedByDocument(estimate, { billing });
     generateEstimateProposalPDF(estimate, res, {
-      ...(await resolveProposalBillingContext(estimate)),
+      ...billing,
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
       acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),

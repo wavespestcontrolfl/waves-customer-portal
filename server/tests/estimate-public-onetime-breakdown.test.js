@@ -4742,6 +4742,22 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Cancel anytime &mdash; no contract');
   });
 
+  test('renderPage reports the rate review item to its caller only when the card prints it (served-disclosure evidence)', () => {
+    const recurring = { status: 'sent', customerName: 'Pat Customer', address: '123 Main St', monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0, tier: 'Bronze' };
+    const data = { result: { recurring: { services: [{ name: 'Pest Control', mo: 50 }] }, oneTime: { items: [], specItems: [] }, specItems: [], results: { pest: { apps: 4 } } } };
+    const printed = jest.fn();
+    expect(renderPage('terms-cb-token', recurring, data, undefined, { onRateReviewTermsRendered: printed })).toContain('Rate reviewed once a year');
+    expect(printed).toHaveBeenCalledTimes(1);
+    // Terms-neutral card (rodent/commercial work anywhere): no item, no report.
+    const neutral = jest.fn();
+    expect(renderPage('terms-cb-neutral', { ...recurring, noEstimateWideGuarantee: true }, data, undefined, { onRateReviewTermsRendered: neutral })).not.toContain('Rate reviewed once a year');
+    expect(neutral).not.toHaveBeenCalled();
+    // No billing card at all (quote required): no report.
+    const quote = jest.fn();
+    renderPage('terms-cb-quote', { ...recurring, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0 }, { result: { recurring: { services: [] }, oneTime: { items: [], specItems: [] }, specItems: [], results: {} } }, undefined, { onRateReviewTermsRendered: quote });
+    expect(quote).not.toHaveBeenCalled();
+  });
+
   test('one-time pest choice excludes WaveGuard setup from the choice price and add-on table', async () => {
     const estimateData = {
       result: {
