@@ -45,22 +45,15 @@ function parseInjectionDose(value) {
   return amount > 0 && unit ? { amount, unit } : null;
 }
 
-// The injection label a catalog row carries (mirrors injectionLabelRate in
-// client/src/lib/injection-dose.js): its basis, mL per inch of trunk or per
-// palm, when the row has a readable rate.
-function injectionLabelOf(catalog = {}) {
-  const unit = String(catalog.default_unit ?? catalog.defaultUnit ?? '');
-  const [base, ...rest] = unit.split('/');
-  const normalizedBase = base.trim().toLowerCase();
-  if (!(normalizedBase === 'ml' || normalizedBase === 'cc' || /^millilit(er|re)s?$/.test(normalizedBase))) return null;
-  const per = rest.join('/').trim().toLowerCase();
-  const basis = /^(inch|in\b)/.test(per) ? 'inch' : /^palm/.test(per) ? 'palm' : null;
-  if (!basis) return null;
-  // The same rate the client reads (injectionLabelRate): one or two positive
-  // numbers. A row without one shows no label, so nothing is checked by it.
-  const bounds = String(catalog.default_rate ?? catalog.defaultRate ?? '').split(/\s*(?:-|–|to)\s*/).map(Number);
-  if (bounds.length > 2 || bounds.some((n) => !(n > 0))) return null;
-  return { basis };
+// Whether a catalog injection label is dosed per inch of trunk or per palm,
+// from its unit in mL or g ("ml/inch dbh", "g/inch dbh", "ml/palm"); null
+// otherwise. Mirrors injectionBasis in client/src/lib/injection-dose.js.
+function injectionBasisOf(catalog = {}) {
+  const match = /^\s*(?:ml|cc|millilit(?:er|re)s?|g|grams?)\s*\/\s*(.*)$/i.exec(String(catalog.default_unit ?? catalog.defaultUnit ?? ''));
+  if (!match) return null;
+  const per = match[1].trim().toLowerCase();
+  if (/^(inch|in\b)/.test(per)) return 'inch';
+  return /^palm/.test(per) ? 'palm' : null;
 }
 
 // A trunk size in inches ("10 in DBH", "10", "10\""); anything else is NaN.
@@ -489,9 +482,9 @@ function validateTreeShrubCloseout({
     const labelRef =
       (injection.productId && productRefs.find((ref) => String(ref.input?.productId) === injection.productId)) ||
       productRefs.find((ref) => [ref.catalog?.name, ref.input?.name].map(text).includes(injection.product));
-    const label = labelRef ? injectionLabelOf(labelRef.catalog) : null;
+    const basis = labelRef ? injectionBasisOf(labelRef.catalog) : null;
     if (!injection.sizeClassOrDbh) pushBlock(blocks, 'tree_shrub_injection_size_required', 'Injection record requires DBH or palm size class.', 'injectionRecord.sizeClassOrDbh');
-    else if (label?.basis === 'inch' && !(trunkInches(injection.sizeClassOrDbh) > 0)) {
+    else if (basis === 'inch' && !(trunkInches(injection.sizeClassOrDbh) > 0)) {
       pushBlock(blocks, 'tree_shrub_injection_dbh_inches', 'Enter the trunk in inches.', 'injectionRecord.sizeClassOrDbh');
     }
     if (!injection.product) pushBlock(blocks, 'tree_shrub_injection_product_required', 'Injection record requires product.', 'injectionRecord.product');

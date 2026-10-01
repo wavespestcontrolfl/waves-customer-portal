@@ -265,10 +265,12 @@ describe('injection record against the product label', () => {
     expect(injectionCodes(PHOSPHO, { product: 'PHOSPHO old name', productId: PHOSPHO.id, sizeClassOrDbh: '30 cm DBH' })).toEqual(['tree_shrub_injection_dbh_inches']);
   });
 
-  test('a catalog rate the client cannot read is not checked against', () => {
-    for (const default_rate of ['', 'see label']) {
-      expect(injectionCodes({ ...PHOSPHO, default_rate }, { sizeClassOrDbh: 'Large' })).toEqual([]);
-    }
+  test('a per-inch label in grams (Arbor-OTC) needs the trunk in inches too', () => {
+    const ARBOR_OTC = { id: 'otc-1', name: 'Arborjet Arbor OTC Fungicide 1 oz', category: 'fungicide', default_rate: '0.28', default_unit: 'g/inch dbh', application_method: 'trunk_injection' };
+    expect(injectionCodes(ARBOR_OTC, { sizeClassOrDbh: 'Large' })).toEqual(['tree_shrub_injection_dbh_inches']);
+    expect(injectionCodes(ARBOR_OTC, { sizeClassOrDbh: '8 in DBH' })).toEqual([]);
+    // The basis is the unit's, whatever the rate field holds.
+    expect(injectionCodes({ ...PHOSPHO, default_rate: '' }, { sizeClassOrDbh: 'Large' })).toEqual(['tree_shrub_injection_dbh_inches']);
   });
 
   test('a per-inch label needs the trunk in inches above zero', () => {

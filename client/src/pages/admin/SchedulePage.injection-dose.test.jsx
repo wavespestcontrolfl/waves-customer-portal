@@ -77,6 +77,24 @@ describe('the injection record', () => {
     expect(screen.getByLabelText('Dose amount').value).toBe('');
   });
 
+  it('starts a palm product without the trunk measured for a tree', () => {
+    render(
+      <Block
+        injectionProducts={[{ name: IMA_JET.name, basis: 'inch', rate: IMA_RATE }, { name: PALM_JET.name, basis: 'palm', rate: PALM_RATE }]}
+        initial={{ injectionRecord: { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH' } }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Injection product'), { target: { value: PALM_JET.name } });
+    expect(record().sizeClassOrDbh).toBe('');
+    expect(screen.getByPlaceholderText('DBH / palm size').value).toBe('');
+  });
+
+  it('asks for the trunk in inches for a label in grams per inch', () => {
+    render(<Block injectionProducts={[{ name: 'Arborjet Arbor OTC Fungicide 1 oz', basis: 'inch', rate: null }]} initial={{ injectionRecord: { product: 'Arborjet Arbor OTC Fungicide 1 oz' } }} />);
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '8' } });
+    expect(record().sizeClassOrDbh).toBe('8 in DBH');
+  });
+
   it('stores the dose in tsp or fl oz', async () => {
     render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} />);
     await waitFor(() => expect(record().product).toBe(IMA_JET.name));
@@ -291,9 +309,19 @@ describe('the closeout check against the product label', () => {
       },
     },
     productFlags: { missingActuals: [] },
-    injectionProducts: [{ name: product, productId: 'p-1', rate }],
+    injectionProducts: [{ name: product, productId: 'p-1', basis: rate?.basis, rate }],
     servicePhotos: [], service: {}, customerRecap: '', notes: '', isIncompleteVisit: false,
   }).filter((block) => block.field?.startsWith('injectionRecord')).map((block) => block.message);
+
+  it('needs the trunk in inches for a label in grams per inch', () => {
+    const blocks = treeShrubCloseoutBlocksClient({
+      closeout: { injectionPerformed: true, injectionRecord: { plantSpecies: 'Live oak', product: 'Arbor OTC', dose: '3 tsp', numberOfPorts: 4, targetIssue: 'Lethal bronzing', followUpDate: '2099-02-01', sizeClassOrDbh: 'Large' } },
+      productFlags: { missingActuals: [] },
+      injectionProducts: [{ name: 'Arbor OTC', basis: 'inch', rate: null }],
+      servicePhotos: [], service: {}, customerRecap: '', notes: '', isIncompleteVisit: false,
+    }).map((block) => block.message);
+    expect(blocks).toContain('Enter the trunk in inches.');
+  });
 
   it('finds the product by catalog id after a rename', () => {
     expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { product: 'Old name', productId: 'p-1', sizeClassOrDbh: '30 cm DBH' })).toEqual(['Enter the trunk in inches.']);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DOSE_UNITS, doseText, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, recordForProduct, trunkInchesText,
+  DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, recordForProduct, trunkInchesText,
 } from './injection-dose';
 
 // Owner ruling 2026-09-29: an injection is measured in tsp or fl oz like
@@ -26,6 +26,18 @@ describe('injectionLabelRate', () => {
     expect(injectionLabelRate({ ...PHOSPHO_JET, default_rate: '' })).toBeNull();
     expect(injectionLabelRate({})).toBeNull();
     expect(injectionLabelRate(null)).toBeNull();
+  });
+});
+
+describe('injectionBasis', () => {
+  it('reads per inch or per palm from the unit, in mL or grams', () => {
+    expect(injectionBasis(IMA_JET_10)).toBe('inch');
+    expect(injectionBasis(PALM_JET)).toBe('palm');
+    // Arbor-OTC's label is grams per inch: no liquid rate, still per inch.
+    expect(injectionBasis({ default_rate: '0.28', default_unit: 'g/inch dbh' })).toBe('inch');
+    expect(injectionLabelRate({ default_rate: '0.28', default_unit: 'g/inch dbh' })).toBeNull();
+    expect(injectionBasis({ default_unit: 'ml/gal' })).toBeNull();
+    expect(injectionBasis({ default_unit: 'oz/1000 sq ft' })).toBeNull();
   });
 });
 
@@ -76,6 +88,8 @@ describe('the record and its product', () => {
       product: PHOSPHO_JET.name, productId: 'pj-1', productAuto: false, sizeClassOrDbh: '10 in DBH', dose: '',
     });
     expect(recordForProduct(record, IMA_JET_10.name, { productAuto: true })).toEqual({ ...record, productAuto: true });
+    // A label measured another way starts without the old size.
+    expect(recordForProduct(record, PALM_JET.name, { clearSize: true }).sizeClassOrDbh).toBe('');
   });
 });
 
