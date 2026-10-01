@@ -145,6 +145,29 @@ describe('the promise check on the completion form', () => {
     expect(onSubmit.mock.calls[0][1]).not.toHaveProperty('promiseMarks');
   });
 
+  it('marks a declined visit will not send never hold Complete, even while the list is slow', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/promises')) return new Promise(() => {});
+      return { ok: true, json: async () => ({ customer: {}, actions: [], available: false }) };
+    }));
+    localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+      serviceId: service.id,
+      savedAt: Date.now(),
+      notes: 'Customer declined at the door.',
+      promiseMarks: { [PROMISES[0].id]: { mark: 'done', version: PROMISES[0].version, stillLeft: '' } },
+    }));
+    const onSubmit = vi.fn().mockResolvedValue({});
+    await renderPanel({ onSubmit });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    fireEvent.change(screen.getByDisplayValue('Completed'), { target: { value: 'customer_declined' } });
+    const submit = await screen.findByRole('button', { name: /^Complete/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => fireEvent.click(submit));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(alert).not.toHaveBeenCalledWith('Still loading the promises you marked. Try again in a moment.');
+    expect(onSubmit.mock.calls[0][1]).not.toHaveProperty('promiseMarks');
+  });
+
   it('a marked promise alone is enough to write the report', async () => {
     await renderPanel();
     await screen.findByText('Promises we made');

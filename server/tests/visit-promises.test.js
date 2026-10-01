@@ -336,6 +336,11 @@ describe('marks reach the office list after the save', () => {
     await VisitPromises.applyVisitPromiseMarks(conn, args); // a resumed completion
     expect(updates).toHaveLength(1);
     expect(updates[0].patch.human_note).toBe('Customer prefers mornings\nPartly done at the October 1 visit. Still left: seal the left side.');
+    // A person's verdict: the automatic checks (evidence close, contact
+    // check, a call reprocess) leave a reviewed row alone. The office's
+    // verdict time is untouched (Codex #5516).
+    expect(updates[0].patch.human_state).toBe('confirmed');
+    expect(updates[0].patch).not.toHaveProperty('reviewed_at');
     expect(updates[0].patch).not.toHaveProperty('status');
     expect(CallCommitments.applyHumanUpdate).not.toHaveBeenCalled();
     expect(SmsActions.applySmsCommitmentUpdate).not.toHaveBeenCalled();
@@ -383,7 +388,18 @@ describe('marks reach the office list after the save', () => {
       customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', version: V(TEXT_ROW.description), stillLeft: 'the left side' }], visitDate: '2026-10-01',
     });
     expect(results).toEqual([{ id: ID(2), mark: 'partly', applied: true }]);
-    expect(updates).toEqual([]);
+    // The retry still marks the row reviewed; the note is not written twice.
+    expect(updates).toEqual([{ id: ID(2), patch: { human_state: 'confirmed', updated_at: expect.any(Date) } }]);
+  });
+
+  test("Partly keeps the office's own review state", async () => {
+    const ledger = LEDGER();
+    ledger.commitments[ID(2)].human_state = 'edited';
+    const { conn, updates } = ledgerDb(ledger);
+    await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', version: V(TEXT_ROW.description), stillLeft: 'the left side' }], visitDate: '2026-10-01',
+    });
+    expect(updates[0].patch.human_state).toBe('edited');
   });
 
   test("Partly never cuts the office's own note to make room", async () => {
@@ -394,7 +410,9 @@ describe('marks reach the office list after the save', () => {
       customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', version: V(TEXT_ROW.description), stillLeft: 'seal the left side' }], visitDate: '2026-10-01',
     });
     expect(results).toEqual([{ id: ID(2), mark: 'partly', applied: false }]);
-    expect(updates).toEqual([]);
+    // No line, but the technician's verdict still keeps the automatic
+    // checks off the promise until the office settles it.
+    expect(updates).toEqual([{ id: ID(2), patch: { human_state: 'confirmed', updated_at: expect.any(Date) } }]);
   });
 
   test('Partly adds no note once the text belongs to another customer', async () => {

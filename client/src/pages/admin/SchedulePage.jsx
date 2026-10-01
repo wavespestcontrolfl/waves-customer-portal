@@ -1060,6 +1060,9 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
 export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+// The promise list is an optional read: a stalled one gives up rather than
+// hold the form (Codex #5516).
+const PROMISE_CHECK_TIMEOUT_MS = 15000;
 
 export function completionPromiseMarksPrompt(error) {
   if (error?.code !== "promise_marks_changed") return null;
@@ -14686,7 +14689,9 @@ export function CompletionPanel({
     }
     setPromiseCheckLoading(true);
     const include = promiseIncludeKey;
-    adminFetch(`/admin/dispatch/${service.id}/promises${include ? `?include=${encodeURIComponent(include)}` : ""}`)
+    const timeout = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? { signal: AbortSignal.timeout(PROMISE_CHECK_TIMEOUT_MS) } : {};
+    adminFetch(`/admin/dispatch/${service.id}/promises${include ? `?include=${encodeURIComponent(include)}` : ""}`, timeout)
       .then((data) => {
         if (!cancelled) setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
       })
@@ -14734,7 +14739,9 @@ export function CompletionPanel({
   // promise still being asked for): a report written now would leave them
   // out while completion later applied them, so Generate and Complete wait
   // (Codex #5516).
-  const promiseMarksPending = promiseMarksSignature(promiseMarks).length > 0
+  // Marks that will not be sent (a declined or incomplete visit, Quick
+  // complete, a backdated closeout) never hold anything (Codex #5516).
+  const promiseMarksPending = !promiseMarksSuppressed && promiseMarksSignature(promiseMarks).length > 0
     && (promiseCheckLoading || unlistedMarkIds.length > 0);
   // The marks as the staleness check and the report heads-up compare them.
   const effectivePromiseSignature = JSON.stringify(promiseMarksSignature(promiseMarksSuppressed ? {} : validPromiseMarks));

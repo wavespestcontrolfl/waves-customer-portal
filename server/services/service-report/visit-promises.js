@@ -260,7 +260,7 @@ async function lockOwnedOpenPromise(trx, id, { customerId, source, version, lock
   const owner = sourceRow && (sourceRow.customer_id || (source === 'email' ? initial.email_customer_id : null));
   if (String(owner || '') !== String(customerId)) return null;
   const row = await trx('call_commitments').where({ id }).forUpdate()
-    .first('status', 'party', 'kind', 'description', 'human_note', 'reviewed_at', column);
+    .first('status', 'party', 'kind', 'description', 'human_note', 'human_state', 'reviewed_at', column);
   const unchanged = row?.status === 'open' && row.party === 'waves' && VISIT_PROMISE_KINDS.includes(row.kind)
     && promiseVersion(row.description, row.reviewed_at) === version
     // The promise still points at the source just checked.
@@ -269,20 +269,28 @@ async function lockOwnedOpenPromise(trx, id, { customerId, source, version, lock
 }
 
 // Partly: the promise stays open and carries the technician's note, added
-// once (a resumed completion finds it already there).
+// once (a resumed completion finds it already there). A Partly mark is a
+// person's verdict, so the row takes the ledger's human-review state
+// (human_state, kept when one is already set): the automatic checks (the
+// evidence close, the contact check, a call reprocess) leave a reviewed row
+// alone, so nothing closes or rewrites what the technician said is still
+// left (Codex #5516). reviewed_at is untouched: it is the office's verdict,
+// and part of the version the mark was made against.
 async function addStillLeftNote(conn, promise, customerId, line) {
   return conn.transaction(async (trx) => {
     const row = await lockOwnedOpenPromise(trx, promise.id, { customerId, source: promise.source, version: promise.version });
     if (!row) return false;
+    const reviewed = { human_state: row.human_state || 'confirmed', updated_at: new Date() };
     const current = String(row.human_note || '');
-    // Already there (a resumed completion): the mark stands.
-    if (current.includes(line)) return true;
     const combined = current ? `${current}\n${line}` : line;
-    // The office's own note is never cut to make room: a note too full for
-    // the line keeps everything it says and gets no line (Codex #5516).
-    if (combined.length > MAX_HUMAN_NOTE_CHARS) return false;
-    await trx('call_commitments').where({ id: promise.id }).update({ human_note: combined, updated_at: new Date() });
-    return true;
+    // Already there (a resumed completion): the mark stands. The office's
+    // own note is never cut to make room: a note too full for the line
+    // keeps everything it says and gets no line (Codex #5516).
+    const noteFits = !current.includes(line) && combined.length <= MAX_HUMAN_NOTE_CHARS;
+    if (noteFits || !row.human_state) {
+      await trx('call_commitments').where({ id: promise.id }).update(noteFits ? { human_note: combined, ...reviewed } : reviewed);
+    }
+    return current.includes(line) || noteFits;
   });
 }
 
