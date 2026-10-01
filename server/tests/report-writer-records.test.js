@@ -69,7 +69,7 @@ describe('reach-out date', () => {
 
 describe('writer records', () => {
   test('a re-service gets its type and a reach-out date the screen allows', () => {
-    const { sections, allowedPhrases } = buildWriterRecords({
+    const { sections, allowedPhrases, allowedDates } = buildWriterRecords({
       serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS, ADVION],
     });
     const text = sections.join('\n\n');
@@ -77,15 +77,16 @@ describe('writer records', () => {
     expect(text).toContain('HOW IT WORKS (approved product wording');
     expect(text).toContain('SERVICE TYPE: re-service');
     expect(text).toContain('REACH-OUT DATE: Wednesday, October 14');
-    expect(allowedPhrases).toEqual(expect.arrayContaining(['a few days', 'about 1–2 weeks', 'Wednesday, October 14', 'October 14']));
+    expect(allowedPhrases).toEqual(expect.arrayContaining(['a few days', 'about 1–2 weeks']));
+    expect(allowedDates).toEqual(['Wednesday, October 14', 'October 14']);
   });
 
   test('a recurring plan visit gets no reach-out date', () => {
-    const { sections, allowedPhrases } = buildWriterRecords({
+    const { sections, allowedDates } = buildWriterRecords({
       serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'recurring', applications: [TAURUS],
     });
     expect(sections.join('\n')).not.toContain('REACH-OUT DATE');
-    expect(allowedPhrases).not.toContain('October 14');
+    expect(allowedDates).toEqual([]);
   });
 
   test('carries no booking state: the report shows the next visit live', () => {

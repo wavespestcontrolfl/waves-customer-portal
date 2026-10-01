@@ -65,7 +65,24 @@ function serviceRow(notes) {
   };
 }
 
+const ORIGINAL_GATE = process.env.GATE_REPORT_WRITER_RULES;
+beforeEach(() => { process.env.GATE_REPORT_WRITER_RULES = 'true'; });
+afterEach(() => {
+  if (ORIGINAL_GATE === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+  else process.env.GATE_REPORT_WRITER_RULES = ORIGINAL_GATE;
+});
+
 describe('four-section report in the report payload', () => {
+  test('with the writer switch off a four-section note is not the summary and adds no fields', async () => {
+    delete process.env.GATE_REPORT_WRITER_RULES;
+    const data = await buildReportV1Data(serviceRow(FOUR_SECTIONS), 'token-four-section-off', stubKnex({
+      scheduled_services: [REPORT_VISIT],
+    }), { mode: 'live' });
+    expect(data.summarySource).not.toBe('technician_report');
+    expect(data).not.toHaveProperty('reportSections');
+    expect(data).not.toHaveProperty('nextSameServiceAppointment');
+  });
+
   test('rides as reportSections, with the same-service next visit in the live view', async () => {
     const data = await buildReportV1Data(serviceRow(FOUR_SECTIONS), 'token-four-section', stubKnex({
       scheduled_services: [REPORT_VISIT, {

@@ -766,6 +766,7 @@ async function buildReportCopyContext({
   // line it covers, whatever the expectations card's own gate says, and the
   // screen allows exactly the timeframes and dates it supplies.
   let writerAllowedPhrases = [];
+  let writerAllowedDates = [];
   if (writerRules) {
     const records = buildWriterRecords({
       serviceYmd,
@@ -776,6 +777,7 @@ async function buildReportCopyContext({
     });
     sections.push(...records.sections);
     writerAllowedPhrases = records.allowedPhrases;
+    writerAllowedDates = records.allowedDates;
   } else if (line === 'pest' && pestReportExpectationsGateOn()) {
     const expectationProducts = productSafety.map(toExpectationProduct);
     const whatToExpect = buildWhatToExpect({ products: expectationProducts });
@@ -850,6 +852,7 @@ async function buildReportCopyContext({
     signals,
     deterministicApplications: productEvidence.deterministicApplications,
     writerAllowedPhrases,
+    writerAllowedDates,
   };
 }
 

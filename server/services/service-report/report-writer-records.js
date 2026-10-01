@@ -141,10 +141,8 @@ function buildWriterRecords({
   }
   return {
     sections,
-    allowedPhrases: [
-      ...groundedTimeframePhrases(expectations.lines),
-      ...(reach ? [reach.full, reach.monthDay] : []),
-    ],
+    allowedPhrases: groundedTimeframePhrases(expectations.lines),
+    allowedDates: reach ? [reach.full, reach.monthDay] : [],
   };
 }
 

@@ -190,6 +190,10 @@ const FOUR_SECTION_HEADERS = Object.freeze([
   ['whatsNext', 'What’s next', /^\s*WHAT['’]S NEXT:?\s*$/],
 ]);
 const MAX_FOUR_SECTION_CHARS = 3200;
+// Read at call time: with the switch off (never on, or turned off as the
+// kill switch) a four-section note is not reviewed report copy, so saved
+// four-section reports fall back like any unparsed note (Codex #5500).
+const { reportWriterRulesLive } = require('../../config/feature-gates');
 const ANY_REPORT_HEADER_RE = /^\s*WHAT (?:WE DID(?: AND WHY)?|WE FOUND|TO EXPECT|['’]S NEXT):?\s*$/;
 
 // A title written inline ("WHAT WE FOUND: You mentioned…") is the same
@@ -245,7 +249,9 @@ function technicianReportCustomerCopy(notes) {
 
   // Four-section report: the same screens over the joined text; `sections`
   // keeps the titles for surfaces that render them.
-  const fourSections = text.length <= MAX_FOUR_SECTION_CHARS ? parseFourSections(text) : null;
+  const fourSections = reportWriterRulesLive() && text.length <= MAX_FOUR_SECTION_CHARS
+    ? parseFourSections(text)
+    : null;
   if (fourSections) {
     const body = fourSections.map((section) => section.paragraphs.join(' ')).join(' ').trim();
     const violations = customerCopyViolations(body);

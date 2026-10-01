@@ -486,11 +486,13 @@ describe('four-section report: supplied timeframes and dates', () => {
     expect(writerRulesRejection('Activity should drop off over the coming weeks.', { allowedPhrases })).toBe('timeframe');
   });
 
-  test('the supplied reach-out date passes; the next visit date never does', () => {
-    const withDate = ['Wednesday, October 14', 'October 14'];
-    expect(writerRulesRejection('If ants are still trailing by Wednesday, October 14, let us know.', { allowedPhrases: withDate })).toBeNull();
+  test('the supplied reach-out date passes only as a reach-out date', () => {
+    const allowedDates = ['Wednesday, October 14', 'October 14'];
+    expect(writerRulesRejection('If ants are still trailing by Wednesday, October 14, let us know.', { allowedDates })).toBeNull();
     expect(writerRulesRejection('If ants are still trailing by Wednesday, October 14, let us know.')).toBe('date');
-    expect(writerRulesRejection('Your next visit is on Tuesday, December 9.', { allowedPhrases: withDate })).toBe('date');
+    expect(writerRulesRejection('Your next visit is Wednesday, October 14.', { allowedDates })).toBe('date');
+    expect(writerRulesRejection('You are booked for October 14.', { allowedDates })).toBe('date');
+    expect(writerRulesRejection('Your next visit is on Tuesday, December 9.', { allowedDates })).toBe('date');
   });
 
   test('an allowed phrase never hides another rule', () => {

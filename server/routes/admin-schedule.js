@@ -24941,12 +24941,18 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
               // (one-time billing and no recurring lineage), or a recurring
               // plan visit. Decides the reach-out date (owner 2026-10-01:
               // one-time services and re-services).
+              // Recurring only on positive evidence (a recurring billing
+              // type or recurring lineage); an unresolved or synthesized
+              // profile stays unknown (Codex #5500).
               serviceKind: (serviceKey === 'pest_re_service' || svc.is_callback === true)
                 ? 're_service'
                 : (String(serviceModel || '').toLowerCase() === 'one_time'
                   && svc.is_recurring !== true && !svc.recurring_parent_id && !svc.recurring_pattern)
                   ? 'one_time'
-                  : (completionProfile ? 'recurring' : null),
+                  : (String(serviceModel || '').toLowerCase() === 'recurring'
+                    || svc.is_recurring === true || Boolean(svc.recurring_parent_id) || Boolean(svc.recurring_pattern))
+                    ? 'recurring'
+                    : null,
             };
           if (completionProfile) {
             fallbackServiceType = serviceName || (serviceKey ? 'scheduled service' : groundingServiceType);
@@ -25107,6 +25113,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let contextSignals = {};
     let deterministicApplications = [];
     let writerAllowedPhrases = [];
+    let writerAllowedDates = [];
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
@@ -25131,6 +25138,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       });
       contextText = ctx.contextText || '';
       writerAllowedPhrases = Array.isArray(ctx.writerAllowedPhrases) ? ctx.writerAllowedPhrases : [];
+      writerAllowedDates = Array.isArray(ctx.writerAllowedDates) ? ctx.writerAllowedDates : [];
       contextSignals = ctx.signals || {};
       deterministicApplications = Array.isArray(ctx.deterministicApplications)
         ? ctx.deterministicApplications : [];
@@ -25363,7 +25371,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       }
     }
     const writerRulesScreen = (text) => (writerRulesOn
-      ? writerRulesRejection(text, { activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases })
+      ? writerRulesRejection(text, {
+        activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
+      })
       : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,

@@ -413,12 +413,15 @@ describe('four-section report (writer rules v2)', () => {
     ['a one-time service', { serviceKey: 'one_time_pest_control', findingsType: null, billingType: 'one_time' }, {}, 'one_time'],
     ['a one-time key on a recurring series', { serviceKey: 'one_time_pest_control', findingsType: null, billingType: 'one_time' }, { recurring_parent_id: 'parent-1' }, 'recurring'],
     ['a recurring plan visit', { serviceKey: 'pest_general_quarterly', findingsType: null, billingType: 'recurring' }, {}, 'recurring'],
+    ['an unresolved profile', { serviceKey: null, findingsType: null, billingType: null, synthesized: true }, {}, null],
+    ['an unresolved profile on a recurring series', { serviceKey: null, findingsType: null, billingType: null }, { recurring_parent_id: 'parent-1' }, 'recurring'],
   ])('gate on: %s reaches the context builder with its service type', async (label, profile, row, kind) => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
     mockProfile = profile;
     mockBooked = row;
     await handler(mkReq({ serviceNotes: `Ants on the slider track (${label} case).` }), mkRes());
-    expect(mockBuildContext.mock.calls[0][0]).toEqual(expect.objectContaining({ writerRules: true, serviceKind: kind }));
+    // (An unresolved profile has no in-scope writer; only its kind is judged here.)
+    expect(mockBuildContext.mock.calls[0][0]).toEqual(expect.objectContaining({ serviceKind: kind }));
   });
 
   test('gate on: a timeframe from the approved wording passes; an invented one is retried', async () => {

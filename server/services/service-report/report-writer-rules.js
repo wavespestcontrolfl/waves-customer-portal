@@ -24,7 +24,7 @@ WHAT WE DID AND WHY: each piece of work, where it went, and why it fits what was
 WHAT TO EXPECT: how today's work should change what the customer sees, from the EXPECTATIONS lines only.
 WHAT'S NEXT: what we will check or do next, what the customer can do, and when to contact us.
 
-1. Shape. Exactly the four titles above, in that order, each on its own line and followed by exactly ONE line of plain text (one to four sentences, no line breaks inside a section). No bullets, no greeting, no sign-off, no customer-name header. Length follows the record: a visit with history, several treatments or open questions gets more; a thin record gets a sentence or two per section. Never pad, and never make the same point in two sections. If a section has nothing grounded to say, write one honest sentence (with no EXPECTATIONS lines, say what the technician will look for next time).
+1. Shape. Exactly the four titles above, in that order, each on its own line and followed by exactly ONE line of plain text (one to four sentences, no line breaks inside a section). No bullets, no greeting, no sign-off, no customer-name header. Length follows the record: a visit with history, several treatments or open questions gets more; a thin record gets a sentence or two per section. Never pad, and never make the same point in two sections. If a section has nothing grounded to say, write one short sentence that only invites the customer to tell us what they notice; never invent an inspection, a check or a follow-up.
 2. Only what was recorded. Every statement must trace to the technician note, a recorded field, a structured finding line, a technician-reviewed photo caption, or a supplied record (EXPECTATIONS, HOW IT WORKS, SERVICE TYPE, REACH-OUT DATE, prior visits). Keep the technician's own words and hedges: never upgrade a general word to a species ("roaches" stays "roaches"), a suspicion to a diagnosis, or one room to the whole house. Keep conditions the technician recorded ("dry and calm") when they bear on the work. If a dictated word looks like a transcription error, leave it out rather than guess.
 3. The customer's words. The booked reason, the customer's concern, and any calls, texts or emails are what the customer said, never a finding. Attribute them ("You mentioned…") and keep each remark with its own place and time: never merge two remarks into one. Never quote their messages, never say we read them, and never state that the technician confirmed something only the customer reported.
 4. Every "none" stays local. State an absence only for the place and day the technician checked ("none were seen at the dishwasher today"). Never "all clear", "no problems", "nothing to worry about", or no activity for the whole property.
@@ -518,13 +518,26 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // Returns a short rejection reason, or null when the copy passes. Runs on
 // top of the report's existing screens (banned words, access codes, shape,
 // this visit's trade names), only while the rules apply.
-function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [] } = {}) {
-  // Supplied timeframes and dates (an EXPECTATIONS line's own words, the
-  // reach-out date) pass exactly as supplied; anything else still trips the
+// A visit tied to a supplied date ("your next visit is …", "we'll be back
+// …", "booked for …") is never a reach-out date: the report shows the next
+// visit itself (Codex #5500).
+const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
+
+function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [], allowedDates = [] } = {}) {
+  // Supplied timeframes (an EXPECTATIONS line's own words) pass exactly as
+  // supplied, and a supplied date (the reach-out date) passes only in a
+  // sentence that ties it to no visit; anything else still trips the
   // timeframe and date screens.
   let copy = String(text || '');
+  const dates = (Array.isArray(allowedDates) ? allowedDates : []).filter((date) => String(date || '').trim().length >= 3);
+  for (const date of dates) {
+    const datePattern = new RegExp(`(?<![\\w-])${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
+    if (copy.split(/(?<=[.!?])\s+/).some((sentence) => datePattern.test(sentence) && REACH_OUT_DATE_MISUSE_RE.test(sentence))) {
+      return 'date';
+    }
+  }
   // Longest first, so a whole phrase is matched before any part of it.
-  const phrases = (Array.isArray(allowedPhrases) ? [...allowedPhrases] : [])
+  const phrases = [...(Array.isArray(allowedPhrases) ? allowedPhrases : []), ...dates]
     .sort((a, b) => String(b || '').length - String(a || '').length);
   for (const phrase of phrases) {
     const pattern = allowedPhrasePattern(phrase);

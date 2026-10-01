@@ -9,7 +9,21 @@ const REPORT = [
   "WHAT'S NEXT", '', 'If the ants are still trailing after about 1–2 weeks, let us know.',
 ].join('\n');
 
+const ORIGINAL_GATE = process.env.GATE_REPORT_WRITER_RULES;
+beforeEach(() => { process.env.GATE_REPORT_WRITER_RULES = 'true'; });
+afterEach(() => {
+  if (ORIGINAL_GATE === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+  else process.env.GATE_REPORT_WRITER_RULES = ORIGINAL_GATE;
+});
+
 describe('four-section report', () => {
+  test('is read only while the writer switch is on (kill switch included)', () => {
+    delete process.env.GATE_REPORT_WRITER_RULES;
+    expect(technicianReportCustomerCopy(REPORT)).toBeNull();
+    process.env.GATE_REPORT_WRITER_RULES = 'false';
+    expect(technicianReportCustomerCopy(REPORT)).toBeNull();
+  });
+
   test('parses the sections in order with their paragraphs', () => {
     const parsed = technicianReportCustomerCopy(REPORT);
     expect(parsed.sections.map((section) => [section.key, section.title, section.paragraphs.length])).toEqual([
