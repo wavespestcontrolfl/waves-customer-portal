@@ -1268,6 +1268,21 @@ describe('retired topics', () => {
     expect(r.findings[0].code).toBe(gate.CODES.RETIRED_TOPIC);
   });
 
+  test('retired topics are scoped to the categories they were retired from (codex r6)', () => {
+    const hit = (query, category) => gate.evaluate(blog({ query, category }), { requireCorpus: false }).findings.find((f) => f.code === gate.CODES.RETIRED_TOPIC);
+    expect(hit('rainy season lawn guide', 'lawn-care')).toBeUndefined();
+    expect(hit('rainy season pests', 'pest-control')).toMatchObject({ url: '/pest-control/rainy-season-pest-control/' });
+    // A pest-control post merged into a lawn-care page retires the topic in both.
+    expect(hit('mole crickets', 'lawn-care')).toMatchObject({ url: '/pest-control/get-rid-of-mole-crickets-sarasota-fl/' });
+    expect(hit('paper wasp nest removal', 'pest-control')).toMatchObject({ url: '/pest-control/get-rid-of-wasp-nest/' });
+  });
+
+  test('exact topics only: a new angle that merely contains a retired topic stays open', () => {
+    for (const query of ['drywood termite frass', 'red ants vs fire ants', 'Roof Rat, Norway Rat, or Mouse? Reading Droppings', 'bed bug bites vs flea bites']) {
+      expect(gate.evaluate(blog({ query }), { requireCorpus: false }).findings.filter((f) => f.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    }
+  });
+
   test('registry size is deliberate (46: 51 proposed minus 5 kept live)', () => {
     expect(gate._internals.RETIRED_POSTS).toHaveLength(46);
   });

@@ -1207,7 +1207,12 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
   if (!hit && !urlOnly) {
     for (const [label, text] of [['primary keyword', query], ['title', title], ['slug', slugWords(slug)]]) {
       const key = text ? topicKey(text) : '';
-      if (key && idx.byTopic.has(key)) { hit = idx.byTopic.get(key); where = label; break; }
+      const post = key ? idx.byTopic.get(key) : null;
+      // Scoped to the categories the topic was retired from (the post's own
+      // and its merge target's): category nouns and framing drop out of the
+      // key, so a lawn "rainy season" guide would otherwise read as the
+      // retired pest-control rainy-season post. Unknown category: all.
+      if (post && (!category || [post.url, post.merged_into].some((u) => categoryFromSlug(u) === category))) { hit = post; where = label; break; }
     }
   }
   if (!hit) return [];
