@@ -3593,12 +3593,15 @@ function holdClaimStrandedOutcome() {
 // (Codex #5459 r2 P2). It is the durable "this stranded claim is owed an office alert" record: the stale-claim
 // sweep reads it before parking the row (the park overwrites the error text) and raises the alert itself.
 const HOLD_CLAIM_STRANDED_MARKER = "HOLD_CLAIM_STRANDED";
-const holdClaimStrandedAlertKey = (invoiceId) => `hold-claim-stranded:${invoiceId}`;
-const holdClaimMaybeStuckAlertKey = (invoiceId) => `hold-claim-maybe-stuck:${invoiceId}`;
+// The dedupe keys are per CLAIM (invoice + send claim token), not per invoice (Codex pre-push audit on #5459 r4):
+// notifyAdmin and the sweep both treat any standing notification with the key as the live alert, so an old
+// incident's row would otherwise swallow a later stranded claim on the same invoice.
+const holdClaimStrandedAlertKey = (invoiceId, claimToken) => `hold-claim-stranded:${invoiceId}:${claimToken || ""}`;
+const holdClaimMaybeStuckAlertKey = (invoiceId, claimToken) => `hold-claim-maybe-stuck:${invoiceId}:${claimToken || ""}`;
 
 // Raises the stranded / manual-recovery alert. THROWS on failure: callers decide how to retry. Its wording is only
 // true for a CONFIRMED pre-provider refusal (the marker records one), where re-queueing or resending is safe.
-async function raiseHoldClaimStrandedAlert(invoiceId, customerId) {
+async function raiseHoldClaimStrandedAlert(invoiceId, customerId, claimToken) {
   // notifyAdmin reports a failed write as a null return rather than a throw: that is a failed alert too.
   const raised = await require("./admin-alert-compose").raiseAdminAlert("alert", {
     area: "Billing",
@@ -3611,7 +3614,7 @@ async function raiseHoldClaimStrandedAlert(invoiceId, customerId) {
     who: "person",
   }, {
     detail: `Invoice ${invoiceId}: the customer has an active collections hold, so its send was stopped, but its in-progress send claim could not be released. It will not send on its own after the hold ends. Open the invoice and re-queue or resend it once the hold is released.`,
-    dedupeKey: holdClaimStrandedAlertKey(invoiceId),
+    dedupeKey: holdClaimStrandedAlertKey(invoiceId, claimToken),
     metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
   });
   if (!raised) throw new Error("the stranded-claim alert was not recorded");
@@ -3621,7 +3624,7 @@ async function raiseHoldClaimStrandedAlert(invoiceId, customerId) {
 // refusal (the marker could not be written, or a stale claim of a held customer carries no marker). It never says
 // the send did not happen: a claim can also die AFTER the provider accepted the message, and a resend would then
 // duplicate the pay link. THROWS on failure.
-async function raiseHoldClaimMaybeStuckAlert(invoiceId, customerId) {
+async function raiseHoldClaimMaybeStuckAlert(invoiceId, customerId, claimToken) {
   const raised = await require("./admin-alert-compose").raiseAdminAlert("alert", {
     area: "Billing",
     action: "check a held invoice that may be stuck",
@@ -3633,7 +3636,7 @@ async function raiseHoldClaimMaybeStuckAlert(invoiceId, customerId) {
     who: "person",
   }, {
     detail: `Invoice ${invoiceId}: its send claim was left in progress and the customer has a collections hold. Check whether the customer actually received the pay link before resending, so it is not sent twice.`,
-    dedupeKey: holdClaimMaybeStuckAlertKey(invoiceId),
+    dedupeKey: holdClaimMaybeStuckAlertKey(invoiceId, claimToken),
     metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
   });
   if (!raised) throw new Error("the maybe-stuck alert was not recorded");
@@ -3658,8 +3661,8 @@ async function alertHoldClaimStranded(invoiceId, row, claimToken = null) {
     }
   }
   try {
-    if (markerRecorded) await raiseHoldClaimStrandedAlert(invoiceId, row?.customer_id);
-    else await raiseHoldClaimMaybeStuckAlert(invoiceId, row?.customer_id);
+    if (markerRecorded) await raiseHoldClaimStrandedAlert(invoiceId, row?.customer_id, claimToken);
+    else await raiseHoldClaimMaybeStuckAlert(invoiceId, row?.customer_id, claimToken);
   } catch (err) {
     logger.error(`[invoice] hold-claim alert failed for ${invoiceId} (${markerRecorded ? "the stale-claim sweep retries it" : "no marker: only the sweep's active-hold check can still surface it"}): ${err.message}`);
   }
@@ -3680,7 +3683,7 @@ function strandedHoldClaimCandidate(q) {
 }
 function standingStrandedAlert() {
   this.select(1).from("notifications as n").where("n.recipient_type", "admin")
-    .whereRaw("n.metadata->>'dedupeKey' = (CASE WHEN COALESCE(invoices.scheduled_send_error, '') LIKE ? THEN 'hold-claim-stranded:' ELSE 'hold-claim-maybe-stuck:' END) || invoices.id::text", [`%${HOLD_CLAIM_STRANDED_MARKER}%`]);
+    .whereRaw("n.metadata->>'dedupeKey' = (CASE WHEN COALESCE(invoices.scheduled_send_error, '') LIKE ? THEN 'hold-claim-stranded:' ELSE 'hold-claim-maybe-stuck:' END) || invoices.id::text || ':' || COALESCE(invoices.send_claim_token::text, '')", [`%${HOLD_CLAIM_STRANDED_MARKER}%`]);
 }
 const STALE_SENDING_SQL = "NOW() - INTERVAL '10 minutes'";
 function stalePark() {
@@ -3704,8 +3707,8 @@ async function raiseStrandedHoldClaimAlerts() {
       .select("id", "customer_id", "send_claim_token", db.raw("COALESCE(scheduled_send_error, '') LIKE ? AS marked", [`%${HOLD_CLAIM_STRANDED_MARKER}%`]));
     for (const row of rows) {
       try {
-        if (row.marked) await raiseHoldClaimStrandedAlert(row.id, row.customer_id);
-        else await raiseHoldClaimMaybeStuckAlert(row.id, row.customer_id);
+        if (row.marked) await raiseHoldClaimStrandedAlert(row.id, row.customer_id, row.send_claim_token);
+        else await raiseHoldClaimMaybeStuckAlert(row.id, row.customer_id, row.send_claim_token);
         // Park only the claim this sweep read, and only while it is still stale: during the alert await
         // another sweep may park it and an operator may start a fresh send, whose live claim must survive.
         await db("invoices").where({ id: row.id, status: "sending" })

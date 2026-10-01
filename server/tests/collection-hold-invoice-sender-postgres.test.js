@@ -281,6 +281,20 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(sentIds()).toContain(inv);
     });
 
+    // Codex pre-push audit on #5459 r4: the marker and the queue write are one transaction, so a queue failure rolls the
+    // marker back and the retried hand-over is again the FIRST one (and still re-arms).
+    test('a hand-over whose queue write fails leaves no ownership marker, so the retry is still the first hand-over and re-arms', async () => {
+      const Deferred = require('../services/dispatch-completion-deferred');
+      const c = await newCustomer();
+      const inv = await newInvoice(c, { status: 'sending', send_claim_token: randomUUID(), scheduled_send_attempts: 5 });
+      const [rec] = await db('service_records').insert({ customer_id: c, service_date: '2040-03-04', service_type: 'Pest Control', status: 'completed' }).returning('id');
+      await expect(Deferred.handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: rec.id })).rejects.toMatchObject({ code: 'QUEUE_INVOICE_NOT_SETTLED' });
+      expect(((await db('service_records').where({ id: rec.id }).first()).structured_notes || {}).invoiceSenderOwnsPayLinkFor).toBeUndefined();
+      await db('invoices').where({ id: inv }).update({ status: 'scheduled', send_claim_token: null, scheduled_send_at: new Date(Date.now() - 1000) });
+      expect(await Deferred.handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: rec.id })).toMatchObject({ queued: true, rearmed: true });
+      expect((await invoice(inv)).scheduled_send_attempts).toBe(0);
+    });
+
     test('idempotent and race-safe: however many callers, the invoice is queued once', async () => {
       const c = await newCustomer();
       const draft = await newInvoice(c);
@@ -492,7 +506,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
             expect(await invoice(viaWrapper)).toMatchObject({ status: 'sending' }); // stranded, exactly what the alert says
             expect(notify).toHaveBeenCalledTimes(1);
             expect(notify).toHaveBeenCalledWith('alert', expect.stringMatching(/^Billing/), expect.any(String),
-              expect.objectContaining({ dedupeKey: `hold-claim-stranded:${viaWrapper}`, link: `/admin/invoices?invoice=${viaWrapper}` }));
+              expect.objectContaining({ dedupeKey: expect.stringMatching(new RegExp(`^hold-claim-stranded:${viaWrapper}:[0-9a-f-]+$`)), link: `/admin/invoices?invoice=${viaWrapper}` }));
 
             const { inv: viaSms } = await packetInvoiceFor(c);
             const spy2 = failRestoreAfterHoldLookup();
@@ -500,7 +514,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
             try { smsOut = await Invoices.sendViaSMS(viaSms, {}); } finally { spy2.mockRestore(); db.__failTables.clear(); }
             expect(smsOut).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_CLAIM_STRANDED', held: true, manualRecovery: true, retryable: false, deferred: false });
             expect(notify).toHaveBeenCalledTimes(2);
-            expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: `hold-claim-stranded:${viaSms}` }));
+            expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: expect.stringMatching(new RegExp(`^hold-claim-stranded:${viaSms}:[0-9a-f-]+$`)) }));
           } finally { notify.mockRestore(); }
         });
 
@@ -539,7 +553,8 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
         // Codex #5459 r2 P2: the refusal-time alert can fail in the same outage that failed the restore. The
         // stale-claim sweep raises it (marker on the row, or a self-pay invoice under a hold) and retries until it lands.
         describe('the stale-claim sweep owns the stranded alert when the refusal-time alert failed (Codex #5459 r2 P2)', () => {
-          const dedupeKey = (id) => `hold-claim-stranded:${id}`;
+          const dedupeKey = (id, token) => `hold-claim-stranded:${id}:${token || ''}`;
+          const keyPrefix = (kind, id) => expect.stringMatching(new RegExp(`^hold-claim-${kind}:${id}:`));
           const makeStale = (id) => db('invoices').where({ id }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
           async function strandedWithFailedAlert(notify) {
             const c = await newCustomer();
@@ -570,7 +585,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
               // the alert lands: the row is parked in the same sweep
               await Invoices.processScheduledSends({ limit: 25 });
               expect(notify).toHaveBeenCalledTimes(3);
-              expect(notify.mock.calls.every((call) => call[3].dedupeKey === dedupeKey(inv))).toBe(true);
+              expect(notify.mock.calls.every((call) => /^hold-claim-stranded:/.test(call[3].dedupeKey) && call[3].dedupeKey.startsWith(`hold-claim-stranded:${inv}:`))).toBe(true);
               expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_at: null, send_claim_token: null });
               expect((await invoice(inv)).scheduled_send_error).toBe(require('../services/invoice-helpers').STALE_SEND_PARK_ERROR);
               // parked: no further alert, ever
@@ -596,7 +611,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
               await Invoices.processScheduledSends({ limit: 25 });
               expect(notify).toHaveBeenCalledTimes(3);
               // no marker ties this claim to a pre-provider refusal: the NEUTRAL alert, under its own key
-              expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: `hold-claim-maybe-stuck:${noMarker}` }));
+              expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: keyPrefix('maybe-stuck', noMarker) }));
               expect((await invoice(noMarker)).status).toBe('scheduled');
               // an ordinary stale claim (no marker, no hold) is parked exactly as before, with no alert
               const c3 = await newCustomer();
@@ -668,7 +683,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
               expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('marker NOT recorded'));
               expect(notify).toHaveBeenCalledTimes(1);
               const [, headline, why, opts] = notify.mock.calls[0];
-              expect(opts.dedupeKey).toBe(`hold-claim-maybe-stuck:${inv}`);
+              expect(opts.dedupeKey).toMatch(new RegExp(`^hold-claim-maybe-stuck:${inv}:[0-9a-f-]+$`));
               expect(`${headline} ${why} ${opts.detail}`).toMatch(/check whether the customer actually received/i);
               expect(`${headline} ${why} ${opts.detail}`).not.toMatch(/did not (go|send)|was not sent|not delivered/i);
               expect((await invoice(inv)).scheduled_send_error || '').not.toContain('HOLD_CLAIM_STRANDED');
@@ -680,11 +695,22 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
             try {
               const c = await newCustomer();
               await placeHold(c);
-              const inv = await newInvoice(c, { status: 'sending', send_claim_token: randomUUID(), scheduled_send_error: 'HOLD_CLAIM_STRANDED' });
-              await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Billing - recover the invoice', body: 'x', metadata: JSON.stringify({ dedupeKey: dedupeKey(inv) }) });
+              const token = randomUUID();
+              const inv = await newInvoice(c, { status: 'sending', send_claim_token: token, scheduled_send_error: 'HOLD_CLAIM_STRANDED' });
+              await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Billing - recover the invoice', body: 'x', metadata: JSON.stringify({ dedupeKey: dedupeKey(inv, token) }) });
               await makeStale(inv);
               await Invoices.processScheduledSends({ limit: 25 });
               expect(notify).not.toHaveBeenCalled();
+              expect((await invoice(inv)).status).toBe('scheduled');
+
+              // The key is per CLAIM: an OLD incident's notification on the same invoice (an earlier claim token) does not
+              // swallow a later stranded claim (Codex pre-push audit on #5459 r4).
+              const later = randomUUID();
+              await db('invoices').where({ id: inv }).update({ status: 'sending', send_claim_token: later, scheduled_send_error: 'HOLD_CLAIM_STRANDED' });
+              await makeStale(inv);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(1);
+              expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: dedupeKey(inv, later) }));
               expect((await invoice(inv)).status).toBe('scheduled');
             } finally {
               notify.mockRestore();
