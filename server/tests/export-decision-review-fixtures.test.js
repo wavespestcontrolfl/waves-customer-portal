@@ -47,6 +47,24 @@ describe('rowToCase', () => {
   });
 });
 
+describe('nested JSON is whitelisted, never copied', () => {
+  test('free text in correct_value, baselines or evidence is dropped; scalars and tokens survive', () => {
+    const c = rowToCase({ ...ROW,
+      label: { verdict: 'jev_wrong', correct_value: 'Jane Doe said she will call back on Tuesday' },
+      baseline_answers: { rules: false, deep_judge: true, excerpt: 'Caller: hi this is Jane at 123 Main' },
+      outcome_evidence: { source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z', transcript: 'must not leak' },
+      jev_answer: { p: 0.2, yes: false, confident: true, probabilities: { a: 0.2, b: 0.8 }, note: 'free text' } });
+    const json = JSON.stringify(c);
+    expect(json).not.toMatch(/Jane|Main|transcript|free text|Tuesday/);
+    expect(c.label).toEqual({ verdict: 'jev_wrong', correct_value: null });
+    expect(c.expected).toBeNull();
+    expect(c.baseline_answers).toEqual({ rules: false, deep_judge: true });
+    expect(c.outcome_evidence).toEqual({ source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' });
+    expect(c.jev_answer).toEqual({ p: 0.2, yes: false, confident: true, probabilities: { a: 0.2, b: 0.8 } });
+    expect(rowToCase({ ...ROW, label: { verdict: 'jev_wrong', correct_value: 'single_family' } }).expected).toBe('single_family');
+  });
+});
+
 describe('expected answer', () => {
   test('jev_right preserves the confirmed jev_answer for both boolean outcomes', () => {
     const yes = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, jev_answer: { p: 0.9, yes: true, confident: true } });

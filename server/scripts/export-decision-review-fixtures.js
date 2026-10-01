@@ -31,17 +31,52 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 
 // One decision_reviews row -> one fixture case. Picks only the allowed fields,
 // so a column added to the table later can never leak into a fixture.
+// Fixture-safe scalar: booleans, finite numbers, or a short token (an enum
+// option such as 'confirmed' or 'single_family'), never free text. Anything
+// else is dropped before serialisation, so a reviewer pasting a sentence or a
+// name into correct_value cannot reach a committed fixture.
+const TOKEN_RE = /^[a-z0-9_.-]{1,48}$/i;
+function fixtureScalar(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && TOKEN_RE.test(v)) return v;
+  return null;
+}
+// Normalised Jev answers and baselines are maps of scalars (or a probabilities
+// map of numbers); anything deeper or textual is dropped key by key.
+function fixtureMap(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return fixtureScalar(obj);
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (!TOKEN_RE.test(k)) continue;
+    const clean = v && typeof v === 'object' && !Array.isArray(v) && depth < 1 ? fixtureMap(v, depth + 1) : fixtureScalar(v);
+    if (clean !== null && clean !== undefined) out[k] = clean;
+  }
+  return out;
+}
+const EVIDENCE_KEYS = ['source', 'window', 'value', 'observed_at'];
+function fixtureEvidence(ev) {
+  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return null;
+  const out = {};
+  for (const k of EVIDENCE_KEYS) {
+    if (ev[k] === undefined) continue;
+    const clean = k === 'observed_at' && typeof ev[k] === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(ev[k]) ? ev[k] : fixtureScalar(ev[k]);
+    if (clean !== null) out[k] = clean;
+  }
+  return out;
+}
+
 function structuredLabel(label) {
   if (!label || typeof label !== 'object') return null;
-  const out = { verdict: label.verdict ?? null };
-  if (label.correct_value !== undefined) out.correct_value = label.correct_value;
+  const out = { verdict: fixtureScalar(label.verdict) };
+  if (label.correct_value !== undefined) out.correct_value = fixtureScalar(label.correct_value);
   return out;
 }
 
 function expectedFor(row) {
   const verdict = row.label && typeof row.label === 'object' ? row.label.verdict : null;
-  if (verdict === 'jev_right') return row.jev_answer ?? null;
-  if (verdict === 'jev_wrong') return row.label.correct_value === undefined ? null : row.label.correct_value;
+  if (verdict === 'jev_right') return fixtureMap(row.jev_answer);
+  if (verdict === 'jev_wrong') return row.label.correct_value === undefined ? null : fixtureScalar(row.label.correct_value);
   return null;
 }
 
@@ -52,7 +87,7 @@ function rowToCase(row) {
     package_id: row.package_id,
     package_hash: row.package_hash,
     question_id: row.question_id,
-    jev_answer: row.jev_answer ?? null,
+    jev_answer: fixtureMap(row.jev_answer),
     // The human-confirmed answer, materialised: jev_right confirms jev_answer;
     // jev_wrong supplies correct_value; unclear has none.
     expected: expectedFor(row),
@@ -60,8 +95,8 @@ function rowToCase(row) {
     // name or quoted text and must never reach a committed fixture (AGENTS.md).
     label: structuredLabel(row.label),
     label_status: row.label_status,
-    baseline_answers: row.baseline_answers ?? null,
-    outcome_evidence: row.outcome_evidence ?? null,
+    baseline_answers: fixtureMap(row.baseline_answers),
+    outcome_evidence: fixtureEvidence(row.outcome_evidence),
   };
 }
 
