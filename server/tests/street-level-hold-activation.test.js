@@ -399,7 +399,8 @@ describe('r20: the confirm is bound to the address the office was shown', () => 
     expect(check).toBeGreaterThan(lock);
     expect(check).toBeLessThan(s.indexOf('await transitionJobStatus({', check));
     const t = fs.readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
-    expect(t).toContain("require('../services/street-level-hold').visitServiceAddressLine(r)");
+    expect(t).toContain("const { visitServiceAddressLine, visitWhenLine, streetLevelVisitLink } = require('../services/street-level-hold');");
+    expect(t).toContain('visitServiceAddressLine(r)');
     expect(visitServiceAddressLine(row)).toBe('1234 Sample Newbuild Trl, Parrish, FL, 34219');
   });
 });

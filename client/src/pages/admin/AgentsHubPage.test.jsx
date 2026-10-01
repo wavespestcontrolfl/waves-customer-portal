@@ -26,6 +26,9 @@ vi.mock("./DataHygienePage", () => ({
 vi.mock("./agents/AgentControlCenterTab", () => ({
   default: () => <div>Control center workspace</div>,
 }));
+vi.mock("./TypedDecisionsReviewPage", () => ({
+  default: () => <div>Typed workspace</div>,
+}));
 vi.mock("./AgentModelsTab", () => ({
   default: () => <div>Models workspace</div>,
 }));
@@ -97,6 +100,25 @@ describe("AgentsHubPage area strip", () => {
     expect(screen.queryByText("Overview workspace")).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: "Calls" }));
     expect(screen.getByTestId("search")).toHaveTextContent("?tab=overview&area=calls");
+  });
+});
+
+describe("AgentsHubPage Typed tab (GATE_TYPED_DECISIONS)", () => {
+  it("is absent while the probe says the lane is off; ?tab=typed falls back to Overview", async () => {
+    renderHub("/admin/agents?tab=typed");
+    await screen.findByText("Overview workspace");
+    expect(screen.queryByRole("button", { name: "Typed" })).toBeNull();
+    expect(screen.queryByText("Typed workspace")).toBeNull();
+  });
+
+  it("appears, and ?tab=typed renders it, only when the probe reports typed: true", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/control/hub") return { ...HUB, features: { queue: false, typed: true } };
+      throw new Error(`unexpected fetch ${path}`);
+    });
+    renderHub("/admin/agents?tab=typed");
+    expect(await screen.findByText("Typed workspace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Typed" })).toBeInTheDocument();
   });
 });
 

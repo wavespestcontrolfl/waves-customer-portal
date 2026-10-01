@@ -62,14 +62,14 @@ const {
   REENTRY_SEND_SEAL_TTL_MS,
 } = require('../services/service-report/email-delivery');
 
-const { previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
+const { previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash, suggestLandscapeCondition } = require('../services/tree-shrub-assessment');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
   resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -618,6 +618,51 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
       ...(completionChoicesEnabled ? { previousRecommendations } : {}),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/promises — the completion form's
+// promise check (owner "ok yes add these" 2026-10-01): the open promises
+// Waves made this visit's customer that a technician can keep at a visit,
+// from calls, texts and emails (visit-promises.js). Only while
+// GATE_REPORT_WRITER_RULES is live and only on visits the writer covers
+// (never lawn or tree, shrub & palm); otherwise a no-read
+// { available: false }. Read-only. `include` (comma-separated ids): open
+// promises beyond the newest ten that a restored draft had marked, listed
+// after them (Codex #5516).
+router.get('/:serviceId/promises', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').reportWriterRulesLive()) {
+      return res.json({ available: false, promises: [] });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit (the customer's
+    // promises are customer data); admins keep office-wide reach.
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    // …and only while it is a current assignment: not cancelled or moved
+    // off them, inside the field access window (the shared predicate;
+    // Codex #5516).
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const VisitPromises = require('../services/service-report/visit-promises');
+    let profileFailed = false;
+    const completionProfile = await resolveCompletionProfileForScheduledService(svc)
+      .catch(() => { profileFailed = true; return null; });
+    if (!VisitPromises.promiseCheckInScope(svc.service_type, completionProfile, { failed: profileFailed })) {
+      return res.json({ available: false, promises: [] });
+    }
+    const include = String(req.query?.include || '').split(',').map((id) => id.trim()).filter(Boolean);
+    const { promises, total } = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id, include });
+    res.json({ available: true, promises, total });
   } catch (err) { next(err); }
 });
 
@@ -2582,6 +2627,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
         if (isOfficeReviewConfirm && typeof req.body?.expected_service_address === 'string') {
           await require('../services/street-level-hold').assertExpectedServiceAddress(trx, svc.id, req.body.expected_service_address);
         }
+        // Record the address this approval is for (same transaction, same row lock), so a later retry of
+        // the activation cannot release the hold against an address that changed afterwards.
+        if (isOfficeReviewConfirm && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
+          await require('../services/street-level-hold').recordApprovedAddressWitness(trx, svc.id);
+        }
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
           fieldConfirmVerified = !!locked
@@ -4137,6 +4187,28 @@ router.post('/slot-check', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/tree-shrub/fast-context
+// What the Tree & Shrub Fast Complete sheet loads: eligibility, the visit
+// identity (echoed back as `expectedVisit` on /complete), the catalog with
+// per-product compliance flags, the protocol month's suggested products, the
+// last visit's values and the rotation / palm-spacing warnings. Read-only;
+// dark behind GATE_TS_FAST_COMPLETE AND the caller's ts_fast_complete user
+// flag, rechecked here (not only on the schedule payload) so a revoked or
+// unflagged tech can't reach the sheet. See services/tree-shrub-fast-context.js.
+router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
+  try {
+    if (!tsFastCompleteLive()) return res.status(404).json({ enabled: false });
+    const flagged = await require('../services/feature-flags')
+      .isUserFeatureEnabled(req.technicianId, 'ts_fast_complete').catch(() => false);
+    if (!flagged) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
+    if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
@@ -4176,12 +4248,15 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
       },
     });
     if (!result) {
-      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', status: 'failed' });
+      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', suggestedCondition: null, status: 'failed' });
     }
     // Sign the scores + observation + the EXACT photo set so the completion handler
     // can verify the review came from this preview for these images.
     const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));
     result.signature = treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations);
+    // Fast Complete's condition suggestion — the tech confirms it; not part of
+    // the signed review.
+    result.suggestedCondition = suggestLandscapeCondition(result.scores?.overallScore);
     return res.json({ ...result, photosHash, status: 'complete' });
   } catch (err) {
     return res.status(500).json({ error: 'Tree & shrub assessment preview failed', detail: err.message });

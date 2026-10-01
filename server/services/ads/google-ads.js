@@ -301,6 +301,9 @@ async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
   }
 }
 
+// system_settings key holding the last successful search-term sync time.
+const SEARCH_TERMS_SYNCED_KEY = 'ads.search_terms.last_synced_at';
+
 // ---------------------------------------------------------------------------
 // syncSearchTerms — pull search term report for last N days
 // ---------------------------------------------------------------------------
@@ -312,6 +315,10 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
     logger.info(`[google-ads] Syncing search terms (last ${days} days)`);
 
     const { since: sinceStr, until: untilStr } = gaqlDateRange(days);
+    // The run's stamp is the moment its snapshot was fetched, so overlapping
+    // runs (manual Sync during the 6 AM job) order by data age, not by who
+    // reached the database first.
+    const syncedAt = new Date();
 
     const rows = await customer.query(`
       SELECT
@@ -329,45 +336,92 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
     `);
 
     const results = [];
+    // One stamp per run, written in one transaction so a failed run commits
+    // nothing. Every row ends the run carrying this run's numbers: terms Google
+    // no longer reports are zeroed below, so stale spend never outlives the
+    // rolling window (the ads advisor reads cost > 0 as current spend).
+    // Rows for a Google campaign with no local ad_campaigns row (campaign sync
+    // failed or lagging) can't be stored, so the snapshot is incomplete.
+    let unmatched = 0;
 
-    for (const row of rows) {
-      const platformId = String(row.campaign.id);
-      const searchTerm = row.search_term_view.search_term;
+    let superseded = false;
 
-      const campaign = await db('ad_campaigns')
-        .where({ platform: 'google_ads', platform_campaign_id: platformId })
-        .first();
-      if (!campaign) continue;
-
-      const costDollars = Number(row.metrics.cost_micros || 0) / 1_000_000;
-
-      const data = {
-        campaign_id: campaign.id,
-        search_term: searchTerm,
-        match_type: row.search_term_view.status || null,
-        impressions: Number(row.metrics.impressions || 0),
-        clicks: Number(row.metrics.clicks || 0),
-        cost: costDollars,
-        conversions: Number(row.metrics.conversions || 0),
-        conversion_value: Number(row.metrics.conversions_value || 0),
-        updated_at: new Date(),
-      };
-
-      // Upsert on campaign_id + search_term
-      const existing = await db('ad_search_terms')
-        .where({ campaign_id: campaign.id, search_term: searchTerm })
-        .first();
-
-      if (existing) {
-        await db('ad_search_terms').where({ id: existing.id }).update(data);
-      } else {
-        await db('ad_search_terms')
-          .insert({ id: uuidv4(), ...data, created_at: new Date() });
+    await db.transaction(async (trx) => {
+      // One snapshot writer at a time; a run whose fetch is older than the
+      // last committed snapshot is superseded and writes nothing.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [SEARCH_TERMS_SYNCED_KEY]);
+      const mark = await trx('system_settings').where({ key: SEARCH_TERMS_SYNCED_KEY }).first();
+      if (mark?.value && new Date(mark.value) >= syncedAt) {
+        superseded = true;
+        return;
       }
 
-      results.push(data);
-    }
+      for (const row of rows) {
+        const platformId = String(row.campaign.id);
+        const searchTerm = row.search_term_view.search_term;
 
+        const campaign = await trx('ad_campaigns')
+          .where({ platform: 'google_ads', platform_campaign_id: platformId })
+          .first();
+        if (!campaign) { unmatched += 1; continue; }
+
+        const costDollars = Number(row.metrics.cost_micros || 0) / 1_000_000;
+
+        const data = {
+          campaign_id: campaign.id,
+          search_term: searchTerm,
+          match_type: row.search_term_view.status || null,
+          impressions: Number(row.metrics.impressions || 0),
+          clicks: Number(row.metrics.clicks || 0),
+          cost: costDollars,
+          conversions: Number(row.metrics.conversions || 0),
+          conversion_value: Number(row.metrics.conversions_value || 0),
+          updated_at: syncedAt,
+        };
+
+        // Upsert on campaign_id + search_term
+        const existing = await trx('ad_search_terms')
+          .where({ campaign_id: campaign.id, search_term: searchTerm })
+          .first();
+
+        if (existing) {
+          await trx('ad_search_terms').where({ id: existing.id }).update(data);
+        } else {
+          await trx('ad_search_terms')
+            .insert({ id: uuidv4(), ...data, created_at: syncedAt });
+        }
+
+        results.push(data);
+      }
+
+      // An incomplete snapshot is rolled back whole: the last complete
+      // snapshot and its success record stay as they were, so a partial run
+      // is never mixed into data the advisor reads as complete (and once that
+      // record ages past 48h the advisor reads search terms as UNAVAILABLE).
+      if (unmatched > 0) {
+        throw Object.assign(
+          new Error(`${unmatched} search-term row(s) belong to campaigns missing locally; snapshot incomplete, nothing written`),
+          { code: 'search_terms_incomplete' },
+        );
+      }
+
+      // Terms missing from this snapshot had no activity in the window.
+      await trx('ad_search_terms')
+        .where('updated_at', '<', syncedAt)
+        .update({ impressions: 0, clicks: 0, cost: 0, conversions: 0, conversion_value: 0, updated_at: syncedAt });
+
+      // Run-level success record: a run that returned zero terms is still a
+      // valid snapshot, which row stamps alone can't show.
+      await trx('system_settings')
+        .insert({ key: SEARCH_TERMS_SYNCED_KEY, value: syncedAt.toISOString(), category: 'ads', description: 'Last successful Google Ads search-term sync' })
+        .onConflict('key')
+        .merge({ value: syncedAt.toISOString(), updated_at: syncedAt });
+    });
+
+    if (superseded) {
+      logger.info('[google-ads] Search-term snapshot superseded by a newer run; nothing written');
+      return [];
+    }
     logger.info(`[google-ads] Synced ${results.length} search terms`);
     return results;
   } catch (err) {
@@ -558,6 +612,7 @@ module.exports = {
   syncCampaigns,
   syncDailyPerformance,
   syncSearchTerms,
+  SEARCH_TERMS_SYNCED_KEY,
   fetchCallViews,
   pauseCampaign,
   enableCampaign,

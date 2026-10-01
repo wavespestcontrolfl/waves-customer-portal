@@ -81,6 +81,15 @@ describe('listFacts', () => {
     expect(q.where).toHaveBeenCalledWith({ source: SOURCE, active: true, status: 'active' });
   });
 
+  test('a knowledge-base-only fact (newsletter: false) never reaches the newsletter writer', async () => {
+    const kbOnly = FACTS.find((f) => f.newsletter === false);
+    expect(kbOnly).toBeDefined();
+    db.mockImplementation(() => chain([...ROWS, rowFor(kbOnly)]));
+    const facts = await listFacts({ now: NOW });
+    expect(facts.map((r) => r.slug)).not.toContain(kbOnly.slug);
+    expect(facts).toHaveLength(ROWS.length);
+  });
+
   test('filters to facts carrying ANY of the given tags', async () => {
     const facts = await listFacts({ tags: ['swarm-season', 'fire-ants'], now: NOW });
     expect(facts.map((f) => f.slug).sort()).toEqual([FIRE_ANT.slug, TERMITE.slug].sort());
@@ -149,6 +158,7 @@ describe('the register data', () => {
       expect(fact.quote).toMatch(/"[^"]{10,}"/);
       expect(fact.content.length).toBeGreaterThan(40);
       if (fact.expiresOn) expect(fact.expiresOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      if (fact.verifiedOn) expect(fact.verifiedOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     }
   });
 
@@ -230,6 +240,13 @@ describe('planFactSync (pure)', () => {
   test('an edit that landed on exactly the register\'s current wording has converged: restamp, do not hold forever', () => {
     const converged = syncedRow({ metadata: syncedMeta({ register_hash: 'stamp-from-before-the-edit' }) });
     expect(planFactSync(fact, converged, { today: TODAY })).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: true, converged: true });
+  });
+
+  test('a fact checked on its own day (verifiedOn) is stamped with that day, not the register default', () => {
+    const own = { ...fact, verifiedOn: '2026-10-01' };
+    expect(planFactSync(own, syncedRow({ metadata: syncedMeta({ verified_on: '2026-10-01' }) }), { today: TODAY })).toEqual({ action: 'unchanged' });
+    // A row stamped with the default date is brought to the fact's own date, wording untouched.
+    expect(planFactSync(own, syncedRow(), { today: TODAY })).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: true, converged: false });
   });
 
   test('an untouched row whose shipped content changed is updated', () => {

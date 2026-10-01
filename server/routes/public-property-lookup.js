@@ -394,7 +394,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       try {
         const updated = await db('leads')
           .where({ id: prefillLeadId })
-          .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
+          .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'handled'])
           .whereNull('converted_at')
           .update({
             first_name: firstName,

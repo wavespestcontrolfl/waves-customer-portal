@@ -13,8 +13,9 @@
 
 const { dateOnlyToNoonUtc } = require('./time-format');
 const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-diagnosis');
-const { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE } = require('./lawn-report-insights');
+const { buildLawnInsightCards, issueRestatesAftercare } =require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
+const { lawnReportLeadLive } = require('../../config/feature-gates');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
@@ -254,6 +255,9 @@ function mapWater(waterContext, waterSnapshot = null) {
 }
 
 const MOW_STATUS = { below: 'too_short', above: 'too_tall', in_range: 'ideal' };
+// How many findings the web findings card renders (LawnInsightCards limit).
+const LEAD_VISIBLE_FINDINGS = 3;
+
 function mapMowing(mowingHeight, grassLabel) {
   if (!mowingHeight) return null;
   const measured = num(mowingHeight.heightIn);
@@ -717,9 +721,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // literal-instruction `includes` check below misses that semantic
   // duplicate, so recognize the shared marker too before concatenating both
   // and repeating the watering command twice (codex P2 #5033 r8).
-  const aftercareAlreadyStated = topIssue?.customerAction
-    && (topIssue.customerAction.includes(aftercareTask || '\u0000')
-      || (topIssue.category === 'water' && topIssue.customerAction.includes(CREDITED_WATER_IN_PHRASE)));
+  const aftercareAlreadyStated = issueRestatesAftercare(topIssue, aftercareTask);
   const realCustomerAction = aftercareTask && aftercareAlreadyStated
     ? topIssue.customerAction
     : [aftercareTask, topIssue?.customerAction].filter(Boolean).join(' ') || null;
@@ -804,6 +806,21 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // category above so the insights + coverage-watch reconciliation keep working;
   // we only drop it from the customer-facing cards.
   const displayDiagnosis = diagnosis.filter((c) => c.key !== 'water_moisture_stress');
+
+  // Lead mode (GATE_LAWN_REPORT_LEAD): an out-of-band mowing reading drops the
+  // gauge's own recommendation only when the mowing finding card is on screen
+  // to say "Raise/Lower the mower one setting". The web findings card shows the
+  // top LEAD_VISIBLE_FINDINGS by priority, so a mowing card ranked below them
+  // keeps the gauge line, or the step would print nowhere (codex P1 pre-push).
+  // The PDF prints every finding's step, so it never loses it.
+  if (lawnReportLeadLive() && mowing && (mowing.status === 'too_short' || mowing.status === 'too_tall')) {
+    const shown = insights
+      .filter(Boolean)
+      .slice()
+      .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
+      .slice(0, LEAD_VISIBLE_FINDINGS);
+    if (shown.some((card) => card.category === 'mowing')) mowing.recommendation = null;
+  }
 
   return {
     snapshot, diagnosis: displayDiagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,

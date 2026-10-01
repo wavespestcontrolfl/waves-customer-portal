@@ -242,7 +242,7 @@ function mergeNarrative(v2, out) {
   if (next.water && !verdictOwnsWatering) next.water.explanation = safeWaterText(out.water, next.water.explanation);
   // Photo-only rows have no measured height/status — don't let the model fill an
   // ungrounded mowing recommendation under the photo (Codex P1).
-  if (next.mowing && next.mowing.measuredHeightInches != null) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
+  if (next.mowing && next.mowing.measuredHeightInches != null && next.mowing.recommendation) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
   if (Array.isArray(out.insights) && Array.isArray(next.insights)) {
     next.insights = next.insights.map((ins, i) => {
       const m = out.insights[i] || {};
@@ -250,8 +250,10 @@ function mergeNarrative(v2, out) {
         ...ins,
         headline: safeText(m.headline, ins.headline),
         whatWeSaw: safeText(m.whatWeSaw, ins.whatWeSaw),
-        whyItMatters: safeText(m.whyItMatters, ins.whyItMatters),
-        wavesAction: safeText(m.wavesAction, ins.wavesAction),
+        // A line the builder left null (lead mode drops the stock sentences)
+        // stays null: the model never fills it back in.
+        whyItMatters: ins.whyItMatters ? safeText(m.whyItMatters, ins.whyItMatters) : ins.whyItMatters,
+        wavesAction: ins.wavesAction ? safeText(m.wavesAction, ins.wavesAction) : ins.wavesAction,
         customerAction: rewriteAction(m.customerAction, ins.customerAction),
         nextVisitPlan: ins.nextVisitPlan ? safeText(m.nextVisitPlan, ins.nextVisitPlan) : ins.nextVisitPlan,
       };

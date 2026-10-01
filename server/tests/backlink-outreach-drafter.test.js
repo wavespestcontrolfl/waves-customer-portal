@@ -18,9 +18,15 @@ jest.mock('../services/seo/link-prospect-worker', () => {
   };
 });
 
+// The cited-page ranking reads the DB; every run here gets an empty one unless a test passes citedPagesFn.
+jest.mock('../services/seo/cited-pages', () => ({
+  ...jest.requireActual('../services/seo/cited-pages'),
+  loadCitedPages: jest.fn(async () => ({ pages: [] })),
+}));
+
 const worker = require('../services/seo/link-prospect-worker');
 const drafter = require('../services/seo/backlink-outreach-drafter');
-const { parseDraft, pickLocation, SYSTEM_PROMPT } = drafter._internals;
+const { parseDraft, pickLocation, SYSTEM_PROMPT, citedPagesFor, pickCitedPage, citedPagesByHost, citedPageVerdict, buildUserPrompt, WAVES_FACTS, WAVES_LISTED_RE } = drafter._internals;
 
 const fakeAnthropic = (text) => ({ messages: { create: async () => ({ content: [{ type: 'text', text }] }) } });
 const noFetch = async () => null; // skip personalization fetch in tests
@@ -65,6 +71,10 @@ describe('parseDraft', () => {
 
 describe('pickLocation', () => {
   const profile = worker.businessProfile();
+  test('a cited-page pitch signs off for the market of the list being pitched', () => {
+    const cited = { questions: [{ city: 'Sarasota', provider: true }] };
+    expect(pickLocation({ notes: 'generic' }, profile, cited).id).toBe('sarasota');
+  });
   test('picks the market hinted in the prospect, else the default location', () => {
     expect(pickLocation({ target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl/' }, profile).id).toBe('sarasota');
     expect(pickLocation({ notes: 'generic' }, profile).id).toBe('bradenton'); // default
@@ -180,5 +190,172 @@ describe('run', () => {
     expect(r.note).toBe('no_anthropic');
     expect(worker.claim).not.toHaveBeenCalled();
     if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
+  });
+});
+
+describe('cited-page pitches', () => {
+  const ARTICLE = 'Our picks for the best pest control companies in Sarasota, with notes on service area, pricing and reviews. '.repeat(6);
+  const citedPage = (o = {}) => ({
+    key: 'floridist.com/best-pest-control-sarasota', host: 'floridist.com', url: 'https://floridist.com/best-pest-control-sarasota',
+    listPage: true, tier: 1, rank: 1, currentMisses: 2,
+    questions: [{ id: 'Q1', query: 'Who is the best pest control company in Sarasota FL?', engines: ['claude', 'perplexity'], provider: true, miss: true, current: true }],
+    ...o,
+  });
+  const cited = prospect({ id: 'p9', target_domain: 'floridist.com', link_type: 'editorial', tier: 2, contact_email: 'editor@floridist.com' });
+
+  test('the system prompt names the business without "& Lawn Care" and carries the cited-page angle', () => {
+    expect(SYSTEM_PROMPT).not.toMatch(/& Lawn Care/);
+    expect(SYSTEM_PROMPT).toMatch(/CITED-PAGE ANGLE/);
+    expect(SYSTEM_PROMPT).toMatch(/No payment, no reciprocal link/);
+  });
+
+  test('a prospect matches its own cited page first, else its host\'s best-ranked page; www and subdomains are exact', () => {
+    const best = citedPage();
+    const other = citedPage({ key: 'floridist.com/lwr', url: 'https://floridist.com/lwr', rank: 2 });
+    const byHost = citedPagesByHost([best, other]);
+    expect(citedPagesFor({ target_domain: 'www.floridist.com' }, byHost)).toEqual([best, other]);
+    expect(citedPagesFor({ target_domain: 'floridist.com', target_url: 'https://floridist.com/LWR/?utm_source=x' }, byHost)).toEqual([other, best]);
+    expect(citedPagesFor({ target_domain: 'blog.floridist.com' }, byHost)).toEqual([]);
+    expect(citedPagesFor({ target_domain: 'floridist.com' }, new Map())).toEqual([]);
+  });
+
+  test('the pitch evidence lists only the hire questions, even when other questions sort first', () => {
+    const page = citedPage({ questions: [
+      { id: 'Q3', query: 'How much does pest control cost?', engines: ['claude'], provider: false, current: true },
+      { id: 'Q1', query: 'Who is the best pest control company in Sarasota FL?', engines: ['perplexity'], provider: true },
+    ] });
+    const text = buildUserPrompt(cited, worker.businessProfile(), null, null, page);
+    expect(text).toContain('Who is the best pest control company in Sarasota FL?');
+    expect(text).not.toContain('How much does pest control cost?');
+  });
+
+  test('a PDF cited page is not read as a page (text null)', async () => {
+    const { fetchPageText } = require('../services/seo/contact-finder');
+    const fetchFn = jest.fn(async () => ({ ok: true, status: 200, headers: { get: (n) => (n === 'content-type' ? 'application/pdf' : null) }, body: null, text: async () => `%PDF-1.7 ${'x'.repeat(2000)}` }));
+    const page = await fetchPageText('https://8.8.8.8/list.pdf', { fetchFn, withText: true });
+    expect(page && page.text).toBeNull();
+  });
+
+  test('the prompt carries the page, its questions and engines, and only the approved Waves facts', () => {
+    const text = buildUserPrompt(cited, worker.businessProfile(), null, null, citedPage());
+    expect(text).toMatch(/CITED PAGE/);
+    expect(text).toMatch(/https:\/\/floridist\.com\/best-pest-control-sarasota/);
+    expect(text).toMatch(/"Who is the best pest control company in Sarasota FL\?" \(claude, perplexity\) — the current answer does not name Waves/);
+    expect(WAVES_FACTS.length).toBe(4);
+    for (const f of WAVES_FACTS) expect(text).toContain(f);
+    expect(WAVES_FACTS.join(' ')).toMatch(/JB351547/);
+    expect(buildUserPrompt(cited, worker.businessProfile(), null, null, null)).not.toMatch(/CITED PAGE/);
+  });
+
+  test('run reads the cited page (not the homepage), drafts with the angle, and notes the page on the report', async () => {
+    claims([cited]);
+    const fetchPageFn = jest.fn(async () => ({ title: 'Best Pest Control in Sarasota', snippet: 'Our picks', text: ARTICLE }));
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: '{"subject":"Your Sarasota list","body":"Hi"}' }] }));
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn, citedPagesFn: async () => ({ pages: [citedPage()] }) });
+    expect(r.drafted).toBe(1);
+    expect(fetchPageFn).toHaveBeenCalledWith('https://floridist.com/best-pest-control-sarasota', { withText: true });
+    expect(create.mock.calls[0][0].messages[0].content).toMatch(/CITED PAGE/);
+    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'drafted', notes: expect.stringContaining('cited page https://floridist.com/best-pest-control-sarasota') }));
+  });
+
+  test('a cited page that already names Waves is skipped, never pitched', async () => {
+    claims([cited]);
+    const create = jest.fn();
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: async () => ({ title: 't', snippet: 's', text: `${ARTICLE} 3. Waves Pest Control (Lakewood Ranch)` }), citedPagesFn: async () => ({ pages: [citedPage()] }) });
+    expect(create).not.toHaveBeenCalled();
+    expect(r.skipped).toBe(1);
+    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', notes: expect.stringMatching(/Waves already on the cited page/) }));
+  });
+
+  test('a cited page that cannot be read fails the lease (retried) — never pitched unchecked', async () => {
+    claims([cited]);
+    const create = jest.fn();
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: noFetch, citedPagesFn: async () => ({ pages: [citedPage()] }) });
+    expect(create).not.toHaveBeenCalled();
+    expect(r.failed).toBe(1);
+    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', notes: expect.stringMatching(/cited page could not be read/) }));
+  });
+
+  test('an HTML-encoded space never hides an existing listing (fetchPageText decodes entities)', async () => {
+    const { fetchPageText } = require('../services/seo/contact-finder');
+    const html = '<html><title>Best Pest Control</title><body>3. Waves&#32;Pest&nbsp;Control &mdash; Lakewood Ranch</body></html>';
+    const fetchFn = jest.fn(async () => ({ ok: true, status: 200, headers: { get: (n) => (n === 'content-type' ? 'text/html' : null) }, body: null, text: async () => html }));
+    const page = await fetchPageText('https://8.8.8.8/best', { fetchFn, withText: true });
+    expect(page && page.text).toMatch(/Waves Pest Control — Lakewood Ranch/);
+    expect(WAVES_LISTED_RE.test(page.text)).toBe(true);
+    expect(WAVES_LISTED_RE.test('Gulf waves and pest control tips')).toBe(false);
+  });
+
+  test('a top list that already names Waves never rules out the publisher\'s other cited list', async () => {
+    const listed = citedPage();
+    const other = citedPage({ key: 'floridist.com/best-exterminators-venice', url: 'https://floridist.com/best-exterminators-venice', rank: 2 });
+    claims([cited]);
+    const fetchPageFn = jest.fn(async (url) => ({ title: 't', snippet: 's', text: url === listed.url ? `${ARTICLE} Waves Pest Control` : ARTICLE }));
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: '{"subject":"S","body":"B"}' }] }));
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn, citedPagesFn: async () => ({ pages: [listed, other] }) });
+    expect(r.drafted).toBe(1);
+    expect(create.mock.calls[0][0].messages[0].content).toContain(other.url);
+    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'drafted', notes: expect.stringContaining(`cited page ${other.url}`) }));
+  });
+
+  test('a prospect planned for a service page is pitched only on its own cited page', () => {
+    const best = citedPage();
+    const other = citedPage({ key: 'floridist.com/best-exterminators-venice', url: 'https://floridist.com/best-exterminators-venice' });
+    const byHost = citedPagesByHost([best, other]);
+    const wdo = { target_domain: 'floridist.com', target_page: 'https://www.wavespestcontrol.com/wdo-inspection/' };
+    expect(citedPagesFor(wdo, byHost)).toEqual([]);
+    expect(citedPagesFor({ ...wdo, target_url: 'https://floridist.com/best-exterminators-venice' }, byHost)).toEqual([other]);
+  });
+
+  test('every cited list is tried — a fourth list is reached when the first three already name Waves', () => {
+    const pages = [1, 2, 3, 4].map((n) => citedPage({ key: `floridist.com/best-${n}`, url: `https://floridist.com/best-${n}`, rank: n }));
+    expect(citedPagesFor({ target_domain: 'floridist.com', target_url: 'https://floridist.com/contact' }, citedPagesByHost(pages))).toHaveLength(4);
+  });
+
+  test('pickCitedPage: an unreadable candidate makes the prospect retry, never skip', async () => {
+    const a = citedPage();
+    const b = citedPage({ key: 'floridist.com/b', url: 'https://floridist.com/b' });
+    const fetchPageFn = async (url) => (url === a.url ? null : { text: `${ARTICLE} Waves Pest Control` });
+    expect(await pickCitedPage([a, b], fetchPageFn)).toEqual({ verdict: { fail: expect.stringMatching(/could not be read/) } });
+  });
+
+  test('a cited page cut short (text null) fails the lease too', async () => {
+    claims([cited]);
+    const create = jest.fn();
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: async () => ({ title: 't', snippet: 's', text: null }), citedPagesFn: async () => ({ pages: [citedPage()] }) });
+    expect(create).not.toHaveBeenCalled();
+    expect(r.failed).toBe(1);
+  });
+
+  test('an empty, title-only or bot-challenge page fails; a redirect to another page skips', () => {
+    const c = citedPage();
+    const unread = { fail: expect.stringMatching(/could not be read in full/) };
+    expect(citedPageVerdict({ text: '   ', finalUrl: c.url }, c)).toEqual(unread);
+    expect(citedPageVerdict({ title: 'Best Pest Control in Sarasota', text: 'Best Pest Control in Sarasota' }, c)).toEqual(unread);
+    expect(citedPageVerdict({ title: 'Just a moment...', text: `Just a moment... Verify you are human. ${ARTICLE}` }, c)).toEqual(unread);
+    expect(citedPageVerdict({ text: ARTICLE, finalUrl: 'https://floridist.com/' }, c)).toEqual({ skip: expect.stringMatching(/now redirects to https:\/\/floridist\.com\//) });
+    // a removed article redirected to a SHORT homepage is moved (skip), not unreadable (retry)
+    expect(citedPageVerdict({ text: 'Home', finalUrl: 'https://floridist.com/' }, c)).toEqual({ skip: expect.stringMatching(/now redirects/) });
+    expect(citedPageVerdict({ text: ARTICLE, finalUrl: 'https://www.floridist.com/best-pest-control-sarasota/' }, c)).toBeNull();
+    expect(citedPageVerdict({ text: ARTICLE }, c)).toBeNull();
+    // a full article that mentions JavaScript somewhere is still the article
+    expect(citedPageVerdict({ text: `${ARTICLE.repeat(4)} Please enable JavaScript to use our contact form.` }, c)).toBeNull();
+  });
+
+  test('a page that is not itself a list never carries the angle, whatever question cited it', () => {
+    expect(citedPagesFor({ target_domain: 'floridist.com' }, citedPagesByHost([citedPage({ listPage: false })]))).toEqual([]);
+  });
+
+  test('only pages cited for a provider question carry the angle — a cost guide keeps the usual pitch', () => {
+    const costGuide = citedPage({ key: 'floridist.com/cost', url: 'https://floridist.com/cost', questions: [{ id: 'Q3', query: 'How much does pest control cost?', engines: ['claude'], provider: false }] });
+    expect(citedPagesFor({ target_domain: 'floridist.com' }, citedPagesByHost([costGuide]))).toEqual([]);
+  });
+
+  test('a failed ranking read drafts with the usual angle', async () => {
+    claims([cited]);
+    const create = jest.fn(async () => ({ content: [{ type: 'text', text: '{"subject":"S","body":"B"}' }] }));
+    const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: noFetch, citedPagesFn: async () => { throw new Error('db down'); } });
+    expect(r.drafted).toBe(1);
+    expect(create.mock.calls[0][0].messages[0].content).not.toMatch(/CITED PAGE/);
   });
 });

@@ -288,7 +288,7 @@ describe('route decisions are keyed on the recording they were derived from', ()
     // No bare insert path is left: a bare ON CONFLICT DO NOTHING is what let a
     // reprocess that decided differently leave the superseded verdict newest.
     expect(body).not.toMatch(/route_decisions'\)[\s\S]{0,120}?\.onConflict\(/);
-    const writes = body.match(/upsertRouteDecision\(db, \w+, \{ callLogId: call\.id, processingToken: procToken \}\)/g) || [];
+    const writes = body.match(/upsertRouteDecision\(db, \w+, \{ callLogId: call\.id, processingToken: procToken \}(?:, routeDecisionWrite)?\)/g) || [];
     expect(writes.length).toBe(2);
     expect((body.match(/recordingSid: call\.recording_sid/g) || []).length).toBe(2);
   });

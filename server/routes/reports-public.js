@@ -275,7 +275,8 @@ const {
   applicatorIdentityPdfSignature,
   applicatorRenderedPdfSignature,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const {
   mosquitoReportV2PdfSignature,
   buildMosquitoReportV2,
@@ -2398,7 +2399,7 @@ router.get('/:token', async (req, res, next) => {
     // served anymore: they were written with raw technician_notes (gate
     // codes, billing notes) before the 2026-07-16 owner ruling and a stored
     // file can't be sanitized in place — regenerate on the fly instead, which
-    // routes notes through technicianReportCustomerCopy (codex P1 #2797).
+    // routes notes through customerSafeVisitNotes (codex P1 #2797).
 
     // Generate PDF on-the-fly
     const products = await db('service_products').where({ service_record_id: service.id });
@@ -2645,8 +2646,9 @@ router.get('/:token/data', async (req, res, next) => {
       customerName: `${service.first_name} ${service.last_name}`,
       cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
       // technician_notes is internal (owner ruling 2026-07-16): only the
-      // reviewed WHAT WE DID / WHAT WE FOUND parse may reach the customer.
-      notes: technicianReportCustomerCopy(service.technician_notes)?.body || '',
+      // reviewed parse may reach the customer, through the one rule every
+      // customer render uses (context-aggregator customerSafeVisitNotes).
+      notes: customerSafeVisitNotes(service) || '',
       products: products.map(p => ({
         name: p.product_name, category: p.product_category,
         activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
@@ -2729,8 +2731,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   }
 
   // Tech notes — raw technician_notes is internal (owner ruling 2026-07-16);
-  // print only the reviewed WHAT WE DID / WHAT WE FOUND parse, or nothing.
-  const reviewedNotes = technicianReportCustomerCopy(service.technician_notes)?.body;
+  // print only the reviewed parse, through the one rule every customer
+  // render uses (context-aggregator customerSafeVisitNotes), or nothing.
+  const reviewedNotes = customerSafeVisitNotes(service);
   if (reviewedNotes) {
     doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
     doc.moveDown(0.3);

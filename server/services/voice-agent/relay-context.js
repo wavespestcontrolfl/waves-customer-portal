@@ -798,61 +798,19 @@ async function loadCompletedVisits(customerId, limit = 5) {
     .orderBy('id', 'desc')
     .limit(limit)
     .select('service_date', 'service_type', 'technician_notes', 'structured_notes', 'status', 'service_data');
-  const { customerSafeServiceNotes } = require('../project-types');
   return rows.map((svc) => {
-    let structured = {};
-    try {
-      structured = typeof svc.structured_notes === 'string'
-        ? JSON.parse(svc.structured_notes)
-        : (svc.structured_notes || {});
-      if (!structured || typeof structured !== 'object' || Array.isArray(structured)) structured = {};
-    } catch { structured = {}; }
-    // THE suppression predicate, imported from the customer portal's own
-    // GET /api/services (routes/services.js suppressesCustomerArtifacts) rather
-    // than re-implemented: any typed delivery posture other than auto_send keeps
-    // the notes off customer surfaces — and the phone is one.
-    const { suppressesCustomerArtifacts } = require('../../routes/services');
-    const suppressed = suppressesCustomerArtifacts(structured);
     // ⭐ PARSER-APPROVED COPY ONLY — speaking a visit's notes down the phone is
-    // a REPORT path. AGENTS.md: "Raw `technician_notes` never egress on any
-    // report path (parser-approved copy only)", and the owner ruling behind it
-    // (2026-07-16, report-data.js's `legacy` block) names
-    // technicianReportCustomerCopy's reviewed parse as the ONLY sanctioned
-    // route to customer copy. customerSafeServiceNotes is not that parse — it
-    // only scrubs the WDO inspection fee and otherwise returns the note
-    // verbatim, so on its own it read the technician's internal note (access
-    // codes, billing notes) to the caller. Same two-step get_service_report
-    // already uses (relay-visit.js): parse first, fee scrub on top, and
-    // anything that is not the reviewed two-section draft simply isn't spoken.
-    const { technicianReportCustomerCopy } = require('../service-report/technician-report-copy');
-    // Completion-time request-context rejections frozen into service_data
-    // gate the spoken note too; unreadable service_data fails CLOSED
-    // (codex r61 #3420 — mirror of relay-visit).
-    const svcBodyRejected = (() => {
-      try {
-        const sd = typeof svc.service_data === 'string'
-          ? JSON.parse(svc.service_data || '{}')
-          : (svc.service_data || {});
-        if (sd?.technicianReportBodyRejected) return true;
-        // Governing snapshot refusals leave no marker — mirror the web
-        // acceptance rule (codex r65; same as relay-visit).
-        const { typedStoryAcceptsBody } = require('../service-report/activity-indicators');
-        return !typedStoryAcceptsBody(sd);
-      } catch { return true; }
-    })();
-    const reportCopy = (suppressed || svcBodyRejected) ? null : technicianReportCustomerCopy(svc.technician_notes);
-    // ⭐ PARSER-APPROVED IS NOT CODE-FREE (mirror of relay-visit's report
-    // path): the reviewed parse validates shape and compliance language, but a
-    // valid section can still carry a gate or lockbox code — the canonical
-    // redactor runs on top, failing CLOSED: no scrub, no spoken note.
-    const notes = (() => {
-      if (!(reportCopy && reportCopy.body)) return null;
-      try {
-        const { redactAccessCodes } = require('../context-aggregator');
-        if (typeof redactAccessCodes !== 'function') return null;
-        return redactAccessCodes(customerSafeServiceNotes(reportCopy.body, structured));
-      } catch { return null; }
-    })();
+    // a REPORT path. customerSafeVisitNotes (context-aggregator.js) is the one
+    // rule for every customer render of the note: the typed-delivery hold
+    // (any posture but auto_send keeps notes off customer surfaces, and the
+    // phone is one), technicianReportCustomerCopy's reviewed parse standing
+    // only where the web report lets it (a completion-time rejection, a
+    // governing typed story that refused it, the rodent trapping screens;
+    // codex r61/r65 #3420), failing CLOSED, with the WDO fee scrub and the
+    // access-code redactor on top. Anything that is not the reviewed draft
+    // simply isn't spoken.
+    const { customerSafeVisitNotes } = require('../context-aggregator');
+    const notes = customerSafeVisitNotes(svc);
     // The ISO day rides beside the spoken one: get_service_report's contract
     // is exact YYYY-MM-DD (spoken forms are rejected), so history must hand
     // the model a value the report tool actually accepts. Same DATE-trap
