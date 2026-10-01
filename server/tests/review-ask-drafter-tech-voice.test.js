@@ -160,8 +160,8 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({})).toBeNull();
   });
 
-  test('an uncited pest, property or repair claim must still be in the record', () => {
-    const body = 'I know you had to get to work, and I fixed the roof leak too. A Google review would really help: {review_url}';
+  test('an uncited pest, property or problem must still be in the record', () => {
+    const body = 'I know you had to get to work, and I looked at the roof leak too. A Google review would really help: {review_url}';
     expect(verify({ body })).toBe('ungrounded_term');
     expect(verify({ body: 'I know you had to get to work. The ants were busy. Google review: {review_url}' })).toBe('ungrounded_term');
     // "Roach" is grounded by "cockroach" in the record; loose words like "spot" are not checked.
@@ -173,9 +173,14 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     const c = { corpus: `${corpus} Moisture under the kitchen sink; suggested raising it with the property group.` };
     const details = [{ text: 'moisture under the kitchen sink', source_quote: 'Moisture under the kitchen sink' }];
     const fixed = "It's Adam, I fixed the moisture under the kitchen sink. A Google review would really help: {review_url}";
-    expect(verify({ body: fixed, details }, c)).toBe('ungrounded_term');
+    expect(verify({ body: fixed, details }, c)).toBe('result_claim');
     const solved = "It's Adam, the moisture under the kitchen sink is solved. A Google review would really help: {review_url}";
-    expect(verify({ body: solved, details }, c)).toBe('ungrounded_term');
+    expect(verify({ body: solved, details }, c)).toBe('result_claim');
+    // A request in the record ("please fix") never grounds a claimed repair (audit round 3).
+    const asked = { corpus: `${corpus} Please fix the moisture under the kitchen sink.` };
+    expect(verify({ body: fixed, details }, asked)).toBe('result_claim');
+    const gone = "It's Adam, the moisture under the kitchen sink is not gone yet. A Google review would really help: {review_url}";
+    expect(verify({ body: gone, details }, c)).toBe('result_claim');
     const cared = "It's Adam, I took care of the moisture under the kitchen sink. A Google review would really help: {review_url}";
     expect(verify({ body: cared, details }, c)).toBe('result_claim');
     // Reporting the observation itself is fine.
