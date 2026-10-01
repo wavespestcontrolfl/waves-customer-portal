@@ -1,14 +1,23 @@
 // Customer merge reconciliation for customer_dunning_schedules (customer-dunning/merge.js,
 // Codex #5503 r2 P1): a merge of two customers that both have schedule rows used to fail on
-// UNIQUE (customer_id, episode) / the one-open-schedule index. The merge now releases every open
-// schedule through the engine first (a refused release aborts the merge), and inside its
-// transaction takes both dunning keys, refuses a schedule that opened meanwhile and renumbers the
-// loser's episodes above the winner's. The real transaction is proven in
+// UNIQUE (customer_id, episode) / the one-open-schedule index. Before its transaction the merge
+// reads each open schedule's version and delivery evidence and refuses (for BOTH customers, writing
+// nothing) what a release would refuse; inside its transaction it takes both dunning keys, releases
+// each open schedule ON THAT TRANSACTION against the version it read (so a merge refused later rolls
+// the release back: Codex local review P2), refuses a schedule that opened meanwhile and renumbers
+// the loser's episodes above the winner's. The real transaction is proven in
 // customer-dunning-merge-postgres.test.js; this suite pins the decisions.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const mockRelease = jest.fn();
-jest.mock('../services/customer-dunning/schedule', () => ({ release: (...a) => mockRelease(...a) }));
+const mockSchedule = {
+  claimIsFresh: jest.fn(() => false),
+  rowSnapshot: jest.fn(),
+  currentStepDelivery: jest.fn(async () => null),
+  activeMemberRows: jest.fn(async () => []),
+  closeUnderLock: jest.fn(),
+  alertPastFinal: jest.fn(async () => {}),
+};
+jest.mock('../services/customer-dunning/schedule', () => mockSchedule);
 
 const DunningMerge = require('../services/customer-dunning/merge');
 
@@ -53,68 +62,141 @@ function withNegateRaw(fake) {
   return fake;
 }
 
-beforeEach(() => { mockRelease.mockReset(); });
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockSchedule.claimIsFresh.mockImplementation(() => false);
+  mockSchedule.rowSnapshot.mockImplementation(async (_db, id) => ({ step_index: 3, episode: 1, row_version: `v-${id}` }));
+  mockSchedule.currentStepDelivery.mockImplementation(async () => null);
+  mockSchedule.activeMemberRows.mockImplementation(async () => []);
+  mockSchedule.closeUnderLock.mockImplementation(async () => ({ closed: true, landed: [] }));
+});
 
-describe('releaseOpenSchedulesForMerge (before the merge transaction)', () => {
-  test('nothing open on either side: reads once and releases nothing', async () => {
-    const { database } = fakeDb([
+describe('prepareMergeRelease (before the merge transaction: reads, refuses, never writes)', () => {
+  test('nothing open on either side: reads once, prepares nothing', async () => {
+    const fake = fakeDb([
       { id: 's1', customer_id: WINNER, episode: 1, status: 'completed' },
       { id: 's2', customer_id: LOSER, episode: 1, status: 'released' },
     ]);
-    await expect(DunningMerge.releaseOpenSchedulesForMerge([WINNER, LOSER], { database })).resolves.toEqual([]);
-    expect(mockRelease).not.toHaveBeenCalled();
+    await expect(DunningMerge.prepareMergeRelease([WINNER, LOSER], { database: fake.database })).resolves.toEqual([]);
+    expect(mockSchedule.rowSnapshot).not.toHaveBeenCalled();
+    expect(fake.log).toEqual([['select']]);
   });
 
-  test('every open schedule of either party is released through the engine as released_merge', async () => {
+  test('every open schedule of either party: its row version and the current step\'s evidence, read against that version; no write, no release', async () => {
     const now = new Date('2026-10-01T15:00:00Z');
-    const { database } = fakeDb([
-      { id: 's-w', customer_id: WINNER, episode: 2, status: 'paused' },
-      { id: 's-l', customer_id: LOSER, episode: 1, status: 'active' },
+    const fake = fakeDb([
+      { id: 's-w', customer_id: WINNER, episode: 2, status: 'paused', step_index: 1 },
+      { id: 's-l', customer_id: LOSER, episode: 1, status: 'active', step_index: 1 },
       { id: 's-old', customer_id: LOSER, episode: 0, status: 'completed' },
       { id: 's-other', customer_id: 'someone-else', episode: 1, status: 'active' },
     ]);
-    mockRelease.mockImplementation(async (schedule) => ({ closed: true, landed: schedule.id === 's-l' ? [{}, {}] : [{}] }));
-    const out = await DunningMerge.releaseOpenSchedulesForMerge([WINNER, LOSER], { now, database });
-    expect(mockRelease.mock.calls.map(([s, reason, at, opts]) => [s.id, reason, at, opts.database])).toEqual([
-      ['s-w', 'released_merge', now, database],
-      ['s-l', 'released_merge', now, database],
+    const evidence = { delivered: true, unconfirmed: false, final: false, named: new Set() };
+    mockSchedule.currentStepDelivery.mockResolvedValueOnce(null).mockResolvedValueOnce(evidence);
+    const out = await DunningMerge.prepareMergeRelease([WINNER, LOSER], { now, database: fake.database });
+    expect(out.map((p) => [p.schedule.id, p.at.row_version, p.delivery])).toEqual([
+      ['s-w', 'v-s-w', null],
+      ['s-l', 'v-s-l', evidence],
     ]);
-    expect(out).toEqual([
-      { scheduleId: 's-w', customerId: WINNER, landed: 1 },
-      { scheduleId: 's-l', customerId: LOSER, landed: 2 },
-    ]);
+    // the evidence is read at the step the version snapshot saw, not the stale list read
+    expect(mockSchedule.currentStepDelivery.mock.calls.map(([sch]) => [sch.id, sch.step_index])).toEqual([['s-w', 3], ['s-l', 3]]);
+    expect(fake.log.some(([kind]) => kind === 'update')).toBe(false);
+    expect(mockSchedule.closeUnderLock).not.toHaveBeenCalled();
   });
 
-  test('a schedule another writer closed in between needs nothing', async () => {
-    const { database } = fakeDb([{ id: 's-l', customer_id: LOSER, episode: 1, status: 'held' }]);
-    mockRelease.mockResolvedValue({ closed: false, landed: [] });
-    await expect(DunningMerge.releaseOpenSchedulesForMerge([WINNER, LOSER], { database })).resolves.toEqual([]);
+  test('a schedule closed by another writer since the list read is skipped (the transaction re-checks)', async () => {
+    const fake = fakeDb([{ id: 's-l', customer_id: LOSER, episode: 1, status: 'held' }]);
+    mockSchedule.rowSnapshot.mockResolvedValueOnce(undefined);
+    await expect(DunningMerge.prepareMergeRelease([WINNER, LOSER], { database: fake.database })).resolves.toEqual([]);
   });
 
   test.each([
-    ['in_flight', /sending to one of these customers right now/],
-    ['outcome_unconfirmed', /still unconfirmed/],
-    ['evidence_unreadable', /could not be read/],
-    ['schedule_changed', /kept changing/],
-  ])('a release the engine refuses (%s) aborts the merge with a 409 in plain words, releasing nothing more', async (reason, words) => {
-    const { database } = fakeDb([
-      { id: 's-a', customer_id: LOSER, episode: 1, status: 'active' },
+    ['in_flight', /sending to one of these customers right now/, () => { mockSchedule.claimIsFresh.mockImplementation((s) => s.id === 's-b'); }],
+    ['evidence_unreadable', /could not be read/, () => {
+      mockSchedule.currentStepDelivery.mockImplementation(async (s) => { if (s.id === 's-b') throw new Error('ledger down'); return null; });
+    }],
+    ['outcome_unconfirmed', /still unconfirmed/, () => {
+      mockSchedule.currentStepDelivery.mockImplementation(async (s) => (s.id === 's-b' ? { unconfirmed: true, delivered: false } : null));
+      mockSchedule.activeMemberRows.mockResolvedValue([{ id: 'm' }]);
+    }],
+  ])('either customer\'s schedule a release would refuse (%s): a 409 in plain words before ANY release, nothing written', async (reason, words, arrange) => {
+    // s-a (loser) is releasable; s-b (winner) is not: the merge stops before releasing either
+    const fake = fakeDb([
+      { id: 's-a', customer_id: LOSER, episode: 1, status: 'paused' },
       { id: 's-b', customer_id: WINNER, episode: 1, status: 'active' },
     ]);
-    mockRelease.mockResolvedValueOnce({ closed: false, landed: [], reason });
-    const err = await DunningMerge.releaseOpenSchedulesForMerge([WINNER, LOSER], { database }).catch((e) => e);
+    arrange();
+    const err = await DunningMerge.prepareMergeRelease([WINNER, LOSER], { database: fake.database }).catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).toMatchObject({ statusCode: 409, code: 'DUNNING_SCHEDULE_BUSY', dunningReason: reason });
     expect(err.message).toMatch(words);
     expect(err.message).toMatch(/nothing was merged/);
     expect(err.message).not.toMatch(/_/); // no reason code in the copy
-    expect(mockRelease).toHaveBeenCalledTimes(1);
+    expect(mockSchedule.closeUnderLock).not.toHaveBeenCalled();
+    expect(fake.log.some(([kind]) => kind === 'update')).toBe(false);
+  });
+
+  test('an unconfirmed outcome with no member left to land is releasable (the release itself allows it)', async () => {
+    const fake = fakeDb([{ id: 's-a', customer_id: LOSER, episode: 1, status: 'active' }]);
+    mockSchedule.currentStepDelivery.mockResolvedValue({ unconfirmed: true, delivered: false });
+    await expect(DunningMerge.prepareMergeRelease([WINNER, LOSER], { database: fake.database })).resolves.toHaveLength(1);
+    expect(mockSchedule.activeMemberRows).toHaveBeenCalledWith(LOSER, { database: fake.database });
   });
 
   test('a failed read fails the merge (nothing has moved yet)', async () => {
     const database = jest.fn(() => ({ whereIn: () => ({ select: async () => { throw new Error('read failed'); } }) }));
-    await expect(DunningMerge.releaseOpenSchedulesForMerge([WINNER, LOSER], { database })).rejects.toThrow('read failed');
-    expect(mockRelease).not.toHaveBeenCalled();
+    await expect(DunningMerge.prepareMergeRelease([WINNER, LOSER], { database })).rejects.toThrow('read failed');
+    expect(mockSchedule.rowSnapshot).not.toHaveBeenCalled();
+  });
+});
+
+describe('reconcileInMergeTransaction: the releases run on the merge\'s own transaction', () => {
+  const prep = (row) => ({ schedule: row, at: { row_version: `v-${row.id}` }, delivery: { tag: row.id } });
+
+  test('each open schedule is closed on THE MERGE\'S trx (released_merge) against the version prepared, after both keys', async () => {
+    const now = new Date('2026-10-01T15:00:00Z');
+    const rows = [
+      { id: 's-w', customer_id: WINNER, episode: 2, status: 'paused' },
+      { id: 's-l', customer_id: LOSER, episode: 1, status: 'active' },
+    ];
+    const fake = withNegateRaw(fakeDb(rows));
+    mockSchedule.closeUnderLock.mockImplementation(async (_trx, schedule) => ({ closed: true, landed: schedule.id === 's-l' ? [{ rowId: 'm1' }] : [] }));
+    const prepared = rows.map(prep);
+    const out = await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared, now });
+    expect(mockSchedule.closeUnderLock.mock.calls.map(([trx, s, reason, at, version, delivery]) => [trx, s.id, reason, at, version.row_version, delivery.tag]))
+      .toEqual([
+        [fake.trx, 's-w', 'released_merge', now, 'v-s-w', 's-w'],
+        [fake.trx, 's-l', 'released_merge', now, 'v-s-l', 's-l'],
+      ]);
+    expect(out.released).toEqual([{ schedule: prepared[0].schedule, landed: [] }, { schedule: prepared[1].schedule, landed: [{ rowId: 'm1' }] }]);
+    // the keys came first
+    expect(fake.log.slice(0, 2).map(([kind]) => kind)).toEqual(['raw', 'raw']);
+    // the released loser schedule is renumbered above the winner's episode 2
+    expect(out.renumbers).toEqual([{ id: 's-l', from: 1, to: 3 }]);
+  });
+
+  test.each([
+    ['changed', { closed: false, landed: [], changed: true }, 'schedule_changed'],
+    ['in flight', { closed: false, landed: [], reason: 'in_flight' }, 'in_flight'],
+    ['unconfirmed', { closed: false, landed: [], reason: 'outcome_unconfirmed' }, 'outcome_unconfirmed'],
+    ['gone', { closed: false, landed: [] }, 'schedule_changed'],
+  ])('a release refused under the keys (%s) throws a 409: the merge transaction rolls back every release with it', async (_label, refusal, reason) => {
+    const rows = [
+      { id: 's-l', customer_id: LOSER, episode: 1, status: 'active' },
+      { id: 's-w', customer_id: WINNER, episode: 1, status: 'active' },
+    ];
+    const fake = withNegateRaw(fakeDb(rows));
+    mockSchedule.closeUnderLock.mockResolvedValueOnce({ closed: true, landed: [] }).mockResolvedValueOnce(refusal);
+    await expect(DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared: rows.map(prep) }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'DUNNING_SCHEDULE_BUSY', dunningReason: reason });
+    expect(fake.log.some(([kind]) => kind === 'update')).toBe(false); // no renumber either
+  });
+
+  test('afterMergeCommit: the past-final alert per released schedule, post-commit; a failing alert never throws', async () => {
+    const released = [{ schedule: { id: 's-1', customer_id: LOSER }, landed: [{ pausedPastFinal: true }] }, { schedule: { id: 's-2', customer_id: WINNER }, landed: [] }];
+    mockSchedule.alertPastFinal.mockRejectedValueOnce(new Error('alerts down'));
+    await expect(DunningMerge.afterMergeCommit(released)).resolves.toBeUndefined();
+    expect(mockSchedule.alertPastFinal.mock.calls).toEqual([[released[0].schedule, released[0].landed], [released[1].schedule, released[1].landed]]);
+    await expect(DunningMerge.afterMergeCommit([])).resolves.toBeUndefined();
   });
 });
 
@@ -133,12 +215,13 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
     expect(fake.log[1][0]).toBe('raw');
   });
 
-  test.each(['active', 'held', 'paused', 'autopay_hold'])('an open (%s) schedule on either side refuses: one opened since the release', async (status) => {
+  test.each(['active', 'held', 'paused', 'autopay_hold'])('an open (%s) schedule on either side that step 1 did not prepare refuses: one opened since', async (status) => {
     for (const owner of [WINNER, LOSER]) {
       const fake = withNegateRaw(fakeDb([{ id: 's', customer_id: owner, episode: 1, status }]));
       await expect(DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER }))
         .rejects.toMatchObject({ statusCode: 409, code: 'DUNNING_SCHEDULE_BUSY', dunningReason: 'reopened' });
       expect(fake.log.some(([kind]) => kind === 'update')).toBe(false);
+      expect(mockSchedule.closeUnderLock).not.toHaveBeenCalled();
     }
   });
 
@@ -147,8 +230,9 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
       { id: 'w1', customer_id: WINNER, episode: 1, status: 'completed' },
       { id: 'l1', customer_id: LOSER, episode: 1, status: 'released' },
     ]));
-    const out = await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
+    const { renumbers: out, released } = await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
     expect(out).toEqual([{ id: 'l1', from: 1, to: 2 }]);
+    expect(released).toEqual([]);
     expect(fake.table.find((r) => r.id === 'l1').episode).toBe(2);
     expect(fake.table.find((r) => r.id === 'w1').episode).toBe(1);
   });
@@ -160,7 +244,7 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
       { id: 'l9', customer_id: LOSER, episode: 9, status: 'completed' },
       { id: 'l3', customer_id: LOSER, episode: 3, status: 'released' },
     ]));
-    const out = await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
+    const { renumbers: out } = await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
     expect(out).toEqual([{ id: 'l3', from: 3, to: 2 }, { id: 'l9', from: 9, to: 3 }]);
     const updates = fake.log.filter(([kind]) => kind === 'update');
     expect(updates[0]).toEqual(['update', 'negate', ['l9', 'l3']]);
@@ -177,7 +261,7 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
       [],
     ]) {
       const fake = withNegateRaw(fakeDb(rows));
-      await expect(DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER })).resolves.toEqual([]);
+      await expect(DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER })).resolves.toEqual({ renumbers: [], released: [] });
       expect(fake.log.some(([kind]) => kind === 'update')).toBe(false);
     }
   });

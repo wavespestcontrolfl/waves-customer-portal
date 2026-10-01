@@ -565,46 +565,52 @@ const rowSnapshot = (database, id) => database(TABLE).where({ id }).whereIn('sta
 // One attempt at close: the landings use the delivery evidence read against `at` (the row version read
 // BEFORE that evidence). A row whose version moved since is returned as `changed`: a send may have
 // delivered in between, so the caller reads the evidence again.
-async function closeOnce(schedule, reason, now, at, delivery, { database, extra, claimStamp, expectedStepIndex }) {
-  return database.transaction(async (trx) => {
-    await takeLock(trx, schedule.customer_id);
-    // Re-read under the lock: the landings below start from the row AS IT IS
-    // NOW (a step that advanced since the caller read it), and a FRESH claim
-    // that is not the caller's is a send in flight — closing under it would
-    // hand its members back to the per-invoice ladder, which repeats the step
-    // it is delivering. Control writes (admin release) pass no claimStamp and are
-    // refused while a fresh foreign claim stands. A runner-internal close passes
-    // ITS claimStamp and is held to the whole claim it acted on: the stamp must
-    // still be the row's (an admin pause / resume clears it, another run replaces
-    // it), the schedule must still be active or held (never an admin's pause),
-    // and still at the step the runner judged. Anything else is `claim_lost` and
-    // closes nothing — a slow worker never overrides a control action.
-    const row = await trx(TABLE).where({ id: schedule.id }).whereIn('status', OPEN_STATUSES).forUpdate()
-      .first('*', ROW_VERSION);
-    if (!row) return { closed: false, landed: [] };
-    if (claimStamp) {
-      const ownsClaim = sameStamp(row.touch_claimed_at, claimStamp)
-        && CLAIMABLE_STATUSES.includes(row.status) && Number(row.step_index) === Number(expectedStepIndex);
-      if (!ownsClaim) return { closed: false, landed: [], reason: 'claim_lost' };
-    } else if (claimIsFresh(row, now)) {
-      return { closed: false, landed: [], reason: 'in_flight' };
-    }
-    // The evidence fence: any write since the snapshot the evidence was read against (a same-step TOLD
-    // delivery that cleared its claim included) makes that evidence stale.
-    if (row.row_version !== at.row_version) return { closed: false, landed: [], changed: true };
-    // A leg of the current step whose outcome is unconfirmed: handing members back could send that step
-    // again on their own ladders, so nothing is released while one remains to land (judged after the
-    // in-flight check: a send in flight right now is the next run's, not an unconfirmed outcome).
-    if (delivery?.unconfirmed && (await activeMemberRows(row.customer_id, { database: trx, forUpdate: true })).length) {
-      return { closed: false, landed: [], reason: 'outcome_unconfirmed' };
-    }
-    await trx(TABLE).where({ id: row.id }).update({
-      status: terminalStatusFor(reason), closed_reason: reason, closed_at: now,
-      next_touch_at: null, updated_at: trx.fn.now(), ...extra,
-    });
-    return { closed: true, landed: await releaseMembers(trx, row, now, delivery) };
+//
+// closeUnderLock runs it on the CALLER's transaction (a customer merge closes inside its own transaction, so
+// a merge that later refuses rolls the release back with it); it takes the customer's key itself, which is
+// re-entrant for a transaction that already holds it. Nothing in it reads outside `trx`.
+async function closeUnderLock(trx, schedule, reason, now, at, delivery, { extra = {}, claimStamp = null, expectedStepIndex = schedule.step_index } = {}) {
+  await takeLock(trx, schedule.customer_id);
+  // Re-read under the lock: the landings below start from the row AS IT IS
+  // NOW (a step that advanced since the caller read it), and a FRESH claim
+  // that is not the caller's is a send in flight — closing under it would
+  // hand its members back to the per-invoice ladder, which repeats the step
+  // it is delivering. Control writes (admin release) pass no claimStamp and are
+  // refused while a fresh foreign claim stands. A runner-internal close passes
+  // ITS claimStamp and is held to the whole claim it acted on: the stamp must
+  // still be the row's (an admin pause / resume clears it, another run replaces
+  // it), the schedule must still be active or held (never an admin's pause),
+  // and still at the step the runner judged. Anything else is `claim_lost` and
+  // closes nothing — a slow worker never overrides a control action.
+  const row = await trx(TABLE).where({ id: schedule.id }).whereIn('status', OPEN_STATUSES).forUpdate()
+    .first('*', ROW_VERSION);
+  if (!row) return { closed: false, landed: [] };
+  if (claimStamp) {
+    const ownsClaim = sameStamp(row.touch_claimed_at, claimStamp)
+      && CLAIMABLE_STATUSES.includes(row.status) && Number(row.step_index) === Number(expectedStepIndex);
+    if (!ownsClaim) return { closed: false, landed: [], reason: 'claim_lost' };
+  } else if (claimIsFresh(row, now)) {
+    return { closed: false, landed: [], reason: 'in_flight' };
+  }
+  // The evidence fence: any write since the snapshot the evidence was read against (a same-step TOLD
+  // delivery that cleared its claim included) makes that evidence stale.
+  if (row.row_version !== at.row_version) return { closed: false, landed: [], changed: true };
+  // A leg of the current step whose outcome is unconfirmed: handing members back could send that step
+  // again on their own ladders, so nothing is released while one remains to land (judged after the
+  // in-flight check: a send in flight right now is the next run's, not an unconfirmed outcome).
+  if (delivery?.unconfirmed && (await activeMemberRows(row.customer_id, { database: trx, forUpdate: true })).length) {
+    return { closed: false, landed: [], reason: 'outcome_unconfirmed' };
+  }
+  await trx(TABLE).where({ id: row.id }).update({
+    status: terminalStatusFor(reason), closed_reason: reason, closed_at: now,
+    next_touch_at: null, updated_at: trx.fn.now(), ...extra,
   });
+  return { closed: true, landed: await releaseMembers(trx, row, now, delivery) };
 }
+
+const closeOnce = (schedule, reason, now, at, delivery, { database, ...opts }) => database.transaction(
+  (trx) => closeUnderLock(trx, schedule, reason, now, at, delivery, opts),
+);
 
 /**
  * Close a schedule (guarded on it still being open) and release surviving
@@ -972,6 +978,9 @@ module.exports = {
   releaseMembers,
   close,
   release,
+  rowSnapshot,
+  closeUnderLock,
+  alertPastFinal,
   nextTouchFor,
   advance,
   completeFinal,

@@ -1952,23 +1952,32 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   // post-commit contact audit event.
   let winnerBeforeMerge = null;
   let mergeLockedAt = null;
-  // Customer-level overdue reminders (customer-dunning/merge.js): an OPEN
-  // schedule on either side is released through the engine's own release
-  // BEFORE the transaction (it reads delivery evidence, which must not run
-  // under the merge's locks); a refused release aborts the merge here,
-  // before anything moved. The next run promotes the merged customer as one.
+  // Customer-level overdue reminders (customer-dunning/merge.js): every OPEN
+  // schedule on either side is read BEFORE the transaction (its row version
+  // and the current step's delivery evidence, a ledger read that must not run
+  // under the merge's locks) and anything a release would refuse aborts the
+  // merge here, for both customers, before anything moved. The releases
+  // themselves run INSIDE the transaction below, so a merge that refuses later
+  // rolls them back too. The next run promotes the merged customer as one.
   const DunningMerge = require('./customer-dunning/merge');
-  await DunningMerge.releaseOpenSchedulesForMerge([winnerId, loserId]);
+  const dunningNow = new Date();
+  const dunningPrepared = await DunningMerge.prepareMergeRelease([winnerId, loserId], { now: dunningNow });
   let dunningEpisodeRenumbers = [];
+  let dunningReleased = [];
   const result = await db.transaction(async (trx) => {
     // FIRST, before every other lock: both customers' dunning keys
     // (EXCLUSIVE, sorted) — every engine path takes that key first in a
-    // fresh transaction, so waiting on it here holds nothing. Under them, an
-    // open schedule that appeared since the release refuses the merge, and
-    // the loser's closed episodes are renumbered above the winner's so the
+    // fresh transaction, so waiting on it here holds nothing. Under them, each
+    // open schedule is released on THIS transaction against the version read
+    // above (a write since refuses the merge), one that appeared since refuses
+    // it, and the loser's episodes are renumbered above the winner's so the
     // FK sweep's repoint keeps UNIQUE (customer_id, episode) — Codex #5503
     // r2 P1: two episode-1 histories raised 23505 and aborted the merge.
-    dunningEpisodeRenumbers = await DunningMerge.reconcileInMergeTransaction(trx, { winnerId, loserId });
+    const dunning = await DunningMerge.reconcileInMergeTransaction(trx, {
+      winnerId, loserId, prepared: dunningPrepared, now: dunningNow,
+    });
+    dunningEpisodeRenumbers = dunning.renumbers;
+    dunningReleased = dunning.released;
     // The collections case lock for BOTH parties, before anything moves
     // (PR C / codex gh-r7): the repoint below rewrites collection_cases FKs
     // while the dial surfaces promote/rotate under this same customer lock —
@@ -3037,6 +3046,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // link-as-property route preserves the loser's address on the winner).
     return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser };
   });
+  // Released combined reminder schedules: the log line and any past-final
+  // office alert, post-commit (never on the merge's transaction; never throws).
+  await DunningMerge.afterMergeCommit(dunningReleased);
   // 360 timeline events for loser contacts appended onto the winner —
   // post-commit, best-effort, awaited (the recorder never throws; a failed
   // event only warns and never fails the merge). No-op when the backfills

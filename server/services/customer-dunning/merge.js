@@ -7,21 +7,30 @@
  * loser's rows onto the winner: two ordinary episode-1 histories, or two open schedules, would raise
  * 23505 and abort the whole merge.
  *
- * The merge therefore runs in two parts:
- *   1. BEFORE its transaction, releaseOpenSchedulesForMerge releases every OPEN schedule of either party
- *      through the engine's own release (closed_reason released_merge): every surviving member lands on
- *      its own per-invoice ladder with no step repeated (schedule.js §7), and the next run promotes the
- *      merged customer as ONE schedule. Release reads the current step's delivery evidence first, which
- *      may not run under the merge's locks. A release the engine refuses (a send in flight, an
- *      unconfirmed or unreadable current step, a schedule that kept changing) aborts the merge before
- *      anything moved: handing members back blind could send a step that already went out.
+ * The merge therefore runs in two parts, and from the operator's view it is all-or-nothing (Codex local
+ * review P2: releases used to commit BEFORE the merge transaction, so a merge that then refused, or whose
+ * second release refused, left the first schedule released for good: a paused combined schedule became
+ * separate paused invoices and the customer-level resume answered 404):
+ *   1. BEFORE its transaction, prepareMergeRelease reads, for every OPEN schedule of either party, the row's
+ *      version and the current step's delivery evidence (the ledger read must not run under the merge's
+ *      locks, and on the global pool it costs no second connection of the merge's own), and refuses up
+ *      front, for EITHER customer, what a release would refuse: a send in flight, evidence that cannot be
+ *      read, a current step whose outcome is unconfirmed while members remain. It writes nothing.
  *   2. FIRST inside the merge transaction, reconcileInMergeTransaction takes both customers' dunning keys
  *      EXCLUSIVELY (sorted ids, before any other lock the merge takes: every engine path takes this key
- *      first in a fresh transaction, so the merge never waits on it while holding anything), refuses when
- *      an open schedule appeared since step 1 (a promotion in between: retry), and renumbers the loser's
- *      closed episodes above the winner's highest so the FK sweep's repoint keeps (customer_id, episode)
- *      unique. Holding the keys to commit keeps any promotion, claim or release out until the customer
- *      is one row.
+ *      first in a fresh transaction, so the merge never waits on it while holding anything), then closes
+ *      each open schedule ON THE MERGE'S TRANSACTION (Schedule.closeUnderLock, closed_reason
+ *      released_merge: every surviving member lands on its own per-invoice ladder with no step repeated,
+ *      schedule.js §7) against the version step 1 read (any write since, a send included, refuses as
+ *      schedule_changed: the evidence may be stale), refuses a schedule that opened after step 1, and
+ *      renumbers the loser's episodes above the winner's highest so the FK sweep's repoint keeps
+ *      (customer_id, episode) unique. Any later refusal of the merge (eligibility, approved versions,
+ *      conflicts) rolls the releases back with everything else. Holding the keys to commit keeps any
+ *      promotion, claim or release out until the customer is one row; the next run promotes the merged
+ *      customer as ONE schedule.
+ *   3. AFTER commit, afterMergeCommit raises the office alert for any member released past its final step
+ *      (alerts are never written on the merge's transaction). Best effort: the member row itself is already
+ *      paused for a person, which is the state that matters.
  *
  * Episode renumbering never changes a touch's identity: every key carries the schedule's uuid, and a
  * closed schedule's keys are never rebuilt from its row. The renumbered rows are plain repoints in the
@@ -30,6 +39,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactContact } = require('../../utils/redact-contact');
 const { OPEN_STATUSES, lockKey } = require('./constants');
 
 const TABLE = 'customer_dunning_schedules';
@@ -63,30 +73,41 @@ async function readRows(database, customerIds, columns) {
 }
 
 /**
- * Step 1 (before the merge transaction): release every open schedule of the given customers. Returns
- * [{ scheduleId, customerId, landed }] for the schedules it closed; throws a 409 DUNNING_SCHEDULE_BUSY
- * error, having closed nothing more, when the engine refuses a release. A schedule another writer
- * closed in between needs nothing (step 2 re-checks under the keys).
+ * Step 1 (before the merge transaction): for each OPEN schedule of the given customers, the row version and
+ * the current step's delivery evidence the in-transaction close is held to. Every refusal a release would
+ * give is checked for BOTH customers before the merge starts; nothing is written. Throws a 409
+ * DUNNING_SCHEDULE_BUSY error on a refusal, or the read error itself when the schedules cannot be read.
+ * Returns [{ schedule, at, delivery }].
  */
-async function releaseOpenSchedulesForMerge(customerIds, { now = new Date(), database = db } = {}) {
+async function prepareMergeRelease(customerIds, { now = new Date(), database = db } = {}) {
   const ids = sortedIds(customerIds);
   if (!ids.length) return [];
   const open = (await readRows(database, ids, ['*'])).filter(isOpen);
   if (!open.length) return [];
   const Schedule = require('./schedule');
-  const released = [];
+  const prepared = [];
   for (const schedule of open) {
-    const out = await Schedule.release(schedule, MERGE_REASON, now, { database });
-    if (out.closed) {
-      released.push({ scheduleId: schedule.id, customerId: String(schedule.customer_id), landed: out.landed.length });
-      logger.info(`[customer-dunning] schedule ${schedule.id} (customer ${schedule.customer_id}) released for a customer merge; ${out.landed.length} invoice(s) back on their own reminders`);
-      continue;
+    if (Schedule.claimIsFresh(schedule, now)) throw refused(schedule, 'in_flight');
+    const at = await Schedule.rowSnapshot(database, schedule.id);
+    if (!at) continue; // closed by another writer since the read: step 2 re-checks under the keys
+    let delivery;
+    try {
+      delivery = await Schedule.currentStepDelivery({ ...schedule, step_index: at.step_index, episode: at.episode });
+    } catch (err) {
+      logger.error(`[customer-dunning] schedule ${schedule.id} delivery evidence unreadable for a customer merge: ${redactContact(err.message)}`);
+      throw refused(schedule, 'evidence_unreadable');
     }
-    if (!out.reason) continue; // already closed by another writer
-    logger.warn(`[customer-dunning] customer merge refused: schedule ${schedule.id} not released (${out.reason})`);
-    throw mergeBlocked(out.reason);
+    if (delivery?.unconfirmed && (await Schedule.activeMemberRows(schedule.customer_id, { database })).length) {
+      throw refused(schedule, 'outcome_unconfirmed');
+    }
+    prepared.push({ schedule, at, delivery });
   }
-  return released;
+  return prepared;
+}
+
+function refused(schedule, reason) {
+  logger.warn(`[customer-dunning] customer merge refused: schedule ${schedule.id} not releasable (${reason})`);
+  return mergeBlocked(reason);
 }
 
 /** Both customers' dunning keys, EXCLUSIVE, in sorted order. */
@@ -97,14 +118,31 @@ async function lockCustomers(trx, customerIds) {
 }
 
 /**
- * Step 2 (FIRST inside the merge transaction): take both dunning keys, refuse an open schedule, and
- * renumber the loser's episodes above the winner's. Returns [{ id, from, to }] (empty when nothing
- * needed renumbering).
+ * Step 2 (FIRST inside the merge transaction): take both dunning keys, close every open schedule on `trx`
+ * against what step 1 read (`prepared`), and renumber the loser's episodes above the winner's. Returns
+ * { renumbers: [{ id, from, to }], released: [{ schedule, landed }] }. Throws a 409 DUNNING_SCHEDULE_BUSY
+ * error (the merge rolls back, releases included) when a schedule opened since step 1, changed since its
+ * evidence was read, or a release refuses.
  */
-async function reconcileInMergeTransaction(trx, { winnerId, loserId }) {
+async function reconcileInMergeTransaction(trx, { winnerId, loserId, prepared = [], now = new Date() }) {
   await lockCustomers(trx, [winnerId, loserId]);
   const rows = await readRows(trx, [winnerId, loserId], ['id', 'customer_id', 'episode', 'status']);
-  if (rows.some(isOpen)) throw mergeBlocked('reopened');
+  const released = [];
+  const openRows = rows.filter(isOpen);
+  if (openRows.length) {
+    const Schedule = require('./schedule');
+    for (const row of openRows) {
+      const prep = prepared.find((p) => String(p.schedule.id) === String(row.id));
+      if (!prep) throw mergeBlocked('reopened');
+      const out = await Schedule.closeUnderLock(trx, prep.schedule, MERGE_REASON, now, prep.at, prep.delivery);
+      if (!out.closed) throw refused(prep.schedule, out.changed || !out.reason ? 'schedule_changed' : out.reason);
+      released.push({ schedule: prep.schedule, landed: out.landed });
+    }
+  }
+  return { renumbers: await renumberLoserEpisodes(trx, rows, { winnerId, loserId }), released };
+}
+
+async function renumberLoserEpisodes(trx, rows, { winnerId, loserId }) {
   const winnerMax = rows.filter((r) => String(r.customer_id) === String(winnerId))
     .reduce((max, r) => Math.max(max, Number(r.episode) || 0), 0);
   const loserRows = rows.filter((r) => String(r.customer_id) === String(loserId))
@@ -125,6 +163,23 @@ async function reconcileInMergeTransaction(trx, { winnerId, loserId }) {
 }
 
 /**
+ * Step 3 (after the merge committed): log each release and alert the office for any member released past its
+ * final step. Never throws: the merge already happened.
+ */
+async function afterMergeCommit(released = []) {
+  if (!released.length) return;
+  const Schedule = require('./schedule');
+  for (const { schedule, landed } of released) {
+    logger.info(`[customer-dunning] schedule ${schedule.id} (customer ${schedule.customer_id}) released for a customer merge; ${landed.length} invoice(s) back on their own reminders`);
+    try {
+      await Schedule.alertPastFinal(schedule, landed);
+    } catch (err) {
+      logger.error(`[customer-dunning] past-final alert after a customer merge failed for schedule ${schedule.id}: ${redactContact(err.message)}`);
+    }
+  }
+}
+
+/**
  * The undo's share (revertMerge): the same keys, EXCLUSIVE, so no promotion, claim or release runs
  * while the journaled invoices and sequences move back. Nothing else is needed: the loser's journaled
  * schedule rows are closed history that moves back by id, and any combined send after the merge
@@ -134,8 +189,9 @@ const lockForMergeUndo = (trx, { winnerId, loserId }) => lockCustomers(trx, [win
 
 module.exports = {
   MERGE_REASON,
-  releaseOpenSchedulesForMerge,
+  prepareMergeRelease,
   reconcileInMergeTransaction,
+  afterMergeCommit,
   lockForMergeUndo,
   _test: { mergeBlocked, BLOCKED_TEXT },
 };
