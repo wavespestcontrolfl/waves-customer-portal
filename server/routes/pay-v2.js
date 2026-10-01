@@ -938,6 +938,12 @@ router.post('/:token/finalize', async (req, res, next) => {
         reconciliationRequired: !!err.reconciliationRequired,
       });
     }
+    // Expected races (the consent-stamp fence, combined-balance drift): the
+    // page reloads to the live session — same contract as /setup and
+    // /update-amount, no admin bill-payment-error alert.
+    if (err.statusCode === 409 && err.staleBalance) {
+      return res.status(409).json({ error: err.message, staleBalance: true });
+    }
     reportBillPaymentError(req, {
       invoice,
       phase: 'finalize',

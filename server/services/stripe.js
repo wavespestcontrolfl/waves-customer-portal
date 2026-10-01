@@ -5276,6 +5276,25 @@ const StripeService = {
           }
         }
 
+        // Consent-stamp fence (pre-push Codex on #5434): this update writes
+        // the stamp beside save_card_opt_in. If the live PI carries a
+        // DIFFERENT stamp (the customer ticked Save after the quote while the
+        // page skipped its /update-amount sync, or a pre-rollout PI with
+        // none), an in-place re-stamp would — should this confirm fail —
+        // leave a client secret an older tab can still confirm (Express
+        // Checkout) under text it never displayed. Refuse under the invoice
+        // lock instead: the page reloads and re-syncs through /setup, which
+        // replaces the PI on a stamp change. Read for the stamp only — the
+        // amount_details clear below stays unconditional (no probe).
+        const livePi = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+        if (String(livePi?.metadata?.[CONSENT_VERSION_METADATA_KEY] || '')
+          !== String(updateParams.metadata[CONSENT_VERSION_METADATA_KEY] || '')) {
+          const fence = new Error('Your payment session changed. Please refresh the page and try again.');
+          fence.statusCode = 409;
+          fence.staleBalance = true;
+          throw fence;
+        }
+
         try {
           await stripe.paymentIntents.update(
             lockedInvoice.stripe_payment_intent_id,
@@ -5340,6 +5359,9 @@ const StripeService = {
         err.savedCardPending = true;
         throw err;
       }
+      // The consent-stamp fence's reloadable 409 reaches the route as-is
+      // (same contract as /update-amount's staleBalance), never wrapped.
+      if (err && err.staleBalance) throw err;
       logger.error(`[stripe] Finalize failed for PI ${invoice.stripe_payment_intent_id}: ${err.message}`);
       throw new Error(`Failed to finalize payment: ${err.message}`);
     }

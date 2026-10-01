@@ -1014,10 +1014,12 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
 
     expect(result.surcharge).toBe(0);
-    // No read-then-write window: the clear rides the same update that
-    // attaches the PM, so a concurrent credit attempt's stranded surcharge
-    // can never survive into this confirm.
-    expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
+    // No read-then-write window for amount_details: the clear rides the same
+    // update that attaches the PM, so a concurrent credit attempt's stranded
+    // surcharge can never survive into this confirm. The single retrieve is
+    // the consent-stamp fence (pre-push Codex on #5434) — its amount_details
+    // are never consulted.
+    expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledTimes(1);
     const [, params, updateOpts] = stripeClient.paymentIntents.update.mock.calls[0];
     expect(params.amount).toBe(7500);
     expect(params.amount_details).toBe('');
@@ -1027,12 +1029,41 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     expect(confirmOpts).toEqual({ apiVersion: expect.any(String) });
   });
 
+  test('finalize refuses (409, reload) when the live consent stamp differs from the one it would write — never a re-stamp in place', async () => {
+    // Pre-push Codex on #5434: the customer ticked Save after the quote while
+    // the page skipped its /update-amount sync (or the PI predates stamps);
+    // an in-place re-stamp would leave an older tab's secret confirmable
+    // under text it never displayed should this confirm fail.
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({ id: 'pi-public', status: 'requires_payment_method', amount_details: null, metadata: {} });
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    await expect(StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor(), { saveCard: true, consentTextVersion: CONSENT_VERSION }))
+      .rejects.toMatchObject({ statusCode: 409, staleBalance: true });
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
+  });
+
+  test('finalize proceeds when the live consent stamp matches the one it writes', async () => {
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi-public', status: 'requires_payment_method', amount_details: null, metadata: { save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION },
+    });
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor(), { saveCard: true, consentTextVersion: CONSENT_VERSION });
+    expect(result.surcharge).toBe(0);
+    const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
+    expect(params.metadata).toEqual(expect.objectContaining({ save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION, waves_customer_id: 'cust-1' }));
+    expect(stripeClient.paymentIntents.confirm).toHaveBeenCalledTimes(1);
+  });
+
   test('credit finalize applies the surcharge breakdown', async () => {
     stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm-card', type: 'card', card: { funding: 'credit' } });
     const StripeService = require('../services/stripe');
     const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
 
-    expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledTimes(1); // the consent-stamp fence only
     expect(result.surcharge).toBe(2.17);
     const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
     expect(params.amount).toBe(7717);
@@ -1061,7 +1092,8 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     expect(fallbackParams.amount).toBe(7500);
     expect(fallbackParams.amount_details).toBeUndefined();
     expect(fallbackOpts).toBeUndefined();
-    const [, , verifyOpts] = stripeClient.paymentIntents.retrieve.mock.calls[0];
+    // The LAST retrieve is the post-unset verify (the first is the consent-stamp fence).
+    const [, , verifyOpts] = stripeClient.paymentIntents.retrieve.mock.calls.at(-1);
     expect(verifyOpts).toEqual({ apiVersion: expect.any(String) });
     expect(stripeClient.paymentIntents.confirm).toHaveBeenCalled();
   });

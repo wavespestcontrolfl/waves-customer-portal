@@ -96,6 +96,20 @@ const post = (baseUrl, route, body) => fetch(`${baseUrl}/api/pay/${TOKEN}/${rout
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
 
+describe("/finalize's consent-stamp fence maps to a reloadable 409", () => {
+  test('a staleBalance 409 from the service reaches the page as { staleBalance: true } (no bill-payment alert)', async () => {
+    const fence = new Error('Your payment session changed. Please refresh the page and try again.');
+    fence.statusCode = 409;
+    fence.staleBalance = true;
+    StripeService.finalizeInvoicePayment.mockRejectedValueOnce(fence);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'finalize', { quoteToken: 'quote-1', saveCard: true, consentTextVersion: CONSENT_VERSION });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: fence.message, staleBalance: true });
+    });
+  });
+});
+
 describe('save-the-method mints attest the rendered consent version', () => {
   test.each([
     ['setup', { saveCard: true }, 'createInvoicePaymentIntent'],

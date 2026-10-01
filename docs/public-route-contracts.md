@@ -650,7 +650,10 @@ in-place re-stamp would let the webhook record the newer version against
 text that tab never rendered. A replacement carries a SUPERSET of the old
 intent's metadata (`waves_customer_id`, `save_card_opt_in`, the consent
 stamp, …) with the new values winning, so the webhook mirrors keyed on
-those stamps keep working across the swap. `/capture-setup` does the same and stamps the
+those stamps keep working across the swap. `/finalize` never re-stamps in
+place either: under the invoice lock it reads the PaymentIntent's live stamp
+and refuses with `409 { error, staleBalance: true }` (the page reloads and
+re-syncs through `/setup`) when it differs from the one it would write. `/capture-setup` does the same and stamps the
 SetupIntent. `/consent` and `/setup-complete` record ONLY under the intent's
 own current stamp — never the posting bundle's constant, since a redirect
 return posts from a freshly loaded, possibly newer bundle — answering the
