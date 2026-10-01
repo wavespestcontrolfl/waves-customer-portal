@@ -8,24 +8,6 @@ const {
 const TAURUS = { name: 'Taurus SC', epaReg: '53883-279', role: 'insect-control application', method: 'perimeter_spray', methodLabel: 'perimeter spray', applicationArea: 'Exterior perimeter', targets: ['Ghost ants'] };
 const ADVION = { name: 'Advion Ant Bait Gel', epaReg: '352-746', role: 'bait application', method: 'bait_placement', methodLabel: 'bait placement', applicationArea: 'Kitchen', targets: ['Ghost ants'] };
 
-// Records every builder call; `rows` (or a rejection) answers the await.
-function knexWith(rows, { fail = false } = {}) {
-  const calls = [];
-  const builder = new Proxy({}, {
-    get(_, prop) {
-      if (prop === 'then') return (resolve, reject) => (fail ? Promise.reject(new Error('lookup down')) : Promise.resolve(rows)).then(resolve, reject);
-      return (...args) => {
-        calls.push([prop, ...args]);
-        if (prop === 'modify') args[0](builder);
-        return builder;
-      };
-    },
-  });
-  const knex = jest.fn(() => builder);
-  knex.calls = calls;
-  return knex;
-}
-
 describe('writer expectations', () => {
   test('pest product classes give the approved lines and the longest closing window', () => {
     const { lines, windowDays } = writerExpectations({ line: 'pest', applications: [TAURUS, ADVION] });
@@ -85,9 +67,43 @@ describe('reach-out date', () => {
   });
 });
 
+// The visit's own row (first) and the bookings list (await) answer
+// separately; whereNot({ id }) leaves the visit out of the list.
+const HOME = { service_address_line1: '123 Main St', service_address_city: 'Bradenton', service_address_zip: '34209' };
+const RENTAL = { service_address_line1: '456 Oak Ave', service_address_city: 'Bradenton', service_address_zip: '34209' };
+function knexFor({ reportVisit = { id: 's1', ...HOME }, rows = [], services = [], fail = false } = {}) {
+  const calls = [];
+  const knex = jest.fn((table) => {
+    let excluded = null;
+    const answer = () => {
+      if (fail) return Promise.reject(new Error('lookup down'));
+      if (table === 'services') return Promise.resolve(services);
+      return Promise.resolve(rows.filter((row) => row.id !== excluded));
+    };
+    const builder = new Proxy({}, {
+      get(_, prop) {
+        if (prop === 'then') return (resolve, reject) => answer().then(resolve, reject);
+        if (prop === 'first') return () => (fail ? Promise.reject(new Error('lookup down')) : Promise.resolve(reportVisit));
+        return (...args) => {
+          calls.push([prop, ...args]);
+          if (prop === 'whereNot') excluded = args[0]?.id ?? null;
+          if (prop === 'modify') args[0](builder);
+          return builder;
+        };
+      },
+    });
+    return builder;
+  });
+  knex.calls = calls;
+  return knex;
+}
+
 describe('next visit on the same line', () => {
-  test('is the first booked visit after this one on the same line', async () => {
-    const knex = knexWith([{ service_type: 'Lawn Care Visit' }, { service_type: 'Quarterly Pest Control' }]);
+  test('is the first booked visit after this one on the same line, at this property', async () => {
+    const knex = knexFor({ rows: [
+      { id: 'n1', service_type: 'Lawn Care Visit', ...HOME },
+      { id: 'n2', service_type: 'Quarterly Pest Control', ...HOME },
+    ] });
     await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
       .resolves.toEqual({ state: 'scheduled', serviceType: 'Quarterly Pest Control' });
     expect(knex.calls).toEqual(expect.arrayContaining([
@@ -97,21 +113,39 @@ describe('next visit on the same line', () => {
     ]));
   });
 
+  test("a booking at another of the customer's properties never counts", async () => {
+    const knex = knexFor({ rows: [{ id: 'n1', service_type: 'Quarterly Pest Control', ...RENTAL }] });
+    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
+      .resolves.toEqual({ state: 'none' });
+  });
+
+  test('an earlier same-line booking with no property, or a visit with none, is unknown', async () => {
+    const unplaced = knexFor({ rows: [
+      { id: 'n1', service_type: 'Quarterly Pest Control' },
+      { id: 'n2', service_type: 'Quarterly Pest Control', ...HOME },
+    ] });
+    await expect(loadNextSameLineVisit({ knex: unplaced, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
+      .resolves.toEqual({ state: 'unknown' });
+    const unplacedVisit = knexFor({ reportVisit: { id: 's1' }, rows: [{ id: 'n2', service_type: 'Quarterly Pest Control', ...HOME }] });
+    await expect(loadNextSameLineVisit({ knex: unplacedVisit, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
+      .resolves.toEqual({ state: 'unknown' });
+  });
+
   test('none booked on the line', async () => {
-    const knex = knexWith([{ service_type: 'Lawn Care Visit' }]);
-    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', serviceYmd: '2026-09-30', line: 'pest' })).resolves.toEqual({ state: 'none' });
+    const knex = knexFor({ rows: [{ id: 'n1', service_type: 'Lawn Care Visit', ...HOME }] });
+    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' })).resolves.toEqual({ state: 'none' });
   });
 
   test('a failed lookup is unknown, never "none booked"', async () => {
-    const knex = knexWith([], { fail: true });
-    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', serviceYmd: '2026-09-30', line: 'pest' })).resolves.toEqual({ state: 'unknown' });
+    const knex = knexFor({ fail: true });
+    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' })).resolves.toEqual({ state: 'unknown' });
   });
 });
 
 describe('writer records', () => {
   test('a re-service gets its booked visit, its type and a reach-out date the screen allows', async () => {
     const { sections, allowedPhrases } = await buildWriterRecords({
-      knex: knexWith([{ service_type: 'Quarterly Pest Control' }]), customerId: 'c1', scheduledServiceId: 's1',
+      knex: knexFor({ rows: [{ id: 'n1', service_type: 'Quarterly Pest Control', ...HOME }] }), customerId: 'c1', scheduledServiceId: 's1',
       serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS, ADVION],
     });
     const text = sections.join('\n\n');
@@ -125,7 +159,7 @@ describe('writer records', () => {
 
   test('a recurring plan visit gets no reach-out date', async () => {
     const { sections, allowedPhrases } = await buildWriterRecords({
-      knex: knexWith([]), customerId: 'c1', serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'recurring', applications: [TAURUS],
+      knex: knexFor(), customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'recurring', applications: [TAURUS],
     });
     expect(sections.join('\n')).not.toContain('REACH-OUT DATE');
     expect(sections.join('\n')).toContain('NEXT VISIT FOR THIS SERVICE: none booked.');
@@ -134,7 +168,7 @@ describe('writer records', () => {
 
   test('a failed next-visit lookup says nothing about booking', async () => {
     const { sections } = await buildWriterRecords({
-      knex: knexWith([], { fail: true }), customerId: 'c1', serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'one_time', applications: [TAURUS],
+      knex: knexFor({ fail: true }), customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'one_time', applications: [TAURUS],
     });
     expect(sections.join('\n')).not.toContain('NEXT VISIT');
     expect(sections.join('\n')).toContain('REACH-OUT DATE: Wednesday, October 14');
@@ -147,38 +181,20 @@ describe('next visit on a rodent report (shared catalog rule)', () => {
     if (ORIGINAL === undefined) delete process.env.GATE_RODENT_REPORT_REFRESH;
     else process.env.GATE_RODENT_REPORT_REFRESH = ORIGINAL;
   });
-
-  // scheduled_services and the services catalog answer from their own rows.
-  function knexByTable(tables) {
-    return (table) => {
-      const rows = tables[table] || [];
-      const builder = new Proxy({}, {
-        get(_, prop) {
-          if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-          return (...args) => { if (prop === 'modify') args[0](builder); return builder; };
-        },
-      });
-      return builder;
-    };
-  }
+  const exclusion = { id: 'n1', service_type: 'Exclusion Service', service_id: 'svc-excl', ...HOME };
+  const catalog = [{ id: 'svc-excl', name: 'Rodent Exclusion', category: 'rodent' }];
 
   test('an exclusion visit linked to a rodent catalog service counts, as on the report', async () => {
     process.env.GATE_RODENT_REPORT_REFRESH = 'true';
-    const knex = knexByTable({
-      scheduled_services: [{ service_type: 'Exclusion Service', service_id: 'svc-excl' }],
-      services: [{ id: 'svc-excl', name: 'Rodent Exclusion', category: 'rodent' }],
-    });
-    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', serviceYmd: '2026-09-30', line: 'rodent' }))
-      .resolves.toEqual({ state: 'scheduled', serviceType: 'Exclusion Service' });
+    await expect(loadNextSameLineVisit({
+      knex: knexFor({ rows: [exclusion], services: catalog }), customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'rodent',
+    })).resolves.toEqual({ state: 'scheduled', serviceType: 'Exclusion Service' });
   });
 
   test('without the refresh gate the strict line match stands', async () => {
     delete process.env.GATE_RODENT_REPORT_REFRESH;
-    const knex = knexByTable({
-      scheduled_services: [{ service_type: 'Exclusion Service', service_id: 'svc-excl' }],
-      services: [{ id: 'svc-excl', name: 'Rodent Exclusion', category: 'rodent' }],
-    });
-    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', serviceYmd: '2026-09-30', line: 'rodent' }))
-      .resolves.toEqual({ state: 'none' });
+    await expect(loadNextSameLineVisit({
+      knex: knexFor({ rows: [exclusion], services: catalog }), customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'rodent',
+    })).resolves.toEqual({ state: 'none' });
   });
 });

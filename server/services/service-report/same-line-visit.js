@@ -19,6 +19,13 @@
  * match.
  */
 const { detectServiceLine, isRodentAdjacentServiceType } = require('./service-line-configs');
+const { resolveVisitPropertyScope, sameResolvedProperty } = require('./visit-property-scope');
+
+// The columns resolveVisitPropertyScope reads off a scheduled_services row.
+const PROPERTY_SCOPE_COLUMNS = Object.freeze([
+  'property_id', 'source_estimate_id',
+  'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+]);
 
 function rodentReportRefreshFor(serviceLine) {
   return serviceLine === 'rodent' && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
@@ -58,4 +65,36 @@ function isSameLineVisit(row, {
     && rodentCatalogNames.has(String(row?.service_type || '').trim().toLowerCase());
 }
 
-module.exports = { rodentReportRefreshFor, loadRodentCatalogIndex, isSameLineVisit };
+// The first of `rows` (already in date order) on the report's service line
+// AND at the report's own property: on a multi-property account a booking
+// at another address is never this property's next visit. Same resolver as
+// the report's upcoming-visits card (visit-property-scope.js). Fails
+// closed: when the report's own visit, or an earlier same-line booking,
+// cannot be tied to a property, the answer is 'unknown', never 'none'.
+async function nextSameLineVisitAtProperty({ knex, rows, reportVisit, serviceLine }) {
+  const reportScope = reportVisit
+    ? await resolveVisitPropertyScope(reportVisit, knex).catch(() => null)
+    : null;
+  if (!reportScope?.key) return { state: 'unknown' };
+  const rodentReportRefresh = rodentReportRefreshFor(serviceLine);
+  const catalog = rodentReportRefresh
+    ? await loadRodentCatalogIndex(knex)
+    : { serviceCategoryById: null, rodentCatalogNames: null };
+  const caches = { propertyById: new Map(), estimateById: new Map() };
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!isSameLineVisit(row, { serviceLine, rodentReportRefresh, ...catalog })) continue;
+     
+    const scope = await resolveVisitPropertyScope(row, knex, caches).catch(() => null);
+    if (!scope?.key) return { state: 'unknown' };
+    if (sameResolvedProperty(scope.key, reportScope.key)) return { state: 'scheduled', row };
+  }
+  return { state: 'none' };
+}
+
+module.exports = {
+  PROPERTY_SCOPE_COLUMNS,
+  rodentReportRefreshFor,
+  loadRodentCatalogIndex,
+  isSameLineVisit,
+  nextSameLineVisitAtProperty,
+};

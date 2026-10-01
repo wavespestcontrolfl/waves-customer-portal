@@ -11,26 +11,33 @@ jest.mock('../services/service-report/rodent-report-narrative', () => ({
 
 const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
 
+// first() answers with a table's first row (the report's own visit);
+// whereNot('id', x) leaves that row out of a list.
 function stubKnex(fixtures = {}) {
   return (table) => {
-    const rows = fixtures[table] || [];
+    let excluded = null;
+    const rows = () => (fixtures[table] || []).filter((row) => row.id !== excluded);
     const query = {
       where: () => query,
       whereIn: () => query,
-      whereNot: () => query,
+      whereNot: (col, val) => { excluded = typeof col === 'object' ? col.id : val; return query; },
       whereNotIn: () => query,
       andWhere: () => query,
       orderBy: () => query,
-      modify: () => query,
+      modify: (fn) => { fn(query); return query; },
       limit: () => query,
-      select: () => Promise.resolve(rows),
-      first: () => Promise.resolve(rows[0] || null),
-      catch: () => Promise.resolve(rows),
-      then: (resolve) => Promise.resolve(rows).then(resolve),
+      select: () => Promise.resolve(rows()),
+      first: () => Promise.resolve((fixtures[table] || [])[0] || null),
+      catch: () => Promise.resolve(rows()),
+      then: (resolve) => Promise.resolve(rows()).then(resolve),
     };
     return query;
   };
 }
+
+const HOME = { service_address_line1: '123 Main St', service_address_city: 'Bradenton', service_address_zip: '34209' };
+const RENTAL = { service_address_line1: '456 Oak Ave', service_address_city: 'Bradenton', service_address_zip: '34209' };
+const REPORT_VISIT = { id: 'visit-1', customer_id: 'customer-1', service_type: 'Pest Re-Service', scheduled_date: '2026-09-30', status: 'completed', ...HOME };
 
 const FOUR_SECTIONS = [
   'WHAT WE FOUND', 'Ghost ants were trailing along the slider track.',
@@ -44,6 +51,7 @@ function serviceRow(notes) {
   return {
     id: 'service-four-section-1',
     customer_id: 'customer-1',
+    scheduled_service_id: 'visit-1',
     service_line: 'pest',
     service_type: 'Pest Re-Service',
     service_date: '2026-09-30',
@@ -60,15 +68,26 @@ function serviceRow(notes) {
 describe('four-section report in the report payload', () => {
   test('rides as reportSections, with the same-service next visit in the live view', async () => {
     const data = await buildReportV1Data(serviceRow(FOUR_SECTIONS), 'token-four-section', stubKnex({
-      scheduled_services: [{
+      scheduled_services: [REPORT_VISIT, {
         id: 'next-1', customer_id: 'customer-1', service_type: 'Quarterly Pest Control',
-        scheduled_date: '2099-01-05', window_start: '09:00:00', status: 'confirmed',
+        scheduled_date: '2099-01-05', window_start: '09:00:00', status: 'confirmed', ...HOME,
       }],
     }), { mode: 'live' });
     expect(data.summarySource).toBe('technician_report');
     expect(data.reportSections.map((section) => section.key)).toEqual(['whatWeFound', 'whatWeDid', 'whatToExpect', 'whatsNext']);
     expect(data.summary).toBe(data.reportSections.map((section) => section.paragraphs.join(' ')).join(' '));
     expect(data.nextSameServiceAppointment).toEqual(expect.objectContaining({ serviceType: 'Quarterly Pest Control', scheduledDate: '2099-01-05' }));
+  });
+
+  test("a booking at another of the customer's properties is not this report's next visit", async () => {
+    const data = await buildReportV1Data(serviceRow(FOUR_SECTIONS), 'token-four-section-rental', stubKnex({
+      scheduled_services: [REPORT_VISIT, {
+        id: 'next-1', customer_id: 'customer-1', service_type: 'Quarterly Pest Control',
+        scheduled_date: '2099-01-05', window_start: '09:00:00', status: 'confirmed', ...RENTAL,
+      }],
+    }), { mode: 'live' });
+    expect(data.reportSections).toHaveLength(4);
+    expect(data).not.toHaveProperty('nextSameServiceAppointment');
   });
 
   test('a two-section paragraph carries neither field', async () => {

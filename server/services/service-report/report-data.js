@@ -22,7 +22,9 @@ const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
-const { loadRodentCatalogIndex, isSameLineVisit } = require('./same-line-visit');
+const {
+  PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
+} = require('./same-line-visit');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
@@ -2083,6 +2085,19 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
     .sort((a, b) => (b.customers - a.customers) || a.label.localeCompare(b.label));
   const pest = top ? LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS.get(top.label) : null;
   return pest ? { city: nearYouCity, pest } : null;
+}
+
+// The report's next-appointment shape for a scheduled_services row.
+function nextAppointmentFields(row) {
+  if (!row || !row.scheduled_date) return null;
+  const rawDate = row.scheduled_date;
+  return {
+    serviceType: row.service_type || null,
+    scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
+    // window_start only — the customer-facing arrival window is always
+    // window_start + 2 hours (window_end is the internal job block).
+    windowStart: row.window_start || null,
+  };
 }
 
 // LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
@@ -5526,6 +5541,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
 
   let nextAppointment = null;
   let sameLineNextAppointment = null;
+  // The candidate rows the next-appointment pick read, kept for the
+  // four-section report's property-scoped "What's next" visit below.
+  let upcomingVisitRows = null;
   // Live-view only (stripLiveOnlyScheduleFields), termite line only.
   let termiteNextMonitoringVisit = null;
   // Live-view only, cockroach typed primaries only (cockroach-report-v2.js):
@@ -5566,6 +5584,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       .orderBy('window_start', 'asc')
       .limit(200)
       .catch(() => null); // null = the query FAILED (not "no visits") — consumers that need the distinction check Array.isArray
+    upcomingVisitRows = Array.isArray(upcomingRows) ? upcomingRows : null;
     // The next visit on this report's own line: one rule, shared with the
     // report writer's NEXT VISIT record (same-line-visit.js), including the
     // rodent program's catalog-aware match under GATE_RODENT_REPORT_REFRESH.
@@ -5582,17 +5601,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // report reads unambiguously ("Quarterly Pest Control · Wed, Nov 18").
     // Same disclosable-status pool; the strict same-line pick above still
     // wins whenever it exists.
-    const toNextAppointment = (row) => {
-      if (!row || !row.scheduled_date) return null;
-      const rawDate = row.scheduled_date;
-      return {
-        serviceType: row.service_type || null,
-        scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
-        // window_start only — the customer-facing arrival window is always
-        // window_start + 2 hours (window_end is the internal job block).
-        windowStart: row.window_start || null,
-      };
-    };
+    const toNextAppointment = nextAppointmentFields;
     // The narrative builders below were written under the same-line
     // invariant (they keep only the date/window), so they receive the
     // strict same-line pick ONLY; the hero cell gets the cross-line
@@ -6458,6 +6467,25 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const callbackNonPerformed = Boolean(reserviceReportBlock)
     && ['inspection_only', 'customer_declined'].includes(reserviceReportBlock.outcome);
 
+  // The four-section report's "What's next" visit: the next booking on this
+  // report's own line AT this report's property (same-line-visit.js; a
+  // booking at another of the customer's properties never counts, and an
+  // unresolvable property shows nothing). Only for that report.
+  let nextSameServiceAppointment = null;
+  if (reportSections && visitSummarySource === 'technician_report' && upcomingVisitRows && service.scheduled_service_id) {
+    try {
+      const reportVisit = await knex('scheduled_services')
+        .where({ id: service.scheduled_service_id })
+        .first(...PROPERTY_SCOPE_COLUMNS);
+      const next = await nextSameLineVisitAtProperty({
+        knex, rows: upcomingVisitRows, reportVisit, serviceLine,
+      });
+      if (next.state === 'scheduled') nextSameServiceAppointment = nextAppointmentFields(next.row);
+    } catch {
+      nextSameServiceAppointment = null;
+    }
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -6670,11 +6698,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
-    // The next visit on THIS report's own service line, for the four-section
-    // report's "What's next" line (owner 2026-10-01: same service only).
-    // Live view only, like nextAppointment (stripLiveOnlyScheduleFields).
-    ...(reportSections && visitSummarySource === 'technician_report' && sameLineNextAppointment
-      ? { nextSameServiceAppointment: sameLineNextAppointment } : {}),
+    // The next visit on THIS report's own service line at THIS property, for
+    // the four-section report's "What's next" line (owner 2026-10-01: same
+    // service only). Live view only, like nextAppointment
+    // (stripLiveOnlyScheduleFields).
+    ...(nextSameServiceAppointment ? { nextSameServiceAppointment } : {}),
     // "Your upcoming visits" card (GATE_REPORT_UPCOMING_VISITS) — live-view
     // only, stripped for pdf/static by stripLiveOnlyScheduleFields below,
     // same as nextAppointment. The KEY itself (not just its value) is
