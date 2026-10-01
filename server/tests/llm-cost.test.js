@@ -102,6 +102,51 @@ describe('parseFeed', () => {
   });
 });
 
+describe('long-prompt tiers', () => {
+  const M = 1_000_000;
+
+  test('the feed\'s overrides are kept as tiers per million tokens; an unreadable tier leaves the model out', () => {
+    const at = new Date('2026-10-01T11:40:00Z');
+    const rows = llmCost.parseFeed({
+      data: [
+        { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015', input_cache_read: '0.0000004' }] } },
+        { id: 'openai/gpt-6-luna', pricing: { prompt: '0.0000001', completion: '0.0000004', overrides: [{ prompt: '0.0000002', completion: '0.00000075' }] } },
+        { id: 'openai/gpt-6-astra', pricing: { prompt: '0.00001', completion: '0.00004' } },
+      ],
+    }, at);
+    const byKey = Object.fromEntries(rows.map((r) => [r.model_key, r]));
+    expect(Object.keys(byKey).sort()).toEqual(['gpt-6-astra', 'gpt-6-sol']);
+    expect(JSON.parse(byKey['gpt-6-sol'].pricing_tiers)).toEqual([
+      { min_prompt_tokens: 272000, input_per_mtok: 4, output_per_mtok: 15, cache_read_per_mtok: 0.4, cache_write_per_mtok: null, reasoning_per_mtok: null },
+    ]);
+    expect(byKey['gpt-6-astra'].pricing_tiers).toBeNull();
+  });
+
+  test('a call bills at the highest tier its whole prompt reaches', () => {
+    const p = { input: 2, output: 8, tiers: [{ minPromptTokens: 272000, input: 4, output: 15 }] };
+    expect(llmCost.ratesForCall(p, 271999)).toBe(p);
+    expect(llmCost.ratesForCall(p, 272000)).toBe(p.tiers[0]);
+    // anthropic counts cache reads and writes into the prompt; the others report them inside input
+    expect(llmCost.promptTokens('anthropic', { input_tokens: 100, cached_input_tokens: 200, cache_write_tokens: 300 })).toBe(600);
+    expect(llmCost.promptTokens('openai', { input_tokens: 600, cached_input_tokens: 200 })).toBe(600);
+  });
+
+  test('per-call rows are priced at their tier, summed rows at the base rate, and a tier with no rate is unpriced', () => {
+    const prices = new Map([
+      ['gpt-6-sol', { input: 2, output: 8, tiers: [{ minPromptTokens: 272000, input: 4, output: 15 }] }],
+      ['gpt-6-luna', { input: 0.1, output: 0.4, tiers: [{ minPromptTokens: 272000, input: null, output: null }] }],
+    ]);
+    const rows = [
+      { lane_id: 'report', provider: 'openai', model: 'gpt-6-sol', calls: 3, usage_unknown: 0, input_tokens: M, output_tokens: 0 },
+      { lane_id: 'report', provider: 'openai', model: 'gpt-6-sol', calls: 1, usage_unknown: 0, per_call: true, input_tokens: M, output_tokens: 0 },
+      { lane_id: 'report', provider: 'openai', model: 'gpt-6-luna', calls: 1, usage_unknown: 0, per_call: true, input_tokens: 300000, output_tokens: 0 },
+    ];
+    const out = llmCost.foldLaneCosts(rows, prices).get('report');
+    expect(out.usd).toBeCloseTo(2 + 4, 9);
+    expect(out.unpricedCalls).toBe(1);
+  });
+});
+
 describe('costUsd', () => {
   const p = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, reasoning: null };
   const M = 1_000_000;
@@ -286,6 +331,21 @@ postgres('llm cost (PostgreSQL)', () => {
     const lane = res.byLane.get('sms_draft');
     expect(lane.usd).toBeCloseTo(9, 9); // three priced rows × 1M input × $3
     expect(lane.unpricedCalls).toBe(2);
+  });
+
+  test('laneCosts prices a call that reaches a long-prompt tier at that tier, and the calls below it at the base rate', async () => {
+    const sol = { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015' }] } };
+    await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([sol])), now: NOW });
+    const at = atET('2026-09-30');
+    const openai = { provider: 'openai', requested_model: 'gpt-6-sol', served_model: 'gpt-6-sol', created_at: at };
+    await app('llm_dispatch_log').insert([
+      row({ ...openai, input_tokens: 200_000 }),
+      row({ ...openai, input_tokens: 200_000 }), // together past the threshold, each below it: base rate
+      row({ ...openai, input_tokens: 300_000 }), // one long call: the tier rate
+    ]);
+    const res = await llmCost.laneCosts(atET('2026-09-30', '00'), atET('2026-10-01', '00'), { conn: app });
+    expect(res.byLane.get('sms_draft').usd).toBeCloseTo(0.4 * 2 + 0.3 * 4, 9);
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
   });
 
   test('the spend check pulls missing prices, raises one item for a spike, then closes it once spend is normal', async () => {

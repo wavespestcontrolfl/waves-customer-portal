@@ -13,7 +13,8 @@
  *                         jumped well above their own recent average
  *
  * Every number is an ESTIMATE: tokens from the ledger (llm_dispatch_log,
- * GATE_LLM_CALL_LEDGER) times today's list price. Rows the ledger has no
+ * GATE_LLM_CALL_LEDGER) times today's list price, at the long-prompt tier
+ * the feed lists for a call whose prompt reaches it. Rows the ledger has no
  * usage for, and models the feed does not list, are counted as unpriced —
  * never guessed. Image, video, audio and embedding calls write no ledger
  * row, so they are not in these totals. Nothing here is customer-facing.
@@ -76,7 +77,11 @@ function aliasKeyOf(key) {
   return key.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, '');
 }
 
-const samePrice = (a, b) => ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning'].every((k) => a[k] === b[k]);
+const RATE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning'];
+const sameRates = (a, b) => RATE_KEYS.every((k) => a[k] === b[k]);
+const samePrice = (a, b) => sameRates(a, b)
+  && (a.tiers || []).length === (b.tiers || []).length
+  && (a.tiers || []).every((t, i) => t.minPromptTokens === b.tiers[i].minPromptTokens && sameRates(t, b.tiers[i]));
 
 /**
  * The price for a ledger model, or null (unpriced). Its own key first. A
@@ -101,6 +106,30 @@ function priceFor(prices, model) {
 
 // ── Price feed ───────────────────────────────────────────────────────
 
+// Long-prompt tiers ("overrides": higher rates once a call's prompt reaches
+// min_prompt_tokens) → stored rows, or null when a tier is unreadable (the
+// model is then left out of the pull: which calls a tier covers is unknown).
+// A tier with no usable input or output rate is kept with nulls, so the calls
+// it covers count as unpriced.
+function parseTiers(overrides) {
+  if (overrides == null) return [];
+  if (!Array.isArray(overrides)) return null;
+  const tiers = [];
+  for (const o of overrides) {
+    const min = Number(o?.min_prompt_tokens);
+    if (!Number.isInteger(min) || min <= 0) return null;
+    tiers.push({
+      min_prompt_tokens: min,
+      input_per_mtok: perMillion(o.prompt),
+      output_per_mtok: perMillion(o.completion),
+      cache_read_per_mtok: perMillion(o.input_cache_read),
+      cache_write_per_mtok: perMillion(o.input_cache_write),
+      reasoning_per_mtok: perMillion(o.internal_reasoning),
+    });
+  }
+  return tiers.sort((a, b) => a.min_prompt_tokens - b.min_prompt_tokens);
+}
+
 // Feed prices are strings of USD per token; stored per million tokens.
 function perMillion(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -120,7 +149,8 @@ function parseFeed(body, fetchedAt) {
     const key = normalizeModelId(id);
     const input = perMillion(m.pricing?.prompt);
     const output = perMillion(m.pricing?.completion);
-    if (!key || input == null || output == null) continue;
+    const tiers = parseTiers(m.pricing?.overrides);
+    if (!key || input == null || output == null || tiers == null) continue;
     const row = {
       model_key: key,
       provider,
@@ -131,6 +161,7 @@ function parseFeed(body, fetchedAt) {
       cache_read_per_mtok: perMillion(m.pricing?.input_cache_read),
       cache_write_per_mtok: perMillion(m.pricing?.input_cache_write),
       reasoning_per_mtok: perMillion(m.pricing?.internal_reasoning),
+      pricing_tiers: tiers.length ? JSON.stringify(tiers) : null,
       fetched_at: fetchedAt,
     };
     // Two ids can still share a key ("x" and "x-latest"): keep the shorter.
@@ -160,27 +191,49 @@ async function pullPrices({ conn = db, fetchImpl = fetch, now = new Date() } = {
 const num = (v) => (v == null ? null : Number(v));
 
 async function loadPrices(conn = db) {
-  const rows = await conn(PRICES).select('model_key', 'input_per_mtok', 'output_per_mtok', 'cache_read_per_mtok', 'cache_write_per_mtok', 'reasoning_per_mtok', 'fetched_at');
+  const rows = await conn(PRICES).select('model_key', 'input_per_mtok', 'output_per_mtok', 'cache_read_per_mtok', 'cache_write_per_mtok', 'reasoning_per_mtok', 'pricing_tiers', 'fetched_at');
   const map = new Map();
   let oldest = null;
+  // the lowest tier threshold of any model: every call below it bills at
+  // its model's base rate, so only calls at or above it are read one by one
+  let tierFloor = null;
   for (const r of rows) {
-    map.set(r.model_key, {
-      input: num(r.input_per_mtok),
-      output: num(r.output_per_mtok),
-      cacheRead: num(r.cache_read_per_mtok),
-      cacheWrite: num(r.cache_write_per_mtok),
-      reasoning: num(r.reasoning_per_mtok),
+    const rates = (x) => ({
+      input: num(x.input_per_mtok),
+      output: num(x.output_per_mtok),
+      cacheRead: num(x.cache_read_per_mtok),
+      cacheWrite: num(x.cache_write_per_mtok),
+      reasoning: num(x.reasoning_per_mtok),
     });
+    const stored = typeof r.pricing_tiers === 'string' ? JSON.parse(r.pricing_tiers) : r.pricing_tiers;
+    const tiers = (Array.isArray(stored) ? stored : []).map((t) => ({ minPromptTokens: Number(t.min_prompt_tokens), ...rates(t) }));
+    for (const t of tiers) if (tierFloor == null || t.minPromptTokens < tierFloor) tierFloor = t.minPromptTokens;
+    map.set(r.model_key, { ...rates(r), tiers });
     const at = new Date(r.fetched_at);
     if (!oldest || at < oldest) oldest = at;
   }
-  return { map, oldestFetchedAt: oldest };
+  return { map, oldestFetchedAt: oldest, tierFloor };
 }
 
 // ── Cost ─────────────────────────────────────────────────────────────
 
+// A call's whole prompt as the provider counts it for a long-prompt tier:
+// Anthropic reports cache reads and writes beside input, the others inside it.
+function promptTokens(provider, t) {
+  const n = (v) => Math.max(0, Number(v) || 0);
+  return provider === 'anthropic' ? n(t.input_tokens) + n(t.cached_input_tokens) + n(t.cache_write_tokens) : n(t.input_tokens);
+}
+const PROMPT_TOKENS_SQL = "CASE WHEN provider = 'anthropic' THEN COALESCE(input_tokens, 0) + COALESCE(cached_input_tokens, 0) + COALESCE(cache_write_tokens, 0) ELSE COALESCE(input_tokens, 0) END";
+
+/** The rates one call bills at: the highest tier its prompt reaches, else the base (pure). */
+function ratesForCall(p, prompt) {
+  let rates = p;
+  for (const t of p.tiers || []) if (prompt >= t.minPromptTokens) rates = t;
+  return rates;
+}
+
 /**
- * Estimated USD for summed token counts on one provider + price (pure).
+ * Estimated USD for summed token counts on one provider + rates (pure).
  * Providers disagree on what the counts contain (llm-dispatch-metrics
  * extractUsage):
  *   anthropic  input EXCLUDES cache reads and writes, which are reported beside it
@@ -190,7 +243,7 @@ async function loadPrices(conn = db) {
  * (an overestimate, never an underestimate). Unknown provider → null.
  */
 function costUsd(provider, t, p) {
-  if (!p) return null;
+  if (!p || p.input == null || p.output == null) return null;
   const n = (v) => Math.max(0, Number(v) || 0);
   const input = n(t.input_tokens);
   const cached = n(t.cached_input_tokens);
@@ -212,14 +265,27 @@ function costUsd(provider, t, p) {
 }
 
 // Token sums per lane × provider × model over [from, to). `usage_unknown`
-// counts rows whose usage was never captured (null counters).
-function laneModelRows(from, to, conn = db) {
-  return conn(LEDGER)
+// counts rows whose usage was never captured (null counters). With a
+// `tierFloor`, calls whose prompt reaches it come back one row each
+// (`per_call`), so each can be priced at its own long-prompt tier; a sum of
+// several calls cannot say which tier any of them reached.
+function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
+  const scoped = () => conn(LEDGER)
     .whereIn('row_kind', ROW_KINDS)
     .whereNotNull('lane_id')
     .whereRaw(LIVE_WORKLOAD)
     .where('created_at', '>=', from)
-    .andWhere('created_at', '<', to)
+    .andWhere('created_at', '<', to);
+  const sums = [
+    conn.raw('COALESCE(SUM(input_tokens), 0)::bigint AS input_tokens'),
+    conn.raw('COALESCE(SUM(cached_input_tokens), 0)::bigint AS cached_input_tokens'),
+    conn.raw('COALESCE(SUM(cache_write_tokens), 0)::bigint AS cache_write_tokens'),
+    conn.raw('COALESCE(SUM(output_tokens), 0)::bigint AS output_tokens'),
+    conn.raw('COALESCE(SUM(reasoning_tokens), 0)::bigint AS reasoning_tokens'),
+  ];
+  const grouped = scoped();
+  if (tierFloor != null) grouped.whereRaw(`${PROMPT_TOKENS_SQL} < ?`, [tierFloor]);
+  grouped
     .groupByRaw('lane_id, provider, COALESCE(served_model, requested_model)')
     .select(
       'lane_id',
@@ -227,18 +293,29 @@ function laneModelRows(from, to, conn = db) {
       conn.raw('COALESCE(served_model, requested_model) AS model'),
       conn.raw('COUNT(*)::int AS calls'),
       conn.raw('COUNT(*) FILTER (WHERE input_tokens IS NULL)::int AS usage_unknown'),
-      conn.raw('COALESCE(SUM(input_tokens), 0)::bigint AS input_tokens'),
-      conn.raw('COALESCE(SUM(cached_input_tokens), 0)::bigint AS cached_input_tokens'),
-      conn.raw('COALESCE(SUM(cache_write_tokens), 0)::bigint AS cache_write_tokens'),
-      conn.raw('COALESCE(SUM(output_tokens), 0)::bigint AS output_tokens'),
-      conn.raw('COALESCE(SUM(reasoning_tokens), 0)::bigint AS reasoning_tokens'),
+      ...sums,
     );
+  if (tierFloor == null) return grouped;
+  const long = scoped()
+    .whereRaw(`${PROMPT_TOKENS_SQL} >= ?`, [tierFloor])
+    .select(
+      'lane_id',
+      'provider',
+      conn.raw('COALESCE(served_model, requested_model) AS model'),
+      conn.raw('1 AS calls'),
+      conn.raw('(input_tokens IS NULL)::int AS usage_unknown'),
+      conn.raw('true AS per_call'),
+      ...['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens']
+        .map((c) => conn.raw(`COALESCE(${c}, 0)::bigint AS ${c}`)),
+    );
+  return Promise.all([grouped, long]).then(([a, b]) => [...a, ...b]);
 }
 
 /**
  * Fold lane × model rows into per-lane estimates (pure):
  * Map(laneId → { usd, unpricedCalls }). unpricedCalls = calls with no usage,
- * plus every call on a model the price table does not list.
+ * plus every call on a model the price table does not list or at a
+ * long-prompt tier the feed gives no rate for.
  */
 function foldLaneCosts(rows, prices) {
   const out = new Map();
@@ -246,7 +323,10 @@ function foldLaneCosts(rows, prices) {
     const lane = out.get(r.lane_id) || { usd: 0, unpricedCalls: 0 };
     const calls = Number(r.calls) || 0;
     const unknown = Number(r.usage_unknown) || 0;
-    const cost = costUsd(r.provider, r, priceFor(prices, r.model));
+    const price = priceFor(prices, r.model);
+    // a summed row holds only calls below every tier threshold: base rates
+    const rates = price && r.per_call ? ratesForCall(price, promptTokens(r.provider, r)) : price;
+    const cost = costUsd(r.provider, r, rates);
     if (cost == null) lane.unpricedCalls += calls;
     else {
       lane.usd += cost;
@@ -259,7 +339,8 @@ function foldLaneCosts(rows, prices) {
 
 /** Estimated spend per lane over [from, to), plus how old the oldest price is. */
 async function laneCosts(from, to, { conn = db } = {}) {
-  const [rows, prices] = await Promise.all([laneModelRows(from, to, conn), loadPrices(conn)]);
+  const prices = await loadPrices(conn);
+  const rows = await laneModelRows(from, to, conn, { tierFloor: prices.tierFloor });
   return { byLane: foldLaneCosts(rows, prices.map), pricesFetchedAt: prices.oldestFetchedAt, priced: prices.map.size > 0 };
 }
 
@@ -369,6 +450,9 @@ module.exports = {
   parseFeed,
   priceFor,
   costUsd,
+  promptTokens,
+  ratesForCall,
+  parseTiers,
   foldLaneCosts,
   findSpikes,
   laneModelRows,
