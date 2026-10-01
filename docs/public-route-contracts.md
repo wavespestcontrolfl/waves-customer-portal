@@ -1644,10 +1644,12 @@ run) is composed on each render from the plan present on that render.
 Label mow hold (P2b, same gate): when an applied product's frozen facts carry a
 label-sourced `mowHoldDays` (from `products_catalog.mow_hold_days`, 1..14; no
 default, no derivation), the banner gains `mowHold`
-`{ days, untilDate, untilLabel, line }` for the longest hold: `untilDate` is the
-completion's Eastern calendar date plus `days` (YYYY-MM-DD), `untilLabel` the
-Eastern weekday ("Thu"; "Wed, Jan 6" at 7+ days), `line` one finished sentence
-("Mowing: hold off until Thu, 2 days after today's treatment."). The key is
+`{ days, untilAt, untilDate, untilLabel, line }` for the longest hold: a label
+day is 24 elapsed hours, so `untilAt` is the completion instant plus `days` x 24
+hours rounded UP to the hour (ISO), `untilDate` its Eastern calendar date
+(YYYY-MM-DD), `untilLabel` its Eastern weekday and clock time ("Fri 4 PM";
+"Wed, Jan 6 at 12 PM" six or more days out), `line` one finished sentence
+("Mowing: hold off until Fri 4 PM, 1 day after today's treatment."). The key is
 absent when no product has a value. A visit with a mow hold but no watering
 claim gets a banner `{ state: null, lines: [], holdUntil: null, waterInBy: null,
 expiresAt: null, ruleSource, mowHold }`; that is the only case `state` is

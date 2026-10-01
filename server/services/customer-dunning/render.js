@@ -85,6 +85,10 @@ async function renderSms({ step, set, customer, payUrl }) {
     workflow: 'invoice_followup_customer',
     entity_type: 'customer',
     entity_id: customer.id,
+  }, {
+    // A transient read / render error THROWS (the sender maps it to a retryable non-send); null stays what
+    // getTemplate means by it: a template that is switched off, missing or will not resolve - terminal.
+    throwOnError: true,
   });
 }
 

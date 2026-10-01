@@ -391,7 +391,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       },
     });
     const base = { state: 'hold', lines: [line1, 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
-    const mow = { days: 2, untilDate: '2026-10-03', untilLabel: 'Sat', line: 'Mowing: hold off until Sat, 2 days after today\'s treatment.' };
+    const mow = { days: 2, untilAt: '2026-10-03T19:00:00.000Z', untilDate: '2026-10-03', untilLabel: 'Sat 3 PM', line: 'Mowing: hold off until Sat 3 PM, 2 days after today\'s treatment.' };
     const without = render(<ServiceReportDocument data={build(base)} token="tok123" />);
     const textWithout = without.container.textContent;
     without.unmount();

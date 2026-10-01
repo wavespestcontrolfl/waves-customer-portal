@@ -128,7 +128,7 @@ test('a no-claim (state null) instruction, or one built while the products could
 });
 
 test('a state-null instruction is never frozen, even with a label mow hold (regenerated from the frozen product facts)', async () => {
-  const mowHold = { days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' };
+  const mowHold = { days: 2, untilAt: '2026-10-02T19:00:00.000Z', untilDate: '2026-10-02', untilLabel: 'Fri 3 PM', line: 'Mowing: hold off until Fri 3 PM, 2 days after today\'s treatment.' };
   const instruction = { ...INSTRUCTION(40), state: null, lines: [], mowHold };
   buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
     opts.wateringInstructionOut.instruction = instruction;
