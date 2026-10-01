@@ -4,12 +4,11 @@
 // 2026-09-29: an injection is measured in tsp or fl oz like everything else,
 // never mL). A trunk-injection label in the catalog gives its rate in mL per
 // inch of trunk (DBH) or per palm: the Arborjet injectables. The injection
-// record shows that rate, and the dose for the tree measured, through the job
-// card's spoon-and-cup formatter (lib/mix-amount.js), rounded inside the
-// label; the dose itself is entered as a number of tsp or fl oz.
+// record shows that rate through the job card's spoon-and-cup formatter
+// (lib/mix-amount.js), rounded inside the label; the dose itself is entered
+// as a number of tsp or fl oz.
 import { formatMeasuredAmount, formatMeasuredRange } from "./mix-amount";
-import { TSP_PER_FL_OZ, isMlUnit } from "./measure-units";
-import LABEL_BANDS from "../../../shared/injection-label-bands.json";
+import { isMlUnit } from "./measure-units";
 
 const ML_PER_FL_OZ = 29.5735;
 
@@ -19,17 +18,6 @@ export const DOSE_UNITS = [
   { value: "fl_oz", label: "fl oz" },
 ];
 
-// The label's own bands (owner rulings 2026-10-01, #5361): the catalog keeps
-// one display range per injectable, but each label splits it by trunk size,
-// palm size, target pest or season. Only labels read in full are here
-// (shared/injection-label-bands.json, shared with the server's closeout
-// check; each row cites its label). A trunk-size band has below / from /
-// through / above inches; the other bands are the tech's pick, and a picked
-// band can split again by trunk (its sizes). An injectable
-// with no row (IMA-jet 10, Propizol until their labels are read) gets no
-// worked-out dose: the record shows the label line only.
-export const INJECTION_LABEL_BANDS = LABEL_BANDS.map((row) => ({ ...row, match: new RegExp(row.match, "i") }));
-
 function labelBasis(unit) {
   if (!isMlUnit(unit)) return null;
   const per = unit.split("/").slice(1).join("/").trim().toLowerCase();
@@ -37,6 +25,10 @@ function labelBasis(unit) {
   return /^palm/.test(per) ? "palm" : null;
 }
 
+/**
+ * A catalog label's injection rate: { low, high, basis } in mL per inch of
+ * trunk (basis "inch") or per palm (basis "palm"); null for any other label.
+ */
 export function injectionLabelRate(product) {
   const basis = labelBasis(String(product?.default_unit ?? product?.defaultUnit ?? ""));
   if (!basis) return null;
@@ -45,37 +37,7 @@ export function injectionLabelRate(product) {
     .map(Number);
   if (bounds.length > 2 || bounds.some((n) => !(n > 0))) return null;
   const [low, high = low] = bounds.sort((a, b) => a - b);
-  const name = String(product?.name ?? "");
-  const table = INJECTION_LABEL_BANDS.find((row) => row.match.test(name) && row.basis === basis) || null;
-  const { bands = null, pick = null, note = null } = table || {};
-  return { low, high, basis, bands, pick, note };
-}
-
-const isSizeBand = (band) => ["below", "from", "through", "above"].some((edge) => band[edge] != null);
-const fitsTrunk = (band, inches) =>
-  !(inches >= (band.below ?? Infinity)) && !(inches < (band.from ?? 0)) &&
-  !(inches > (band.through ?? Infinity)) && !(inches <= (band.above ?? -Infinity));
-
-/**
- * The band that applies: by trunk size, or the tech's pick (the only band
- * when there is one); null until a trunk size or a pick settles it.
- */
-export function injectionBand(rate, trunkInches, pickKey) {
-  const bands = rate?.bands;
-  if (!bands) return null;
-  if (bands.length === 1) return bands[0];
-  if (bands.some(isSizeBand)) {
-    const inches = Number(trunkInches);
-    if (!(inches > 0)) return null;
-    return bands.find((band) => fitsTrunk(band, inches)) || null;
-  }
-  const picked = bands.find((band) => band.key === pickKey) || null;
-  if (!picked?.sizes) return picked;
-  // A picked band the label splits again by trunk (IMA-jet: the lower rate
-  // under 12 in, the highest over 24 in).
-  const inches = Number(trunkInches);
-  const size = inches > 0 ? picked.sizes.find((band) => fitsTrunk(band, inches)) : null;
-  return size ? { ...picked, low: size.low, high: size.high } : null;
+  return { low, high, basis };
 }
 
 // A single-rate dose in the truck's measures, never more than 5% under it
@@ -107,39 +69,9 @@ function rangeText(lowMl, highMl) {
 
 const basisText = (basis) => (basis === "palm" ? "per palm" : "per inch of trunk");
 
-/** A rate (or band) as the tech reads it: "¼ – 1 tsp per inch of trunk". */
-export function injectionLabelText(rate, band = null) {
-  const { low, high } = band || rate;
-  return `${rangeText(low, high)} ${basisText(rate.basis)}`;
-}
-
-/**
- * The dose for this tree ("½ – 2 fl oz"): the band's rate times the trunk's
- * inches, or the band's per-palm rate. Null while the band is not settled,
- * while a per-inch label has no trunk size, and for an injectable with no
- * band table (the label's display range is not a dose for every tree).
- */
-export function injectionDoseText(rate, trunkInches, pickKey) {
-  const band = injectionBand(rate, trunkInches, pickKey);
-  if (!band) return null;
-  if (rate.basis === "palm") return rangeText(band.low, band.high);
-  const inches = Number(trunkInches);
-  if (!(inches > 0)) return null;
-  return rangeText(band.low * inches, band.high * inches);
-}
-
-/**
- * Whether a dose entered is more than the label allows for this tree (or one
- * palm), against the exact limit rather than the rounded range shown: the
- * band's limit once it is settled, else the label's highest rate.
- */
-export function doseOverLabel(rate, trunkInches, amount, unit, pickKey) {
-  const inches = rate.basis === "palm" ? 1 : Number(trunkInches);
-  const n = Number(amount);
-  if (!(inches > 0) || !(n > 0)) return false;
-  const limit = injectionBand(rate, trunkInches, pickKey)?.high ?? rate.high;
-  const flOz = unit === "tsp" ? n / TSP_PER_FL_OZ : n;
-  return flOz * ML_PER_FL_OZ > limit * inches * (1 + 1e-9);
+/** The label's rate as the tech reads it: "¼ – 1 tsp per inch of trunk". */
+export function injectionLabelText(rate) {
+  return `${rangeText(rate.low, rate.high)} ${basisText(rate.basis)}`;
 }
 
 const FRACTIONS = { "⅛": 0.125, "¼": 0.25, "⅜": 0.375, "½": 0.5, "⅝": 0.625, "¾": 0.75, "⅞": 0.875 };
@@ -197,14 +129,16 @@ export function trunkInchesText(sizeClassOrDbh) {
 
 /**
  * What the injection record shows for a record and this visit's injection
- * products: the chosen product's label rate, the band (by the tech's pick,
- * saved for this product, or by the trunk), the trunk in inches, the dose
- * for the tree, the dose entered, and the saved values the form cannot read.
+ * products: the chosen product (by catalog id, else by name) and its label
+ * rate, the trunk in inches, the dose entered, and the saved values the form
+ * cannot read.
  */
 export function injectionRecordView(record = {}, injectionProducts = []) {
-  const chosen = injectionProducts.find((product) => product.name === record.product) || null;
+  const chosen =
+    (record.productId && injectionProducts.find((product) => product.productId && String(product.productId) === String(record.productId))) ||
+    injectionProducts.find((product) => product.name === record.product) ||
+    null;
   const rate = chosen?.rate || null;
-  const pickKey = record.labelBand?.product === record.product ? record.labelBand?.key || "" : "";
   const sizeText = String(record.sizeClassOrDbh || "").trim();
   const trunkInches = trunkInchesText(sizeText);
   const dose = parseDose(record.dose);
@@ -212,48 +146,26 @@ export function injectionRecordView(record = {}, injectionProducts = []) {
   return {
     chosen,
     rate,
-    pickKey,
     trunkInches,
-    band: rate ? injectionBand(rate, trunkInches, pickKey) : null,
-    doseRange: rate ? injectionDoseText(rate, trunkInches, pickKey) : null,
     dose,
     // A saved size that is not in inches ("30 cm DBH") or a saved dose that
     // is not tsp or fl oz: shown, to enter again, never read as something else.
     unreadableTrunk: rate?.basis === "inch" && sizeText && !trunkInches ? sizeText : "",
     unreadableDose: doseSaved && !dose.amount ? doseSaved : "",
-    overLabel: (unit) => Boolean(rate) && doseOverLabel(rate, trunkInches, dose.amount, unit, pickKey),
   };
 }
 
 /**
- * The record naming another product. A dose, band, or band-set palm size
- * belongs to the product it was worked out for, so a new product starts
- * without them; the trunk measured stays.
+ * The record naming another product, by name and (for one of this visit's
+ * catalog products) catalog id. A dose belongs to the product it was entered
+ * for, so a new product starts without one; the trunk measured stays.
  */
-export function recordForProduct(record = {}, product, { productAuto = false, palmSizeFromBand = false } = {}) {
-  if (product === record.product) return { ...record, productAuto };
-  return {
-    ...record,
-    product,
-    productAuto,
-    dose: "",
-    labelBand: null,
-    ...(palmSizeFromBand ? { sizeClassOrDbh: "" } : {}),
-  };
+export function recordForProduct(record = {}, product, { productAuto = false, productId = null } = {}) {
+  if (product === record.product) return { ...record, productAuto, productId: productId ?? record.productId ?? null };
+  return { ...record, product, productId, productAuto, dose: "" };
 }
 
 /** What the tech is typing, while the record still holds what it stored. */
 export function typedDraft(typed, saved) {
   return typed && typed.stored === String(saved || "") ? typed.typed : null;
-}
-
-/**
- * The record with the band the tech picked. A palm label's band is the
- * palm's size, so it is also the record's size: never a second answer that
- * can disagree.
- */
-export function recordWithBand(record = {}, rate, key) {
-  const labelBand = { product: record.product, key };
-  const palmSize = rate?.basis === "palm" ? rate.bands?.find((band) => band.key === key)?.label : null;
-  return { ...record, labelBand, ...(palmSize ? { sizeClassOrDbh: palmSize } : {}) };
 }
