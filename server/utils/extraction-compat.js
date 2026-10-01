@@ -248,10 +248,12 @@ function canonicalV2Secondary(extraction) {
   if (!single) return mirror;
   if (!mirror) return single;
   // A singleton with NO phone / email of its own also pairs with a mirror of
-  // the same (even one-word) name — nothing on it can conflict; otherwise the
+  // the same (even one-word) name, or one whose full name starts with it
+  // ("John" / "John Smith") — nothing on it can conflict; otherwise the
   // strict same-person rule applies.
   const nameOf = (c) => [c.first_name, c.last_name].filter(Boolean).join(' ').trim().toLowerCase();
-  const sparseSameName = !single.phone && !single.email && !!nameOf(single) && nameOf(single) === nameOf(mirror);
+  const sparseSameName = !single.phone && !single.email && !!nameOf(single)
+    && (nameOf(single) === nameOf(mirror) || nameOf(mirror).startsWith(`${nameOf(single)} `));
   if (!sparseSameName && !sameV2Person(extraction.secondary_contact, first)) return single;
   // Same person: the mirror fills any field the singleton left empty or
   // 'unknown' (a name-only singleton with the phone on the mirror keeps the

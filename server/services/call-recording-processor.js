@@ -18703,16 +18703,20 @@ const CallRecordingProcessor = {
               // still-pending legacy row is no appointment to ask about). The
               // visit id rides the claim, so a send-window-deferred ask is
               // re-checked against the same visit before it goes out.
-              const onSiteAskVisitLive = (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true
+              // 'live' = ask now; 'unknown' = the visit read failed: the ask is
+              // claimed (pending, visit-bound) but not dispatched, so the
+              // undispatched-ask recovery sweep re-checks this same visit and
+              // sends or releases it — an unreadable visit is never read as gone.
+              const onSiteAskVisitState = (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true
                 && !(await isStreetLevelHoldRow(db, svc)))
                 ? await (async () => {
                   const v = await db('scheduled_services').where({ id: svc.id, status: 'confirmed' })
                     .where((q) => q.whereNull('customer_confirmed').orWhere('customer_confirmed', true)).first('id');
                   const at = v ? await require('./appointment-reminders').scheduledServiceApptTime(svc.id, { throwOnError: true }) : null;
-                  return at?.getTime() > Date.now();
-                })().catch(() => false)
-                : false;
-              if (onSiteAskVisitLive) {
+                  return at?.getTime() > Date.now() ? 'live' : 'dead';
+                })().catch(() => 'unknown')
+                : 'dead';
+              if (onSiteAskVisitState !== 'dead') {
                 onSiteAsksHandled = true;
                 const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
                 const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -18733,7 +18737,9 @@ const CallRecordingProcessor = {
                       propertyAddress: visitAddress || [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
                       visitId: svc.id,
                     }) : [];
-                    if (claims.length) {
+                    if (claims.length && onSiteAskVisitState === 'unknown') {
+                      await markOptinAsk(entry, 'not_sent:visit_check_retry');
+                    } else if (claims.length) {
                       await markOptinAsk(entry, 'dispatching');
                       void dispatchRecipientOptins(claims, custRow)
                         .catch((err) => {

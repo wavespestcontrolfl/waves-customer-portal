@@ -1422,6 +1422,11 @@ describe('extraction compat adapter', () => {
     roleless.secondary_contact = entry('unknown', false, false, 'Sample Spouse', '+15550100123');
     roleless.secondary_contacts = [entry('tenant', false, true, 'Sample Spouse', '+15550100123')];
     expect(flatView(roleless).secondary_contact).toMatchObject({ role: 'tenant', on_site: true });
+    // A first-name-only singleton pairs with a mirror whose full name starts with it.
+    const prefix = validPersisted();
+    prefix.secondary_contact = { ...entry('spouse_partner', false, false, 'John', null), name_full: 'John', first_name: 'John', last_name: null };
+    prefix.secondary_contacts = [{ ...entry('spouse_partner', true, true, 'John Smith', '+15550100123'), name_full: 'John Smith', first_name: 'John', last_name: 'Smith' }];
+    expect(flatView(prefix).secondary_contact).toMatchObject({ phone: '+15550100123', on_site: true, last_name: 'Smith' });
     // Array-only payload (no singleton): the mirror is the canonical contact, flags kept.
     const arrayOnly = validPersisted();
     arrayOnly.secondary_contact = null;
