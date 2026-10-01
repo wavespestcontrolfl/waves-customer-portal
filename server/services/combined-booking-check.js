@@ -858,10 +858,11 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     .whereRaw("metadata->>'dedupeKey' = ANY(?)", [candidates.map((estimate) => dedupeKeyFor(estimate.id))])
     .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'problems' as problems")))
     .map((row) => [String(row.estimate_id), Array.isArray(row.problems) ? row.problems : []]));
-  // A booking the overflow bell owes stays on it while it cannot be judged.
+  // A booking the overflow bell owes stays on it while it cannot be judged
+  // or its bell cannot be written.
   const owed = [];
-  const keepOwed = (estimate) => {
-    if (owedBefore.has(String(estimate.id))) owed.push({ id: String(estimate.id), line: `estimate ${estimate.id} (customer ${estimate.customer_id}): could not be re-checked this run` });
+  const keepOwed = (estimate, why = 'could not be re-checked this run') => {
+    if (owedBefore.has(String(estimate.id))) owed.push({ id: String(estimate.id), line: `estimate ${estimate.id} (customer ${estimate.customer_id}): ${why}` });
   };
   const work = candidates.filter((estimate) => {
     try {
@@ -883,6 +884,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     .acceptedRecurringScheduleGaps(conn, { now, cutoff: now, estimateIds: work.map((estimate) => estimate.id), coverage }) : [];
 
   let rings = 0;
+  const standingOf = (id) => standing.get(id) || [];
   for (const estimate of work) {
     const id = String(estimate.id);
     const isNew = !standing.has(id);
@@ -890,10 +892,10 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
       const judged = coverage.get(id);
       const checked = await checkEstimate(conn, estimate, {
         scheduleGaps: gaps.filter((gap) => String(gap.estimateId) === id),
-        scheduleSkippedFamilies: judged || new Set(),
+        scheduleSkippedFamilies: judged, // checkEstimate defaults it when unjudged
         scheduleUnjudged: !judged,
       });
-      const { outcome, problems } = outcomeOf(checked?.verdict, standing.get(id));
+      const { outcome, problems } = outcomeOf(checked?.verdict, standingOf(id));
       if (outcome !== 'problems') {
         result[outcome === 'frozen' ? 'deferred' : outcome] += 1;
         if (!isNew && outcome !== 'frozen') {
@@ -902,12 +904,23 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         continue;
       }
       result.checked += 1;
-      if (isNew && rings >= ringBudget) {
+      // Anything that would ring (a new bell, or a standing one gaining a
+      // problem identity it did not carry) spends the budget; past it the
+      // booking waits on the overflow bell and rings on a later run, never
+      // refreshed into a read bell in silence.
+      const known = new Set(standingOf(id).flatMap(problemKeys));
+      const wouldRing = isNew || problems.flatMap(problemKeys).some((key) => !known.has(key));
+      if (wouldRing && rings >= ringBudget) {
         owed.push({ id, line: `${checked.ctx.customerName} (customer ${estimate.customer_id}, estimate ${id}): ${problems.map((problem) => problem.text).join('; ')}` });
         continue;
       }
       const row = await postAlert(estimate, { ...checked.verdict, problems }, checked.ctx, { raise });
-      if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`); continue; }
+      if (!row) {
+        result.failed += 1;
+        keepOwed(estimate, 'its alert could not be written this run');
+        logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`);
+        continue;
+      }
       if (rang(row)) rings += 1;
       result.problems += 1;
     } catch (err) {

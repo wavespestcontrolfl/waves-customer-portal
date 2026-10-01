@@ -268,6 +268,41 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a standing bell gaining a problem past the budget waits (owed) and rings later; a failed write stays owed', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    const { raiseAdminAlert } = jest.requireActual('../services/admin-alert-compose');
+    const owedIds = async () => ((await trx('notifications').where({ recipient_type: 'admin', category: 'alert' })
+      .whereRaw("metadata->>'dedupeKey' = 'combined-booking-check:overflow'").first('metadata'))?.metadata.itemKeys || []);
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      const [before] = await alertsOf(trx, est.estimateId);
+      await trx('notifications').where({ id: before.id }).update({ read_at: new Date() });
+      // A new problem identity appears (a lawn visit priced off the quote) with no budget left.
+      const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 1 });
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 0 })).toMatchObject({ overflow: 1 });
+      expect(await owedIds()).toEqual([est.estimateId]);
+      expect((await alertsOf(trx, est.estimateId))[0].read_at).not.toBeNull(); // not refreshed in silence
+
+      // Its bell write fails: it stays owed.
+      const failing = jest.fn(async (category, spec, opts) => (spec.subject.type === 'check' ? raiseAdminAlert(category, spec, opts) : null));
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10, raise: failing })).toMatchObject({ failed: 1, overflow: 1 });
+      expect(await owedIds()).toEqual([est.estimateId]);
+
+      // With budget: it rings, and nothing is owed.
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 1, overflow: 0 });
+      const [after] = await alertsOf(trx, est.estimateId);
+      expect(after.read_at).toBeNull();
+      expect(after.metadata.problemCodes).toContain('price_mismatch');
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a voided combined invoice replaced on its anchor governs the members, never reads as a split', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

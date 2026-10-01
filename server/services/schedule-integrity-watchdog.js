@@ -711,7 +711,7 @@ async function runInner({ now = new Date() } = {}) {
     // It rings within what is left of this run's shared budget
     // (docs/admin-notifications.md: non-customer rows ring at most 10 a day).
     combinedBooking = await require('./combined-booking-check').runCombinedBookingCheck({
-      now, ringBudget: Math.max(0, MAX_ALERTS_PER_RUN - (delivered.alerted || 0)),
+      now, ringBudget: Math.max(0, MAX_ALERTS_PER_RUN - delivered.alerted),
     });
   } catch (err) {
     combinedBookingCheckFailed = true;
