@@ -146,15 +146,37 @@ function lastAmountsByProduct(history) {
   return byProduct;
 }
 
-// IRAC (insecticides) / FRAC (fungicides) group, falling back to the generic
-// moa_group. The family prefix keeps an IRAC "3A" from matching a FRAC "3".
-function resistanceGroup(row) {
-  for (const [family, raw] of [['irac', row.irac_group], ['frac', row.frac_group], ['moa', row.moa_group]]) {
-    const group = String(raw || '').trim().replace(/^group\s*/i, '');
-    if (group) return { key: `${family}:${group.replace(/\s+/g, '').toLowerCase()}`, label: `${family === 'moa' ? 'MOA' : family.toUpperCase()} ${group}` };
-  }
-  return null;
+// The generic moa_group column carries no family ("Group 3" is a FRAC DMI on
+// Headway and an HRAC code on Snapshot), so its family comes from the
+// product's category; an unknown category stays 'moa' and matches any family.
+function moaFamily(category) {
+  const c = String(category || '').toLowerCase();
+  if (/insect|miticide|igr|acaricide/.test(c)) return 'irac';
+  if (/fungicide/.test(c)) return 'frac';
+  if (/herbicide/.test(c)) return 'hrac';
+  return 'moa';
 }
+
+// Every individual resistance group a product carries, family-qualified.
+// Combination products list several ("28+4A", "Group 11 + 3"), and a
+// rotation conflict is ANY shared group, so each is its own entry. The
+// explicit IRAC/FRAC/HRAC columns win over the generic moa_group.
+function resistanceGroups(row) {
+  const explicit = [['irac', row.irac_group], ['frac', row.frac_group], ['hrac', row.hrac_group]]
+    .filter(([, raw]) => String(raw || '').trim());
+  const sources = explicit.length ? explicit : [[moaFamily(row.category), row.moa_group]];
+  const groups = [];
+  for (const [family, raw] of sources) {
+    for (const part of String(raw || '').replace(/group/gi, '').split(/[+,/&]|\band\b/i)) {
+      const code = part.trim().replace(/\s+/g, '').toUpperCase();
+      if (code && !groups.some((g) => g.family === family && g.code === code)) groups.push({ family, code });
+    }
+  }
+  return groups;
+}
+
+const sameGroup = (a, b) => a.code === b.code && (a.family === b.family || a.family === 'moa' || b.family === 'moa');
+const groupLabel = (g) => `${g.family === 'moa' ? 'MOA' : g.family.toUpperCase()} ${g.code}`;
 
 const isPalmFertilizer = (row) => !!row.id && deriveTreeShrubTreatments({
   products: [{ productId: row.id }],
@@ -175,23 +197,31 @@ function buildTreeShrubWarnings({ catalogRows, applications, visitDate }) {
     .map((app) => ({ app, daysAgo: daysBetween(visitDate, etCalendarDayOf(app.application_date)) }))
     .filter((entry) => entry.daysAgo >= 0)
     .sort((a, b) => a.daysAgo - b.daysAgo);
-  const rotationByGroup = new Map();
+  // Newest first, so the first entry sharing a group is the one to name.
+  const rotationEntries = [];
   let palmApplication = null;
   for (const entry of dated) {
-    const group = resistanceGroup({ ...entry.app, moa_group: entry.app.moa_group ?? entry.app.history_moa_group });
-    if (group && entry.daysAgo <= ROTATION_WINDOW_DAYS && !rotationByGroup.has(group.key)) rotationByGroup.set(group.key, entry);
+    if (entry.daysAgo <= ROTATION_WINDOW_DAYS) {
+      const groups = resistanceGroups({ ...entry.app, moa_group: entry.app.moa_group ?? entry.app.history_moa_group });
+      if (groups.length) rotationEntries.push({ entry, groups });
+    }
     if (!palmApplication && entry.daysAgo <= PALM_FERTILIZER_SPACING_DAYS && isPalmFertilizer({ ...entry.app, id: entry.app.product_id, name: entry.app.product_name })) palmApplication = entry;
   }
   const warnings = [];
   for (const row of catalogRows) {
-    const group = resistanceGroup(row);
-    const rotation = group && rotationByGroup.get(group.key);
+    const candidateGroups = resistanceGroups(row);
+    let rotation = null;
+    let shared = [];
+    for (const { entry, groups } of rotationEntries) {
+      shared = candidateGroups.filter((g) => groups.some((h) => sameGroup(g, h)));
+      if (shared.length) { rotation = entry; break; }
+    }
     if (rotation) {
       warnings.push({
         type: 'rotation',
         productId: row.id,
         productName: row.name,
-        group: group.label,
+        group: shared.map(groupLabel).join(', '),
         daysAgo: rotation.daysAgo,
         appliedProductName: rotation.app.product_name || null,
         appliedOn: etCalendarDayOf(rotation.app.application_date),

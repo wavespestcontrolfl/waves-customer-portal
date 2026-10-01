@@ -167,6 +167,28 @@ describe('buildTreeShrubWarnings', () => {
     expect(warnings[0]).toMatchObject({ type: 'rotation', productId: 'cand', group: 'MOA 3A' });
   });
 
+  test('a combination product shares each of its groups: IRAC 28+4A warns a group-28 candidate', () => {
+    const acelepryn = cat('acx', 'Acelepryn Xtra', { irac_group: '28+4A' });
+    const warnings = buildTreeShrubWarnings({ catalogRows, applications: [app(14, acelepryn)], visitDate });
+    expect(warnings).toEqual([expect.objectContaining({ type: 'rotation', productId: 'mainspring', group: 'IRAC 28', appliedProductName: 'Acelepryn Xtra' })]);
+  });
+
+  test('a single-group application warns a combination candidate on the shared group', () => {
+    const temprid = cat('tfx', 'Temprid FX', { category: 'insecticide', moa_group: 'Group 3A + 4A' });
+    const bifen = cat('bif', 'Bifenthrin', { category: 'insecticide', moa_group: 'Group 3A' });
+    const warnings = buildTreeShrubWarnings({ catalogRows: [temprid], applications: [app(7, bifen)], visitDate });
+    expect(warnings).toEqual([expect.objectContaining({ productId: 'tfx', group: 'IRAC 3A' })]);
+  });
+
+  test('moa_group takes its family from the category: a herbicide group 3 never matches a fungicide group 3', () => {
+    const snapshot = cat('snap', 'Snapshot 2.5TG', { category: 'herbicide', moa_group: 'Group 3 + 29' });
+    const headway = cat('head', 'Headway Fungicide', { category: 'fungicide', moa_group: 'Group 11 + 3' });
+    const pillar = cat('pil', 'Pillar G Intrinsic', { category: 'fungicide', moa_group: 'Group 11 + 3' });
+    expect(buildTreeShrubWarnings({ catalogRows: [snapshot], applications: [app(5, headway)], visitDate })).toEqual([]);
+    expect(buildTreeShrubWarnings({ catalogRows: [pillar], applications: [app(5, headway)], visitDate }))
+      .toEqual([expect.objectContaining({ productId: 'pil', group: 'FRAC 11, FRAC 3' })]);
+  });
+
   test('an IRAC code never matches a FRAC code of the same text', () => {
     const fungicide = cat('fung', 'Some Fungicide', { frac_group: '23' });
     expect(buildTreeShrubWarnings({ catalogRows: [fungicide], applications: [app(5, kontos)], visitDate })).toEqual([]);
