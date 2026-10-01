@@ -168,6 +168,8 @@ describe('recheckPlacements', () => {
     const before = row({ query: Q1, date: '2026-09-25', urls: [PAGE] });
     expect(recheckPlacements([placement()], [before, row({ query: Q1, date: '2026-10-05', urls: [PAGE] })], { now: new Date('2026-10-08T16:00:00Z') })[0].verdict).toBe('too_early');
     expect(recheckPlacements([placement()], [before], { now: NOW })[0].verdict).toBe('too_early'); // no answer since
+    // a named answer inside the settling window is still too early
+    expect(recheckPlacements([placement()], [before, row({ query: Q1, date: '2026-10-05', urls: [PAGE], named: true })], { now: new Date('2026-10-08T16:00:00Z') })[0].verdict).toBe('too_early');
     expect(recheckPlacements([placement()], [before, row({ query: Q1, date: '2026-10-18', urls: ['https://www.yelp.com/x'] })], { now: NOW })[0].verdict).toBe('page_not_cited_now');
     expect(recheckPlacements([placement()], [before, row({ query: Q1, date: '2026-10-18', urls: [PAGE] })], { now: NOW })[0].verdict).toBe('not_named_yet');
   });

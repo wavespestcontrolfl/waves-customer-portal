@@ -2289,7 +2289,7 @@ function BacklinksTab() {
               )}
             </UiCard>
           )}
-          {llmDash?.citedPages && (
+          {llmDash?.citedPageRanking && (
             <UiCard className="p-6">
               <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
                 Cited pages to win
@@ -2298,14 +2298,14 @@ function BacklinksTab() {
                 Directory and article pages answer engines cite, ranked page by
                 page. First: pages cited in a current &ldquo;who should I
                 hire&rdquo; answer that does not name Waves. Since{" "}
-                {llmDash.citedPages.since}.
+                {llmDash.citedPageRanking.since}.
               </p>
-              {llmDash.citedPages.pages.length === 0 ? (
+              {llmDash.citedPageRanking.pages.length === 0 ? (
                 <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
                   No directory or article pages cited in this window.
                 </p>
               ) : (
-                llmDash.citedPages.pages.map((p) => (
+                llmDash.citedPageRanking.pages.map((p) => (
                   <div
                     key={p.key}
                     className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
@@ -2336,12 +2336,12 @@ function BacklinksTab() {
                   </div>
                 ))
               )}
-              {llmDash.citedPages.placements?.length > 0 && (
+              {llmDash.citedPageRanking.placements?.length > 0 && (
                 <>
                   <h4 className="text-ui-body text-zinc-900 font-medium [margin:16px_0_4px]">
                     Placements live on a cited page
                   </h4>
-                  {llmDash.citedPages.placements.map((r) => (
+                  {llmDash.citedPageRanking.placements.map((r) => (
                     <div
                       key={r.prospectId}
                       className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"

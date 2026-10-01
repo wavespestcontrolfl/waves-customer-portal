@@ -675,10 +675,10 @@ router.get('/llm-mentions', async (req, res, next) => {
     try {
       const { loadCitedPages, loadPlacementRechecks } = require('../services/seo/cited-pages');
       const [{ since, scanned, pages }, placements] = await Promise.all([loadCitedPages(db, { limit: 25 }), loadPlacementRechecks(db)]);
-      dashboard.citedPages = { since, scanned, pages, placements };
+      dashboard.citedPageRanking = { since, scanned, pages, placements };
     } catch (err) {
       logger.warn(`[llm-mentions] cited-pages block failed: ${err.message}`);
-      dashboard.citedPages = null;
+      dashboard.citedPageRanking = null;
     }
     res.json(dashboard);
   } catch (err) { next(err); }

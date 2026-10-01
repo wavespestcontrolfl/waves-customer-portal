@@ -278,8 +278,8 @@ function daysBetween(fromDate, toDate) {
  * answers cited that exact page in the RECHECK_BEFORE_DAYS before the link
  * went live. before = those questions' answers in the
  * RECHECK_BEFORE_DAYS before; after = their answers from that day on.
- * verdict: too_early (under RECHECK_SETTLE_DAYS live, or no answer since) |
- * named_when_cited (an answer since cites the page and names Waves) |
+ * verdict, in order: too_early (under RECHECK_SETTLE_DAYS live, or no answer
+ * since) | named_when_cited (an answer since cites the page and names Waves) |
  * page_not_cited_now | not_named_yet. A placement with no live_url, or on a
  * page no engine cited before that day, is not returned.
  */
@@ -311,9 +311,10 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
       if (cites(r)) { t.citingPage += 1; if (named) t.namedWhenCiting += 1; }
     }
     const daysLive = daysBetween(liveOn, today);
+    // settle first: one early answer is not a result
     let verdict = 'not_named_yet';
-    if (tally.after.namedWhenCiting > 0) verdict = 'named_when_cited';
-    else if (daysLive < RECHECK_SETTLE_DAYS || tally.after.answers === 0) verdict = 'too_early';
+    if (daysLive < RECHECK_SETTLE_DAYS || tally.after.answers === 0) verdict = 'too_early';
+    else if (tally.after.namedWhenCiting > 0) verdict = 'named_when_cited';
     else if (tally.after.citingPage === 0) verdict = 'page_not_cited_now';
     out.push({
       prospectId: pl.id, host, liveOn, daysLive, page: liveKey, questions: [...questions].sort(),
