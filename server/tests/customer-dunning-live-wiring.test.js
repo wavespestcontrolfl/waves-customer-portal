@@ -247,6 +247,116 @@ describe('fireStep ownership fence', () => {
   });
 });
 
+// ── micro-deposit verification nudges keep their sender (Codex local review P1) ──
+// The combined set excludes an invoice waiting on bank micro-deposit verification (balance-set.js), so the
+// schedule never nudges it; owning every row of the customer left that nudge with no sender at all.
+describe('an owned customer\'s invoice waiting on micro-deposit verification keeps its own nudge', () => {
+  const FeatureGatesMock = require('../config/feature-gates');
+  const StripeMock = require('../services/stripe');
+  const waiting = new Set();
+  beforeEach(() => {
+    FeatureGatesMock.gates.divertMicrodepositDunning = true;
+    waiting.clear();
+    StripeMock.isInvoiceAwaitingMicrodepositVerification = jest.fn(async (inv) => waiting.has(inv.id));
+  });
+  afterEach(() => {
+    delete FeatureGatesMock.gates.divertMicrodepositDunning;
+    delete StripeMock.isInvoiceAwaitingMicrodepositVerification;
+  });
+
+  test('the batch predicate keeps an owned customer\'s PaymentIntent rows as candidates (gate on); gate off it is the plain ownership predicate', async () => {
+    jest.spyOn(Wiring, 'releaseIfDark').mockResolvedValue({});
+    await Followups.runPending();
+    let [, batch] = mockDb.chains.find(([t]) => t === 'invoice_followup_sequences as s');
+    const predicate = Followups._test.notOwnedOrMicrodepositCandidate;
+    expect(batch.calls.some(([m, arg]) => m === 'where' && arg === predicate)).toBe(true);
+    const builder = { whereRaw: jest.fn() };
+    predicate.call(builder);
+    const [sql, bindings] = builder.whereRaw.mock.calls[0];
+    expect(sql).toBe('(NOT EXISTS (SELECT 1 FROM customer_dunning_schedules c WHERE c.customer_id = s.customer_id AND c.status IN (?, ?, ?, ?)) OR i.stripe_payment_intent_id IS NOT NULL)');
+    expect(bindings).toEqual([...OPEN_STATUSES]);
+    delete FeatureGatesMock.gates.divertMicrodepositDunning;
+    mockDb.chains = [];
+    await Followups.runPending();
+    [, batch] = mockDb.chains.find(([t]) => t === 'invoice_followup_sequences as s');
+    expect(batch.calls.some(([m, arg]) => m === 'where' && arg === Followups._test.notOwnedByCustomerSchedule)).toBe(true);
+  });
+
+  test('runPending: an owned row fires only while its invoice waits on verification (checked before any lock); other owned rows are untouched and uncounted', async () => {
+    jest.spyOn(Wiring, 'releaseIfDark').mockResolvedValue({});
+    const due = new Date(NOW.getTime() - 60000);
+    const batchRow = (id, customerId, pi) => ({
+      id: `seq-${id}`, invoice_id: `inv-${id}`, customer_id: customerId, step_index: 2, next_touch_at: due, invoice_stripe_pi: pi,
+    });
+    mockDb.results['invoice_followup_sequences as s'] = [
+      batchRow('md', CUST, 'pi_md'), // owned, waiting on verification -> its own nudge
+      batchRow('paid-pi', CUST, 'pi_x'), // owned, a PaymentIntent but not waiting -> the schedule's
+      batchRow('free', CUST2, 'pi_y'), // not owned -> the ordinary per-invoice touch
+    ];
+    waiting.add('inv-md');
+    mockDb.results.customer_dunning_schedules = [{ customer_id: CUST }];
+    await expect(Followups.runPending()).resolves.toEqual({ sent: 2, skipped: 0 });
+    // the ownership read names only the PaymentIntent rows' customers, open statuses only
+    const [, ownersRead] = mockDb.chains.find(([t]) => t === 'customer_dunning_schedules');
+    expect(ownersRead.calls).toEqual(expect.arrayContaining([['whereIn', 'customer_id', [CUST, CUST2]], ['whereIn', 'status', [...OPEN_STATUSES]]]));
+    // Stripe was asked only about the OWNED PaymentIntent rows, and outside any transaction
+    expect(StripeMock.isInvoiceAwaitingMicrodepositVerification.mock.calls.map(([inv]) => inv)).toEqual([
+      { id: 'inv-md', stripe_payment_intent_id: 'pi_md' },
+      { id: 'inv-paid-pi', stripe_payment_intent_id: 'pi_x' },
+    ]);
+    // fireStep (the shared key) ran for the waiting owned row and the free row, never for the other owned row
+    const keyed = mockDb.log.filter((e) => e.raw && /pg_advisory_xact_lock_shared/.test(e.raw)).map((e) => e.bindings[0]);
+    expect(keyed).toEqual([lockKey(CUST), lockKey(CUST2)]);
+    expect(writes()).toEqual([]); // in this fake no row was due under the lock, so nothing was claimed
+  });
+
+  describe('fireStep with ownedMicrodeposit: claimed, then the nudge only while still waiting', () => {
+    const row = { id: 'seq-1', invoice_id: 'inv-1', customer_id: CUST, step_index: 2, next_touch_at: new Date(NOW.getTime() - 60000), invoice_stripe_pi: 'pi_1' };
+    beforeEach(() => {
+      mockDb.raw = async (sql) => ({ rows: /customer_dunning_schedules/.test(sql) ? [{ id: 'sched-9' }] : [] });
+      mockDb.firsts.invoices = { id: 'inv-1', customer_id: CUST, status: 'overdue' };
+      mockDb.firsts.invoice_followup_sequences = { id: 'seq-1', customer_id: CUST, status: 'active', step_index: 2, next_touch_at: row.next_touch_at };
+      mockDb.results.invoice_followup_sequences = 1; // the claim matched
+    });
+
+    test('no longer waiting by the time of the touch: nothing sent and nothing written but the claim and its clear', async () => {
+      await expect(Followups._test.fireStep({ ...row }, { ownedMicrodeposit: true })).resolves.toBeUndefined();
+      const seqWrites = writes().filter((w) => w.table === 'invoice_followup_sequences');
+      expect(seqWrites.map((w) => Object.keys(w.args[0]).sort())).toEqual([
+        ['touch_claimed_at', 'updated_at'], ['touch_claimed_at', 'updated_at'],
+      ]);
+      expect(seqWrites[1].args[0].touch_claimed_at).toBeNull();
+      expect(writes().filter((w) => w.table !== 'invoice_followup_sequences')).toEqual([]);
+      expect(StripeMock.isInvoiceAwaitingMicrodepositVerification).toHaveBeenCalledWith({ id: 'inv-1', stripe_payment_intent_id: 'pi_1' });
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('no longer waiting on bank verification'));
+    });
+
+    test('still waiting: the touch runs (here it stops at the archived customer and pauses its own row, the fired signal)', async () => {
+      waiting.add('inv-1');
+      mockDb.firsts.customers = { id: CUST, deleted_at: new Date() };
+      await expect(Followups._test.fireStep({ ...row }, { ownedMicrodeposit: true })).resolves.toBeUndefined();
+      expect(writes().some((w) => w.table === 'invoice_followup_sequences' && w.args[0].status === 'paused')).toBe(true);
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('is soft-deleted'));
+    });
+
+    test('without the flag the owned row is still refused under the key ({ ownedBy }, nothing claimed, Stripe never asked)', async () => {
+      waiting.add('inv-1');
+      await expect(Followups._test.fireStep({ ...row })).resolves.toEqual({ ownedBy: 'sched-9' });
+      expect(writes()).toEqual([]);
+      expect(StripeMock.isInvoiceAwaitingMicrodepositVerification).not.toHaveBeenCalled();
+    });
+
+    test('the schedule closed before the fence: an ordinary touch (no verification-only restriction)', async () => {
+      mockDb.raw = async () => ({ rows: [] });
+      mockDb.firsts.customers = { id: CUST, deleted_at: new Date() };
+      await Followups._test.fireStep({ ...row }, { ownedMicrodeposit: true });
+      // not waiting, yet the touch ran: the owned-only check did not apply
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('is soft-deleted'));
+      expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('no longer waiting on bank verification'));
+    });
+  });
+});
+
 // ── sendNextTouchNow routing ───────────────────────────────────────────────
 describe('sendNextTouchNow (the invoice follow-up send-now)', () => {
   beforeEach(() => {

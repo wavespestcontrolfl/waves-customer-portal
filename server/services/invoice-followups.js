@@ -925,9 +925,12 @@ async function runPending() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
     // A customer on an open customer_dunning_schedules row: the schedule owns
-    // the cadence and these rows are membership state, never fired here.
-    // With no schedule rows this excludes nothing (pinned).
-    .where(notOwnedByCustomerSchedule)
+    // the cadence and these rows are membership state, never fired here —
+    // except an invoice waiting on bank micro-deposit verification, which the
+    // schedule's set excludes (balance-set.js) and so never reminds: its own
+    // row keeps sending the verification nudge (the loop below decides, per
+    // row, outside any lock). With no schedule rows this excludes nothing (pinned).
+    .where(gates.divertMicrodepositDunning ? notOwnedOrMicrodepositCandidate : notOwnedByCustomerSchedule)
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',
@@ -938,10 +941,19 @@ async function runPending() {
       'i.created_at as invoice_created_at',
     );
 
+  const owners = await microdepositCandidateOwners(rows);
   let sent = 0, skipped = 0;
   for (const batchRow of rows) {
     let row = batchRow;
     try {
+      // A row of a customer on a combined schedule is in the batch only as a
+      // possible micro-deposit nudge: unless its invoice is waiting on that
+      // verification right now, it is the schedule's and is left untouched
+      // (no retime, no stale skip, no claim, not counted).
+      if (owners.has(String(row.customer_id))) {
+        if (!(await awaitingMicrodepositVerification(row))) continue;
+        row = { ...row, owned_microdeposit: true };
+      }
       // A legacy-cadence touch moved to its Day 90 ladder day is processed
       // on that new day in this same run when the new day is today (pre-push
       // audit P1): skipping it would let the next tick find it past its
@@ -984,9 +996,45 @@ async function runPending() {
 // sent), except a row fireStep refused because its customer is on an open
 // customer-level schedule (0): nothing was claimed or sent.
 async function fireCounted(row) {
-  const out = await fireStep(row);
+  const out = await fireStep(row, { ownedMicrodeposit: row.owned_microdeposit === true });
   return out && out.ownedBy ? 0 : 1;
 }
+
+// ── micro-deposit verification nudges on a combined schedule ─────────────
+//
+// The customer-level set excludes an invoice whose PaymentIntent waits on the
+// customer's two bank micro-deposits (balance-set.js, `excluded.md`): the
+// combined reminder never names or nudges it. That invoice's OWN row stays its
+// one sender (Codex local review P1: owning every row of the customer left
+// these verification nudges with no sender at all), on its own cadence, through
+// fireTouch's existing verification copy, contact policy and spacing. Who owns
+// an invoice is decided by the same live Stripe signal both sides read (the
+// engine at its resolve, this path at the touch): waiting on verification ->
+// this row, otherwise the schedule. No Stripe call ever runs under a lock: the
+// batch pre-check below runs before the fence, and fireTouch re-checks after
+// the claim committed and sends NOTHING unless the invoice is still waiting.
+
+function notOwnedOrMicrodepositCandidate() {
+  this.whereRaw(`(NOT EXISTS (SELECT 1 FROM customer_dunning_schedules c WHERE c.customer_id = s.customer_id AND c.status IN (${
+    CustomerDunningKeys.OPEN_STATUSES.map(() => '?').join(', ')})) OR i.stripe_payment_intent_id IS NOT NULL)`, CustomerDunningKeys.OPEN_STATUSES);
+}
+
+// The customers among the batch's PaymentIntent rows that are on an open
+// schedule (one read; none when no row carries a PaymentIntent).
+async function microdepositCandidateOwners(rows) {
+  if (!gates.divertMicrodepositDunning) return new Set();
+  const ids = [...new Set(rows.filter((r) => r.invoice_stripe_pi).map((r) => String(r.customer_id)))];
+  if (!ids.length) return new Set();
+  const owned = await db('customer_dunning_schedules').whereIn('customer_id', ids)
+    .whereIn('status', CustomerDunningKeys.OPEN_STATUSES).select('customer_id');
+  return new Set((owned || []).map((r) => String(r.customer_id)));
+}
+
+// Fail CLOSED for an owned row: an unreadable state reads as "not waiting", so
+// the row stays the schedule's (which holds the whole set on the same
+// unreadable state) and nothing is sent from either side.
+const awaitingMicrodepositVerification = (row) => gates.divertMicrodepositDunning && !!row.invoice_stripe_pi
+  && StripeService.isInvoiceAwaitingMicrodepositVerification({ id: row.invoice_id, stripe_payment_intent_id: row.invoice_stripe_pi });
 
 // ── customer-level overdue reminders (dunning consolidation) ─────────────
 //
@@ -1446,7 +1494,7 @@ async function skipStaleTouches(row, now) {
  * self-heals via the TTL window.
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
-async function fireStep(row, { operatorInitiated = false } = {}) {
+async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = false } = {}) {
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
@@ -1517,9 +1565,12 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
         return;
       }
       // A customer on an open customer-level schedule: the schedule owns the
-      // cadence; this row is membership state and is never fired or claimed.
+      // cadence; this row is membership state and is never fired or claimed —
+      // unless the caller brings it as a micro-deposit nudge (runPending's
+      // pre-check): then it is claimed, and fireTouch sends only the
+      // verification nudge, only if the invoice is still waiting on it.
       ownedBy = await openCustomerScheduleId(trx, row.customer_id);
-      if (ownedBy) return;
+      if (ownedBy && !ownedMicrodeposit) return;
       const claimed = await trx('invoice_followup_sequences')
         .where({ id: row.id })
         .where(function () {
@@ -1543,7 +1594,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
     logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
     return;
   }
-  if (ownedBy) {
+  if (ownedBy && !ownedMicrodeposit) {
     logger.info(`[invoice-followups] sequence ${row.id} not fired — customer ${row.customer_id} is on customer reminder schedule ${ownedBy}`);
     return { ownedBy };
   }
@@ -1566,7 +1617,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row, { operatorInitiated, claimStamp });
+    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1579,7 +1630,15 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   }
 }
 
-async function fireTouch(row, { operatorInitiated = false, claimStamp = null } = {}) {
+async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false } = {}) {
+  // A row of a customer on a combined schedule (fireStep's ownedMicrodeposit):
+  // re-judged now, after the claim committed and outside any lock. No longer
+  // waiting on verification -> the invoice is the schedule's: nothing is sent
+  // or written here (the claim clears in fireStep's finally).
+  if (verificationOnly && !(await awaitingMicrodepositVerification(row))) {
+    logger.info(`[invoice-followups] sequence ${row.id} not sent — invoice ${row.invoice_id} is no longer waiting on bank verification and customer ${row.customer_id} is on a customer reminder schedule`);
+    return;
+  }
   const step = followupSteps()[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -1647,11 +1706,11 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — customer ${row.customer_id} is missing`);
     return;
   }
-  const mdPending = gates.divertMicrodepositDunning
+  const mdPending = verificationOnly || (gates.divertMicrodepositDunning
     && await StripeService.isInvoiceAwaitingMicrodepositVerification({
       id: row.invoice_id,
       stripe_payment_intent_id: row.invoice_stripe_pi,
-    });
+    }));
   const category = mdPending ? 'payment_issue' : 'invoice';
   let explicitChannels = null;
   if (!operatorInitiated) {
@@ -3080,6 +3139,7 @@ module.exports = {
   // Exported for tests only (fireStep + the batch ownership predicate: the
   // customer-dunning PostgreSQL concurrency suite drives them directly).
   _test: {
-    canSystemResume, isSystemStopStamp, holdTouchUntilNextDay, fireStep, notOwnedByCustomerSchedule, reviveLegacyFinishedSequences,
+    canSystemResume, isSystemStopStamp, holdTouchUntilNextDay, fireStep, notOwnedByCustomerSchedule, notOwnedOrMicrodepositCandidate,
+    reviveLegacyFinishedSequences,
   },
 };

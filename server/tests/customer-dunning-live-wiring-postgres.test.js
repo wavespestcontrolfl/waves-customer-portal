@@ -174,17 +174,19 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
     await app('customers').insert({ id, first_name: 'Sam', last_name: 'Fixture', deleted_at: new Date() });
     return id;
   }
-  async function member(customerId, { sentDaysAgo = 40, step = 3, due = true, claimedAt = null } = {}) {
+  async function member(customerId, { sentDaysAgo = 40, step = 3, due = true, claimedAt = null, pi = null } = {}) {
     const invoiceId = randomUUID();
     const sentAt = new Date(Date.now() - sentDaysAgo * DAY);
-    await app('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'overdue', created_at: sentAt, sent_at: sentAt, token: `tok-${invoiceId.slice(0, 8)}` });
+    await app('invoices').insert({
+      id: invoiceId, customer_id: customerId, status: 'overdue', created_at: sentAt, sent_at: sentAt, token: `tok-${invoiceId.slice(0, 8)}`, stripe_payment_intent_id: pi,
+    });
     const [seq] = await app('invoice_followup_sequences').insert({
       invoice_id: invoiceId, customer_id: customerId, status: 'active', step_index: step,
       next_touch_at: due ? new Date(Date.now() - 60 * 1000) : new Date(Date.now() + 5 * DAY), touch_claimed_at: claimedAt,
     }).returning('*');
-    return { invoiceId, seq, sentAt };
+    return { invoiceId, seq, sentAt, pi };
   }
-  const batchRow = (m) => ({ ...m.seq, invoice_id: m.invoiceId });
+  const batchRow = (m) => ({ ...m.seq, invoice_id: m.invoiceId, invoice_stripe_pi: m.pi || null });
   async function openSchedule(customerId, over = {}) {
     const [row] = await app('customer_dunning_schedules').insert({
       customer_id: customerId, episode: 1, status: 'active', step_index: 3,
@@ -385,6 +387,110 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
       await openSchedule(closed, { status: 'released', closed_reason: 'released_admin', closed_at: new Date() });
       await openSchedule(closed, { status: 'completed', episode: 2, closed_reason: 'balance_cleared', closed_at: new Date() });
       expect(await select(ids, true)).toEqual(await select(ids, false));
+    });
+  });
+
+  // ── micro-deposit verification nudges (Codex local review P1) ──────────
+  describe('an owned customer\'s invoice waiting on micro-deposit verification keeps its own sender', () => {
+    const StripeService = require('../services/stripe');
+    let waiting;
+    let stripeSpy;
+    let savedGate;
+    beforeEach(() => {
+      waiting = new Set();
+      savedGate = FeatureGates.gates.divertMicrodepositDunning;
+      FeatureGates.gates.divertMicrodepositDunning = true;
+      stripeSpy = jest.spyOn(StripeService, 'isInvoiceAwaitingMicrodepositVerification')
+        .mockImplementation(async (inv) => waiting.has(String(inv.id)));
+    });
+    afterEach(() => { stripeSpy.mockRestore(); FeatureGates.gates.divertMicrodepositDunning = savedGate; });
+
+    test('the batch predicate: an owned customer\'s PaymentIntent rows stay candidates, its other rows stay out; no schedule rows: nothing excluded', async () => {
+      const owned = await customer();
+      const free = await customer();
+      const withPi = await member(owned, { pi: 'pi_md' });
+      await member(owned);
+      await member(free, { pi: 'pi_free' });
+      await member(free);
+      const ids = [owned, free];
+      const select = (predicate) => app('invoice_followup_sequences as s').join('invoices as i', 's.invoice_id', 'i.id')
+        .whereIn('s.customer_id', ids).where('s.status', 'active').where(predicate).orderBy('s.id').pluck('s.id');
+      const all = await app('invoice_followup_sequences').whereIn('customer_id', ids).orderBy('id').pluck('id');
+      expect(await select(Followups._test.notOwnedOrMicrodepositCandidate)).toEqual(all);
+      await openSchedule(owned, { status: 'paused' });
+      const left = await select(Followups._test.notOwnedOrMicrodepositCandidate);
+      const freeRows = await app('invoice_followup_sequences').where({ customer_id: free }).pluck('id');
+      expect(new Set(left)).toEqual(new Set([...freeRows, withPi.seq.id]));
+    });
+
+    test('still waiting: fireStep (ownedMicrodeposit) claims the owned row and its touch runs; Stripe is asked after the claim committed', async () => {
+      const c = await customer();
+      const a = await member(c, { pi: 'pi_md' });
+      await member(c, { sentDaysAgo: 35, step: 2 });
+      await openSchedule(c);
+      waiting.add(a.invoiceId);
+      let heldKeysAtStripe = null;
+      stripeSpy.mockImplementation(async (inv) => {
+        // no lock is held by this backend while Stripe is asked: the claim already committed
+        const { rows } = await admin.raw("select count(*)::int as n from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'advisory' and a.datname = current_database()");
+        heldKeysAtStripe = rows[0].n;
+        expect((await seqRow(a.seq.id)).touch_claimed_at).not.toBeNull();
+        return waiting.has(String(inv.id));
+      });
+      expect(await Followups._test.fireStep(batchRow(a), { ownedMicrodeposit: true })).toBeUndefined();
+      expect(heldKeysAtStripe).toBe(0);
+      expect(fired()).toBe(1); // reached the touch (stopped at the archived customer)
+      const after = await seqRow(a.seq.id);
+      expect(after.status).toBe('paused');
+      expect(after.touch_claimed_at).toBeNull();
+    });
+
+    test('no longer waiting by the touch: nothing sent, the row\'s step / due time / status unchanged, claim cleared', async () => {
+      const c = await customer();
+      const a = await member(c, { pi: 'pi_md' });
+      await member(c, { sentDaysAgo: 35, step: 2 });
+      await openSchedule(c);
+      const before = await seqRow(a.seq.id);
+      expect(await Followups._test.fireStep(batchRow(a), { ownedMicrodeposit: true })).toBeUndefined();
+      expect(fired()).toBe(0);
+      const after = await seqRow(a.seq.id);
+      expect([after.status, after.step_index, after.next_touch_at?.getTime(), after.touch_claimed_at])
+        .toEqual([before.status, before.step_index, before.next_touch_at?.getTime(), null]);
+    });
+
+    test('the engine\'s claim holds the member rows: a verification fire for one of them claims nothing and sends nothing', async () => {
+      const c = await customer();
+      const a = await member(c, { pi: 'pi_md' });
+      await member(c, { sentDaysAgo: 35, step: 2 });
+      const schedule = await openSchedule(c);
+      waiting.add(a.invoiceId);
+      const claimed = await Schedule.claim(schedule.id, new Date(), { force: true });
+      expect(claimed).not.toBeNull();
+      expect(await Followups._test.fireStep(batchRow(a), { ownedMicrodeposit: true })).toBeUndefined();
+      expect(fired()).toBe(0);
+      expect(stripeSpy).not.toHaveBeenCalled();
+      expect(new Date((await seqRow(a.seq.id)).touch_claimed_at).getTime()).toBe(claimed.claimStamp.getTime());
+      await Schedule.releaseClaim(claimed);
+    });
+
+    test('a verification fire in flight (claimed, asking Stripe): the engine\'s claim refuses, never a deadlock, never both', async () => {
+      const c = await customer();
+      const a = await member(c, { pi: 'pi_md' });
+      await member(c, { sentDaysAgo: 35, step: 2 });
+      const schedule = await openSchedule(c);
+      waiting.add(a.invoiceId);
+      let reached;
+      const atStripe = new Promise((r) => { reached = r; });
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      stripeSpy.mockImplementation(async () => { reached(); await gate; return true; });
+      const fire = Followups._test.fireStep(batchRow(a), { ownedMicrodeposit: true });
+      await atStripe;
+      expect(await Schedule.claim(schedule.id, new Date(), { force: true })).toBeNull(); // member claim fresh
+      release();
+      await fire;
+      expect(deadlocks()).toEqual([]);
+      expect(fired()).toBe(1);
     });
   });
 
