@@ -360,11 +360,39 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_open');
     expect(result.paymentIntentId).toBe('pi_fresh');
     expect(result.clientSecret).toBe('pi_fresh_secret');
-    const [params] = stripeClient.paymentIntents.create.mock.calls[0];
+    const [params, createOpts] = stripeClient.paymentIntents.create.mock.calls[0];
     // The fresh mint is the full /setup block — the webhook mirrors' keys ride along.
     expect(params.metadata).toEqual(expect.objectContaining({
       save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION, waves_customer_id: 'cust_123', waves_invoice_id: invoiceRow.id,
     }));
+    // The retired intent stays in the replacement's idempotency key (codex
+    // local max-effort review on #5434): save on → off → on within Stripe's
+    // idempotency window must never replay the first, now-canceled mint.
+    expect(createOpts.idempotencyKey).toContain('_pi_open_');
+    expect(createOpts.idempotencyKey).not.toContain('_new_');
+  });
+
+  test('a save-card round trip (off → on → off) never reuses the original mint key', async () => {
+    // Third /setup in the cycle: the active PI (the saving replacement, stamped)
+    // is retired for a no-save mint whose key would otherwise equal the very
+    // first `_new_…_nocv` key and replay that canceled intent.
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    invoiceRow.stripe_payment_intent_id = 'pi_saving';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_saving',
+      status: 'requires_payment_method',
+      amount: 7500,
+      metadata: { waves_invoice_id: invoiceRow.id, save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION },
+    });
+    stripeClient.paymentIntents.cancel.mockResolvedValueOnce({ id: 'pi_saving', status: 'canceled' });
+    stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({ id: 'pi_third', status: 'requires_payment_method', client_secret: 'pi_third_secret' });
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: false });
+    expect(result.paymentIntentId).toBe('pi_third');
+    const [, createOpts] = stripeClient.paymentIntents.create.mock.calls[0];
+    expect(createOpts.idempotencyKey).toContain('_pi_saving_');
+    expect(createOpts.idempotencyKey).toMatch(/_nocv$/);
+    expect(createOpts.idempotencyKey).not.toContain('_new_');
   });
 
   test('a PI minted before the consent stamp existed is replaced, not re-stamped, when a save-the-method tab reuses it', async () => {

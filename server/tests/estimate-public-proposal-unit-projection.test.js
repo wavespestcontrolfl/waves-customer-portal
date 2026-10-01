@@ -238,6 +238,44 @@ describe('GET /:token/data — proposal line projection', () => {
     }
   });
 
+  test('a signed-pin headless pass (the /pdf route\'s or the admin\'s capture) never writes served evidence — only a customer-facing render does (codex local review on #5434)', async () => {
+    const { signEstimateDocPin } = require('../services/pdf/estimate-doc-pdf');
+    dbRows.estimates = {
+      ...estimateRow(),
+      id: 'est-rate-review-pinned',
+      monthly_total: 85,
+      annual_total: 1020,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Ornamental Care Program', monthlyPrice: 85 }],
+        result: { recurring: { services: [{ service: 'tree_shrub', name: 'Ornamental Care Program', mo: 85 }] } },
+        proposal: {
+          enabled: false,
+          buildings: [{ name: 'Service location', lineItems: [{ description: 'Ornamental Care Program', unitPrice: 85, frequency: 'monthly', taxable: false }] }],
+        },
+      },
+    };
+    let writes = 0;
+    dbRows.__update = () => { writes += 1; return 1; };
+    try {
+      await withServer(async (baseUrl) => {
+        const pin = signEstimateDocPin('unitprojectiontoken');
+        const pinned = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf&dpin=${encodeURIComponent(pin)}`);
+        expect(pinned.status).toBe(200);
+        const body = await pinned.json();
+        expect(body.documentRender).toBe(true);
+        expect(body.proposal.rateReviewTermsEligible).toBe(true);
+        expect(writes).toBe(0);
+        // The same customer-facing (unpinned) pass does write.
+        const bare = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+        expect(bare.status).toBe(200);
+        expect(writes).toBe(1);
+      });
+    } finally {
+      dbRows.__update = null;
+    }
+  });
+
   test('document mode: a row that freezes between the read and the evidence write restarts the payload from the frozen row (pre-push Codex on #5434)', async () => {
     dbRows.estimates = {
       ...estimateRow(),

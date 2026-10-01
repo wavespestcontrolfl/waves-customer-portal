@@ -3749,6 +3749,15 @@ const StripeService = {
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
+        // The intent a cancel-and-replace branch below retires (codex local
+        // max-effort review on #5434): it must stay in the replacement's
+        // idempotency key. Clearing the invoice pointer alone made the key
+        // fall back to `_new_`, i.e. the ORIGINAL mint's key, and within
+        // Stripe's idempotency window the create replayed that first — now
+        // canceled — intent's original response (status included), binding
+        // the invoice to a dead client secret (save on → off → on within a
+        // day, or re-opening the original link after opting in).
+        let retiredIntentId = null;
         // Combined setups serialize per customer BEFORE any row lock (codex
         // r2 P2): two combined setups from different anchor links otherwise
         // each hold their own anchor and then want the other's inside the
@@ -3919,6 +3928,7 @@ const StripeService = {
                 // a PaymentIntent that will never collect them.
                 await require('./pay-combined').clearPaymentIntentStamps(trx, triagedPi.id);
                 lockedInvoice.stripe_payment_intent_id = null;
+                retiredIntentId = triagedPi.id;
               } catch (e) {
                 logger.warn(`[stripe] pay-page stale-PI triage could not clear dead PI for invoice ${invoiceId}: ${e.message}`);
                 const err = new Error('Could not prepare your payment — please try again in a moment');
@@ -4164,6 +4174,7 @@ const StripeService = {
               await PayCombined.clearPaymentIntentStamps(trx, activeIntent.id);
               await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, updated_at: trx.fn.now() });
               lockedInvoice.stripe_payment_intent_id = null;
+              retiredIntentId = activeIntent.id;
             } catch (e) {
               logger.warn(`[stripe] could not release combined PI ${activeIntent.id} for sibling invoice ${invoiceId}: ${e.message}`);
               const err = new Error('Could not prepare your payment — please try again in a moment');
@@ -4236,6 +4247,7 @@ const StripeService = {
               await PayCombined.clearPaymentIntentStamps(trx, activeIntent.id);
               await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, updated_at: trx.fn.now() });
               lockedInvoice.stripe_payment_intent_id = null;
+              retiredIntentId = activeIntent.id;
               logger.info(`[stripe] allocation/amount/consent stamp changed for invoice ${lockedInvoice.invoice_number} — replaced PI ${activeIntent.id} with a fresh mint`);
             } catch (e) {
               logger.warn(`[stripe] could not replace changed-allocation PI ${activeIntent.id} for invoice ${invoiceId}: ${e.message}`);
@@ -4327,7 +4339,7 @@ const StripeService = {
 
         // Include the currently stored PI id in the key so a replacement
         // setup cannot replay an older canceled intent for this invoice.
-        const sourceIntent = lockedInvoice.stripe_payment_intent_id || 'new';
+        const sourceIntent = retiredIntentId || lockedInvoice.stripe_payment_intent_id || 'new';
         // Allocation-salted (codex r13 P2): a rolled-back stamp write can
         // leave a PI parked under this key; if the eligible sibling SET
         // changes while the total stays equal, the retry would send

@@ -27613,7 +27613,14 @@ async function composeEstimateDataPayload(estimate, {
     // GATE_ESTIMATE_DOC_PDF off a bare ?mode=pdf falls through to the normal
     // page and shows no document, so nothing is served and nothing is
     // recorded (the /pdf route's pdfkit path writes its own evidence).
-    if (isPdfRenderPass && !documentEvidence && featureGates.isEnabled('estimateDocPdf')) {
+    // Customer-facing renders only (codex local max-effort review on #5434):
+    // the signed-pin headless pass (the /pdf route's and the admin's
+    // proposal.pdf capture) and staff/draft previews never count as the
+    // customer being served the line — the public /pdf route writes its own
+    // evidence before its capture, and an operator's download is not a
+    // disclosure to the customer.
+    if (isPdfRenderPass && !documentEvidence && featureGates.isEnabled('estimateDocPdf')
+      && !docRenderPin && !verifiedStaffPreview && !adminDraftPreview) {
       const evidence = await require('../services/estimate-proposal-billing').ensureRateReviewTermsEvidenceBeforeRender(estimate);
       if (evidence.estimate !== estimate) {
         return composeEstimateDataPayload(evidence.estimate, {
