@@ -315,6 +315,10 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
     logger.info(`[google-ads] Syncing search terms (last ${days} days)`);
 
     const { since: sinceStr, until: untilStr } = gaqlDateRange(days);
+    // The run's stamp is the moment its snapshot was fetched, so overlapping
+    // runs (manual Sync during the 6 AM job) order by data age, not by who
+    // reached the database first.
+    const syncedAt = new Date();
 
     const rows = await customer.query(`
       SELECT
@@ -336,12 +340,22 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
     // nothing. Every row ends the run carrying this run's numbers: terms Google
     // no longer reports are zeroed below, so stale spend never outlives the
     // rolling window (the ads advisor reads cost > 0 as current spend).
-    const syncedAt = new Date();
     // Rows for a Google campaign with no local ad_campaigns row (campaign sync
     // failed or lagging) can't be stored, so the snapshot is incomplete.
     let unmatched = 0;
 
+    let superseded = false;
+
     await db.transaction(async (trx) => {
+      // One snapshot writer at a time; a run whose fetch is older than the
+      // last committed snapshot is superseded and writes nothing.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [SEARCH_TERMS_SYNCED_KEY]);
+      const mark = await trx('system_settings').where({ key: SEARCH_TERMS_SYNCED_KEY }).first();
+      if (mark?.value && new Date(mark.value) >= syncedAt) {
+        superseded = true;
+        return;
+      }
+
       for (const row of rows) {
         const platformId = String(row.campaign.id);
         const searchTerm = row.search_term_view.search_term;
@@ -404,6 +418,10 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
         .merge({ value: syncedAt.toISOString(), updated_at: syncedAt });
     });
 
+    if (superseded) {
+      logger.info('[google-ads] Search-term snapshot superseded by a newer run; nothing written');
+      return [];
+    }
     logger.info(`[google-ads] Synced ${results.length} search terms`);
     return results;
   } catch (err) {

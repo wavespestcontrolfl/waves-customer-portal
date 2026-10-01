@@ -21,6 +21,8 @@ const mockWhere = jest.fn(() => {
 const mockDb = jest.fn(() => ({ where: mockWhere, insert: mockInsert }));
 // syncCampaigns upserts inside a row-locked transaction now.
 mockDb.transaction = (cb) => cb(mockDb);
+const mockRaw = jest.fn(() => Promise.resolve());
+mockDb.raw = mockRaw;
 mockDb.fn = { now: () => 'NOW()' };
 
 jest.mock('../models/db', () => mockDb);
@@ -342,6 +344,20 @@ describe('syncSearchTerms retires terms missing from the latest snapshot (Codex 
     await expect(GoogleAds.syncSearchTerms(30, { throwOnError: true })).rejects.toMatchObject({ code: 'search_terms_incomplete' });
     expect(mockWhere.mock.calls.find((c) => c[0] === 'updated_at' && c[1] === '<')).toBeUndefined();
     expect(mockInsert.mock.calls.find((c) => c[0]?.key === GoogleAds.SEARCH_TERMS_SYNCED_KEY)).toBeUndefined();
+  });
+
+  test('runs serialize on an advisory lock, and a run older than the committed snapshot writes nothing (Codex r13)', async () => {
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: 1 }, search_term_view: { search_term: 'synthetic term', status: 'NONE' },
+      metrics: { impressions: 3, clicks: 1, cost_micros: 2_000_000, conversions: 0, conversions_value: 0 },
+    }]);
+    // The committed snapshot was fetched after this run's fetch.
+    mockQueryFirst.mockResolvedValueOnce({ key: GoogleAds.SEARCH_TERMS_SYNCED_KEY, value: new Date(Date.now() + 60000).toISOString() });
+    const out = await GoogleAds.syncSearchTerms(30, { throwOnError: true });
+    expect(out).toEqual([]);
+    expect(mockRaw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), [GoogleAds.SEARCH_TERMS_SYNCED_KEY]);
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
   });
 
   test('records a run-level success, even for an empty snapshot (Codex r9)', async () => {
