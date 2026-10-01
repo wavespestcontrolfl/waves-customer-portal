@@ -142,6 +142,12 @@ describe('draftTechVoice', () => {
     expect(mockDispatch.mock.calls[0][1].text).toContain('Customer first name: (unknown - do not use a name)');
   });
 
+  test('terminal pass 4: a company split across first/last name is caught even when the contact name is cut to its first word', async () => {
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Sunset', recipientName: 'Sunset', customer: { id: 'cust-1', first_name: 'Sunset', last_name: 'Vacation Rentals' } });
+    expect(mockDispatch.mock.calls[0][1].text).toContain('Customer first name: (unknown - do not use a name)');
+  });
+
   test('a company stored as the first name is never used as a greeting', async () => {
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Sunset Vacation Rentals', customer: { id: 'cust-1', first_name: 'Sunset Vacation Rentals' } });
@@ -374,6 +380,10 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({ body: 'Bill, I know you had to get to work. Google review: {review_url}' }, { firstName: 'Bill' })).toBeNull();
     // An actual bill is still a money topic.
     expect(verify({ body: 'Bill, I know you had to get to work and the bill is due. Google review: {review_url}' }, { firstName: 'Bill' })).toBe('sensitive_topic');
+  });
+
+  test('terminal pass 4: "Please" opening the review request is not a name', () => {
+    expect(verify({ body: 'I know you had to get to work. Please leave a Google review: {review_url}' })).toBeNull();
   });
 
   test('Codex r2: an email intro must name a Google review too', () => {

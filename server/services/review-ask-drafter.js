@@ -606,7 +606,8 @@ function unknownProperNoun(body, { firstName, techName, ownWords }) {
     // A capital at the start of a sentence is only exempt for an ordinary
     // opener; an invented name there ("Nutmeg was great") is still caught.
     const sentenceStart = /(?:^|[.!?]\s+|\n\s*)$/.test(body.slice(0, m.index));
-    if (sentenceStart && SENTENCE_STARTERS.has(word)) continue;
+    // Request words ("Please leave...", "Could you...") are ordinary openers too.
+    if (sentenceStart && (SENTENCE_STARTERS.has(word) || ASK_WORDS.has(word))) continue;
     return m[1];
   }
   return null;
@@ -882,8 +883,12 @@ async function draftTechVoice({ customer, recipientFirstName, recipientName, ser
     const ctx = await gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep });
     // The company check reads the FULL name ("Sunset Vacation Rentals"), never
     // the first word a caller already cut it to.
-    const fullName = recipientName || [customer.first_name, customer.last_name].filter(Boolean).join(" ");
-    const firstName = COMPANY_NAME_RE.test(String(fullName || "")) ? "" : personFirstName(recipientFirstName || customer.first_name);
+    // Both the recipient's name and the account's full name are checked: a
+    // contact name can itself be cut to "Sunset" when the company is split
+    // across first_name / last_name. (Only the account holder is drafted for.)
+    const names = [recipientName, [customer.first_name, customer.last_name].filter(Boolean).join(" ")];
+    const isCompany = names.some((n) => COMPANY_NAME_RE.test(String(n || "")));
+    const firstName = isCompany ? "" : personFirstName(recipientFirstName || customer.first_name);
     const serviceDaysAgo = serviceDate ? etCalendarDaysBetween(serviceDate, new Date()) : null;
     const stepKind = channel === "email" ? "email" : resolveStepKind(sequenceStep, serviceDaysAgo);
     const termite = isTermiteService(serviceType);
