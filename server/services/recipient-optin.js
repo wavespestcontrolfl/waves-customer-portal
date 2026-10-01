@@ -74,7 +74,9 @@ function visitSlotAt(visit) {
   return require('../utils/datetime-et').parseETDateTime(`${datePart}T${timePart}`);
 }
 // Replay outcomes that end the obligation (anything else is retried by the sweep).
-const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'template_unavailable', 'confirmation_off', 'sms_not_chosen']);
+// template_unavailable is NOT terminal: the renderer returns null on a
+// transient template-read / render error too, so it is retried.
+const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'confirmation_off', 'sms_not_chosen']);
 // A replay claim older than this is a crashed attempt and may be retaken.
 const REPLAY_CLAIM_STALE_MS = 10 * 60 * 1000;
 // Unanswered or undeliverable entries stop being retried after this.
@@ -120,7 +122,11 @@ async function stampConsentOnConfirm(h, customerId, phoneKey, customer) {
       .whereIn('phone_key', others)
       .select('phone_key');
     const confirmedKeys = new Set((confirmed || []).map((r) => r.phone_key));
-    if (!others.every((k) => confirmedKeys.has(k))) return { stamped: false, reason: 'other_slot_phone_unconfirmed' };
+    // Phones the previous account stamp covered when an unconsented add
+    // cleared it (call pipeline consent_covered_phone_keys) count as covered.
+    const prefs = typeof customer.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer.service_preferences;
+    const coveredKeys = new Set(Array.isArray(prefs?.consent_covered_phone_keys) ? prefs.consent_covered_phone_keys : []);
+    if (!others.every((k) => confirmedKeys.has(k) || coveredKeys.has(k))) return { stamped: false, reason: 'other_slot_phone_unconfirmed' };
   }
   // Bound to the slot phones just checked: a concurrent contact add/replace
   // changes a column and the stamp writes nothing (row_changed).

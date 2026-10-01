@@ -5874,8 +5874,8 @@ const CONFIRMATION_REPLAY_DEAD_STATUSES = new Set(['cancelled', 'completed', 'sk
 // the send window with the service-contact trust floor, and renders the
 // SAME `appointment_confirmation` template ladder as deliverConfirmation. The
 // slot, window, reminders and the primary's own confirmation are untouched.
-// Deduped on sms_log: the same phone, message_type 'confirmation' and visit
-// within 24 hours is never re-sent. Returns { sent, reason }.
+// Deduped on sms_log for the visit's lifetime: the same phone (last 10),
+// message_type 'confirmation' and visit is never re-sent. Returns { sent, reason }.
 async function sendConfirmationToServiceContact({ customerId, scheduledServiceId, contact, inReplyToYes = false } = {}) {
   if (!customerId || !scheduledServiceId || !contact || !contact.phone) return { sent: false, reason: 'missing_input' };
   try {
@@ -5905,9 +5905,11 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
       // stored formatted — compare last-10 digits.
       .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [String(contact.phone).replace(/\D/g, '').slice(-10)])
       .whereRaw('metadata::text like ?', [`%${scheduledServiceId}%`])
-      .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+      // Visit lifetime, not a window: a reprocess days later must not resend.
       .first('id')
-      .catch(() => null);
+      // An unreadable dedupe fails CLOSED and retries (never a blind send).
+      .catch(() => ({ readFailed: true }));
+    if (recentDup && recentDup.readFailed) return { sent: false, reason: 'dedupe_unreadable' };
     if (recentDup) return { sent: false, reason: 'already_sent' };
     const firstName = firstNameFrom(contact.name) || 'there';
     // Same customer-facing label as the reminder rail: the reminder row's

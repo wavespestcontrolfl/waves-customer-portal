@@ -375,6 +375,7 @@ describe('persistCallSecondaryContact', () => {
 
   function makeDb({ customer, updateRows = 1, otherCustomer = null, prefs = undefined }) {
     const writes = { updates: [], prefsMerges: [], whereFns: 0 };
+    db.raw = jest.fn((sql, binds) => ({ sql, binds }));
     db.mockImplementation((table) => {
       if (table === 'customers') {
         // One builder serves both queries against `customers`: the main
@@ -509,6 +510,12 @@ describe('persistCallSecondaryContact', () => {
       service_contacts_consent_at: null,
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
+      // ...remembering which phones it DID cover, so the new recipient's YES
+      // can restore the stamp (grandfathered slots have no opt-in row).
+      service_preferences: {
+        sql: "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{consent_covered_phone_keys}', ?::jsonb)",
+        binds: [JSON.stringify(['9415557777'])],
+      },
     }]);
   });
 
@@ -525,11 +532,18 @@ describe('persistCallSecondaryContact', () => {
 
   test('an on-site contact with no notification ask is still saved (unstamped) so the opt-in ask can reach them', async () => {
     const writes = makeDb({ customer: bareCustomer });
-    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', wants_notifications: false, on_site: true })).toBe('written');
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', wants_notifications: false, on_site: true }, { onSiteAskEligible: true })).toBe('written');
     expect(writes.updates[0].service_contacts_consent_at).toBeUndefined();
+    // Nobody asked for notifications to them: the phone is filed, the email is not.
+    expect(writes.updates[0].service_contact_email).toBeNull();
+    expect(writes.updates[0].service_contact_phone).toBe(buyer.phone);
+    // The ask cannot go out (do-not-contact / dark rail → not eligible): no write.
+    const writesDark = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', wants_notifications: false, on_site: true })).toBe('skipped_no_intent');
+    expect(writesDark.updates).toHaveLength(0);
     // A non-on-site role with on_site=true is not an ask trigger: no write.
     const writes2 = makeDb({ customer: bareCustomer });
-    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'real_estate_agent', wants_notifications: false, on_site: true })).toBe('skipped_no_intent');
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'real_estate_agent', wants_notifications: false, on_site: true }, { onSiteAskEligible: true })).toBe('skipped_no_intent');
     expect(writes2.updates).toHaveLength(0);
   });
 
@@ -796,43 +810,43 @@ describe('on-site contact opt-in ask', () => {
     expect(src).not.toContain('phoneWithheld');
   });
 
-  test('the loop asks via claimRecipientOptins on the on-site decision and records optin_ask on the card', () => {
+  test('the loop only QUEUES the on-site ask (awaiting_booking); explicit consent keeps its own claim path', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result })');
-    expect(src).toContain("(askedViaOnSite && secondaryEntry?.phone)");
+    expect(src).toContain('pendingOnSiteAsks.push({ entry: secondaryEntry, demote: !otherSlotPhone });');
+    expect(src).toContain("const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;");
     expect(src).toContain('JSON.stringify({ optin_ask: value })');
-    // 'dispatching' until the fire-and-forget dispatch's outcome lands.
-    expect(src).toContain("optinAskState = 'dispatching'");
-    expect(src).toContain("markOptinAsk(dispatchedEntry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed')");
-    // dispatchRecipientOptins resolves { requested }: the count is read off the object.
-    expect(src).toContain("const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);");
+    // The save only admits an on-site-only contact when the ask can go out.
+    expect(src).toContain('{ smsConsentExplicit: v2SmsConsentExplicit, onSiteAskEligible: onSitePreAsk }');
     // Either extractor's do-not-contact request blocks the ask.
     expect(src).toMatch(/const v2DoNotContact = v2CanonicalExtraction\?\.consent\?\.do_not_contact_request === true\s*\|\| extracted\.do_not_contact_request === true;/);
-    expect(src).toContain('`not_sent:${onSiteDecision.reason}`');
     // Explicit V2 consent keeps the original claim path (fresh slot only).
-    expect(src).toContain("(result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit)");
+    expect(src).toContain("if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {");
     // The same-call fan-out gate is the original one.
     expect(src).toContain('const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(');
+    // No booking landed: the card says so.
+    expect(src).toContain("for (const { entry } of pendingOnSiteAsks) await markOptinAsk(entry, 'not_sent:no_booking');");
   });
 
-  test('the booking site leaves per-phone markers (never the pref) once a booking lands; set for a fresh slot AND a contact already on record', () => {
+  test('the booking site sends the on-site ask only once a visit landed: marker first (deep-merged), claim with the VISIT address, dispatch outcome on the card, reconcile', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    // Every asked recipient gets a marker (confirmation replay at YES); demote
-    // only when they are the only texting slot phone — not tied to this pass
-    // having WRITTEN the slot.
-    expect(src).toContain('if (askedViaOnSite) {');
-    expect(src).toContain('deferPrimaryOptOutPhoneKeys.set(lastTen(secondaryEntry.phone), !otherSlotPhone);');
-    expect(src).not.toContain("result === 'written' && !hadSlotPhone");
     const landed = src.indexOf('scheduledServiceId = svc.id;');
-    const marker = src.indexOf("\\'{demote_primary_on_optin}\\'", landed);
-    expect(marker).toBeGreaterThan(landed);
-    const block = src.slice(landed, marker + 600);
-    // A street-level address hold (office review) is not an active booking: no marker.
-    expect(block).toContain('if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKeys.size && !(await isStreetLevelHoldRow(db, svc)))');
-    // One entry per phone AND visit.
-    expect(block).toContain('const visitEntry = { [svc.id]: { demote, set_at: new Date().toISOString() } };');
-    // The booking site writes no pref at all any more.
+    const site = src.indexOf('if (pendingOnSiteAsks.length && !(await isStreetLevelHoldRow(db, svc))) {', landed);
+    expect(site).toBeGreaterThan(landed);
+    const block = src.slice(site, site + 6000);
+    // Marker before the ask; an existing visit entry's fields win (demoted_at / claim kept).
+    expect(block.indexOf("'{demote_primary_on_optin}'")).toBeLessThan(block.indexOf('claimRecipientOptins({'));
+    expect(block).toContain('?::jsonb || COALESCE(service_preferences #> ARRAY');
+    // The ask quotes the booked visit's address.
+    expect(block).toContain("const visitAddress = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');");
+    expect(block).toContain('propertyAddress: visitAddress ||');
+    expect(block).toContain("const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);");
+    expect(block).toContain("return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');");
+    expect(block).toContain('await reconcileDemoteMarker(customerId, phoneKey);');
+    // The booking site writes no pref at all.
     expect(src).not.toContain('appointment_notify_primary: false');
+    // The persistence loop no longer claims for the on-site path.
+    expect(src).not.toContain('(askedViaOnSite && secondaryEntry?.phone)');
   });
 });
 

@@ -136,12 +136,13 @@ function flatView(extraction) {
     // Order-stable per-contact signature over the whole secondary_contacts[]
     // (phone-identity:role:wants-notifications:text-intent:on-site, '|'-joined, '' when none) so a
     // flag flipping on entries 2+ shows in replay variance too (FIELD_GROUPS
-    // high). Canonical: the array when present, else the singleton as one entry.
+    // high). The singleton is ALWAYS fingerprinted first ('S=' entry), then
+    // the array: a candidate whose singleton drifts from secondary_contacts[0]
+    // (the live resolver reads both) cannot pass replay unnoticed.
     secondary_contacts_consent_signature: (() => {
+      const sig = (c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_notifications ? 1 : 0}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`;
       const list = mapSecondaryContactsToLegacy(extraction.secondary_contacts);
-      return (list.length ? list : [secondary].filter(Boolean))
-        .map((c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_notifications ? 1 : 0}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`)
-        .join('|');
+      return [...(secondary ? [`S=${sig(secondary)}`] : []), ...list.map(sig)].join('|');
     })(),
 
     appointment_confirmed: sched.status === 'confirmed',

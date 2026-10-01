@@ -168,4 +168,19 @@ describe('sendConfirmationToServiceContact', () => {
     expect(res).toEqual({ sent: false, reason: 'already_sent' });
     expect(q.whereRaw.mock.calls.some(([, binds]) => binds && binds[0] === '5550100123')).toBe(true);
   });
+
+  test('an unreadable dedupe fails closed (retryable), never a blind send', async () => {
+    const q = {};
+    ['where', 'whereRaw', 'whereNull', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.first = jest.fn(() => Promise.reject(new Error('db down')));
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ id: 's1', status: 'confirmed', service_type: 'Pest Control' });
+      if (table === 'appointment_reminders') return chain({ appointment_time: future, cancelled: false });
+      if (table === 'sms_log') return q;
+      return chain(undefined);
+    });
+    const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+    expect(res).toEqual({ sent: false, reason: 'dedupe_unreadable' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });

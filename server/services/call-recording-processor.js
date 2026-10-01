@@ -3260,10 +3260,16 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false } = {}) {
-  // An on-site contact the opt-in ask may go to is saved too (unstamped): the
-  // slot is where the ask's phone and the later YES stamp live.
-  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOptinAskTrigger(contact))) return 'skipped_no_intent';
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false } = {}) {
+  // An on-site contact the opt-in ask will actually go to (the caller's
+  // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
+  // unstamped: the slot is where the ask's phone and the later YES stamp live.
+  const onSiteOnly = !!contact && contact.wants_notifications !== true && onSiteAskEligible && onSiteOptinAskTrigger(contact);
+  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly)) return 'skipped_no_intent';
+  // Nobody asked for this person to get notifications: their opt-in covers
+  // appointment TEXTS only, so their email is not filed (service-report
+  // emails fan out to every slot email).
+  if (onSiteOnly && contact.email) contact = { ...contact, email: null };
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
   const customer = await db('customers').where({ id: customerId }).first();
@@ -3425,6 +3431,13 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_at: null,
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
+      // The phones the cleared stamp DID cover (pre-double-opt-in slots have
+      // no recipient_optin row): kept so the new recipient's YES can restore
+      // the account stamp instead of being blocked by them forever.
+      service_preferences: db.raw(
+        "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{consent_covered_phone_keys}', ?::jsonb)",
+        [JSON.stringify(SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean))],
+      ),
     } : {}),
   };
   const updated = await write.update(slotWrite);
@@ -13515,15 +13528,35 @@ const CallRecordingProcessor = {
     // fan-out must exclude them — no row means grandfathered, and a claim
     // failure must fail CLOSED for that phone, not text it (#2956 r13).
     const optinClaimFailedPhones = new Set();
-    // Recipients (last-10 phone key -> demote) of on-site contacts that were
-    // (or earlier were) sent the opt-in ask: once a booking lands on THIS call,
-    // a durable marker per phone is left so that recipient's YES replays this
-    // booking's confirmation to them; demote=true (they are the account's only
-    // texting slot phone) also switches the caller's appointment texts off at
-    // that YES. Filled for a fresh slot write AND for a contact already on
-    // record, so a retry of the call still leaves the marker.
-    let deferPrimaryOptOutCustomerId = null;
-    const deferPrimaryOptOutPhoneKeys = new Map();
+    // On-site contacts whose opt-in ask is due ({ entry, demote }): the ask is
+    // NOT sent here. It goes out at the booking site, only once a visit has
+    // actually landed (and is not a street-level office-review hold), quoting
+    // that visit's address, together with the durable per-phone+visit marker
+    // that makes the recipient's YES replay this booking's confirmation;
+    // demote=true (they are the account's only texting slot phone) also
+    // switches the caller's appointment texts off at that YES. Filled for a
+    // fresh slot write AND for a contact already on record, so a retry of the
+    // call still asks and marks.
+    const pendingOnSiteAsks = [];
+    let onSiteAsksHandled = false;
+    // Review-card breadcrumb (secondary_contact_captured payload.optin_ask) for
+    // the card's own contact: awaiting_booking | dispatching | sent |
+    // not_sent:<reason>.
+    const markOptinAsk = async (entry, value) => {
+      const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      if (!callSecondaryContact || !tenOf(entry?.phone) || tenOf(entry.phone) !== tenOf(callSecondaryContact.phone)) return;
+      try {
+        await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'secondary_contact_captured' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({
+            payload: db.raw('(coalesce(payload, \'{}\'::jsonb)) || ?::jsonb', [JSON.stringify({ optin_ask: value })]),
+            updated_at: new Date(),
+          });
+      } catch (triageErr) {
+        logger.warn(`[call-proc] optin-ask triage update failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    };
     // The opt-in ask needs a LIVE rail (gate on + request template active);
     // dark = nobody can be asked. Read once per call, only when it can matter.
     const optinRailLive = callSecondaryContacts.some(onSiteOptinAskTrigger)
@@ -13534,22 +13567,6 @@ const CallRecordingProcessor = {
       // each entry passes the SAME per-contact gates (wants_notifications,
       // dedup, cross-customer, empty slot). Stop early when slots run out.
       const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      // Review-card breadcrumb (secondary_contact_captured payload.optin_ask) for
-      // the card's own contact: 'sent' or 'not_sent:<reason>'.
-      const markOptinAsk = async (entry, value) => {
-        if (!callSecondaryContact || !lastTen(entry?.phone) || lastTen(entry.phone) !== lastTen(callSecondaryContact.phone)) return;
-        try {
-          await db('triage_items')
-            .where({ call_log_id: call.id, reason_code: 'secondary_contact_captured' })
-            .whereIn('status', ['open', 'in_progress'])
-            .update({
-              payload: db.raw('(coalesce(payload, \'{}\'::jsonb)) || ?::jsonb', [JSON.stringify({ optin_ask: value })]),
-              updated_at: new Date(),
-            });
-        } catch (triageErr) {
-          logger.warn(`[call-proc] optin-ask triage update failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
-        }
-      };
       for (const secondaryEntry of callSecondaryContacts) {
       try {
         // Pre-persist: only entries that could be asked need the slot-phone read.
@@ -13565,25 +13582,22 @@ const CallRecordingProcessor = {
             return !!key && key !== lastTen(secondaryEntry.phone);
           });
         }
-        const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit });
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit, onSiteAskEligible: onSitePreAsk });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         // Recipient double opt-in parity with the portal flow (#2956): a
         // call-created phone recipient gets the same claim + confirmation
         // ask (dark template = nothing pends; gate off = no-op). The CLAIM
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
-        // stays async. Asked when the caller gave explicit SMS consent (as
-        // always) OR when the on-site rule above says this person should be
-        // asked; a phone already filed by an earlier pass is asked too, so a
-        // retry never leaves them unasked (the claim dedupes on the row).
+        // stays async. Asked here when the caller gave explicit SMS consent
+        // (as always). An on-site contact's ask waits for the booking site
+        // (pendingOnSiteAsks) — no booking, no ask.
         const onSiteDecision = decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result });
-        const askedViaOnSite = onSiteDecision.ask;
-        let optinAskState = onSiteDecision.ask ? 'not_sent:no_new_ask' : `not_sent:${onSiteDecision.reason}`;
-        // The dispatch is fire-and-forget: the card says 'dispatching' until
-        // its outcome lands ('sent', or not_sent:dispatch_failed when the ask
-        // was blocked / released to ask_failed).
-        let optinDispatch = null;
-        if ((result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) || (askedViaOnSite && secondaryEntry?.phone)) {
+        if (onSiteDecision.ask && secondaryEntry?.phone) {
+          pendingOnSiteAsks.push({ entry: secondaryEntry, demote: !otherSlotPhone });
+        }
+        const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;
+        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -13603,24 +13617,11 @@ const CallRecordingProcessor = {
                 propertyAddress: [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
               });
               if (claims.length) {
-                optinDispatch = dispatchRecipientOptins(claims, custRow)
-                  .catch((err) => {
-                    logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`);
-                    return 0;
-                  });
-                if (askedViaOnSite) optinAskState = 'dispatching';
-              }
-              // Every asked recipient gets the booking's confirmation at their
-              // YES; only the account's sole texting slot phone also makes the
-              // caller step back (marker written at the booking site) — also on
-              // a retry where the contact was already filed and the ask out.
-              if (askedViaOnSite) {
-                deferPrimaryOptOutCustomerId = customerId;
-                deferPrimaryOptOutPhoneKeys.set(lastTen(secondaryEntry.phone), !otherSlotPhone);
+                void dispatchRecipientOptins(claims, custRow)
+                  .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
               }
             }
           } catch (optErr) {
-            if (askedViaOnSite) optinAskState = 'not_sent:claim_failed';
             const failedKey = String(secondaryEntry.phone || '').replace(/\D/g, '').slice(-10);
             optinClaimFailedPhones.add(failedKey);
             // Durable fail-closed: the slot is already committed, so leave a
@@ -13640,14 +13641,6 @@ const CallRecordingProcessor = {
           }
         }
         await markOptinAsk(secondaryEntry, optinAskState);
-        if (optinDispatch && optinAskState === 'dispatching') {
-          const dispatchedEntry = secondaryEntry;
-          void optinDispatch.then((outcome) => {
-            // dispatchRecipientOptins resolves { requested }; the catch above yields 0.
-            const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);
-            return markOptinAsk(dispatchedEntry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');
-          });
-        }
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
           // customer's primary phone — the office decides whether it's the
@@ -18486,31 +18479,74 @@ const CallRecordingProcessor = {
               // appointment_notify_primary = false, replays this booking's
               // confirmation to the recipient and clears THAT entry when their
               // YES lands (a NO / failed ask clears it too).
-              // A street-level address hold (office review, #5381) is not an
-              // active booking yet: no marker, so no confirmation replay for it.
-              if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKeys.size && !(await isStreetLevelHoldRow(db, svc))) {
-                try {
-                  // One entry per phone AND visit: a second booking before the
-                  // reply adds its own entry instead of replacing the first.
-                  for (const [phoneKey, demote] of deferPrimaryOptOutPhoneKeys) {
+              // On-site opt-in asks (owner ruling 2026-09-30, redesigned 10-01:
+              // consent is the recipient's own YES). Sent only HERE, once a visit
+              // has landed — never for an unbooked / held call, and never for a
+              // street-level address hold (office review, #5381, not active yet).
+              // Per recipient: the durable phone+visit marker is written FIRST
+              // (deep-merged: a reprocess keeps demoted_at / an in-flight
+              // replay claim), then the ask is claimed + dispatched quoting THIS
+              // visit's address, then reconcileDemoteMarker settles an opt-in
+              // that is already answered (confirmed earlier / failed).
+              if (pendingOnSiteAsks.length && !(await isStreetLevelHoldRow(db, svc))) {
+                onSiteAsksHandled = true;
+                const { claimRecipientOptins, dispatchRecipientOptins, reconcileDemoteMarker } = require('./recipient-optin');
+                const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+                const visitAddress = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');
+                for (const { entry, demote } of pendingOnSiteAsks) {
+                  const phoneKey = tenOf(entry.phone);
+                  try {
                     const visitEntry = { [svc.id]: { demote, set_at: new Date().toISOString() } };
                     await db('customers')
-                      .where({ id: deferPrimaryOptOutCustomerId })
+                      .where({ id: customerId })
                       .update({
                         service_preferences: db.raw(
-                          'jsonb_set(COALESCE(service_preferences, \'{}\'::jsonb), \'{demote_primary_on_optin}\', COALESCE(service_preferences -> \'demote_primary_on_optin\', \'{}\'::jsonb) || jsonb_build_object(?::text, COALESCE(service_preferences #> ARRAY[\'demote_primary_on_optin\', ?::text], \'{}\'::jsonb) || ?::jsonb))',
-                          [phoneKey, phoneKey, JSON.stringify(visitEntry)],
+                          'jsonb_set(COALESCE(service_preferences, \'{}\'::jsonb), \'{demote_primary_on_optin}\', COALESCE(service_preferences -> \'demote_primary_on_optin\', \'{}\'::jsonb) || jsonb_build_object(?::text, COALESCE(service_preferences #> ARRAY[\'demote_primary_on_optin\', ?::text], \'{}\'::jsonb) || jsonb_build_object(?::text, ?::jsonb || COALESCE(service_preferences #> ARRAY[\'demote_primary_on_optin\', ?::text, ?::text], \'{}\'::jsonb))))',
+                          [phoneKey, phoneKey, String(svc.id), JSON.stringify(visitEntry[svc.id]), phoneKey, String(svc.id)],
                         ),
                       });
+                    const custRow = await db('customers').where({ id: customerId }).first();
+                    const claims = custRow ? await claimRecipientOptins({
+                      customer: custRow,
+                      contacts: [{
+                        name: [entry.first_name, entry.last_name].filter(Boolean).join(' '),
+                        firstName: entry.first_name || '',
+                        phone: entry.phone,
+                      }],
+                      priorPhones: [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                        .filter((ph) => tenOf(ph) !== phoneKey),
+                      propertyAddress: visitAddress || [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
+                    }) : [];
+                    if (claims.length) {
+                      await markOptinAsk(entry, 'dispatching');
+                      void dispatchRecipientOptins(claims, custRow)
+                        .catch((err) => {
+                          logger.warn(`[call-proc] on-site opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`);
+                          return 0;
+                        })
+                        .then((outcome) => {
+                          // dispatchRecipientOptins resolves { requested }; the catch yields 0.
+                          const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);
+                          return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');
+                        });
+                    } else {
+                      await markOptinAsk(entry, 'not_sent:no_new_ask');
+                    }
+                  } catch (askErr) {
+                    // Durable fail-closed, as the explicit-consent path: a
+                    // BLOCKING ask_failed row (save-retryable) for this phone.
+                    await db('recipient_optin').insert({
+                      phone_key: phoneKey,
+                      phone_e164: String(entry.phone || '').trim(),
+                      status: 'ask_failed',
+                      customer_id: customerId,
+                      requested_by: 'call_pipeline',
+                      requested_at: new Date(),
+                    }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
+                    await markOptinAsk(entry, 'not_sent:claim_failed');
+                    logger.warn(`[call-proc] on-site opt-in ask failed for ${maskSid(callSid)}: ${safeErrorToken(askErr)}`);
                   }
-                  // The opt-in may already be settled (confirmed on an earlier
-                  // call, or the reply beat the booking): apply / drop now.
-                  const { reconcileDemoteMarker } = require('./recipient-optin');
-                  for (const phoneKey of deferPrimaryOptOutPhoneKeys.keys()) {
-                    await reconcileDemoteMarker(deferPrimaryOptOutCustomerId, phoneKey);
-                  }
-                } catch (prefsErr) {
-                  logger.warn(`[call-proc] deferred primary opt-out marker failed for ${maskSid(callSid)}: ${safeErrorToken(prefsErr)}`);
+                  await reconcileDemoteMarker(customerId, phoneKey);
                 }
               }
               if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {
@@ -20879,6 +20915,11 @@ const CallRecordingProcessor = {
           [JSON.stringify({ needs_confirmation: bridgeNeedsConfirmation, address_validation_status: v2AddressValidation?.status || null })],
         ),
       }).catch((e) => logger.warn(`[call-proc] late-scheduling-hold lead-activity refresh failed for ${maskSid(callSid)}: ${e.message}`));
+    }
+
+    // On-site asks that never reached a landed, active visit: nothing was sent.
+    if (pendingOnSiteAsks.length && !onSiteAsksHandled) {
+      for (const { entry } of pendingOnSiteAsks) await markOptinAsk(entry, 'not_sent:no_booking');
     }
 
     const liveLeadConversation = isLiveLeadConversation({

@@ -1366,7 +1366,15 @@ describe('extraction compat adapter', () => {
     expect(flatView(swapped).secondary_contacts_consent_signature).not.toBe(flatView(original).secondary_contacts_consent_signature);
     // Singleton-only payloads are fingerprinted too; a phone change changes the signature.
     const single = (phone) => { const x = validPersisted(); x.secondary_contact = entry('spouse_partner', true, true, 'Sample', phone); return x; };
-    expect(flatView(single('+15550100123')).secondary_contacts_consent_signature).toBe('5550100123:spouse_partner:1:1:1');
+    expect(flatView(single('+15550100123')).secondary_contacts_consent_signature).toBe('S=5550100123:spouse_partner:1:1:1');
+    // The singleton is fingerprinted even when the array is populated: a
+    // singleton phone drifting from secondary_contacts[0] changes the signature.
+    const both = (singlePhone) => {
+      const x = single(singlePhone);
+      x.secondary_contacts = [entry('spouse_partner', true, true, 'Sample', '+15550100123')];
+      return x;
+    };
+    expect(flatView(both('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(both('+15550100123')).secondary_contacts_consent_signature);
     expect(flatView(single('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(single('+15550100123')).secondary_contacts_consent_signature);
     // Flat singleton mirrors; the retired evidence/grounded mirrors and the transcript option are gone.
     const flat = flatView(single('+15550100123'));

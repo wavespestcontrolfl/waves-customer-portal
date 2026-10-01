@@ -337,6 +337,15 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(state.cards[0].payload).toEqual({ optin_result: 'confirmed', consent_stamp: 'held:other_slot_phone_unconfirmed' });
   });
 
+  test('YES when the other slot phone was covered by the stamp an unconsented add cleared (grandfathered, no opt-in row): stamps', async () => {
+    const { dbh, state } = fakeDb({
+      customer: spouseRow({ service_contact2_phone: '+19415550444', service_preferences: { consent_covered_phone_keys: [OTHER] } }),
+      optinRows: confirmed(),
+    });
+    await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.customer.service_contacts_consent_source).toBe('recipient_optin_confirmed');
+  });
+
   test('YES when the other slot phone has its OWN confirmed row: stamps', async () => {
     const { dbh, state } = fakeDb({ customer: spouseRow({ service_contact2_phone: '+19415550444' }), optinRows: confirmed([{ phone_key: OTHER, customer_id: 'c1', status: 'confirmed' }]) });
     await applyDemoteMarkersOnConfirm(KEY, { dbh });
@@ -438,7 +447,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
       return q;
     });
     dbMod.raw = jest.fn((sql, binds) => ({ sql, binds }));
-    const outcomes = [{ sent: true }, { sent: false, reason: 'visit_not_future' }, { sent: false, reason: 'blocked' }, { sent: false, reason: 'error' }];
+    const outcomes = [{ sent: true }, { sent: false, reason: 'visit_not_future' }, { sent: false, reason: 'blocked' }, { sent: false, reason: 'template_unavailable' }];
     const sendConfirmationToServiceContact = jest.fn(async () => outcomes.shift());
     // An earlier test cached its own appointment-reminders mock: drop it so the
     // lazy require inside the runner picks up this one.
