@@ -780,7 +780,7 @@ describe('closed-world timing rule (terminal review)', () => {
   });
 
   test('"12½" is normalized to digits and rejected whole', () => {
-    expect(guards.normalizeCopy('12½ days')).toBe('12 1/2  days');
+    expect(guards.normalizeCopy('12½ days')).toBe('12 1/2 days');
     expect(checkNumericWhitelist('Expect 12½.', { allowedNumbers: [12, 1, 2] }).length).toBeGreaterThan(0);
   });
 });
@@ -953,6 +953,199 @@ describe('whole numeric expressions, bare dry idiom, negation, line wraps (termi
 
     test('approved sentences match across line wraps', () => {
       accepts('Most turf shows a response\nin 3 to 7 days.', ROW);
+    });
+  });
+});
+
+describe('one canonical normalization feeds every rule (terminal review pass 3)', () => {
+  describe('score allowance: only a whole signed integer, optionally followed by "points"', () => {
+    const facts = { allowedNumbers: [5] };
+    test.each([
+      ['Your score is 5hours.', '5 hours'],
+      ['Your score is 5th.', '5 th'],
+      ['Your score is 5ft.', '5 ft'],
+      ['Your score is 5 ft.', '5 ft'],
+      ['Your score is 5in.', null],
+      ['Your score is 5mm.', '5 mm'],
+      ['Your score is 5lbs.', '5 lbs'],
+      ['Your score is 5 hours.', '5 hours'],
+      ['Your score is 5 inches.', '5 inches'],
+      ['Your score is 5 points hours.', '5 points hours'],
+      ['Your score is 5pts%.', null],
+      ['Your score is 5x.', null],
+    ])('%s rejects with allowedNumbers [5]', (text) => {
+      expect(checkNumericWhitelist(text, facts).length).toBeGreaterThan(0);
+    });
+
+    test('digits are separated from attached letters by the canonical form', () => {
+      expect(guards.normalizeCopy('5hours 5th 5ft 4pm')).toBe('5 hours 5 th 5 ft 4 pm');
+      expect(guards.normalizeCopy('５hours')).toBe('5 hours');
+    });
+
+    test('the plain forms still pass', () => {
+      ['Your score is 5.', 'Your score is 5 points.', 'Your score is 5 pts.', 'Your score is up 5 points.'].forEach((text) => {
+        expect(checkNumericWhitelist(text, { allowedNumbers: [5] })).toEqual([]);
+      });
+    });
+  });
+
+  describe('vulgar fractions keep their exact value', () => {
+    test('1½ and 1¼ are different canonical forms', () => {
+      expect(guards.normalizeCopy('1½')).toBe('1 1/2');
+      expect(guards.normalizeCopy('1¼')).toBe('1 1/4');
+      expect(guards.normalizeCopy('¾')).toBe('3/4');
+      expect(guards.normalizeCopy('12½')).toBe('12 1/2');
+    });
+
+    test('a changed approved sentence no longer matches', () => {
+      const approved = 'Most turf shows 1½ inches of growth.';
+      const facts = { approvedSentences: [approved] };
+      accepts(approved, facts);
+      accepts('Most turf shows 1 1/2 inches of growth.', facts);
+      rejects('Most turf shows 1¼ inches of growth.', 'numeric', facts);
+      rejects('Most turf shows 1¾ inches of growth.', 'numeric', facts);
+      rejects('Most turf shows 1⅓ inches of growth.', 'numeric', facts);
+    });
+  });
+
+  describe('whitespace and line wraps never hide a pattern in any rule', () => {
+    test.each([
+      ['The lawn is on\ntrack.', 'progress_coupling'],
+      ['The lawn is on  track.', 'progress_coupling'],
+      ['The lawn is on\r\ntrack.', 'progress_coupling'],
+      ['The lawn is on\t track.', 'progress_coupling'],
+      ['The lawn is\n\tnot\nimproving.', 'progress_coupling'],
+      ['Your lawn is weed\nfree.', 'overpromise'],
+      ['Your lawn is weed  free.', 'overpromise'],
+      ['It kills\nall weeds.', 'overpromise'],
+      ['This product is pet\n safe.', 'safety_claim'],
+      ['Back on Fri\n morning.', 'weekday_clock'],
+      ['Back at 4\nPM.', 'weekday_clock'],
+      ['Water\nthe lawn.', 'water_mow'],
+      ['We will eliminate\nthe weeds.', 'overpromise'],
+      ['The weeds are\ngone.', 'banned_copy'],
+    ])('%j -> %s', (text, rule) => {
+      rejects(text, rule, {});
+    });
+  });
+
+  describe('keep-off and re-entry match at any distance inside one sentence', () => {
+    const LONG = 'Keep the very large treated back lawn and the side garden beds and the shaded flower border off the turf';
+    test('a long subject escapes no gap', () => {
+      expect(LONG.indexOf('Keep')).toBe(0);
+      expect(LONG.length - LONG.indexOf('off') < 200 && LONG.indexOf('off') > 40).toBe(true);
+      expect(checkReentryPattern(`${LONG} for a day.`).length).toBe(1);
+      expect(checkReentryPattern(`${LONG} for 14 minutes.`).length).toBe(1);
+      expect(checkBannerCopy(`${LONG} for 2 hours.`).map((r) => r.rule)).toContain('reentry_figure');
+      rejects(`${LONG} for a day.`, 'reentry_figure', {});
+    });
+
+    test('the trigger is not limited to the first words of the sentence', () => {
+      const wrap = 'Please be sure that your family and all of your friends and anyone visiting will wait';
+      expect(checkReentryPattern(`${wrap} for fourteen minutes.`).length).toBe(1);
+      expect(checkBannerCopy(`${wrap} for fourteen minutes.`).map((r) => r.rule)).toContain('reentry_figure');
+    });
+
+    test('a trigger sentence with no timing or number still passes the re-entry rule', () => {
+      expect(checkReentryPattern(`${LONG}.`)).toEqual([]);
+    });
+
+    test('a time word in a different sentence is not the same sentence', () => {
+      expect(checkReentryPattern(`${LONG}. The visit is quick.`)).toEqual([]);
+    });
+  });
+
+  describe('weekday abbreviations, any case, in date context', () => {
+    test.each([
+      'Back FRI MORNING.',
+      'Back fri morning.',
+      'Back Fri Morning.',
+      'Back WED 4.',
+      'Back wed 4.',
+      'Back thu afternoon.',
+      'Back THU.',
+      'Back tue.',
+      'Back TUES.',
+      'Back Mon.',
+      'Back mon.',
+      'Back sat.',
+      'Back SAT EVENING.',
+      'Back sun morning.',
+      'Back SUN 5.',
+      'Back Sun.',
+      'Back SUN.',
+      'Back Wed, 5.',
+    ])('rejects: %s', (text) => {
+      expect(checkWeekdayClockDeny(text).length).toBeGreaterThan(0);
+    });
+
+    test.each([
+      'The front needs full sun.',
+      'Full sun exposure matters.',
+      'The sun is strong here.',
+      'The turf sat untouched.',
+      'They wed in spring.',
+      'Mon amie.',
+    ])('plain-word uses pass: %s', (text) => {
+      expect(checkWeekdayClockDeny(text)).toEqual([]);
+    });
+  });
+
+  describe('property: whitespace and case changes never turn a reject into a pass', () => {
+    const FACTS = { allowedNumbers: [72, 100, 5], progress: 'up', progressStates: ['on_track'] };
+    const SAMPLES = [
+      ['Stay off the turf for fourteen minutes.', {}],
+      ['Keep the pets off the grass for 2 hours.', {}],
+      ['Please wait a few days.', {}],
+      ['The lawn is on track.', { progress: 'flat', progressStates: [] }],
+      ['The lawn is behind the expected pace.', { progress: 'up' }],
+      ['The lawn is not improving.', FACTS],
+      ['Your lawn is weed free.', {}],
+      ['The weeds will never come back.', {}],
+      ['It is 100 percent effective.', {}],
+      ['Back Friday morning.', {}],
+      ['Back at 4 PM.', {}],
+      ['Back on Fri morning.', {}],
+      ['Water the lawn deeply.', {}],
+      ['This product is pet safe.', {}],
+      ['The treatment is safe for kids.', {}],
+      ['Expect a change in 10 days.', {}],
+      ['Expect a change next week.', {}],
+      ['Your score is 72 / 100.', FACTS],
+      ['Your score is 5 ft.', FACTS],
+      ['Your score is 1 1/2.', FACTS],
+      ['We will eliminate the weeds.', {}],
+      ['The weeds are gone.', {}],
+    ];
+    const SPACE_TRANSFORMS = {
+      newline: (t) => t.replace(/ /g, '\n'),
+      doubled: (t) => t.replace(/ /g, '  '),
+      tabs: (t) => t.replace(/ /g, '\t'),
+      crlf: (t) => t.replace(/ /g, '\r\n'),
+      mixed: (t) => t.split(' ').map((w, i) => w + ['\n', '  ', ' \n ', '\t'][i % 4]).join('').trim(),
+    };
+    const CASE_TRANSFORMS = { upper: (t) => t.toUpperCase(), lower: (t) => t.toLowerCase(), swap: (t) => t.replace(/[a-z]/gi, (c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())) };
+
+    test.each(SAMPLES)('baseline rejects: %s', (text, facts) => {
+      expect(checkLawnModelCopy(text, { ...FACTS, ...facts }).ok).toBe(false);
+    });
+
+    describe.each(Object.entries({ ...SPACE_TRANSFORMS, ...CASE_TRANSFORMS }))('%s', (_name, transform) => {
+      test.each(SAMPLES)('still rejects: %s', (text, facts) => {
+        const allFacts = { ...FACTS, ...facts };
+        expect(checkLawnModelCopy(transform(text), allFacts).ok).toBe(false);
+        // and the same through the banner checks when the sentence is a re-entry one
+        if (/stay off|keep the pets off|wait/i.test(text)) {
+          expect(checkBannerCopy(transform(text)).length).toBeGreaterThan(0);
+        }
+      });
+    });
+
+    test('a clean sample stays clean under the same transforms', () => {
+      const clean = 'The edge along the front looks thin and we will keep an eye on it.';
+      Object.values({ ...SPACE_TRANSFORMS, ...CASE_TRANSFORMS }).forEach((transform) => {
+        expect(checkLawnModelCopy(transform(clean), {}).ok).toBe(true);
+      });
     });
   });
 });

@@ -28,7 +28,8 @@
  *                      shortly, later, "a while", ago, yesterday, eventually).
  *   numeric            any spelled number word, and any digit or fraction except
  *                      the score allowance: a bare signed integer or "<n>
- *                      points" whose value, sign included, is in
+ *                      points" (no attached or following unit: 5hours, 5th, 5 ft
+ *                      all reject) whose value, sign included, is in
  *                      facts.allowedNumbers ("-5", "minus 5", "down 5 points"
  *                      are -5; "+5", "plus 5", "up 5 points" are 5). The whole
  *                      expression is read first: "1 / 2", "72 / 100", "72 of
@@ -73,8 +74,12 @@
  * allowedText is REMOVED (it fed the old whole-phrase allowlist). A window the
  * writer may quote is an approved sentence, not a licensed phrase.
  *
- * Sentences: a single newline is plain whitespace (line wraps never hide a
- * pattern); a sentence ends at . ! ? or at a blank line.
+ * Normalization: ONE canonical form (NFKC, folded quotes/dashes, lossless vulgar
+ * fractions, collapsed whitespace, digits split from attached letters) is built
+ * once at the entry point and cut into one sentence list; every rule reads that
+ * list case-insensitively and none reads raw text. A single newline is plain
+ * whitespace; a sentence ends at . ! ? or a blank line. approvedSentences go
+ * through the same normalization and match exactly on that form.
  *
  * Judgment calls (documented, tested):
  *  - Over-rejection is deliberate: "next visit", "warm-season turf", "one area",
@@ -89,42 +94,63 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // ---------------------------------------------------------------------------
 // Normalization
 
-// Vulgar fractions become " 1/2 " (any digits keep the digit detector honest).
-const VULGAR_CLASS = '½¼¾⅓⅔⅕⅖⅗⅘⅙⅚⅐⅛⅜⅝⅞⅑⅒';
+// ONE canonical normalization feeds every rule. normalizeCopy runs once at the
+// entry point and splitSentences cuts the result into one sentence list; every
+// check reads that list, case-insensitively, and none reads raw text:
+//  - vulgar fractions become their exact lossless form ("1½" -> "1 1/2", "1¼" ->
+//    "1 1/4"), never a shared lossy key
+//  - NFKC (fullwidth and compatibility forms), Arabic-Indic digits to ASCII
+//  - curly quotes and apostrophes, every dash and the unicode minus folded;
+//    zero-width characters dropped
+//  - every whitespace run, single newlines included, becomes one space; a blank
+//    line is a paragraph break
+//  - digits are separated from attached letters ("5hours" -> "5 hours", "5th" ->
+//    "5 th", "5ft" -> "5 ft"), so an attached suffix is always a multi-part
+//    expression the score allowance rejects
+//  - 1,000 -> 1000; a.m. / p.m. -> am / pm
+const VULGAR_FRACTIONS = {
+  '½': '1/2', '¼': '1/4', '¾': '3/4', '⅓': '1/3', '⅔': '2/3', '⅕': '1/5', '⅖': '2/5', '⅗': '3/5', '⅘': '4/5',
+  '⅙': '1/6', '⅚': '5/6', '⅐': '1/7', '⅛': '1/8', '⅜': '3/8', '⅝': '5/8', '⅞': '7/8', '⅑': '1/9', '⅒': '1/10',
+};
+const VULGAR_RE = new RegExp(`[${Object.keys(VULGAR_FRACTIONS).join('')}]`, 'g');
+const FOLDS = [
+  [/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660)],
+  [/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0)],
+  [/[‘’ʼ′]/g, () => "'"],
+  [/[“”″]/g, () => '"'],
+  [/[‐-―−﹘－]/g, () => '-'],
+  [/⁄/g, () => '/'],
+  [/[​-‍⁠﻿]/g, () => ''],
+];
+
+function canonicalParagraph(paragraph) {
+  return paragraph
+    .replace(/\s+/g, ' ')
+    .replace(/(\d),(?=\d{3}\b)/g, '$1')
+    .replace(/\b([ap])\.\s?m\b\.?/gi, '$1m')
+    .replace(/(\d)(?=[a-z])/gi, '$1 ')
+    .trim();
+}
 
 function normalizeCopy(text) {
-  let t = String(text == null ? '' : text);
-  t = t.normalize('NFC')
-    .replace(/[     ]/g, ' ')
-    .replace(/[​‌‍﻿]/g, '')
-    .replace(/[‘’ʼ]/g, "'")
-    .replace(/[“”]/g, '"')
-    .replace(/[‐-―−]/g, '-')
-    .replace(/′/g, "'")
-    .replace(/″/g, '"');
-  // fullwidth and Arabic-Indic digits read as ASCII digits
-  t = t.replace(/[\uff10-\uff19]/g, (d) => String(d.charCodeAt(0) - 0xff10))
-    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
-    .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
-  t = t.replace(new RegExp(`[${VULGAR_CLASS}]`, 'g'), ' 1/2 ');
-  // 1,000 -> 1000
-  t = t.replace(/(\d),(?=\d{3}\b)/g, '$1');
-  // a.m. / p.m. -> am / pm so the period does not split a sentence
-  t = t.replace(/\b([ap])\.\s?m\b\.?/gi, '$1m');
-  return t;
+  const t = FOLDS.reduce(
+    (acc, [re, fn]) => acc.replace(re, fn),
+    String(text == null ? '' : text).replace(VULGAR_RE, (f) => ` ${VULGAR_FRACTIONS[f]} `).normalize('NFKC')
+  );
+  return t.replace(/\r\n?/g, '\n').split(/\n\s*\n/).map(canonicalParagraph).filter(Boolean).join('\n\n');
 }
 
-// Line wraps are plain whitespace. A sentence ends at real sentence-ending
-// punctuation or at a blank line (paragraph break), never at a single newline.
+// A sentence ends at . ! ? or a blank line, never at a single newline.
 function splitSentences(text) {
-  return normalizeCopy(text)
-    .split(/\n\s*\n/)
-    .flatMap((paragraph) => paragraph.replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/))
-    .filter(Boolean);
+  return normalizeCopy(text).split('\n\n').flatMap((paragraph) => paragraph.split(/(?<=[.!?])\s+/)).filter(Boolean);
 }
+
+// Every check takes raw text or an already-split sentence list.
+const sentencesOf = (input) => (Array.isArray(input) ? input : splitSentences(input));
+const globalOf = (re) => new RegExp(re.source, 'gi');
 
 function sentenceKey(s) {
-  return normalizeCopy(s).toLowerCase().replace(/[\s.!?;:,"']+$/g, '').replace(/\s+/g, ' ').trim();
+  return splitSentences(s).map((x) => x.toLowerCase().replace(/[\s.!?;:,"']+$/g, '').trim()).join(' ');
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +169,8 @@ function sentenceKey(s) {
 // Over-rejection ("the next visit", "warm-season turf", "one area") is
 // deliberate: the writer falls back to the deterministic copy.
 
-const TIME_WORD_RE = /\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|months?|mos?|years?|yrs?|seasons?|nights?|overnight|decades?|fortnights?|hourly|nightly|daily|weekly|biweekly|monthly|yearly|annual(?:ly)?)\b/i;
+const TIME_WORDS_SRC = 'seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|months?|mos?|years?|yrs?|seasons?|nights?|overnight|decades?|fortnights?|hourly|nightly|daily|weekly|biweekly|monthly|yearly|annual(?:ly)?';
+const TIME_WORD_RE = new RegExp(`\\b(?:${TIME_WORDS_SRC})\\b`, 'i');
 const RELATIVE_TIME_RE = /\b(?:next|coming|following|within|soon|shortly|later|ago|yesterday|eventually)\b|\ba\s+while\b/i;
 const NUMBER_WORD_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|dozen|half|halves|quarters?|thirds?)\b/i;
 // any time word, relative phrase, number word or digit
@@ -158,8 +185,11 @@ const ANY_TIMING_RE = new RegExp([TIME_WORD_RE, RELATIVE_TIME_RE, NUMBER_WORD_RE
 // it rejects whole instead of leaving a stripped fragment behind.
 const NUM_TERM_SRC = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)';
 const NUM_JOIN_SRC = '(?:\\s*(?:[/\\-+x\u00d7*:,%\u00b0]|\\bof\\b|\\bout\\s+of\\b|\\bto\\b|\\bor\\b|\\band\\b)\\s*|\\s+)';
+// A unit that follows a number: attached suffixes (th, ft ...) and any time word
+// make it a measurement or duration, never a bare score.
+const UNIT_FOLLOW_SRC = `(?:\\s*[%°]|\\s+(?:percent|pct|degrees?|deg|th|st|nd|rd|ft|feet|foot|inch(?:es)?|yds?|yards?|mm|cm|km|mi|miles?|in|x|m|g|l|pt|qt|lbs?|pounds?|oz|ounces?|gal|gallons?|sq|acres?|mph|mg|ml|kg|${TIME_WORDS_SRC})\\b)`;
 const NUMERIC_EXPR_RE = new RegExp(
-  `(?<![\\w.])(?<sign>[+-]\\s*|minus\\s+|plus\\s+|(?:up|down)\\s+(?:by\\s+)?)?(?<expr>${NUM_TERM_SRC}(?:${NUM_JOIN_SRC}${NUM_TERM_SRC})*)(?<tail>(?:\\s+(?:points?|pts))?(?:\\s*(?:%|\u00b0|percent\\b|degrees?\\b))?)`,
+  `(?<![\\w.])(?<sign>[+-]\\s*|minus\\s+|plus\\s+|(?:up|down)\\s+(?:by\\s+)?)?(?<expr>${NUM_TERM_SRC}(?:${NUM_JOIN_SRC}${NUM_TERM_SRC})*)(?<points>\\s+(?:points?|pts)\\b)?(?<unit>${UNIT_FOLLOW_SRC})?`,
   'gi'
 );
 
@@ -173,27 +203,33 @@ function toNumberSet(list) {
 }
 
 const isNegativeSign = (sign) => /^(?:-|minus|down)/i.test(sign || '');
-const isSingleScore = ({ expr, tail }) => /^\d+$/.test(expr) && /^(?:\s+(?:points?|pts))?$/i.test(tail);
+// only a whole token that is a signed integer, optionally followed by the word
+// "points", qualifies; any attached or following unit rejects the expression
+const isSingleScore = ({ expr, unit }) => /^\d+$/.test(expr) && !unit;
 
-function checkNumericWhitelist(text, facts = {}) {
-  const allowed = toNumberSet(facts.allowedNumbers);
+function checkNumericSentence(sentence, allowed) {
   const reasons = [];
-  const rest = normalizeCopy(text).replace(NUMERIC_EXPR_RE, (full, ...args) => {
+  const rest = sentence.replace(NUMERIC_EXPR_RE, (full, ...args) => {
     const groups = args[args.length - 1];
     const value = (isNegativeSign(groups.sign) ? -1 : 1) * Number(groups.expr);
-    const ok = isSingleScore(groups) && allowed.has(value);
-    if (!ok) reasons.push({ rule: 'numeric', match: full.trim(), detail: 'not a single supplied score value' });
+    if (!(isSingleScore(groups) && allowed.has(value))) {
+      reasons.push({ rule: 'numeric', match: full.trim(), detail: 'not a single supplied score value' });
+    }
     return ' ';
   });
   (rest.match(/\S*\d\S*/g) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'digits outside the score allowance' }));
-  (rest.match(new RegExp(NUMBER_WORD_RE.source, 'gi')) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'spelled number' }));
+  (rest.match(globalOf(NUMBER_WORD_RE)) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'spelled number' }));
   return reasons;
 }
 
-function checkTimingLanguage(text) {
-  const t = normalizeCopy(text);
-  return [TIME_WORD_RE, RELATIVE_TIME_RE].flatMap((re) => (t.match(new RegExp(re.source, 'gi')) || [])
-    .map((m) => ({ rule: 'timing', match: m, detail: 'no time language outside approved sentences' })));
+function checkNumericWhitelist(input, facts = {}) {
+  const allowed = toNumberSet(facts.allowedNumbers);
+  return sentencesOf(input).flatMap((sentence) => checkNumericSentence(sentence, allowed));
+}
+
+function checkTimingLanguage(input) {
+  return sentencesOf(input).flatMap((sentence) => [TIME_WORD_RE, RELATIVE_TIME_RE].flatMap((re) => (sentence.match(globalOf(re)) || [])
+    .map((m) => ({ rule: 'timing', match: m, detail: 'no time language outside approved sentences' }))));
 }
 
 // ---------------------------------------------------------------------------
@@ -204,38 +240,41 @@ function checkTimingLanguage(text) {
 const WATER_MOW_DENY_RE = /water|irrigat|sprinkl|moist|damp|\brain|\bzones?\b|\brun\s*times?\b|\bsoak|\bhose|\bhosing|\bwet(?:ting|ness|ter|ted)?\b|\bmow|\bcut(?:ting)?\s+(?:the\s+|your\s+)?(?:grass|lawn|turf)\b|\bcutting\s+height\b|\bheight\s+of\s+cut\b|\b(?:raise|lower)\s+(?:the\s+|your\s+)?(?:deck|blade)\b/i;
 const DRY_DROUGHT_RE = /\bdr(?:y|ier|ies|ied|ying|yness)\b|drought/i;
 
-function checkWaterMowDeny(text, facts = {}) {
-  const t = normalizeCopy(text);
-  const reasons = [];
-  const first = t.match(WATER_MOW_DENY_RE);
-  if (first) reasons.push({ rule: 'water_mow', match: first[0], detail: 'model copy never writes watering, rain or mowing' });
-  if (!facts.droughtFlagged) {
-    const d = t.match(DRY_DROUGHT_RE);
-    if (d) reasons.push({ rule: 'water_mow', match: d[0], detail: 'dry / drought needs a technician drought flag' });
-  }
-  return reasons;
+function checkWaterMowDeny(input, facts = {}) {
+  return sentencesOf(input).flatMap((sentence) => {
+    const reasons = [];
+    const first = sentence.match(WATER_MOW_DENY_RE);
+    if (first) reasons.push({ rule: 'water_mow', match: first[0], detail: 'model copy never writes watering, rain or mowing' });
+    const dry = !facts.droughtFlagged && sentence.match(DRY_DROUGHT_RE);
+    if (dry) reasons.push({ rule: 'water_mow', match: dry[0], detail: 'dry / drought needs a technician drought flag' });
+    return reasons;
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Weekday / date / clock deny (G9)
 
 const WEEKDAY_FULL_RE = /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:'s|s|s')?\b/i;
-// Abbreviations collide with words (sun, sat, wed, mon): only the forms that
-// read as a date ("Wed 4 PM", "Tue.", "Thu, 5th") count.
-const WEEKDAY_ABBR_RE = /\b(?:Mon|Tues?|Wed|Thu(?:rs?)?|Fri|Sat|Sun|MON|TUES?|WED|THU(?:RS?)?|FRI|SAT|SUN)(?:\.|(?=\s+\d)|(?=,\s*\d)|(?=\s+(?:morning|afternoon|evening|night)\b))/;
+// Abbreviations collide with words (sun, sat, wed, mon), so they count only in
+// date context, in any case: followed by a digit or a time-of-day word ("FRI
+// MORNING", "fri morning", "Wed 4 PM"), or by a period ("Tue.", "fri."). The one
+// plain word kept out of the period rule is lowercase "sun" ("needs full sun.");
+// "Sun." and "SUN." still count.
+const WEEKDAY_ABBR_CONTEXT_RE = /\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\b(?=\s*[,.]?\s*\d|\s+(?:morning|afternoon|evening|night)\b)/i;
+const WEEKDAY_ABBR_DOT_RE = /\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat)\./i;
+const WEEKDAY_SUN_DOT_RE = /\b(?:Sun|SUN)\./;
 const RELATIVE_DAY_RE = /\b(?:tomorrow|tonight|noon|midnight|weekends?|this\s+(?:evening|afternoon)|later\s+today|the\s+day\s+after)\b/i;
 const MONTH_SRC = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
-const DATE_RE = new RegExp(`\\b${MONTH_SRC}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b|\\b\\d{1,2}(?:st|nd|rd|th)\\s+of\\s+${MONTH_SRC}\\b|\\b\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}\\b|\\b(?:1[0-2]|[1-9])\\/(?:1[3-9]|2\\d|3[01])\\b`, 'i');
+const DATE_RE = new RegExp(`\\b${MONTH_SRC}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b|\\b\\d{1,2}\\s*(?:st|nd|rd|th)\\s+of\\s+${MONTH_SRC}\\b|\\b\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}\\b|\\b(?:1[0-2]|[1-9])\\/(?:1[3-9]|2\\d|3[01])\\b`, 'i');
 const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b\d{1,2}\s*o'?clock\b/i;
 
-function checkWeekdayClockDeny(text) {
-  const t = normalizeCopy(text);
-  const reasons = [];
-  [WEEKDAY_FULL_RE, WEEKDAY_ABBR_RE, RELATIVE_DAY_RE, DATE_RE, CLOCK_RE].forEach((re) => {
-    const m = t.match(re);
-    if (m) reasons.push({ rule: 'weekday_clock', match: m[0] });
-  });
-  return reasons;
+const WEEKDAY_CLOCK_RES = [WEEKDAY_FULL_RE, WEEKDAY_ABBR_CONTEXT_RE, WEEKDAY_ABBR_DOT_RE, WEEKDAY_SUN_DOT_RE, RELATIVE_DAY_RE, DATE_RE, CLOCK_RE];
+
+function checkWeekdayClockDeny(input) {
+  return sentencesOf(input).flatMap((sentence) => WEEKDAY_CLOCK_RES
+    .map((re) => sentence.match(re))
+    .filter(Boolean)
+    .map((m) => ({ rule: 'weekday_clock', match: m[0] })));
 }
 
 // ---------------------------------------------------------------------------
@@ -273,8 +312,11 @@ function judgeProgressMatch(m, t, ok, reasonDetail) {
   return ok ? null : { rule: 'progress_coupling', match: m[0], detail: reasonDetail };
 }
 
-function checkProgressCoupling(text, facts = {}) {
-  const t = normalizeCopy(text);
+function checkProgressSentence(sentence, checks) {
+  return checks.flatMap(({ re, ok, detail }) => matchesOf(re, sentence).map((m) => judgeProgressMatch(m, sentence, ok, detail)).filter(Boolean));
+}
+
+function checkProgressCoupling(input, facts = {}) {
   const dir = stateKey(facts.progress);
   const itemStates = new Set((Array.isArray(facts.progressStates) ? facts.progressStates : []).map(stateKey));
   const checks = [
@@ -286,24 +328,22 @@ function checkProgressCoupling(text, facts = {}) {
       detail: `state "${state}" not supplied`,
     })),
   ];
-  return checks.flatMap(({ re, ok, detail }) => matchesOf(re, t).map((m) => judgeProgressMatch(m, t, ok, detail)).filter(Boolean));
+  return sentencesOf(input).flatMap((sentence) => checkProgressSentence(sentence, checks));
 }
 
 // ---------------------------------------------------------------------------
 // Banned re-entry pattern (SCOPE s3) and the keep-off regression lists
 
-const REENTRY_TRIGGER_RE = /\bkeep(?:ing)?\b[^.!?]{0,40}\boff\b|\bstay(?:ing|s)?\s+off\b|\bwait(?:ing|s|ed)?\b|\bdr(?:y|ies|ied|ying|ier)\b/i;
+const REENTRY_TRIGGER_RE = /\bkeep(?:ing)?\b.*\boff\b|\bstay(?:ing|s)?\s+off\b|\bwait(?:ing|s|ed)?\b|\bdr(?:y|ies|ied|ying|ier)\b/i;
 // Any time word, relative-time phrase, spelled number or digit in the same
 // sentence as the trigger is a violation, whatever the facts say. Absolute:
 // takes no facts, and approved sentences are NOT exempt.
-function checkReentryPattern(text) {
-  const reasons = [];
-  splitSentences(text).forEach((s) => {
-    const trig = s.match(REENTRY_TRIGGER_RE);
-    const fig = trig && s.match(ANY_TIMING_RE);
-    if (trig && fig) reasons.push({ rule: 'reentry_figure', match: s, detail: `"${trig[0]}" with "${fig[0]}"` });
+function checkReentryPattern(input) {
+  return sentencesOf(input).flatMap((sentence) => {
+    const trig = sentence.match(REENTRY_TRIGGER_RE);
+    const fig = trig && sentence.match(ANY_TIMING_RE);
+    return trig && fig ? [{ rule: 'reentry_figure', match: sentence, detail: `"${trig[0]}" with "${fig[0]}"` }] : [];
   });
-  return reasons;
 }
 
 // Strings from W5-plan.json tests[3] / fable-plan-review.md hand-off to W1:
@@ -331,15 +371,16 @@ const BANNER_COPY_ACCEPT = [
   "Follow this week's plan below.",
 ];
 
-function checkBannerCopy(text) {
-  return [...checkReentryPattern(text), ...checkBannedCopy(text)];
+function checkBannerCopy(input) {
+  const sentences = sentencesOf(input);
+  return [...checkReentryPattern(sentences), ...checkBannedCopy(sentences)];
 }
 
 // ---------------------------------------------------------------------------
 // Shared banned list + lawn-only overpromise list (G1, G6)
 
-function checkBannedCopy(text) {
-  return findBannedCustomerCopy(normalizeCopy(text)).map((match) => ({ rule: 'banned_copy', match }));
+function checkBannedCopy(input) {
+  return sentencesOf(input).flatMap((sentence) => findBannedCustomerCopy(sentence).map((match) => ({ rule: 'banned_copy', match })));
 }
 
 // The shared list lacks these; it is not edited (pest, rodent and T&S blast radius).
@@ -363,10 +404,11 @@ const EFFICACY_CLAIM_RE = new RegExp([
   '\\bfail-?safe\\b',
 ].join('|'), 'i');
 
-function checkOverpromise(text) {
-  const t = normalizeCopy(text);
-  const m = t.match(LAWN_EXTRA_BANNED_RE) || t.match(EFFICACY_CLAIM_RE);
-  return m ? [{ rule: 'overpromise', match: m[0] }] : [];
+function checkOverpromise(input) {
+  return sentencesOf(input)
+    .map((sentence) => sentence.match(LAWN_EXTRA_BANNED_RE) || sentence.match(EFFICACY_CLAIM_RE))
+    .filter(Boolean)
+    .map((m) => ({ rule: 'overpromise', match: m[0] }));
 }
 
 // ---------------------------------------------------------------------------
@@ -399,8 +441,8 @@ const SAFETY_CLAIM_RE = new RegExp([
 // "organic fertilizer"), not the agronomic sense ("organic matter in the thatch").
 const NATURAL_CLAIM_RE = /\b(?:all[- ])?(?:natural(?:ly)?|organic(?!\s+(?:matter|material|debris|layer|buildup|content))|botanical|plant-based|chemical-free)\b(?:[^.!?]{0,40}\b(?:treatment|product|pesticide|application|chemical|spray|fertili[sz]er|herbicide|insecticide|fungicide|granules?|material|solution|control)s?\b)|\b(?:treatment|product|pesticide|application|chemical|spray|fertili[sz]er|herbicide|insecticide|fungicide|granules?|material|solution|control)s?\b[^.!?]{0,40}\b(?:all[- ])?(?:natural(?:ly)?|organic(?!\s+(?:matter|material|debris|layer|buildup|content))|botanical|plant-based|chemical-free)\b/i;
 
-function checkSafetyClaim(text) {
-  return splitSentences(text)
+function checkSafetyClaim(input) {
+  return sentencesOf(input)
     .filter((sentence) => !SAFE_IDIOM_SENTENCE_RE.test(sentence))
     .map((sentence) => sentence.match(SAFETY_CLAIM_RE) || sentence.match(NATURAL_CLAIM_RE))
     .filter(Boolean)
@@ -410,10 +452,11 @@ function checkSafetyClaim(text) {
 // ---------------------------------------------------------------------------
 // Entry point
 
-function stripApprovedSentences(text, approved) {
-  const keys = new Set((Array.isArray(approved) ? approved : []).map(sentenceKey).filter(Boolean));
-  if (!keys.size) return normalizeCopy(text);
-  return splitSentences(text).filter((s) => !keys.has(sentenceKey(s))).join(' ');
+// Approved sentences are normalized exactly like model text and matched exactly
+// on that form (case aside), so "1½" and "1¼" are different sentences.
+function withoutApproved(sentences, approved) {
+  const keys = new Set((Array.isArray(approved) ? approved : []).filter((a) => typeof a === 'string').map(sentenceKey).filter(Boolean));
+  return keys.size ? sentences.filter((sentence) => !keys.has(sentenceKey(sentence))) : sentences;
 }
 
 // Sub-day durations (hours, minutes, seconds) in MODEL copy. Every lawn
@@ -421,29 +464,28 @@ function stripApprovedSentences(text, approved) {
 // watering timing, which the banner owns. So no hour/minute/second word is
 // allowed anywhere, approved sentences included. Absolute: takes no facts.
 const SUB_DAY_RE = /\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|hourly)\b|\bhalf[- ]hours?\b/gi;
-function checkSubDayDuration(text) {
-  return (normalizeCopy(text).match(SUB_DAY_RE) || []).map((match) => ({ rule: 'sub_day_duration', match }));
+function checkSubDayDuration(input) {
+  return sentencesOf(input).flatMap((sentence) => (sentence.match(SUB_DAY_RE) || []).map((match) => ({ rule: 'sub_day_duration', match })));
 }
 
 function checkLawnModelCopy(text, facts = {}) {
-  if (typeof text !== 'string' || !text.trim()) {
-    return { ok: false, reasons: [{ rule: 'empty', match: '' }] };
-  }
+  const sentences = typeof text === 'string' ? splitSentences(text) : [];
+  if (!sentences.length) return { ok: false, reasons: [{ rule: 'empty', match: '' }] };
   const f = facts && typeof facts === 'object' ? facts : {};
   // Sentences copied verbatim from approved rows keep their own windows,
-  // numbers and state words; every other rule still reads the full text.
-  const unapproved = stripApprovedSentences(text, f.approvedSentences);
+  // numbers and state words; every other rule still reads every sentence.
+  const unapproved = withoutApproved(sentences, f.approvedSentences);
   const reasons = [
     ...checkTimingLanguage(unapproved),
     ...checkNumericWhitelist(unapproved, f),
-    ...checkWaterMowDeny(text, f),
-    ...checkWeekdayClockDeny(text),
+    ...checkWaterMowDeny(sentences, f),
+    ...checkWeekdayClockDeny(sentences),
     ...checkProgressCoupling(unapproved, f),
-    ...checkReentryPattern(text),
-    ...checkSubDayDuration(text),
-    ...checkBannedCopy(text),
-    ...checkOverpromise(text),
-    ...checkSafetyClaim(text),
+    ...checkReentryPattern(sentences),
+    ...checkSubDayDuration(sentences),
+    ...checkBannedCopy(sentences),
+    ...checkOverpromise(sentences),
+    ...checkSafetyClaim(sentences),
   ];
   return { ok: reasons.length === 0, reasons };
 }
