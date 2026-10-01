@@ -267,26 +267,41 @@ function decideUnreachableRecovery(event) {
     : null;
 }
 
+// Is an EXISTING touch done? Judged against the legs that touch itself selected (its reservations persist
+// selectedChannels), minus any channel the customer has since removed: a channel enabled after the touch went
+// out is not owed to it (the progress view's own `complete` counts today's channels). A touch with no persisted
+// selection (an older row) falls back to today's channels.
+function recoveryComplete(event, channels) {
+  if (!event) return false;
+  const selected = Array.isArray(event.metadata?.selectedChannels) ? event.metadata.selectedChannels : null;
+  const legs = selected ? selected.filter((c) => channels.includes(c)) : channels;
+  if (!legs.length) return false;
+  return legs.every((c) => event.delivered.has(c) || event.resolved.has(c) || (event.waived.has(c) && event.delivered.size > 0));
+}
+
 async function decideRecovery(run) {
   let progress;
   try {
     // The shadow run reads the same view but must not repair (stamp) anything.
-    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, run.readOnly ? { repair: false } : undefined);
+    run.step = STEPS[run.schedule.step_index];
+    if (!run.step) return decision('close', 'no_step', { closeReason: 'released_prereq_off' });
+    run.eventKey = eventKey(run.schedule, run.step.id);
+    // This touch's keyed reservations are loaded without the 90-day window (see reminderProgress), so a schedule
+    // paused longer than that still recovers an accepted email instead of holding unconfirmed for good.
+    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, { eventKey: run.eventKey, ...(run.readOnly ? { repair: false } : {}) });
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — delivery progress unreadable: ${redactContact(err.message)}`);
     return decision('hold', 'progress_unreadable');
   }
-  run.step = STEPS[run.schedule.step_index];
-  if (!run.step) return decision('close', 'no_step', { closeReason: 'released_prereq_off' });
-  run.eventKey = eventKey(run.schedule, run.step.id);
   // Keep the WHOLE collection: run.eventKey moves when the stage is planned again (catch-up,
   // re-plan), and everything that reads "this touch's events" selects by the CURRENT key.
   run.progress = progress;
   const event = currentEvent(run);
+  const complete = recoveryComplete(event, run.channels);
   if (!run.channels.length) return decideUnreachableRecovery(event);
-  if (!event || event.delivered.size === 0) return event?.complete ? decision('pause', 'all_channels_terminal') : null;
+  if (!event || event.delivered.size === 0) return complete ? decision('pause', 'all_channels_terminal') : null;
   // Delivered before: settle from the ledger. No render, no set read.
-  if (event.complete || await nextStageArrived(run, event)) {
+  if (complete || await nextStageArrived(run, event)) {
     return decision('settle', 'already_delivered', { facts: { event, delivered: event.delivered, deliveredAt: event.deliveredAt, deliveredNow: [] } });
   }
   return null;
@@ -429,6 +444,7 @@ function attemptSend(run, set) {
     channels: run.sendChannels,
     metadata: run.snapshotMeta,
     send: makeSender(ctx),
+    unwindowed: true, // this touch's keyed reservations are judged with no 90-day window (reminderProgress eventKey)
     // the office "send now" skips a plain dispute hold at the policy consult too (a fallback hold still waits)
     ...(run.operatorInitiated ? { holdExempt: 'operator' } : {}),
   });
@@ -458,7 +474,7 @@ async function sendWithRerender(run, set) {
 async function deliveryFacts(run, result) {
   let event = null;
   try {
-    const progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.sendChannels);
+    const progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.sendChannels, { eventKey: run.eventKey });
     event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey) || null;
   } catch (err) {
     logger.warn(`[customer-dunning] post-send progress unreadable for schedule ${run.schedule.id}: ${redactContact(err.message)}`);
@@ -496,11 +512,16 @@ const customerArchived = (result) => Object.values(result.results || {})
 // sendReminderChannels already released that leg's reservation; with nothing delivered the schedule holds.
 const heldByCollectionHold = (facts) => Object.values(facts.results || {}).some((r) => collectionHold.isHoldSuppression(r));
 
+// Enrolled in autopay while the message was prepared (the boundary's last-moment guard): the schedule parks.
+const autopayEnrolled = (facts) => Object.values(facts.results || {})
+  .some((r) => r?.code === Boundary.AUTOPAY_ENROLLED || r?.reason === Boundary.AUTOPAY_ENROLLED);
+
 async function dispose(run, facts) {
   // Archived at the provider boundary with nothing delivered: pause as decideCustomer does (the email leg's
   // generic not-sent would otherwise read as retryable and keep the schedule held).
   if (!facts.delivered?.size && customerArchived(facts)) return pause(run, 'customer_deleted');
   if (!facts.delivered?.size && heldByCollectionHold(facts)) return hold(run, COLLECTION_HOLD);
+  if (!facts.delivered?.size && autopayEnrolled(facts)) return applyDecision(run, decision('autopay_hold', 'autopay_hold'));
   const verdict = Schedule.dispositionOf(facts);
   if (verdict.kind === 'advance') return finishDelivered(run, facts);
   if (verdict.kind === 'told') {
@@ -653,7 +674,11 @@ async function decideShadowPolicy(run, set) {
   // deduped, not sent again.
   const allowed = pending.filter((channel) => !denied.includes(channel));
   const verdictOf = new Map();
-  for (const channel of allowed) verdictOf.set(channel, claimVerdict(await standingReservation(run, channel)));
+  const standing = new Map();
+  for (const channel of allowed) {
+    standing.set(channel, await standingReservation(run, channel));
+    verdictOf.set(channel, claimVerdict(standing.get(channel)));
+  }
   const deduped = allowed.filter((channel) => verdictOf.get(channel).delivered);
   // A leg the keyed reservation already resolved terminally (a suppression refusal, found past the 90-day
   // window) is settled, never owed again: live restores it into the resolved set and moves on.
@@ -663,7 +688,7 @@ async function decideShadowPolicy(run, set) {
   if (unclaimable.length === owed.length && unclaimable.length) {
     return decision('hold', 'REMINDER_OUTCOME_UNCONFIRMED', { denied, unclaimable });
   }
-  if (!owed.length) return settledDisposition(event, { deduped, denied, pending, verdicts });
+  if (!owed.length) return settledDisposition(event, { deduped, denied, pending, verdicts, standing });
   run.policyDenied = denied; // a partial send: the claimable allowed channels go, these do not
   run.unclaimable = unclaimable;
   run.deduped = deduped;
@@ -674,13 +699,19 @@ async function decideShadowPolicy(run, set) {
 // the SAME disposition live uses on the facts the send would produce: a durably denied leg is waived (the
 // touch settles), a transiently denied one stays owed (live leaves the step TOLD and retries it), so shadow
 // holds instead of settling; nothing delivered and nothing left owed is live's all_channels_terminal pause.
-function settledDisposition(event, { deduped, denied, pending, verdicts }) {
+function settledDisposition(event, { deduped, denied, pending, verdicts, standing }) {
   const delivered = new Set([...(event?.delivered || []), ...deduped]);
   const waived = new Set([...(event?.waived || []), ...denied.filter((c) => verdictDurablyDenied(verdicts[pending.indexOf(c)]))]);
   const results = Object.fromEntries(denied.map((c) => [c, { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }]));
   const complete = denied.every((c) => waived.has(c) && delivered.size > 0);
   const verdict = Schedule.dispositionOf({ delivered, complete, results });
-  if (verdict.kind === 'advance') return decision('settle', denied.length ? 'policy_waived' : 'already_delivered', { denied });
+  if (verdict.kind === 'advance') {
+    // The delivery evidence the settle rests on, as live's deliveryFacts restores it: the deduped legs' own reservations.
+    const entries = [...(event?.entries || []), ...deduped.map((c) => ({ channel: c, invoice_ids: standing.get(c)?.invoiceIds || [] }))];
+    return decision('settle', denied.length ? 'policy_waived' : 'already_delivered', {
+      denied, facts: { event: { ...(event || {}), entries }, delivered, deliveredNow: [] },
+    });
+  }
   if (verdict.kind === 'paused') return decision('pause', verdict.reason === 'COLLECTIONS_POLICY' ? 'all_channels_terminal' : verdict.reason, { denied });
   return decision('hold', 'COLLECTIONS_POLICY', { denied });
 }
@@ -696,7 +727,7 @@ async function standingReservation(run, channel) {
   if (typeof overlay === 'string') { try { overlay = JSON.parse(overlay); } catch { overlay = {}; } }
   const metadata = { ...row.metadata };
   for (const key of ['send_failed', 'resolved', 'resolution', 'delivered']) if (overlay && key in overlay) metadata[key] = overlay[key];
-  return { id: row.id, reused: true, metadata };
+  return { id: row.id, reused: true, metadata, invoiceIds: row.invoiceIds };
 }
 
 /**
@@ -705,12 +736,24 @@ async function standingReservation(run, channel) {
  * stage and template checks), and only their decide halves — nothing is applied.
  * `schedule` is always a STORED row (shadow never judges a schedule that does not exist).
  */
-async function judgeShadowSchedule(schedule, set, { now }) {
+async function shadowStop(run, schedule, now) {
+  // The set is resolved at the SAME point live runClaimed resolves it: after the customer, recovery and
+  // reachability guards, so a schedule those guards settle never pays for (or fails on) the Stripe-backed read.
+  const early = await decideCustomer(run) || await decideRecovery(run) || decideReachable(run);
+  if (early) return { stop: early, set: null };
+  const set = await resolveDunnableSet(schedule.customer_id, { now });
+  return { stop: await decideAfterSet(run, set) || await decideSet(run, set) || await decideShadowPolicy(run, set), set };
+}
+
+// A final notice settles only on readable evidence of the invoices it named (finishDelivered holds otherwise).
+const shadowEvidenceUnreadable = (run, schedule, stop) => stop.kind === 'settle' && Schedule.isFinalIndex(schedule.step_index)
+  && !!stop.facts && namedForFinal(run, stop.facts).unreadable.length > 0;
+
+async function judgeShadowSchedule(schedule, { now }) {
   const run = { schedule, now, operatorInitiated: false, claimStamp: null, readOnly: true };
   const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
-  const stop = await decideCustomer(run) || await decideRecovery(run) || decideReachable(run) || await decideAfterSet(run, set)
-    || await decideSet(run, set) || await decideShadowPolicy(run, set);
-  if (!stop) {
+  const { stop: decided, set } = await shadowStop(run, schedule, now);
+  if (!decided) {
     line('send', {
       ...fields, step: run.step?.id, kind: set.kind, members: set.members.length, total_cents: set.totalCents,
       ...(run.policyDenied?.length ? { denied: run.policyDenied.join('+') } : {}),
@@ -719,6 +762,7 @@ async function judgeShadowSchedule(schedule, set, { now }) {
     });
     return 'send';
   }
+  const stop = shadowEvidenceUnreadable(run, schedule, decided) ? decision('hold', 'delivered_evidence_unreadable') : decided;
   const verb = { hold: 'hold', autopay_hold: 'hold', pause: 'pause', close: 'close', settle: 'settle' }[stop.kind];
   line(verb, {
     ...fields, reason: stop.reason, ...(stop.denied?.length ? { denied: stop.denied.join('+') } : {}),
@@ -748,10 +792,7 @@ async function shadowPromote(customerId, now) {
   return ['promote'];
 }
 
-async function shadowSchedule(schedule, now) {
-  const set = await resolveDunnableSet(schedule.customer_id, { now });
-  return judgeShadowSchedule(schedule, set, { now });
-}
+const shadowSchedule = (schedule, now) => judgeShadowSchedule(schedule, { now });
 
 /**
  * The shadow gate's whole job. It never calls a writer: no promotion, claim,

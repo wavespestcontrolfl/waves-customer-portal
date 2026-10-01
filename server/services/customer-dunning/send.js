@@ -32,6 +32,12 @@ const { SOURCE, emailIdempotencyKey, triggerEventId } = require('./constants');
 
 const TABLE = 'customer_dunning_schedules';
 
+// The short code's recorded channel for the legs that carry its link: { channel } for a lone email / sms leg, else {}.
+function linkChannelFor(channels = []) {
+  const legs = [...new Set(channels)];
+  return legs.length === 1 && (legs[0] === 'email' || legs[0] === 'sms') ? { channel: legs[0] } : {};
+}
+
 /**
  * MINT ONCE (B-6, B-13): a short code is written only when the schedule's
  * cached link is for a different set digest. The cache lives on the schedule
@@ -50,7 +56,9 @@ async function ensureLink(ctx) {
     entityType: 'invoices',
     entityId: set.anchor.id,
     customerId: customer.id,
-    channel: 'sms',
+    // One shared link serves every leg of the touch: name its channel only when exactly one leg
+    // (email or sms) will carry it; a touch on several legs, or an app push, stays neutral ('link' in the timeline).
+    ...linkChannelFor(ctx.channels),
     purpose: 'customer_dunning',
     codePrefix: invoiceShortCodePrefix(set.anchor),
   });
@@ -119,6 +127,20 @@ async function sendTextLeg(ctx, channel, ledger) {
   });
 }
 
+// The operator email's recipient, re-resolved on the comms-lock transaction: null = still good, else a verdict.
+async function operatorRecipientBlock(trx, customerId, { to, templateKey }) {
+  const customer = await trx('customers').where({ id: customerId }).first();
+  const who = customer ? await operatorEmailRecipient(customer, 'customer-dunning', trx) : { refusal: true };
+  if (who.refusal || String(who.to).trim().toLowerCase() !== String(to).trim().toLowerCase()) {
+    return { ok: false, code: 'DUNNING_RECIPIENT_CHANGED', reason: 'The email address changed after this reminder was prepared', retryable: true };
+  }
+  const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey, trx);
+  if (!loaded?.template) return { ok: false, code: 'BILLING_EMAIL_RECHECK_FAILED', reason: 'Billing email template is unavailable', retryable: true };
+  const suppression = await EmailTemplateLibrary.activeSuppressionFor(loaded.template, who.to, 'transactional_required', trx);
+  if (!suppression) return null;
+  return { ok: false, code: 'EMAIL_SUPPRESSED', reason: `Suppressed: ${suppression.suppression_type || 'active suppression'}`, retryable: false };
+}
+
 /**
  * The operator send's provider handoff: a customer-comms transaction that runs
  * the boundary on ITS handle, then dispatches (the analogue of
@@ -132,8 +154,15 @@ async function sendTextLeg(ctx, channel, ledger) {
  * the retryable refusal, the tagged throw aborts the dispatch, and the outcome is
  * the same `{ ok: false }` the normal authority returns.
  */
-function boundaryOnlyHandoff(snapshot, state) {
-  const check = Boundary.check(snapshot);
+function boundaryOnlyHandoff(snapshot, state, recipient = null) {
+  const boundary = Boundary.check(snapshot);
+  // The deliberate preference bypass stays, but the ADDRESS and its suppression are re-resolved on the handoff
+  // transaction at both points the boundary runs: a changed address or a new suppression never reaches the provider.
+  const check = async (opts) => {
+    const verdict = await boundary(opts);
+    if (verdict.ok !== true || !recipient) return verdict;
+    return (await operatorRecipientBlock(opts.database, snapshot.customerId, recipient)) || verdict;
+  };
   const refuse = (verdict) => blocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
   return async (dispatch) => {
     try {
@@ -176,7 +205,7 @@ const AUTHORITY_INPUT = (customerId) => ({
 });
 
 function emailHandoff(ctx, to, templateKey, state) {
-  if (ctx.operatorInitiated) return boundaryOnlyHandoff(ctx.snapshot, state);
+  if (ctx.operatorInitiated) return boundaryOnlyHandoff(ctx.snapshot, state, { to, templateKey });
   return (dispatch) => dispatchUnderBillingEmailAuthority({
     input: AUTHORITY_INPUT(ctx.customer.id),
     recipientEmail: to,

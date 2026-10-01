@@ -58,14 +58,16 @@ function isEmailLike(value) {
 
 // Who an operator's explicit send goes to: the billing recipient, whatever
 // the customer chose.
-async function operatorEmailRecipient(customer, logTag) {
-  const prefs = await db('notification_prefs')
-    .where({ customer_id: customer.id })
-    .first()
-    .catch((err) => {
+// `database` (optional): a caller holding a transaction reads on it (never a second pool connection); its read
+// error then propagates (a failed statement has already aborted that transaction), where the pool read degrades.
+async function operatorEmailRecipient(customer, logTag, database = db) {
+  const lookup = database('notification_prefs').where({ customer_id: customer.id }).first();
+  const prefs = database === db
+    ? await lookup.catch((err) => {
       logger.warn(`[${logTag}] notification_prefs lookup failed for ${customer.id}: ${redactContact(err.message)}`);
       return null;
-    });
+    })
+    : await lookup;
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
     .filter((entry) => isEmailLike(entry.email));
   if (!recipient?.email) return { refusal: { ok: false, skipped: true, reason: 'missing_email' } };
