@@ -239,7 +239,7 @@ jest.setTimeout(60000);
   // The booking path's own sequence (routes/booking.js): close -> the REAL attributeSelfBooking -> drop the request's row
   // only when the booking attributed.
   describe('the closed request\'s funnel row is dropped only once the booking\'s own row exists (codex #5477 r1 P1, pre-push P1)', () => {
-    const { closeBookedPreferredLeads, dropSupersededPreferredFunnelRows } = require('../services/booking-preferred-time');
+    const { closeBookedPreferredLeads, dropSupersededPreferredFunnelRows, reconcileBookingSince } = require('../services/booking-preferred-time');
     const { attributeSelfBooking } = require('../services/lead-estimate-link');
     const flow = async ({ attribution, bookingSource = null, customerCreated = false, stage = 'lead' }) => {
       const cust = randomUUID();
@@ -378,41 +378,71 @@ jest.setTimeout(60000);
       });
     });
 
-    describe('a booking that converted a genuine lead instead (codex #5477 r2 P1)', () => {
-      const withConvertedLead = async ({ stage = 'booked', updatedAt = new Date(), forCustomer = true } = {}) => {
+    describe('a booking that converted a genuine lead instead: lineage is the booking\'s own (codex #5477 r2 P1, pre-push P1)', () => {
+      // The booking path: close (persisting the converted ids on its audit row), then attributeSelfBooking
+      // (leadConverted: records nothing), then the cleanup with the same ids.
+      const setupConverted = async ({ stage = 'booked' } = {}) => {
         const { cust, req, booking } = await setupRequestAndBooking();
         const genuine = await database('leads').insert({ first_name: 'Pat', last_name: 'Sample', phone: '+19415550100', status: 'won', lead_type: 'web_form', customer_id: cust }).returning('id');
-        await database('ad_service_attribution').insert({ lead_id: genuine[0].id, customer_id: forCustomer ? cust : randomUUID(), funnel_stage: stage, updated_at: updatedAt });
-        await closeBookedPreferredLeads(database, { customerId: cust, booking });
-        // convertLeadFromEvent converted the genuine lead, so attributeSelfBooking records nothing for the booking itself
+        await database('ad_service_attribution').insert({ lead_id: genuine[0].id, customer_id: cust, funnel_stage: stage });
+        return { cust, req, booking, genuineId: genuine[0].id };
+      };
+      const attributeConverted = async (cust, booking) => {
         const attributed = await attributeSelfBooking({
           customerId: cust, attribution: captured, serviceInterest: 'Pest Control', customerCreated: false, selfBookedAppointmentId: booking.id, bookingSource: null, leadConverted: true, database,
         });
         expect(attributed).toMatchObject({ attributed: false, reason: 'lead_converted' });
         expect(await bookingRows(booking.id)).toHaveLength(0);
-        await dropSupersededPreferredFunnelRows(database, { booking }); // booking.js calls it on leadConversion.converted
-        return { req, genuineId: genuine[0].id };
       };
 
-      test('the converted lead\'s booked row is the replacement: the request row is dropped, the genuine lead\'s row stays', async () => {
-        const { req, genuineId } = await withConvertedLead();
+      test('via the ids the booking path passes: the converted lead\'s booked row is the replacement, the request row goes, the genuine row stays', async () => {
+        const { cust, req, booking, genuineId } = await setupConverted();
+        await closeBookedPreferredLeads(database, { customerId: cust, booking, convertedLeadIds: [genuineId] });
+        await attributeConverted(cust, booking);
+        expect(await dropSupersededPreferredFunnelRows(database, { booking, convertedLeadIds: [genuineId] })).toBe(1);
         expect(await requestRow(req.leadId)).toHaveLength(0);
         expect(await requestRow(genuineId)).toHaveLength(1);
       });
-      test('a converted lead already at completed counts too', async () => {
-        const { req } = await withConvertedLead({ stage: 'completed' });
+
+      test('via the ids persisted on the close audit row: a later closer (replay / reconcile) with no ids finds them', async () => {
+        const { cust, req, booking, genuineId } = await setupConverted({ stage: 'completed' });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking, convertedLeadIds: [genuineId] });
+        const audit = await closeRows();
+        expect(audit[0].metadata.converted_lead_ids).toEqual([genuineId]);
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(1);
         expect(await requestRow(req.leadId)).toHaveLength(0);
       });
-      test('another lead\'s booked row from BEFORE this booking (an older journey) is not a replacement', async () => {
-        const { req } = await withConvertedLead({ updatedAt: new Date(Date.now() - 86400000) });
+
+      test('reconcile closes FIRST (its audit row carries no ids, nothing is dropped); the booking path then passes its ids and deletes', async () => {
+        const { cust, req, booking, genuineId } = await setupConverted();
+        await reconcileBookingSince(database, { phone: '9415550100', since: new Date(Date.now() - 60000) });
+        expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
+        expect((await closeRows())[0].metadata.converted_lead_ids).toBeUndefined();
+        expect(await requestRow(req.leadId)).toHaveLength(1); // no replacement known to the reconcile
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking, convertedLeadIds: [genuineId] })).closed).toBe(0);
+        await attributeConverted(cust, booking);
+        await dropSupersededPreferredFunnelRows(database, { booking, convertedLeadIds: [genuineId] });
+        expect(await requestRow(req.leadId)).toHaveLength(0);
+      });
+
+      test('an unrelated, recently updated completed row for the same customer is NOT a replacement (no lineage to this booking)', async () => {
+        const { cust, req, booking, genuineId } = await setupConverted({ stage: 'completed' });
+        await database('ad_service_attribution').where({ lead_id: genuineId }).update({ updated_at: new Date() });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking }); // this booking converted nothing
+        await attributeConverted(cust, booking);
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(0);
+        expect(await requestRow(req.leadId)).toHaveLength(1);
+        // another booking's persisted ids never count for this one
+        await database('lead_activities').insert({ lead_id: req.leadId, activity_type: 'status_change', performed_by: 'system', metadata: JSON.stringify({ reason: 'booking_on_preferred_request', booking_id: randomUUID(), converted_lead_ids: [genuineId] }) });
+        expect(await dropSupersededPreferredFunnelRows(database, { booking })).toBe(0);
         expect(await requestRow(req.leadId)).toHaveLength(1);
       });
-      test('a booked row belonging to a different customer is not a replacement', async () => {
-        const { req } = await withConvertedLead({ forCustomer: false });
-        expect(await requestRow(req.leadId)).toHaveLength(1);
-      });
-      test('a converted lead that has only reached an open stage is not a replacement', async () => {
-        const { req } = await withConvertedLead({ stage: 'contacted' });
+
+      test('converted ids whose funnel row is still at an open stage are not a replacement', async () => {
+        const { cust, req, booking, genuineId } = await setupConverted({ stage: 'contacted' });
+        await closeBookedPreferredLeads(database, { customerId: cust, booking, convertedLeadIds: [genuineId] });
+        await attributeConverted(cust, booking);
+        expect(await dropSupersededPreferredFunnelRows(database, { booking, convertedLeadIds: [genuineId] })).toBe(0);
         expect(await requestRow(req.leadId)).toHaveLength(1);
       });
     });
@@ -442,12 +472,40 @@ jest.setTimeout(60000);
       test('the submit\'s reconcile does not silence the new_lead bell for it', async () => {
         const cust = randomUUID();
         await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
-        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id']);
-        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
         const { triggerNotification } = require('../services/notification-triggers');
         triggerNotification.mockClear();
-        const out = await recordPreferredTimeRequest(database, value({ firstName: 'Robin', lastName: 'Other' }), { notify: true });
+        const slow = gate();
+        mockStamp.mockImplementation(async (handle, lead) => { await slow.p; await handle('funnel_rows').insert({ lead_id: lead.id }); });
+        const submit = recordPreferredTimeRequest(database, value({ firstName: 'Robin', lastName: 'Other' }), { notify: true });
+        await tick();
+        // the booking commits while the submit is in flight (the reconcile sees it)
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+        slow.open();
+        const out = await submit;
         expect(await database('leads').where({ id: out.leadId }).first()).toMatchObject({ status: 'new' });
+        expect(triggerNotification).toHaveBeenCalledTimes(1);
+      });
+
+      test('the bell is judged on the SUBMITTED request: an older request of the booker is closed by the reconcile, the new non-corroborated one stays open and rings', async () => {
+        const cust = randomUUID();
+        await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
+        // the booker's own earlier request (same person, linked by name)
+        const older = await recordPreferredTimeRequest(database, value({ firstName: 'Pat', lastName: 'Sample' }), { notify: false });
+        await database('leads').where({ id: older.leadId }).update({ status: 'new', created_at: new Date(Date.now() - 3 * 86400000), extracted_data: JSON.stringify({ last_requested_at: new Date(Date.now() - 3 * 86400000).toISOString() }) });
+        const { triggerNotification } = require('../services/notification-triggers');
+        triggerNotification.mockClear();
+        const slow = gate();
+        mockStamp.mockImplementation(async (handle, lead) => { await slow.p; await handle('funnel_rows').insert({ lead_id: lead.id }); });
+        const submit = recordPreferredTimeRequest(database, value({ firstName: 'Robin', lastName: 'Other' }), { notify: true });
+        await tick();
+        const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id']);
+        await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+        slow.open();
+        const fresh = await submit;
+        // the reconcile closed the booker's OLDER request, yet the submitted one is still open and rings
+        expect(await database('leads').where({ id: older.leadId }).first()).toMatchObject({ status: 'handled' });
+        expect(await database('leads').where({ id: fresh.leadId }).first()).toMatchObject({ status: 'new' });
         expect(triggerNotification).toHaveBeenCalledTimes(1);
       });
 

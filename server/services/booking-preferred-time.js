@@ -230,12 +230,14 @@ async function reconcileBookingSince(db, { phone, since, leadId = null }) {
       // The booking's own funnel row may already exist (its attribution ran before
       // this close): then this closer is the second and drops the request's row.
       await dropSupersededPreferredFunnelRows(db, { booking: candidate });
-      // The bell is moot only when the request is now closed: a booking on a
-      // shared phone that does not corroborate this request leaves it open.
-      if (out.closed > 0) return true;
-      if (out.live && leadId) {
+      // The bell is moot only when THIS request is now closed (a booking on a shared
+      // phone that does not corroborate it leaves it open). Judged on THIS request: on a shared phone the close may have taken an older
+      // request of the booker's and left the new one open (its bell must ring).
+      if (leadId) {
         const row = await db('leads').where({ id: leadId }).first('status');
         if (row && row.status === CLOSED_STATUS) return true;
+      } else if (out.closed > 0) {
+        return true;
       }
     }
     return false;
@@ -487,7 +489,7 @@ async function notifyRequestClosed({ lead, customerName, service, day, visitId }
  * submit's reconcile keys its new_lead bell on it), `closed` = leads closed by
  * this call. Best-effort; never throws into the booking.
  */
-async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}) {
+async function closeBookedPreferredLeads(db, { customerId, booking = null, convertedLeadIds = [] } = {}) {
   const none = { live: false, closed: 0 };
   if (!customerId || !booking || !booking.id) return none;
   try {
@@ -497,6 +499,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
       .first();
     if (!visit || visit.is_callback) return none;
     const bookedMs = new Date(booking.created_at).getTime();
+    const convertedIds = (Array.isArray(convertedLeadIds) ? convertedLeadIds : []).filter(Boolean).map(String);
     if (Number.isNaN(bookedMs)) return { live: true, closed: 0 };
     const customer = await db('customers').where({ id: customerId }).first('phone', 'first_name', 'last_name', 'email');
     const ten = tenDigitPhone(customer && customer.phone);
@@ -556,6 +559,9 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
             previous_status: current.status,
             status: CLOSED_STATUS,
             auto: true,
+            // The genuine lead(s) this booking's own conversion converted (the funnel-row
+            // cleanup's replacement lineage when the booking records no row of its own).
+            ...(convertedIds.length ? { converted_lead_ids: convertedIds } : {}),
           }),
         });
         return { name: [current.first_name, current.last_name].filter(Boolean).join(' ') };
@@ -586,17 +592,31 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
  * does not matter which closer won the race (the booking's own post-commit close,
  * the submit's reconcileBookingSince, or a replay): each calls this after its
  * own step and whichever runs SECOND, once the booking's row exists, deletes.
- * Idempotent. The replacement (a row keyed to this booking's id, or the booked
- * row of a genuine lead this booking converted) belonging to another lead is
+ * Idempotent. The replacement (a row keyed to this booking's id, or the booked /
+ * completed row of a genuine lead THIS booking converted: ids passed by the
+ * booking path or persisted on its close audit row) belonging to another lead is
  * verified in the same statement as the delete, and a row already at booked /
  * completed (revenue attached) is never removed.
  * Best-effort: never throws into the booking. Returns the rows removed.
  */
-async function dropSupersededPreferredFunnelRows(db, { booking = null } = {}) {
+async function dropSupersededPreferredFunnelRows(db, { booking = null, convertedLeadIds = [] } = {}) {
   if (!booking || !booking.id) return 0;
-  const bookedMs = new Date(booking.created_at).getTime();
-  const convertedSince = booking.customer_id && !Number.isNaN(bookedMs) ? new Date(bookedMs - BOOKING_SLACK_MS) : null;
   try {
+    // The genuine lead(s) this booking converted, from its own lineage only: the ids
+    // the booking path passes, plus the ids it persisted on the close's audit rows
+    // for THIS booking (a later closer, such as the reconcile or a replay, reads those).
+    // Never "any recently updated booked/completed row for the customer".
+    const audits = (await db('lead_activities')
+      .where('activity_type', 'status_change')
+      .whereRaw("metadata->>'reason' = ?", [CLOSE_REASON])
+      .whereRaw("metadata->>'booking_id' = ?", [String(booking.id)])
+      .select('metadata')) || [];
+    const persisted = audits.flatMap((row) => {
+      let meta = row && row.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      return meta && Array.isArray(meta.converted_lead_ids) ? meta.converted_lead_ids : [];
+    });
+    const converted = [...new Set([...(Array.isArray(convertedLeadIds) ? convertedLeadIds : []), ...persisted].filter(Boolean).map(String))];
     return (await db('ad_service_attribution')
       .whereIn('lead_id', function closedByThisBooking() {
         this.select('a.lead_id').from('lead_activities as a')
@@ -608,21 +628,16 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null } = {}) {
       })
       .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
       .whereExists(function replacementRow() {
-        // The booking's own row (keyed to this booking), OR the funnel row of a
-        // genuine lead this booking converted instead (recurring / estimate-
-        // linked bookings convert that lead, so attributeSelfBooking writes no row
-        // of its own): another lead's row, for the booked customer, at booked /
-        // completed and advanced since this booking was made. Persisted facts
-        // only, so either closer finds it whichever runs second.
+        // The booking's own row (keyed to this booking), OR the booked / completed
+        // funnel row of a genuine lead this booking converted instead (recurring /
+        // estimate-linked bookings convert that lead, so attributeSelfBooking writes
+        // no row of its own).
         this.select(1).from('ad_service_attribution as booked')
           .whereRaw('booked.lead_id IS DISTINCT FROM ad_service_attribution.lead_id')
           .where((q) => {
             q.whereRaw('booked.self_booked_appointment_id = ?', [booking.id]);
-            if (convertedSince) {
-              q.orWhere((c) => c.whereRaw('booked.lead_id IS NOT NULL')
-                .whereRaw('booked.customer_id = ?', [booking.customer_id])
-                .whereIn('booked.funnel_stage', ['booked', 'completed'])
-                .where('booked.updated_at', '>=', convertedSince));
+            if (converted.length) {
+              q.orWhere((c) => c.whereIn('booked.lead_id', converted).whereIn('booked.funnel_stage', ['booked', 'completed']));
             }
           });
       })
