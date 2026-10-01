@@ -134,6 +134,18 @@ const LEDGER_FAMILIES_FOR_LINE = Object.freeze({
   termite: ['termite_bait', 'termite'],
   rodent: ['rodent_bait', 'rodent'],
 });
+const KNOWN_LEDGER_FAMILIES = new Set(Object.values(LEDGER_FAMILIES_FOR_LINE).flat());
+// A granted retention offer and an active plan hold are scoped to ONE plan
+// family (retention_offers / plan_holds family_key — the ledger's
+// vocabulary, which LEDGER_FAMILIES_FOR_LINE maps this line to): a lawn
+// offer never holds the pest review (the invoice rails apply an offer to
+// its own family only, visit-completion-payment.js). A failed read or an
+// unrecognised family key holds every line — fail closed.
+function familySignalTouchesLine(families, familyKey) {
+  if (families === 'error' || !Array.isArray(families)) return true;
+  const lineFamilies = LEDGER_FAMILIES_FOR_LINE[familyKey] || [familyKey];
+  return families.some((f) => lineFamilies.includes(f) || !KNOWN_LEDGER_FAMILIES.has(f));
+}
 // reservice-scheduler's open-callback lane keys per family (facts.js
 // openCallbackLanes); families with no re-service lane are never held by one.
 const CALLBACK_LANE_FOR_FAMILY = Object.freeze({ pest_control: 'pest', lawn_care: 'lawn' });
@@ -473,12 +485,14 @@ function allowanceFor(allowances, line) {
 // prepaid_amount / original prepay_amount are what was CHARGED, not what
 // settled (clearPrepaidStampsForTerm keeps completed visits' stamps after a
 // refund), so they are never used here.
-function visitRevenueCents(row) {
+function visitRevenueCents(row, { termVisitsFallback = null } = {}) {
   const paid = positive(row.paid_revenue);
   if (paid != null) return Math.round(paid * 100);
   if (row.annual_prepay_term_id) {
     const settled = positive(row.term_settled_amount);
-    const visits = positive(row.term_visit_count);
+    // a term from before coverage_visit_count existed (nullable) infers its
+    // count the way resolveCurrentRate does — the line's cadence / catalog count
+    const visits = positive(row.term_visit_count) || positive(termVisitsFallback);
     if (settled != null && visits != null) return Math.round((settled / visits) * 100);
   }
   return null;
@@ -505,7 +519,7 @@ function revenuePerHour(paired) {
 // monthly members pay at account level, so their visits carry no invoice of
 // their own. Used only for a visit with no paired revenue; flagged
 // rph_from_dues.
-function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinutes = 0, duesRevenueCents = null } = {}) {
+function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinutes = 0, duesRevenueCents = null, termVisitsFallback = null } = {}) {
   const usable = [];
   let duesAttributed = 0;
   let compositeVisits = 0;
@@ -518,7 +532,7 @@ function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinute
     if (row.composite_visit) { compositeVisits += 1; continue; }
     const t = treatmentMinutesFor(row, allowanceMinutes);
     if (!t) continue;
-    let revenueCents = visitRevenueCents(row);
+    let revenueCents = visitRevenueCents(row, { termVisitsFallback });
     if (revenueCents == null && duesRevenueCents > 0) { revenueCents = duesRevenueCents; duesAttributed += 1; }
     usable.push({ ...t, revenueCents });
   }
@@ -622,7 +636,7 @@ const EXCEPTION_FLAGS = Object.freeze([
   'tenure_under_lock', 'prepay_mid_term', 'prepay_term_missing', 'reviewed_within_12mo', 'manual_rate_edit_recent',
   'retention_offer_active', 'plan_hold_active', 'callback_recent', 'cancellation_case_recent', 'complaint_open',
   'past_due', 'hand_picked_tier', 'commercial', 'termite_program', 'multi_property', 'lane_cleanup', 'cadence_conflict',
-  'prepay_term_ambiguous', 'rate_unattributed', 'list_low_confidence', 'list_bundle_incomplete', 'unsupported_family', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
+  'prepay_term_ambiguous', 'rate_unattributed', 'list_low_confidence', 'list_bundle_incomplete', 'multi_program_line', 'unsupported_family', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
 ]);
 
 function evaluateExceptions(line, config = DEFAULT_CONFIG) {
@@ -652,6 +666,7 @@ function evaluateExceptions(line, config = DEFAULT_CONFIG) {
   if (line.billingLane === 'per_visit' || line.billingLane === 'one_time' || line.billingLane == null) flags.push('lane_cleanup');
   if (line.listLowConfidence) flags.push('list_low_confidence');
   if (line.listBundleIncomplete) flags.push('list_bundle_incomplete');
+  if (line.multiProgramLine) flags.push('multi_program_line');
   if (line.familyKey === 'other') flags.push('unsupported_family');
   if (!f) flags.push('facts_unavailable');
   else if (f.moneyFactsDegraded) flags.push('facts_degraded');
@@ -875,6 +890,18 @@ const QUALIFYING_KEY_FOR_FAMILY = Object.freeze({
 // The engine qualifying key an ACTIVE plan line contributes as a prior
 // service — from its catalog service keys, not its family: a palm-only
 // tree_shrub line (palm_injection*) qualifies for nothing.
+// A tree_shrub family whose open visits carry BOTH programs (bed keys and
+// palm_injection* keys) on one cadence: a per-application median across
+// their distinct prices is a blend, and the replay prices one primary item
+// (riders join monthly figures only) — held (multi_program_line). The
+// monthly ledger slice sums both programs and its replay must then price
+// every component (list_bundle_incomplete), so it is not held here.
+function isMultiProgramLine(familyKey, serviceKeys) {
+  if (familyKey !== 'tree_shrub') return false;
+  const keys = (Array.isArray(serviceKeys) ? serviceKeys : []).map((k) => String(k || '').toLowerCase());
+  return keys.some(isPalmServiceKey) && keys.some((k) => !isPalmServiceKey(k));
+}
+
 function qualifyingKeyForLine(line) {
   const keys = (line && Array.isArray(line.serviceKeys) ? line.serviceKeys : []).map((k) => String(k || '').toLowerCase());
   if (line.familyKey === 'tree_shrub') {
@@ -1501,13 +1528,13 @@ async function loadExceptionSignals(dbh, customerId, { now, config }) {
     leg(() => dbh('retention_offers')
       .where({ customer_id: customerId, status: 'granted' })
       .where(function notExpired() { this.whereNull('expires_at').orWhere('expires_at', '>', now); })
-      .count({ n: '*' }).first()),
+      .select('family_key')),
     leg(() => dbh('plan_holds').where({ customer_id: customerId, status: 'active' }).select('family_key')),
   ]);
   return {
     callbackLines: callbacks === 'error' ? 'error' : callbacks.map((r) => r.line),
     cancellationCaseRecent: cases === 'error' ? true : Number(cases && cases.n) > 0,
-    retentionOfferActive: offers === 'error' ? true : Number(offers && offers.n) > 0,
+    retentionOfferFamilies: offers === 'error' ? 'error' : offers.map((o) => o.family_key),
     planHoldFamilies: holds === 'error' ? 'error' : holds.map((h) => h.family_key),
   };
 }
@@ -1730,10 +1757,12 @@ async function assembleBookEntry(inputs, planLine, { config, replayCache, deps }
     const ledgerSlice = ledgerSliceForLine(ledger, customer.id, familyKey);
     const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice });
     const visitsPerYear = visitsPerYearFor(cadence, planLine.catalog_vpy);
+    const multiProgram = current.unit === 'application' && isMultiProgramLine(familyKey, planLine.service_keys);
     const lineVisits = visitsByLine.get(`${customer.id}|${familyKey}`) || [];
     const stats = lineDurationStats(lineVisits, {
       config,
       allowanceMinutes: allowanceFor(allowances, familyKey),
+      termVisitsFallback: visitsPerYear,
       duesRevenueCents: current.unit === 'month'
         ? duesPerVisitCents({ settledCents: settledDues.get(customer.id) || 0, ledger, customerId: customer.id, familyKey, accountLines: planLine.account_lines, completedVisits: lineVisits.length })
         : null,
@@ -1796,7 +1825,7 @@ async function assembleBookEntry(inputs, planLine, { config, replayCache, deps }
       planLine, customer, familyKey, cadence,
       visitsPerYear,
       current, stats, first, acceptedAt, list,
-      engineUnavailable, listLowConfidence, listBundleIncomplete,
+      engineUnavailable, listLowConfidence, listBundleIncomplete, multiProgram,
       serviceKeys: planLine.service_keys || [],
     };
 }
@@ -1918,8 +1947,8 @@ function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEd
       || callbackLines.some((line) => line === familyKey || line === 'other')
       || openLanes.includes('unknown')
       || (familyLane != null && openLanes.includes(familyLane));
-    const holdFamilies = signals ? signals.planHoldFamilies : 'error';
-    const planHoldActive = holdFamilies === 'error' || holdFamilies.length > 0 || !!tierProtected;
+    const planHoldActive = familySignalTouchesLine(signals ? signals.planHoldFamilies : 'error', familyKey) || !!tierProtected;
+    const retentionOfferActive = familySignalTouchesLine(signals ? signals.retentionOfferFamilies : 'error', familyKey);
 
     const line = {
       batchKey,
@@ -1937,6 +1966,7 @@ function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEd
       engineUnavailable: entry.engineUnavailable,
       listLowConfidence: entry.listLowConfidence,
       listBundleIncomplete: entry.listBundleIncomplete,
+      multiProgramLine: !!entry.multiProgram,
       tenureMonths: entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null,
       currentRateCents: current.cents,
       currentRateSource: current.source,
@@ -1965,7 +1995,7 @@ function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEd
       cadenceConflict: !!entry.planLine.cadence_conflict,
       reviewedWithin12mo: priorReviews.has(`${customer.id}|${familyKey}`),
       manualRateEditRecent: !!(manualAt && manualAt >= manualEditCutoff),
-      retentionOfferActive: !signals || signals.retentionOfferActive,
+      retentionOfferActive,
       planHoldActive,
       callbackRecent,
       cancellationCaseRecent: !signals || signals.cancellationCaseRecent,
@@ -2295,7 +2325,18 @@ async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null,
     sanitized.code = 'RATE_REVIEW_DIGEST_DELIVERY_FAILED';
     throw sanitized;
   }
-  return { ...built, emailed: !!email.sent, email };
+  // A digest the tick could not deliver (mailer unconfigured, recipient not
+  // an internal address) is a FAILED tick too — never a healthy job_health
+  // row for a month nobody was told about; the day 1–7 ticks retry, the
+  // batch stays persisted. Manual callers (the admin route) see the skip.
+  if (!email.sent) {
+    logger.error(`[rate-review] digest for ${batchKey} not delivered (${email.skipped}) — batch persisted, delivery will retry`);
+    const undelivered = new Error(`rate review digest not delivered for ${batchKey} (${email.skipped})`);
+    undelivered.code = 'RATE_REVIEW_DIGEST_NOT_DELIVERED';
+    undelivered.skipped = email.skipped;
+    throw undelivered;
+  }
+  return { ...built, emailed: true, email };
 }
 
 module.exports = {
@@ -2310,6 +2351,8 @@ module.exports = {
   sendBatchEmail,
   composeBatchEmail,
   _private: {
+    familySignalTouchesLine,
+    isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
     PLAN_ROW_SQL, LIVE_STATUS_SQL,

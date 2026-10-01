@@ -165,6 +165,11 @@ describe('trimmed median and the usable-visit floor', () => {
     // a paid visit invoice still wins over the term share
     const both = fixture.visit('c', 'pest_control', { minutes: 40, revenue: 117, prepay: { id: 't1', settled: 404, visits: 4 } });
     expect(P.visitRevenueCents(both)).toBe(11700);
+    // a term from before coverage_visit_count existed infers the count from the line's cadence / catalog count, as resolveCurrentRate does
+    const legacy = fixture.visit('c', 'pest_control', { minutes: 40, prepay: { id: 't0', settled: 404, visits: null } });
+    expect(P.visitRevenueCents(legacy)).toBeNull();
+    expect(P.visitRevenueCents(legacy, { termVisitsFallback: 4 })).toBe(10100);
+    expect(P.lineDurationStats([40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', prepay: { id: 't0', settled: 404, visits: null } })), { termVisitsFallback: 4 }).revenuePerHourCents).toBe(P.lineDurationStats([40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 101 }))).revenuePerHourCents);
     // the SQL never reads the charged stamps
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
@@ -331,6 +336,7 @@ describe('exception rules', () => {
     ['engine replay needs a human (manual review / heuristic turf / LOW confidence)', { listLowConfidence: true }, 'list_low_confidence'],
     ['unclassified service family', { familyKey: 'other' }, 'unsupported_family'],
     ['a ledger component the engine replay did not price (palm sold on a separate estimate)', { listBundleIncomplete: true }, 'list_bundle_incomplete'],
+    ['a per-application tree/shrub line carrying both the bed program and palm injections (blended median)', { multiProgramLine: true }, 'multi_program_line'],
     ['two live prepay terms could cover the line', { prepayTermAmbiguous: true }, 'prepay_term_ambiguous'],
     ['monthly dues with no per-family attribution', { rateUnattributed: true }, 'rate_unattributed'],
     ['facts loader failed (fail closed)', { facts: null }, 'facts_unavailable'],
@@ -1717,6 +1723,93 @@ describe('runMonthlyRateReview', () => {
     const empty = fixture.scriptedDb({ priorReviews: [], batchRow: null });
     db.mockImplementation((table) => empty(table));
     expect(await rateReview.sendBatchEmail({ batchKey: '2026-11' })).toEqual({ sent: false, skipped: 'no_batch' });
+  });
+  test('a tick whose digest was not delivered (mailer unconfigured, external recipient) is a FAILED tick, not a healthy one', async () => {
+    const book = fixture.decemberBook();
+    const make = () => {
+      const scenario = { planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null };
+      const scripted = fixture.scriptedDb(scenario);
+      db.mockImplementation((table) => scripted(table));
+      db.raw.mockImplementation((...args) => scripted.raw(...args));
+      db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+      mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+      mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+      return scripted;
+    };
+    const unconfigured = { isConfigured: () => false, sendOne: jest.fn() };
+    let scripted = make();
+    const failure = await rateReview.runMonthlyRateReview({ now: NOW, mailer: unconfigured, deps: { pricingEngine: fixture.fakePricingEngine() } }).catch((e) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({ code: 'RATE_REVIEW_DIGEST_NOT_DELIVERED', skipped: 'unconfigured' });
+    expect(failure.message).toBe('rate review digest not delivered for 2026-11 (unconfigured)');
+    expect(unconfigured.sendOne).not.toHaveBeenCalled();
+    expect(scripted.writes.batchUpserts).toHaveLength(1); // the batch landed
+    expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at)).toBe(false); // nothing stamped → the next tick retries
+    // an external recipient: the same failed tick, and the address never rides the error
+    scripted = make();
+    process.env.RATE_REVIEW_DIGEST_EMAIL = 'someone@example.com';
+    try {
+      const external = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } }).catch((e) => e);
+      expect(external).toMatchObject({ code: 'RATE_REVIEW_DIGEST_NOT_DELIVERED', skipped: 'recipient' });
+      expect(external.message).not.toMatch(/@/);
+      expect(require('../services/sendgrid-mail').sendOne).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.RATE_REVIEW_DIGEST_EMAIL;
+    }
+  });
+  test('a granted retention offer or an active plan hold holds only its own family; a failed read or an unknown family holds every line', async () => {
+    expect(P.familySignalTouchesLine(['lawn_care'], 'pest_control')).toBe(false);
+    expect(P.familySignalTouchesLine(['pest_control'], 'pest_control')).toBe(true);
+    expect(P.familySignalTouchesLine(['palm_injection'], 'tree_shrub')).toBe(true); // the ledger's vocabulary for the family
+    expect(P.familySignalTouchesLine(['termite_bait'], 'termite')).toBe(true);
+    expect(P.familySignalTouchesLine([], 'pest_control')).toBe(false);
+    expect(P.familySignalTouchesLine('error', 'pest_control')).toBe(true);
+    expect(P.familySignalTouchesLine(['something_new'], 'pest_control')).toBe(true); // fail closed
+    // the loader reads the offers' families (never a customer-wide count)
+    const book = fixture.decemberBook();
+    const target = book.customers.belowList.id;
+    const run = async (signals) => {
+      const scenario = { planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals, batchRow: null };
+      const scripted = fixture.scriptedDb(scenario);
+      db.mockImplementation((table) => scripted(table));
+      db.raw.mockImplementation((...args) => scripted.raw(...args));
+      db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+      mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+      mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+      const signalsRead = await P.loadExceptionSignals(db, target, { now: NOW, config: DEFAULT_CONFIG });
+      await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+      const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === target && r.family_key === 'pest_control');
+      return { signalsRead, flags: JSON.parse(row.flags) };
+    };
+    const lawnOnly = await run({ [target]: { retentionOfferFamilies: ['lawn_care'], holds: ['lawn_care'] } });
+    expect(lawnOnly.signalsRead.retentionOfferFamilies).toEqual(['lawn_care']);
+    expect(lawnOnly.flags).not.toContain('retention_offer_active');
+    expect(lawnOnly.flags).not.toContain('plan_hold_active');
+    const own = await run({ [target]: { retentionOfferFamilies: ['pest_control'], holds: ['pest_control'] } });
+    expect(own.flags).toEqual(expect.arrayContaining(['retention_offer_active', 'plan_hold_active']));
+  });
+  test('a per-application tree/shrub line carrying both programs is held as multi_program_line, never a blended green', async () => {
+    expect(P.isMultiProgramLine('tree_shrub', ['tree_shrub_program', 'palm_injection_semiannual'])).toBe(true);
+    expect(P.isMultiProgramLine('tree_shrub', ['palm_injection_semiannual'])).toBe(false);
+    expect(P.isMultiProgramLine('tree_shrub', ['tree_shrub_program'])).toBe(false);
+    expect(P.isMultiProgramLine('tree_shrub', [])).toBe(false);
+    expect(P.isMultiProgramLine('pest_control', ['pest_control_quarterly', 'palm_injection_semiannual'])).toBe(false);
+    const book = fixture.decemberBook();
+    const target = book.customers.belowList.id;
+    const extra = fixture.planLine(target, 'tree_shrub', 'bimonthly', 80, { service_keys: ['tree_shrub_program', 'palm_injection_semiannual'] });
+    const scenario = { planLines: [...book.planLines, extra], customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    // an explicit window that covers the imported line's member_since anniversary
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-11-15', anniversaryTo: '2027-01-15', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === target && r.family_key === 'tree_shrub');
+    expect(row).toBeDefined();
+    expect(JSON.parse(row.flags)).toContain('multi_program_line');
+    expect(row.status).toBe('exception');
   });
   test('an external recipient fails closed — the body names customers', async () => {
     const scripted = fixture.scriptedDb({ priorReviews: [], batchRow: { batch_key: '2026-12' } });

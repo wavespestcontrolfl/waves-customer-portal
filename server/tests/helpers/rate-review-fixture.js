@@ -90,7 +90,7 @@ function scriptedDb(scenario) {
       case 'cancellation_cases':
         return chain({ count: (q) => ({ n: signalsFor(q.customerId).cancellationCases || 0 }) });
       case 'retention_offers':
-        return chain({ count: (q) => ({ n: signalsFor(q.customerId).retentionOffers || 0 }) });
+        return chain({ rows: (q) => (signalsFor(q.customerId).retentionOfferFamilies || []).map((family_key) => ({ family_key })) });
       case 'plan_holds':
         return chain({ rows: (q) => (signalsFor(q.customerId).holds || []).map((family_key) => ({ family_key })) });
       default:
