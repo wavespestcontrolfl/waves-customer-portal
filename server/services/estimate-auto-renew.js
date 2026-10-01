@@ -20,7 +20,7 @@ const EmailTemplateAutomationExecutor = require('./email-template-automation-exe
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
-const { isEnabled } = require('../config/feature-gates');
+const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
@@ -36,23 +36,24 @@ function canFallbackFromAutomationEmailError(err) {
   return /relation .*email_template_automation|automation .*not found|does not define an idempotency key|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
+// A processTrigger failure whose partialResults include a run that is
+// actually delivering (sent, or on its way: queued/scheduled/running/
+// retry_scheduled) — not a dedupe, a skip, a shadow-only or a blocked run,
+// none of which emails the customer.
+const DELIVERING_RUN_STATUSES = new Set(['sent', 'queued', 'scheduled', 'running', 'retry_scheduled']);
+function siblingDeliveringEmail(err) {
+  const results = Array.isArray(err?.partialResults) ? err.partialResults : [];
+  return results.some((r) => r && !r.deduped && DELIVERING_RUN_STATUSES.has(r.run?.status));
+}
+
 // estimate_data.noEngagementAutomation — the durable zero-comms opt-out
 // stamped by publish-without-delivery mints (report click-to-estimate).
-// Same key the engagement engine and legacy follow-up cron enforce;
-// duplicated locally like theirs (shared-import would couple this sender's
-// load order to those modules) and pinned in lockstep by
-// estimate-followup-engagement-optout.test.js. A renewal here would both
-// EXTEND the estimate and EMAIL the customer — the lane promises neither.
-function estimateOptedOutOfAutoRenew(est) {
-  try {
-    const data = typeof est.estimate_data === 'string'
-      ? JSON.parse(est.estimate_data)
-      : est.estimate_data;
-    return data?.noEngagementAutomation === true;
-  } catch {
-    return false;
-  }
-}
+// ONE shared rule with the engagement engine, the legacy follow-up cron,
+// the extension flow and the email_template_automation executor
+// (estimate-comms-eligibility.js, a dependency-free leaf). A renewal here
+// would both EXTEND the estimate and EMAIL the customer — the lane promises
+// neither.
+const { estimateOptedOutOfEngagement: estimateOptedOutOfAutoRenew } = require('./estimate-comms-eligibility');
 
 const EstimateAutoRenew = {
   async checkAll() {
@@ -170,7 +171,14 @@ const EstimateAutoRenew = {
               };
               if (sendgrid.isConfigured()) {
                 try {
-                  if (isEnabled('emailTemplateAutomations')) {
+                  // Shadow must never change a LIVE send: only handing this
+                  // send to the executor at mode==='live' preserves today's
+                  // direct sendTemplate fallback below in shadow (and off) —
+                  // a shadow run finalizes 'shadow' (nothing dispatched), so
+                  // routing here on the boolean gate alone (true in shadow
+                  // too) would silently drop the customer's extension notice
+                  // (codex/coordinator finding on #5154).
+                  if (emailTemplateAutomationsMode() === 'live') {
                     const result = await EmailTemplateAutomationExecutor.processTrigger({
                       triggerEventKey: 'estimate.auto_renewed',
                       triggerEventId: `estimate_auto_renew:${est.id}`,
@@ -222,7 +230,16 @@ const EstimateAutoRenew = {
                   }
                 } catch (e) {
                   if (!canFallbackFromTemplateEmailError(e) && !canFallbackFromAutomationEmailError(e)) throw e;
-                  logger.warn(`[est-auto-renew] Template unavailable for estimate ${est.id}; falling back to SMTP: ${e.message}`);
+                  if (siblingDeliveringEmail(e)) {
+                    // Another automation on this trigger already sent or
+                    // queued the customer's email; only a sibling failed on
+                    // configuration. Falling back now would send a second
+                    // email (codex #5418 r4). Logged, never retried here.
+                    logger.error(`[est-auto-renew] Email automation partially failed for estimate ${est.id}; a sibling automation is delivering: ${e.message}`);
+                    sentWithTemplateLibrary = true;
+                  } else {
+                    logger.warn(`[est-auto-renew] Template unavailable for estimate ${est.id}; falling back to SMTP: ${e.message}`);
+                  }
                 }
               }
               if (!sentWithTemplateLibrary) {

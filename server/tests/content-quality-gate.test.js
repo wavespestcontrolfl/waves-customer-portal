@@ -1820,3 +1820,94 @@ describe('citability checks read rendered Markdown only (Codex r8 P2)', () => {
     }).ok).toBe(true);
   });
 });
+
+describe('citability backfill completion (refresh, weight-0 hard)', () => {
+  const {
+    checkCitabilityBackfillGapsCleared, checkImprovementOverPrior, isCitabilityBackfillBrief, PAGE_TYPE_CHECKS,
+  } = require('../services/content/content-quality-gate')._internals;
+  const backfill = (gaps, extra = {}) => ({ target_page_type: 'supporting-blog', ...extra, gsc_signal: { bucket: 'citability_backfill', citability_gaps: gaps } });
+  const prior = { previousVersion: { body: 'Experts say ants trail after rain. Water deeply.' } };
+  const table = '<ComparisonTable columns={["a","b"]} rows={[]} />';
+  const howTo = '## How to choose\n- If A → choose B\n- If C → choose D\n- If E → choose F';
+
+  test('registered on refresh as a weight-0 HARD check; refresh threshold unchanged', () => {
+    const c = PAGE_TYPE_CHECKS.refresh.find((x) => x.name === 'citability_backfill_gaps_cleared');
+    expect(c).toMatchObject({ weight: 0, isHard: true });
+    expect(MIN_TOTAL_SCORES.refresh).toBe(47);
+    expect(PAGE_TYPE_CHECKS['supporting-blog'].some((x) => x.name === 'citability_backfill_gaps_cleared')).toBe(false);
+  });
+
+  test('non-backfill and non-blog briefs are untouched', () => {
+    expect(isCitabilityBackfillBrief({ gsc_signal: { bucket: 'citability_backfill', citability_gaps: [] } })).toBe(false);
+    expect(checkCitabilityBackfillGapsCleared({ body: 'x' }, {}, {})).toEqual({ ok: true, reason: 'not_citability_backfill' });
+    expect(checkCitabilityBackfillGapsCleared({ body: 'x' }, backfill(['named_sources'], { target_page_type: 'page' }), {}))
+      .toEqual({ ok: true, reason: 'non_blog_target' });
+  });
+
+  test('an unresolved planned gap fails; clearing every planned gap passes', () => {
+    const r = checkCitabilityBackfillGapsCleared({ body: 'Experts say ants trail after rain. Water 1/2 inch per week.' }, backfill(['named_sources', 'concrete_specifics']), prior);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^planned_gaps_unresolved:named_sources\(no_named_source_attribution\)$/);
+    const fixed = checkCitabilityBackfillGapsCleared({ body: 'Per UF/IFAS, ants trail after rain. Water 1/2 inch per week.' }, backfill(['named_sources', 'concrete_specifics']), prior);
+    expect(fixed).toEqual({ ok: true });
+  });
+
+  test('evaluate(): an open planned gap fails the refresh bundle; a cleared one passes it', () => {
+    const { evaluate } = require('../services/content/content-quality-gate');
+    const brief = { page_type: 'refresh', ...backfill(['named_sources']) };
+    const open = evaluate({ body: 'Experts say ants trail after rain.' }, brief, prior);
+    expect(open.hard_failures.map((f) => f.name)).toContain('citability_backfill_gaps_cleared');
+    const cleared = evaluate({ body: 'Per UF/IFAS, ants trail after rain. Water deeply.' }, brief, prior);
+    expect(cleared.hard_failures.map((f) => f.name)).not.toContain('citability_backfill_gaps_cleared');
+  });
+
+  test('improvement_over_prior: a backfill targeted edit needs no +200 chars, but the 20% loss floor holds', () => {
+    const small = { body: 'Per UF/IFAS, ants trail after rain. Water deeply.' };
+    expect(checkImprovementOverPrior(small, {}, prior).ok).toBe(false);
+    expect(checkImprovementOverPrior(small, backfill(['named_sources']), prior)).toEqual({ ok: true, reason: 'citability_backfill_targeted_edit' });
+    expect(checkImprovementOverPrior({ body: 'Ants.' }, backfill(['named_sources']), prior).ok).toBe(false);
+    expect(checkImprovementOverPrior(small, backfill(['named_sources']), {}).ok).toBe(false);
+    // A backfill brief that lost its gap list gets no waiver.
+    expect(checkImprovementOverPrior(small, backfill([]), prior).ok).toBe(false);
+  });
+
+  test('planned structural gaps need the structure itself — reframing the heading does not clear them', () => {
+    const planned = backfill(['comparison', 'how_to_choose']);
+    const ctx = { previousVersion: { body: '## Bait or spray?\nPer UF/IFAS, both work.' } };
+    const reframed = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: '## Treatment overview\nPer UF/IFAS, both work.' }, planned, ctx);
+    expect(reframed).toEqual({ ok: false, reason: 'planned_gaps_unresolved:comparison(structure_missing),how_to_choose(structure_missing)' });
+    const done = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Treatment overview\nPer UF/IFAS, both work.\n${table}\n${howTo}` }, planned, ctx);
+    expect(done).toEqual({ ok: true });
+  });
+
+  test('a fenced table does not clear a planned comparison gap', () => {
+    const r = checkCitabilityBackfillGapsCleared({ title: 'Bait or spray?', body: `## Bait or spray?\n\`\`\`\n${table}\n\`\`\`` }, backfill(['comparison']), {});
+    expect(r).toEqual({ ok: false, reason: 'planned_gaps_unresolved:comparison(structure_missing)' });
+  });
+
+  test('a legacy .md target is never asked for the MDX table', () => {
+    const md = backfill(['comparison'], { target_file_path: 'src/content/blog/termite/bait-or-spray.md' });
+    expect(checkCitabilityBackfillGapsCleared({ title: 'Bait or spray?', body: '## Bait or spray?\nPer UF/IFAS, both work.' }, md, {})).toEqual({ ok: true });
+  });
+
+  test('a trait the prior page satisfied may not regress on a targeted edit', () => {
+    const prevBody = `## Bait or spray?\nExperts say both work.\n${table}\n${howTo}`;
+    const ctx = { previousVersion: { body: prevBody } };
+    const planned = backfill(['named_sources']);
+    expect(checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: '## Bait or spray?\nPer UF/IFAS, both work.' }, planned, ctx))
+      .toEqual({ ok: false, reason: 'citability_traits_regressed:comparison,how_to_choose' });
+    expect(checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Bait or spray?\nPer UF/IFAS, both work.\n${table}` }, planned, ctx))
+      .toEqual({ ok: false, reason: 'citability_traits_regressed:how_to_choose' });
+    expect(checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Bait or spray?\nPer UF/IFAS, both work.\n${table}\n${howTo}` }, planned, ctx))
+      .toEqual({ ok: true });
+  });
+
+  test('dropping a measurement or a named source the live page had is a regression', () => {
+    const measured = { previousVersion: { body: 'Per UF/IFAS, mosquitoes peak June 1 – Sept 30.' } };
+    expect(checkCitabilityBackfillGapsCleared({ body: 'Per UF/IFAS, mosquitoes peak in summer.' }, backfill(['comparison'], { target_file_path: 'x.md' }), measured))
+      .toEqual({ ok: false, reason: 'citability_traits_regressed:concrete_specifics' });
+    const sourced = { previousVersion: { body: 'Per UF/IFAS, ants trail after rain.' } };
+    expect(checkCitabilityBackfillGapsCleared({ body: 'Experts say ants trail after rain for 3 days.' }, backfill(['concrete_specifics']), sourced))
+      .toEqual({ ok: false, reason: 'citability_traits_regressed:named_sources' });
+  });
+});

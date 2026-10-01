@@ -16,7 +16,7 @@ jest.mock('../services/sendgrid-mail', () => ({
   unsubscribeUrl: jest.fn((token) => `https://example.com/unsubscribe/${token}`),
   sendOne: jest.fn(),
 }));
-jest.mock('../services/newsletter-sender', () => ({}));
+jest.mock('../services/newsletter-sender', () => ({ hasOutstandingDeliveries: jest.fn(async () => false) }));
 jest.mock('../services/logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
@@ -25,6 +25,7 @@ jest.mock('../services/logger', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const NewsletterSender = require('../services/newsletter-sender');
 const adminNewsletterRouter = require('../routes/admin-newsletter');
 
 const EVENT_UUID = '2b0fcf1c-2a8e-4d3e-9b5a-1f2e3d4c5b6a';
@@ -158,5 +159,147 @@ describe('PATCH /sends/:id event_ids preservation', () => {
     expect(payload.event_ids).toBe(JSON.stringify([EVENT_UUID]));
     // The occurrence snapshot is saved with the event list.
     expect(JSON.parse(payload.event_occurrences)).toEqual({ [EVENT_UUID]: '2026-10-10T22:00:00.000Z' });
+  });
+});
+
+// The Pest Insider's proof kill switch and its fact-register claim scan key on
+// newsletter_type='pest-insider-monthly' (email division fact register lane).
+// A template swap in the composer replaces only the HTML body, so retyping the
+// draft would carry its old text body, subject or preview past both gates.
+describe('PATCH /sends/:id refuses retyping a Pest Insider draft', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('changing a Pest Insider draft to another type is refused before any write', async () => {
+    const update = mockSendsTable({ ...draftRow([]), newsletter_type: 'pest-insider-monthly' });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { newsletterType: 'local-weekly-fresh-events', subject: 'Retyped' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/Pest Insider/);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('an edit that keeps the Pest Insider type goes through', async () => {
+    const update = mockSendsTable({ ...draftRow([]), newsletter_type: 'pest-insider-monthly' });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { newsletterType: 'pest-insider-monthly', subject: 'Still the Pest Insider' });
+      expect(res.status).toBe(200);
+    });
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+// Codex round 12 on #5187: a partially delivered campaign whose stored copy the
+// resume re-validation now rejects is corrected IN PLACE — it keeps its
+// publicly readable 'failed'/'sent' state (the web version the first batch
+// received stays up) and the next Resume reaches only the ledger's
+// outstanding rows. Copy fields only.
+describe('PATCH /sends/:id correct-and-resume for a partially delivered campaign', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  // `deliveryRow` stands for "a Resume still has someone to mail": the
+  // route asks the sender's outstanding-retryable predicate (codex round 14
+  // P2 — a ledger row alone never makes a campaign correctable).
+  function mockTables({ send, deliveryRow }) {
+    const update = jest.fn(async () => 1);
+    const whereIns = [];
+    NewsletterSender.hasOutstandingDeliveries.mockResolvedValue(Boolean(deliveryRow));
+    db.mockImplementation((table) => {
+      const q = {};
+      ['where', 'orderBy', 'limit', 'offset', 'select'].forEach((method) => { q[method] = jest.fn(() => q); });
+      q.whereIn = jest.fn((...args) => { whereIns.push(args); return q; });
+      if (table === 'newsletter_sends') { q.first = jest.fn(async () => send); q.update = update; return q; }
+      throw new Error(`Unexpected table ${table}`);
+    });
+    return { update, whereIns };
+  }
+  const failedInsider = { ...draftRow([]), status: 'failed', newsletter_type: 'pest-insider-monthly' };
+
+  test('a failed campaign WITH a delivery ledger accepts a copy correction, scoped to its own status and without touching its state', async () => {
+    const { update, whereIns } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>', textBody: 'Corrected' });
+      expect(res.status).toBe(200);
+    });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(whereIns).toContainEqual(['status', ['failed']]);
+    expect(update.mock.calls[0][0]).toMatchObject({ html_body: '<p>Corrected</p>', text_body: 'Corrected' });
+    expect(update.mock.calls[0][0].status).toBeUndefined();
+  });
+
+  test('a correction is bound to the inspected row version: a Resume that re-finalized the row in between makes the save a 409, not an archive rewrite (codex round 19 P2)', async () => {
+    const inspectedAt = new Date('2026-09-28T17:00:00Z');
+    const send = { ...failedInsider, status: 'sent', updated_at: inspectedAt };
+    const { update } = mockTables({ send, deliveryRow: { id: 'd-1' } });
+    const wheres = [];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = base(table);
+      const where = q.where;
+      q.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
+      return q;
+    });
+    update.mockResolvedValueOnce(0); // the row moved on: same status, later updated_at
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>', textBody: 'Corrected' });
+      expect(res.status).toBe(409);
+    });
+    expect(wheres).toContainEqual(['updated_at', '<', new Date(inspectedAt.getTime() + 1)]);
+  });
+
+  test('a correction that still carries a blocked claim is refused with the validation errors — the web version never shows it (pre-push audit P1)', async () => {
+    const { update } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, {
+        htmlBody: '<p>Termites swarm again after storms.</p>', textBody: 'Termites swarm again after storms.',
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.errors.some((e) => /termite_second_swarm/.test(e))).toBe(true);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test("adding or removing subject B on a partially delivered campaign is refused — every recipient's variant is fixed (codex round 13 P1)", async () => {
+    const { update } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { subjectB: 'A second subject line' });
+      expect(res.status).toBe(400);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('the composer may send the stored type back unchanged; a changed type is still refused (codex round 13 P2)', async () => {
+    const same = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>', textBody: 'Corrected', newsletterType: 'pest-insider-monthly', subjectB: null });
+      expect(res.status).toBe(200);
+    });
+    expect(same.update).toHaveBeenCalledTimes(1);
+    const changed = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>', newsletterType: 'reengagement' });
+      expect(res.status).toBe(400);
+    });
+    expect(changed.update).not.toHaveBeenCalled();
+  });
+
+  test('a failed campaign with NO outstanding recipient is still not editable', async () => {
+    const { update } = mockTables({ send: failedInsider, deliveryRow: undefined });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>' });
+      expect(res.status).toBe(400);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a partially delivered campaign cannot change its audience or type — the ledger is the audience', async () => {
+    const { update } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { segmentFilter: { tags: ['everyone'] } });
+      expect(res.status).toBe(400);
+    });
+    expect(update).not.toHaveBeenCalled();
   });
 });

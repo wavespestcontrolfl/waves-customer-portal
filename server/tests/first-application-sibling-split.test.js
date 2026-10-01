@@ -22,8 +22,6 @@ const {
   PAID_INVOICE_STATUSES,
   dateOnly,
   SETTLED_INVOICE_STATUSES,
-  selectSweepBatch,
-  SWEEP_BATCH_LIMIT,
 } = require('../services/first-application-sibling-split');
 
 const anchor = (over = {}) => ({ id: 'anchor-1', scheduled_date: '2026-10-01', completed_at: null, ...over });
@@ -582,14 +580,18 @@ describe('buildDivergenceAlertCopy', () => {
     expect(detail).toContain(`visit ${moved.id} now on 2026-10-09 (was ${anchorDate})`);
   });
 
-  test("payment_pending_never_ran: says the ACH payment is still settling and to wait — never 'refund or credit' now", () => {
+  // Tender-neutral (Codex r17 P2 on #5021): 'processing' is not only an ACH
+  // debit — a card / Terminal / saved-card attempt parked for reconciliation
+  // reads the same, so the copy never names ACH.
+  test("payment_pending_never_ran: says the payment is still processing and to wait — never 'refund or credit' now, never 'ACH'", () => {
     const cancelled = member('cancelled-covered', { status: 'cancelled' });
     const { detail, leadSentence, actionSentence } = buildDivergenceAlertCopy({
       diverging: [cancelled], anchorDate, alertKind: 'payment_pending_never_ran',
     });
-    expect(leadSentence).toContain('ACH payment is still settling');
-    expect(actionSentence).toMatch(/^Wait for the ACH payment to settle or fail before refunding or crediting/);
-    expect(detail).toContain(`visit ${cancelled.id} was cancelled — its share is part of an ACH payment that is still settling`);
+    expect(leadSentence).toContain('payment is still processing (not yet settled or reconciled)');
+    expect(actionSentence).toMatch(/^Wait for that payment to settle, fail, or be reconciled before refunding or crediting/);
+    expect(detail).toContain(`visit ${cancelled.id} was cancelled — its share is part of a payment that is still processing`);
+    expect(`${leadSentence} ${actionSentence} ${detail}`).not.toMatch(/\bACH\b/);
     for (const text of [detail, leadSentence, actionSentence]) {
       expect(text).not.toMatch(/refund or credit/);
       expect(text).not.toContain('already been paid');
@@ -843,55 +845,3 @@ describe('dateOnly', () => {
   });
 });
 
-// Bound the whole candidate set in fair, wrapping keyset batches so no
-// single tick runs unbounded and no candidate is starved behind an
-// always-same head of the list. Owner ruling 2026-09-27: there is no more
-// "established, never bounded" category to special-case — every stamped
-// candidate loadCandidates returns (including the standing-alert recovery
-// case) is equally current, so this one batcher covers everything.
-describe('selectSweepBatch', () => {
-  const group = (invoiceId) => [{ invoice_id: invoiceId }];
-  // Sorted ascending, exactly like loadCandidates' own ORDER BY.
-  const ids = Array.from({ length: SWEEP_BATCH_LIMIT + 50 }, (_, i) => `inv-${String(i).padStart(4, '0')}`);
-  const groups = ids.map(group);
-
-  test('at or under the limit, every group is returned untouched regardless of cursor', () => {
-    const small = groups.slice(0, SWEEP_BATCH_LIMIT);
-    expect(selectSweepBatch(small, null)).toBe(small);
-    expect(selectSweepBatch(small, 'inv-0005')).toBe(small);
-  });
-
-  test('over the limit with no cursor, starts from the beginning', () => {
-    const batch = selectSweepBatch(groups, null);
-    expect(batch).toHaveLength(SWEEP_BATCH_LIMIT);
-    expect(batch[0][0].invoice_id).toBe(ids[0]);
-    expect(batch[batch.length - 1][0].invoice_id).toBe(ids[SWEEP_BATCH_LIMIT - 1]);
-  });
-
-  test('resumes strictly after the cursor', () => {
-    const cursor = ids[10];
-    const batch = selectSweepBatch(groups, cursor);
-    expect(batch[0][0].invoice_id).toBe(ids[11]);
-    expect(batch).toHaveLength(SWEEP_BATCH_LIMIT);
-  });
-
-  test('wraps around to the start once the cursor is near the end — nothing is starved forever', () => {
-    const cursor = ids[ids.length - 5];
-    const batch = selectSweepBatch(groups, cursor);
-    expect(batch).toHaveLength(SWEEP_BATCH_LIMIT);
-    // The last 4 ids, then wraps to the beginning.
-    expect(batch.slice(0, 4).map((g) => g[0].invoice_id)).toEqual(ids.slice(ids.length - 4));
-    expect(batch[4][0].invoice_id).toBe(ids[0]);
-  });
-
-  test('a cursor for an invoice no longer present (evaluated then resolved) still resumes from the next-highest id', () => {
-    const withoutTen = groups.filter((g) => g[0].invoice_id !== ids[10]);
-    const batch = selectSweepBatch(withoutTen, ids[10]);
-    expect(batch[0][0].invoice_id).toBe(ids[11]);
-  });
-
-  test('a cursor past every remaining id wraps to the start', () => {
-    const batch = selectSweepBatch(groups, ids[ids.length - 1]);
-    expect(batch[0][0].invoice_id).toBe(ids[0]);
-  });
-});

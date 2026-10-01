@@ -1666,12 +1666,12 @@ function parseJsonObject(value) {
   return {};
 }
 
-function normalizeCompletionTextArray(value, limit = 20) {
+function normalizeCompletionTextArray(value, limit = COMPLETION_TEXT_MAX_ENTRIES) {
   if (!Array.isArray(value)) return [];
   const seen = new Set();
   const out = [];
   for (const item of value) {
-    const text = String(item || '').trim().replace(/\s+/g, ' ').slice(0, 240);
+    const text = String(item || '').trim().replace(COMPLETION_WHITESPACE, ' ').slice(0, COMPLETION_TEXT_MAX_LENGTH);
     if (!text) continue;
     const key = text.toLowerCase();
     if (seen.has(key)) continue;
@@ -1709,13 +1709,21 @@ function completedProtocolActionScopes(actions, scopeEntries, serviceLine) {
     .filter(Boolean);
 }
 
+// Marker-line grammar shared with the admin completion panel (SchedulePage.jsx)
+// so its active-marker detection and pruning match this parser exactly.
+const COMPLETION_MARKER_GRAMMAR = require('../../shared/completion-marker-grammar.json');
+const COMPLETION_MARKER_LINE = new RegExp(COMPLETION_MARKER_GRAMMAR.lineSource);
+const COMPLETION_WHITESPACE = new RegExp(COMPLETION_MARKER_GRAMMAR.whitespaceSource, 'g');
+const COMPLETION_TEXT_MAX_LENGTH = COMPLETION_MARKER_GRAMMAR.maxLength;
+const COMPLETION_TEXT_MAX_ENTRIES = COMPLETION_MARKER_GRAMMAR.maxEntries;
+
 function taggedCompletionNoteLines(notes, tags) {
   const tagSet = new Set(tags.map((tag) => tag.toLowerCase()));
   return String(notes || '')
     .split(/\r?\n/)
     .map((line) => line.trim())
     .map((line) => {
-      const match = line.match(/^\[([^\]]+)\]\s*(.+)$/);
+      const match = line.match(COMPLETION_MARKER_LINE);
       if (!match) return null;
       return { tag: match[1].toLowerCase(), text: match[2].trim() };
     })
@@ -2082,6 +2090,16 @@ function completionUsesReportLane({
 // mint recovers). Legacy (non-report-v1) visits keep their portal-home link —
 // that is where their visit detail lives. delivery_mode 'disabled' never
 // mints and never texts, so it is not a withhold. Pure for testability (_test).
+// The lawn write gate mints its own report token (ensureReportToken) when it
+// freezes the synthesis. If the earlier mint failed and that retry succeeded,
+// the handler adopts the recovered token before the missing-token branch runs,
+// so the text is not withheld/failed and the office is not alerted for a token
+// that now exists. Pure for testability (_test).
+function adoptRecoveredReportToken({ reportToken, gateToken, portalUrl }) {
+  if (reportToken || typeof gateToken !== 'string' || !/^[a-f0-9]{32}$/.test(gateToken)) return null;
+  return { reportToken: gateToken, reportUrl: `${portalUrl}/report/${gateToken}` };
+}
+
 function completionSmsWithheldForMissingReportToken({
   serviceReportV1Delivery,
   typedDeliveryMode,
@@ -2487,6 +2505,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
       lawnAssessmentId = null,
       lawnProtocolCompletion = null,
+      propertyServiceArea = null,
       treeShrubCompletion = null,
       completionPhotos = [],
       manualHeightIn = null,        // turf height-of-cut gauge reading (lawn) — OPTIONAL
@@ -5754,7 +5773,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               catalogServiceId: (lockedSvcRow || svc).service_id || null,
               serviceType: (lockedSvcRow || svc).service_type || null,
             });
+          const propertyAreaSnapshot = await require('./property-service-areas')
+            .snapshotVisitArea(propertyServiceArea, lockedSvcRow || svc, completionInput.actor, trx, {
+              // An incomplete visit with no products applied did not treat
+              // the reviewed default area; only an explicit override counts.
+              treatmentEvidence: !isIncompleteVisit
+                || (Array.isArray(products) && products.some((product) => product && product.productId)),
+            });
           const structuredNotes = {
+            ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -6623,6 +6650,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               recordInsert.client_pest_rating_source = 'technician';
               if (serviceRecordCols.client_pest_rating_at) {
                 recordInsert.client_pest_rating_at = trx.fn.now();
+              }
+              // Owner ruling 2026-09-29: mark whether this write IS the
+              // untouched first-visit default so email-division's activity
+              // averages can exclude it (a tech-chosen rating — including a
+              // deliberately re-entered 5 — still counts). By this point
+              // firstVisitDefaultApplied being true means the default
+              // survived confirmFirstVisitUnderLock above (otherwise
+              // effectiveClientPestRating was nulled out and this block
+              // never runs), so it is safe to use directly. Does not touch
+              // the Pest Pressure engine, the report score, or the recap.
+              if (serviceRecordCols.client_pest_rating_defaulted) {
+                recordInsert.client_pest_rating_defaulted = firstVisitDefaultApplied === true;
               }
             }
           }
@@ -9268,7 +9307,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             logger.warn(`[dispatch] visit ${svc.id}: refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is covered by SETTLED invoice ${liveBesideLabel} (${liveBesideNow.status}) — manual-billing alert ${already ? 'rewritten as resolved' : 'skipped'}`);
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
-                body: `RESOLVED — no action needed: invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}. The earlier manual-billing instruction for refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} no longer applies; do NOT bill or collect again.`,
+                ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}. The earlier manual-billing instruction for refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} no longer applies; do NOT bill or collect again.`),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ liveBesideInvoiceId: liveBesideNow.id, resolvedCovered: true })]),
               });
             }
@@ -9303,7 +9342,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Keep the parked alert's advice CURRENT on every retry — the
             // situation may have changed since it was written (codex r11).
             await trx('notifications').where({ id: already.id }).update({
-              body: alertBody,
+              ...require('../services/notification-service').adminBodyColumns('billing', alertBody),
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}) })]),
             });
             return true;
@@ -9435,7 +9474,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             logger.warn(`[dispatch] visit ${svc.id}: annual-prepay term now covers estimate ${feeEstimateRef} — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'} (fee waived by prepay)`);
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
-                body: `RESOLVED — no action needed: an annual-prepay term now covers estimate ${feeEstimateRef}; the setup fee is waived by that plan. The earlier manual-billing instruction no longer applies; do NOT bill.`,
+                ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: an annual-prepay term now covers estimate ${feeEstimateRef}; the setup fee is waived by that plan. The earlier manual-billing instruction no longer applies; do NOT bill.`),
                 read_at: trx.fn.now(),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
               });
@@ -9544,7 +9583,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             logger.warn(`[dispatch] visit ${svc.id}: the setup fee and the application charge for estimate ${feeEstimateRef} are both covered by live invoices — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
-                body: `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and ${applicationCoveredBy ? `invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers` : 'an out-of-band prepayment (marked prepaid) covered'} the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`,
+                ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and ${applicationCoveredBy ? `invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers` : 'an out-of-band prepayment (marked prepaid) covered'} the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`),
                 // No action left — never a false unread badge (Codex PR r9 P2).
                 read_at: trx.fn.now(),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: feeCoveredBy.id, resolvedCovered: true })]),
@@ -9609,7 +9648,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ...(expectedAppCentsThisVisit > 0 ? { [String(svc.id)]: expectedAppCentsThisVisit } : {}),
             };
             await trx('notifications').where({ id: already.id }).update({
-              body: alertBody + crossVisitNote,
+              ...require('../services/notification-service').adminBodyColumns('billing', alertBody + crossVisitNote),
               // Newly actionable again — surface in the unread badge.
               read_at: null,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, expectedSetupFeeCents, expectedApplicationCentsByVisit, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
@@ -10693,6 +10732,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // #5237, refuseCoveredMemberMintInTrx): handled by its own
         // release-for-resume below, never the manual-billing bell.
         const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;
+        // Visit went non-live (cancelled/no-show/skipped) WHILE this
+        // REQUIRED mint waited on the shared schedule.invoice.mint lock
+        // (Codex #5244 r7 P0 — the exact race this fix closes): unlike a
+        // stale price or Bill-To, there is nothing to reconcile and no
+        // resume can ever succeed, so this is NOT a release-for-resume
+        // case. Surface the SAME 409/`already_terminal` shape the
+        // pre-transaction terminal guard at the top of this function
+        // already returns for an ordinary (non-raced) cancel, instead of
+        // the generic "mint failed — retry the closeout" 503, and leave
+        // the completion attempt row untouched (never promise an
+        // immediate resume that would just re-enter this same mint and
+        // 409 again) — the stale-attempt window reclaims it, and by then
+        // a genuine retry re-reads the visit fresh and hits that same
+        // early guard before ever reaching this mint.
+        if (invErr?.code === 'SCHEDULED_VISIT_NOT_LIVE' && !invoice?.id) {
+          logger.error(`[dispatch] visit ${svc.id} went ${invErr.visitStatus} while its REQUIRED completion invoice was minting — closeout NOT finalized (no resume promised): ${invErr.message}`);
+          return ({ status: 409, body: {
+            error: `This visit was ${invErr.visitStatus} while its invoice was being created and can no longer be completed. Refresh and try again.`,
+            code: 'already_terminal',
+            status: invErr.visitStatus,
+            serviceRecordId: record.id,
+          } });
+        }
         if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
           // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
@@ -11071,6 +11133,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // flip, or coverage stamp racing this window consumes nothing.
             requireExtendedCompletionAnchor: true,
           } : {}),
+          // An active collections dispute hold (collection_hold, B10) stops
+          // automatic credit on EVERY completion lane, not just the extended
+          // one. Hold ONLY: a stopped follow-up sequence keeps its existing
+          // lane-scoped semantics (refuseWhenDunningStopped, extended lane).
+          refuseWhenCollectionHold: true,
         });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })
@@ -11213,6 +11280,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // crash/block anywhere before the combined text delivers leaves
           // the job to send the classic receipt when it comes due.
           await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {
+            // The charge primitive refuses an active collections dispute hold
+            // BY DEFAULT on EVERY completion lane (B10); the stopped-sequence
+            // check stays extended-lane-only below. Refusal throws
+            // COLLECTION_HOLD_ACTIVE / _CHECK_FAILED (no decline facts, so no
+            // payment-failed text) and the pay-link fallback is unchanged.
             // Atomic re-enforcement of the SAME ceiling the preflight above
             // validated (Codex #3153 r7 P0): the charge service re-checks it
             // against the LOCKED invoice, so an invoice edit racing this
@@ -11397,7 +11469,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
         }
         try {
-          await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
+          // A collections dispute hold refusal (B10) is a SKIP, not a failed
+          // charge: distinct autopay_log event, no decline bookkeeping.
+          await require('../services/autopay-log').logAutopay(svc.customer_id, require('../services/collections/collection-hold').isCollectionHoldRefusal(chargeErr) ? 'skipped_collection_hold' : 'charge_failed', {
             details: { source: completionChargeSource, invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', collection_suppressed: fallbackPolicy.suppressFallback, collection_fenced: suppressAlternateCollection, reconciliation_required: reconciliationRequired, error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }
@@ -11618,7 +11692,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (shouldBundleReview) {
       try {
         const ReviewService = require('../services/review-request');
-        const inlineReview = await ReviewService.createInline({
+        // Send-time click guard: a customer who already tapped a tracked review
+        // link since this visit (say, from the portal card) gets NO new
+        // solicitation bundled into the completion text. Nothing is minted; the
+        // completion message itself still goes out below without a review URL.
+        const clickedSinceVisit = await require('../services/review-click-guard')
+          .touchSuppressedByClick(svc.customer_id, { serviceRecordId: record.id, scheduledServiceId: svc.id });
+        const inlineReview = clickedSinceVisit ? null : await ReviewService.createInline({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
         });
@@ -11673,7 +11753,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     };
     const reviewSuffix = bundledReviewUrl
-      ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
+      ? `\n\n${require('./scheduled-sms-delivery').COMPLETION_REVIEW_INVITE} ${bundledReviewUrl}`
       : '';
 
     // Digital business card: mint the customer's card off their first
@@ -11865,7 +11945,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               identityTrustLevel: 'phone_matches_customer',
               // billing_mode_at_send: the owner autopay digest (#3607) classifies
               // the text against the lane that authorized it.
-              metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
+              metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode, templateKey: 'payment_failed' },
             }));
             paymentFailedNoticeSent = !!failResult.sent;
             const noticeLegs = (failResult.channelResults || failResult.deduped === true)
@@ -11898,6 +11978,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   message_type: 'payment_failed',
                   metadata: JSON.stringify({
                     entry_point: 'autopay_completion_decline_deferred',
+                    // The frozen payment_failed body's template row; the
+                    // scheduler replay forwards it.
+                    template_key: 'payment_failed',
                     notificationEventKey: `payment-problem:service:${record.id}`,
                     service_record_id: record.id,
                     invoice_id: invoice.id,
@@ -12171,6 +12254,46 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     };
 
+    // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
+    // source of truth) and run the consistency check. Its smsSummary is no
+    // longer read — the completion text is the plain DB template for every
+    // service line (owner ruling 2026-08-01) — but the freeze and the
+    // consistency check are what the REPORT reads, so the gate stays.
+    // It runs HERE, in the common completion path before either delivery
+    // channel, so every auto-send lawn completion freezes the watering
+    // instruction (and banner) exactly once whether or not the customer gets
+    // the completion text (email-only customers, SMS disabled, no phone,
+    // text already handled). Best-effort; never blocks completion. Backfill
+    // closeouts skip it: the gate would freeze TODAY's sprinkler settings as
+    // though captured at the historical visit (render-time reconciliation
+    // still applies, as it did before the hoist).
+    if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion) {
+      try {
+        const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
+        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
+        // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
+        // fold the frozen synthesis back in so the later sending/sent writes (which
+        // spread recordStructuredNotes) don't clobber it.
+        if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
+        // Same for the watering-instruction freeze (its own key, first writer wins).
+        if (gate.wateringFreeze) recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze;
+        // A token the earlier mint could not create but the gate's own mint did.
+        const recovered = adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken, portalUrl });
+        if (recovered) {
+          reportToken = recovered.reportToken;
+          reportUrl = recovered.reportUrl;
+          reportTokenMintError = null;
+          reportSmsUrl = await shortenOrPassthrough(reportUrl, {
+            kind: 'service_report',
+            entityType: 'service_records',
+            entityId: record.id,
+            customerId: svc.customer_id,
+            codePrefix: 'report',
+          });
+        }
+      } catch { /* best-effort — render-time reconciliation still applies */ }
+    }
+
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
       && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
       // Report-v1 visit with no public report token (mint failed above): the
@@ -12319,22 +12442,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           || prepaidCovered
           || autopayCoversVisit
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase()));
-        // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
-        // source of truth) and run the consistency check. Its smsSummary is no
-        // longer read — the completion text is the plain DB template for every
-        // service line (owner ruling 2026-08-01) — but the freeze and the
-        // consistency check are what the REPORT reads, so the gate stays.
-        // Best-effort; never blocks completion.
-        if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
-          try {
-            const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
-            const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
-            // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
-            // fold the frozen synthesis back in so the later sending/sent writes (which
-            // spread recordStructuredNotes) don't clobber it.
-            if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
-          } catch { /* best-effort — render-time reconciliation still applies */ }
-        }
         // The trace/applications lookup that used to feed this call is gone
         // with the re-entry line. It existed so the SMS could apply the same
         // read-time exterior normalization the report does (codex P2 #3007
@@ -12576,6 +12683,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // no other caller, so it is removed with it; computeAssessmentScoreParts
         // stays — sendAssessmentNotification (unlinked assessments, manual
         // re-send) still uses it.
+        // Send-time click guard for the bundled review line: the provider
+        // call below runs under the per-customer review lock, right after
+        // the click check (queued completions run the same gate inside
+        // dispatchReviewAsk). A tap since this visit drops the line and
+        // suppresses the ask; an unreadable click state or a busy lock drops
+        // it and re-arms the ask for the standalone sender, which checks
+        // again before it texts. The completion text itself always goes out.
+        const dropBundledReviewLine = async (drop) => {
+          sentSmsBody = require('./scheduled-sms-delivery').stripCompletionReviewLine(sentSmsBody);
+          try {
+            if (drop === 'clicked') {
+              await db('review_requests').where({ id: bundledReviewRequestId, status: 'pending' }).whereNull('sms_sent_at')
+                .update({ status: 'suppressed', scheduled_for: null });
+            } else {
+              await require('../services/review-request').markInlineRetryable(bundledReviewRequestId, bundledReviewRetryAt());
+            }
+          } catch (e) {
+            logger.warn(`[dispatch] Bundled review ${drop} mark failed for ${bundledReviewRequestId}: ${e.message}`);
+          }
+          logger.info(`[dispatch] Bundled review line dropped at send time (${drop}) for record ${record.id}`);
+          bundledReviewRequestId = null;
+          bundledReviewUrl = null;
+        };
         if (sentSmsBody) {
           // smsNotesDelta accumulates every key this SMS leg owns — each
           // persisted write below merges the delta only (mergeRecordNotesKeys),
@@ -12598,7 +12728,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           };
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
-          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true };
+          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true, templateKey: sentSmsType };
           if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
@@ -12647,29 +12777,48 @@ async function completeScheduledService(completionInput, packetContext = null) {
             invoiceLinkAllowed: allowCompletionInvoiceLink,
             deliveryUnverifiedAt: smsNotesDelta.completionSmsDeliveryUnverifiedAt,
           };
-          let smsResult = throwIfDeliveryUnverified(await sendCustomerMessage(sendInput));
-          if (smsResult.channel === 'push') {
-            sentSmsChannel = 'push';
-            completionSmsAcceptedSnapshot.channel = 'push';
-          }
-          if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
-            logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
-            const fallbackMetadata = { ...smsMetadata };
-            delete fallbackMetadata.mediaUrls;
-            delete fallbackMetadata.allowMediaUrls;
-            fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
-            completionSmsAcceptedSnapshot.channel = 'sms';
-            smsResult = throwIfDeliveryUnverified(await sendCustomerMessage({
-              ...sendInput,
-              metadata: fallbackMetadata,
-            }));
-            sentSmsChannel = 'sms';
-            mmsFallbackToSms = true;
-            smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
-            smsNotesDelta.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
-            sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
-            sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
-          }
+          const sendCompletionSms = async (drop) => {
+            if (drop) {
+              await dropBundledReviewLine(drop);
+              // The stripped body replaces the persisted one before the
+              // provider call, so a resume never replays the dropped line.
+              const droppedDelta = { completionSmsBody: sentSmsBody, completionSmsBundledReviewRequestId: null, completionSmsBundledReviewUrl: null };
+              Object.assign(smsNotesDelta, droppedDelta);
+              Object.assign(sendingNotes, droppedDelta);
+              delete smsMetadata.bundled_review_request_id;
+              sendInput.body = sentSmsBody;
+              completionSmsAcceptedSnapshot.body = sentSmsBody;
+              completionSmsAcceptedSnapshot.reviewCarried = true;
+              await mergeRecordNotesKeys(record.id, droppedDelta);
+            }
+            let smsResult = throwIfDeliveryUnverified(await sendCustomerMessage(sendInput));
+            if (smsResult.channel === 'push') {
+              sentSmsChannel = 'push';
+              completionSmsAcceptedSnapshot.channel = 'push';
+            }
+            if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
+              logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
+              const fallbackMetadata = { ...smsMetadata };
+              delete fallbackMetadata.mediaUrls;
+              delete fallbackMetadata.allowMediaUrls;
+              fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
+              completionSmsAcceptedSnapshot.channel = 'sms';
+              smsResult = throwIfDeliveryUnverified(await sendCustomerMessage({
+                ...sendInput,
+                metadata: fallbackMetadata,
+              }));
+              sentSmsChannel = 'sms';
+              mmsFallbackToSms = true;
+              smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
+              smsNotesDelta.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+              sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
+              sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
+            }
+            return smsResult;
+          };
+          const smsResult = bundledReviewRequestId && bundledReviewUrl && sentSmsBody.includes(bundledReviewUrl)
+            ? await require('./review-ask-dispatch').withBundledAskGate(svc.customer_id, bundledReviewRequestId, sendCompletionSms)
+            : await sendCompletionSms(null);
           completionSmsProviderAccepted = smsResult.sent === true;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
@@ -12727,6 +12876,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 metadata: JSON.stringify({
                   entry_point: 'dispatch_completion_deferred',
                   replay_purpose: 'service_completion',
+                  // The frozen body above came from this template row; the
+                  // morning replay records it on the sent sms_log row.
+                  ...(sentSmsType ? { template_key: sentSmsType } : {}),
                   notificationEventKey: `scheduled-service:${svc.id}:completed`,
                   useCustomerChannel: true,
                   service_record_id: record.id,
@@ -13585,6 +13737,7 @@ module.exports = {
   reportV1InvoiceBodyCarriesPayLink,
   completionUsesReportLane,
   completionSmsWithheldForMissingReportToken,
+  adoptRecoveredReportToken,
   completionStructuredObservationAllowlist,
   completedProtocolActionScopes,
   shouldInsertNoActivityFinding,

@@ -12,9 +12,11 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 const { excludePendingFirstBookings } = require('./estimate-conversion-guard');
 const { ESTIMATE_SEND_EXPIRY_DAYS } = require('./admin-estimate-persistence');
 const { EXPIRED_DISPOSITION_SQL } = require('./estimate-disposition');
+const { estimateFollowupBlockedReason } = require('./estimate-comms-eligibility');
 const { FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
 
 // Every expiry flip also stamps WHY (estimator audit 2026-08-29 P0): the
@@ -38,16 +40,67 @@ function getThresholdDays() {
   return raw;
 }
 
+// codex round 3 on #5154 (P1): the lifecycle sweep used to re-derive "missed
+// estimate.expired events" by guessing from estimates.updated_at, which the
+// archive endpoint (admin-estimates.js POST /:id/archive) also stamps on an
+// already-expired row with no new automation run — archiving or otherwise
+// editing an old expired estimate looked exactly like a fresh expiry and
+// could send a stale expiration email. The fix is structural: the flip
+// itself durably records its own intent marker, in the SAME transaction as
+// the status UPDATE, so a rollback of the flip rolls back the marker too and
+// the sweep never has to infer anything from a timestamp again (see
+// email-template-automation-emitters.js's email_template_automation_intents
+// outbox and retryPendingIntents).
+//
+// Only an estimate that may receive automated follow-up at all earns a
+// marker (codex P1 round 6): estimate-comms-eligibility.js's shared rule —
+// not archived, and not stamped estimate_data.noEngagementAutomation (the
+// zero-comms promise of report cross-sell / plan-restart / website
+// self-service publications) — the same rule the engagement engine,
+// follow-up cron, auto-renew and extension flow read. The executor re-judges
+// it at execution (livePayloadForRun), so a later archive still stops a
+// pending or delayed run.
+async function flipExpiredBatch(buildQuery, columns, now) {
+  return db.transaction(async (trx) => {
+    const rows = await buildQuery(trx).update(expiredUpdate(now), columns);
+    const flipped = Array.isArray(rows) ? rows : [];
+    const intentIdByEstimateId = new Map();
+    const eligible = flipped.filter((row) => !estimateFollowupBlockedReason(row));
+    if (eligible.length) {
+      const { recordAutomationIntents } = require('./email-template-automation-emitters');
+      const intents = await recordAutomationIntents(trx, eligible.map((row) => ({
+        triggerEventKey: 'estimate.expired',
+        entityType: 'estimate',
+        entityId: row.id,
+        occurredAt: now,
+        payload: {
+          id: row.id,
+          customer_id: row.customer_id || null,
+          customer_email: row.customer_email || null,
+          category: row.category || null,
+          service_interest: row.service_interest || null,
+          expires_at: row.expires_at || null,
+        },
+      })));
+      for (const intent of intents) intentIdByEstimateId.set(String(intent.entity_id), intent.id);
+    }
+    return { rows: flipped, intentIdByEstimateId };
+  });
+}
+
 async function runEstimateExpiration() {
   const thresholdDays = getThresholdDays();
   const ageCutoff = new Date(Date.now() - thresholdDays * 24 * 60 * 60 * 1000);
   const now = new Date();
+  // archived_at + estimate_data feed the shared follow-up rule
+  // (estimateFollowupBlockedReason) for the estimate.expired automation.
+  const flippedColumns = ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition', 'customer_id', 'customer_email', 'category', 'service_interest', 'expires_at', 'archived_at', 'estimate_data'];
 
   // Rule 1: aged-out — sent/viewed with sent_at older than the cutoff and
   // no accept/decline yet. Only flips live rows. Archived rows are parked
   // status-neutral (manual archive + converted-customer sweep) — expiring
   // them would rewrite their status and ping Virginia about dead courtships.
-  const agedResult = await db('estimates')
+  const { rows: agedRows, intentIdByEstimateId: agedIntents } = await flipExpiredBatch((conn) => conn('estimates')
     .whereIn('status', ['sent', 'viewed'])
     .whereNull('archived_at')
     .whereNotNull('sent_at')
@@ -81,12 +134,15 @@ async function runEstimateExpiration() {
     .modify(excludePendingFirstBookings)
     // RETURNING the flipped rows so the admin bell can name who walked away
     // (owner ruling 2026-07-30: a bell that says "Customer expired without a
-    // decision" is not actionable).
-    .update(expiredUpdate(now), ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition']);
+    // decision" is not actionable). customer_id/customer_email/category/
+    // service_interest/expires_at ride along for the estimate.expired
+    // email_template_automation intent marker recorded in the same
+    // transaction (flipExpiredBatch, above).
+  , flippedColumns, now);
 
   // Rule 2: explicit expires_at — any non-terminal row whose expires_at has
   // passed. Accepted/declined estimates are left alone.
-  const dateResult = await db('estimates')
+  const { rows: dateRows, intentIdByEstimateId: dateIntents } = await flipExpiredBatch((conn) => conn('estimates')
     .whereNotNull('expires_at')
     .whereNull('archived_at')
     .where('expires_at', '<', now)
@@ -101,10 +157,7 @@ async function runEstimateExpiration() {
     // before the customer booked doesn't make expiring their live courtship
     // any less wrong.
     .modify(excludePendingFirstBookings)
-    .update(expiredUpdate(now), ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition']);
-
-  const agedRows = Array.isArray(agedResult) ? agedResult : [];
-  const dateRows = Array.isArray(dateResult) ? dateResult : [];
+  , flippedColumns, now);
   const unviewed = [...agedRows, ...dateRows].filter((r) => r.disposition === 'expired_unviewed').length;
   logger.info(`[estimate-expiration] thresholdDays=${thresholdDays} aged=${agedRows.length} dateExpired=${dateRows.length} unviewed=${unviewed}`);
 
@@ -140,6 +193,29 @@ async function runEstimateExpiration() {
       });
     } catch (e) {
       logger.warn(`[estimate-expiration] notification trigger failed: ${e.message}`);
+    }
+  }
+
+  // estimate.expired (email_template_automation, dark/shadow): one emit per
+  // flipped row, immediately after its own transaction committed its
+  // durable intent marker (flipExpiredBatch, above) — the marker's id rides
+  // along so a success/failure here settles that SAME marker (processed /
+  // pending-with-error / unrecoverable) rather than leaving the sweep to
+  // guess. Never blocks the sweep — each is its own try/catch so one bad
+  // row can't stop the rest, and the emitter itself is a no-op when the
+  // gate is off (its marker just stays pending for later replay). Same
+  // shared follow-up rule as the marker (flipExpiredBatch): an archived or
+  // zero-comms estimate is never emitted, marker or not.
+  const automationRows = expiredRows.filter((row) => !estimateFollowupBlockedReason(row));
+  if (automationRows.length) {
+    const { emitEstimateExpired } = require('./email-template-automation-emitters');
+    const intentIdByEstimateId = new Map([...agedIntents, ...dateIntents]);
+    for (const row of automationRows) {
+      try {
+        await emitEstimateExpired(row, intentIdByEstimateId.get(String(row.id)) || null);
+      } catch (e) {
+        logger.warn(`[estimate-expiration] estimate.expired emit failed for ${row.id}: ${scrubSentryText(e && e.message ? e.message : e)}`);
+      }
     }
   }
 

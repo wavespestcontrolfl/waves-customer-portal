@@ -223,3 +223,31 @@ describe('buildSummary billing-lane fact', () => {
     expect(s).not.toContain('98.50');
   });
 });
+
+// pg hands DATE columns over as local-midnight Dates. On the UTC prod host
+// that is 00:00Z, which an ET toLocaleDateString shows as the day before: a
+// Thu Oct 1 visit read "Next: WDO Inspection Service 9/30/2026".
+describe('buildSummary visit dates', () => {
+  const ContextAggregator = require('../services/context-aggregator');
+  const c = { first_name: 'Pat', last_name: 'Tester', pipeline_stage: 'active_customer' };
+
+  // Built the way pg builds them (local midnight). CI runs in UTC, so this
+  // case catches the shift there; the string case catches it in any zone.
+  test('Next and Last keep the stored calendar day on a UTC host', () => {
+    const s = ContextAggregator.buildSummary(
+      c, [],
+      { service_type: 'Pest Control', service_date: new Date(2026, 8, 1) },
+      [{ service_type: 'WDO Inspection Service', scheduled_date: new Date(2026, 9, 1) }],
+      0, null,
+    );
+    expect(s).toContain('Next: WDO Inspection Service 10/1/2026');
+    expect(s).toContain('Last: Pest Control 9/1/2026');
+  });
+
+  test('a YYYY-MM-DD string keeps its day too', () => {
+    const s = ContextAggregator.buildSummary(
+      c, [], null, [{ service_type: 'WDO Inspection Service', scheduled_date: '2026-10-01' }], 0, null,
+    );
+    expect(s).toContain('Next: WDO Inspection Service 10/1/2026');
+  });
+});

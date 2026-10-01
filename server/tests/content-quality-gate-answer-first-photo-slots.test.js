@@ -735,3 +735,211 @@ describe('Codex r9: four-letter nouns survive beside a long qualifier', () => {
   });
 });
 
+// ── Codex r8 on #5216 (follow-up PR) ─────────────────────────────────
+describe('Codex r8: the run ledger marks a customer-question page on refresh', () => {
+  const refresh = brief({ action_type: 'refresh_existing_page', page_type: 'refresh' });
+  const live = '<BottomLineBox verdict="Yes, you should." recommendation="Compare both." />\n\nIntro.';
+  const moved = { frontmatter: {}, body: 'New intro.\n\n<BottomLineBox verdict="Yes, you should." recommendation="Compare both." />' };
+  const ctx = (extra) => ({ liveFrontmatter: { post_type: 'decision' }, previousVersion: { body: live }, ...extra });
+  test('a decision-shaped customer question keeps its box first', () => {
+    expect(checkVerdictBoxFirst(moved, refresh, ctx({ liveIsCustomerQuestion: true }))).toEqual({ ok: false, reason: 'verdict_box_not_first_block' });
+  });
+  test('a decision post the ledger does not mark may move its box', () => {
+    expect(checkVerdictBoxFirst(moved, refresh, ctx({ liveIsCustomerQuestion: false }))).toEqual({ ok: true, reason: 'not_identification_or_question' });
+  });
+  test('an unreadable ledger holds a page that opens on the box (fail closed)', () => {
+    expect(checkVerdictBoxFirst(moved, refresh, ctx({ liveQuestionLedgerUnavailable: true })).ok).toBe(false);
+  });
+  test('a ledger-marked page is held even when its live body no longer opens on the box', () => {
+    const c = { liveFrontmatter: { post_type: 'location' }, previousVersion: { body: 'Intro.' }, liveIsCustomerQuestion: true };
+    expect(checkVerdictBoxFirst(moved, refresh, c).ok).toBe(false);
+  });
+});
+
+describe('Codex r8: no sales pitch inside the verdict box', () => {
+  const run = (props) => checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body: `<BottomLineBox ${props} />\n\nMore.` }, brief());
+  test.each([
+    ['verdict="Cockroaches can fly. Get a free estimate now." recommendation="Seal gaps."'],
+    ['verdict="Yes, they sting." recommendation="Call today."'],
+    ['verdict="Yes, they sting." recommendation="Call (941) 297-5749 for help."'],
+    ['verdict="Yes, they sting." recommendation="Call {{cityPhone}}."'],
+  ])('%s is a pitch', (props) => {
+    expect(run(props)).toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('advice to call a licensed pro is not a pitch', () => {
+    expect(run('verdict="Yes, fire ants sting and it hurts." recommendation="Keep kids off the mound; call a licensed pro if the mound is near the house."')).toEqual({ ok: true });
+  });
+});
+
+describe('Codex r8: each photo credit sits directly below its image', () => {
+  const credited = `![${PHOTO.alt}](${PHOTO_URL})\n\n${ATTR}`;
+  test('a credit directly below passes', () => {
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${credited}\n\nMore.`), slotsBrief())).toEqual({ ok: true });
+  });
+  test('a credit in a distant footer does not count', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}](${PHOTO_URL})\n\nA paragraph between.\n\n${ATTR}`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+  });
+  test('two copies of the photo need two credits', () => {
+    const body = `Intro.\n\n${credited}\n\nMore.\n\n![${PHOTO.alt}](${PHOTO_URL})\n\nEnd.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${credited}\n\nMore.\n\n${credited}\n\nEnd.`), slotsBrief())).toEqual({ ok: true });
+  });
+});
+
+// ── Codex r1 on #5272 ────────────────────────────────────────────────
+describe('#5272 r1: compact phone numbers in the box, reference-style credits', () => {
+  test.each([
+    ['verdict="Yes, they sting." recommendation="Text 9412975749 for help."'],
+    ['verdict="Yes, they sting." recommendation="Call +19412975749."'],
+  ])('%s is a pitch', (props) => {
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body: `<BottomLineBox ${props} />\n\nMore.` }, brief()))
+      .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('a reference definition between the image and its credit is skipped', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}][pest]\n\n[pest]: ${PHOTO_URL}\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
+  });
+});
+
+// Codex r2 on #5272 ("Start the credit check after the complete image span").
+test('#5272 r2: a credit directly below an image whose alt wraps a line passes', () => {
+  const wrapped = PHOTO.alt.replace(' ', '\n');
+  const body = `Intro.\n\n![${wrapped}](${PHOTO_URL})\n\n${ATTR}\n\nMore.`;
+  expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
+});
+
+// ── Codex r3 on #5272 ────────────────────────────────────────────────
+describe('#5272 r3: multi-line reference definitions, one credit per copy', () => {
+  test('a multi-line reference definition between the image and its credit is skipped', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}][pest]\n\n[pest]:\n  ${PHOTO_URL}\n  "A title"\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
+  });
+  test('two copies on one line cannot share one credit', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}](${PHOTO_URL}) ![${PHOTO.alt}](${PHOTO_URL})\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+  });
+});
+
+// ── Codex r4 on #5272 ────────────────────────────────────────────────
+describe('#5272 r4: expression props and visible components', () => {
+  test('a pitch in a static-expression prop is still a pitch', () => {
+    const body = '<BottomLineBox verdict={"Yes, they sting."} recommendation={"Call today."} />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('an expression-prop verdict is read as the answer', () => {
+    const { checkAnswerInFirstParagraph } = require('../services/content/content-quality-gate')._internals;
+    const body = '<BottomLineBox verdict={"Yes, some species can."} recommendation={"Seal gaps."} />\n\nMore.';
+    expect(checkAnswerInFirstParagraph({ body }, { target_keyword: 'Can cockroaches fly?' })).toEqual({ ok: true });
+  });
+  test('a visible component between the image and its credit breaks adjacency', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}](${PHOTO_URL})\n\n<InlineCTA ctaHref="/contact/" />\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+  });
+});
+
+// ── Codex r5 on #5272 ────────────────────────────────────────────────
+describe('#5272 r5: decoded prop values, blockquote definitions', () => {
+  test.each([
+    ['recommendation={"Call\\x20today."}'],
+    ['recommendation={"Call\\u0020today."}'],
+    ['recommendation="Call&#32;today."'],
+  ])('%s decodes to a pitch', (prop) => {
+    const body = `<BottomLineBox verdict="Yes, they sting." ${prop} />\n\nMore.`;
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('a reference definition inside a blockquote between the image and its credit is skipped', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}][p]\n\n> [p]: ${PHOTO_URL}\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
+  });
+});
+
+// Codex r6 on #5272 ("Decode all rendered whitespace entities").
+test.each([
+  ['recommendation="Call&nbsp;today."'],
+  ['recommendation="Call&#160;today."'],
+  ['recommendation={"Call\\u00a0today."}'],
+])('#5272 r6: %s is a pitch', (prop) => {
+  const body = `<BottomLineBox verdict="Yes, they sting." ${prop} />\n\nMore.`;
+  expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+    .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+});
+
+// Codex r7 on #5272: full HTML decoding and JS-parsed expression props.
+test.each([
+  ['recommendation="Call&Tab;today."'],
+  ['recommendation="Call&NonBreakingSpace;today."'],
+  ['recommendation={"Call today." /* note */}'],
+  ['recommendation={"Call " + "today."}'],
+])('#5272 r7: %s is a pitch', (prop) => {
+  const body = `<BottomLineBox verdict="Yes, they sting." ${prop} />\n\nMore.`;
+  expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+    .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+});
+
+// Codex r8 on #5272 ("Fail closed on unevaluable verdict-box expressions").
+test('#5272 r8: a verdict-box prop that is not a static string fails closed', () => {
+  const body = '<BottomLineBox verdict="Yes, they sting." recommendation={true ? "Call today." : "Wait."} />\n\nMore.';
+  expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+    .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
+});
+
+// ── Codex r9 on #5272 ────────────────────────────────────────────────
+describe('#5272 r9: escape-aware box tag, duplicate props', () => {
+  test('an escaped quote inside an expression prop does not hide the box', () => {
+    const body = '<BottomLineBox verdict={"Yes, ants sting."} recommendation={"Don\\"t wait; call today."} />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('a repeated recommendation prop fails closed', () => {
+    const body = '<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." recommendation="Call today." />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
+  });
+});
+
+
+// Later-queue from #5272 r10: eachJsxAttr skips spreads, so a spread that
+// overrides a literal prop was read as the literal.
+describe('verdict box with a JSX spread fails closed', () => {
+  test.each([
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." {...{recommendation: "Call today."}} />'],
+    ['<BottomLineBox {...{verdict: "Yes, they sting."}} recommendation="Seal gaps." />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." { /* c */ ...props} />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps."{...{recommendation: "Call today."}} />'],
+    ['<BottomLineBox verdict={"Yes, they sting."}{...props} recommendation="Seal gaps." />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." { // c\n ...{recommendation: "Call today."}} />'],
+  ])('%s', (tag) => {
+    const body = `${tag}\n\nMore.`;
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
+  });
+  test.each([
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." // =\n {...{recommendation: "Call today."}} />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." /* {note} */ />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation=Seal />'],
+  ])('a box with anything but plain props fails closed: %s', (tag) => {
+    const body = `${tag}\n\nMore.`;
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()).ok).toBe(false);
+  });
+  test('an unreadable leading box tag is not "no box" (#5380 r4)', () => {
+    const body = '<BottomLineBox verdict="Yes, fire ants sting." recommendation="Seal gaps." /* { */ {...{recommendation: "Call today."}} />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'verdict_box_unreadable' });
+    const { checkVerdictBoxFirst } = require('../services/content/content-quality-gate')._internals;
+    expect(checkVerdictBoxFirst({ frontmatter: { post_type: 'diagnostic' }, body }, { page_type: 'customer-question' }))
+      .toEqual({ ok: false, reason: 'verdict_box_unreadable' });
+  });
+  test('a plain box still passes', () => {
+    const body = '<BottomLineBox verdict="Yes, they sting." recommendation={"Seal gaps."} confidence="high" />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief())).toEqual({ ok: true });
+  });
+  test('a spread box has no readable verdict for the answer-first check', () => {
+    const { checkAnswerInFirstParagraph } = require('../services/content/content-quality-gate')._internals;
+    const body = '<BottomLineBox verdict="Yes, fire ants sting." recommendation="Seal gaps." {...extra} />\n\nMore.';
+    expect(checkAnswerInFirstParagraph({ body }, { customer_signal: { normalized_question: 'Do fire ants sting?' } }))
+      .toEqual({ ok: false, reason: 'verdict_box_has_no_verdict' });
+  });
+});

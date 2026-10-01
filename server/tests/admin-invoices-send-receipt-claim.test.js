@@ -26,7 +26,7 @@ jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssued
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/receipt-delivery-queue', () => ({
   claimReceiptJobForOperatorSend: jest.fn(async () => ({ id: 'job-1', token: 'claim-1', prior: { status: 'queued', next_attempt_at: 'T' } })),
-  recordOperatorReceiptEmail: jest.fn(async () => undefined),
+  recordOperatorReceiptDelivered: jest.fn(async () => undefined),
   releaseOperatorReceiptClaim: jest.fn(async () => undefined),
 }));
 
@@ -34,7 +34,7 @@ const express = require('express');
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
-const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
+const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
 const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
 const router = require('../routes/admin-invoices');
 
@@ -88,9 +88,10 @@ describe('POST /:id/send-receipt', () => {
     expect(claimAt).toBeLessThan(sendReceiptEmail.mock.invocationCallOrder[0]);
     expect(claimAt).toBeLessThan(InvoiceService.sendReceipt.mock.invocationCallOrder[0]);
     expect(invoiceUpdates).toContainEqual({ table: 'invoices', patch: expect.objectContaining({ receipt_sent_at: 'now()' }) });
-    // The delivered email is recorded on the claim before anything else can fail.
-    expect(recordOperatorReceiptEmail).toHaveBeenCalledWith(expect.objectContaining({ id: 'job-1' }));
-    expect(recordOperatorReceiptEmail.mock.invocationCallOrder[0]).toBeLessThan(InvoiceService.sendReceipt.mock.invocationCallOrder[0]);
+    // Each delivered leg is recorded on the claim the moment it succeeds.
+    expect(recordOperatorReceiptDelivered).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 'job-1' }), 'email');
+    expect(recordOperatorReceiptDelivered.mock.invocationCallOrder[0]).toBeLessThan(InvoiceService.sendReceipt.mock.invocationCallOrder[0]);
+    expect(recordOperatorReceiptDelivered).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: 'job-1' }), 'sms');
     expect(releaseOperatorReceiptClaim).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'job-1' }),
       expect.objectContaining({ emailDelivered: true }),
@@ -100,7 +101,8 @@ describe('POST /:id/send-receipt', () => {
   test('an SMS-only resend hands the queued job back (emailDelivered false) — it still owes the email', async () => {
     await withServer((base) => post(base, `/${INVOICE_ID}/send-receipt`, { via: 'sms' }));
     expect(sendReceiptEmail).not.toHaveBeenCalled();
-    expect(recordOperatorReceiptEmail).not.toHaveBeenCalled();
+    expect(recordOperatorReceiptDelivered).toHaveBeenCalledTimes(1);
+    expect(recordOperatorReceiptDelivered).toHaveBeenCalledWith(expect.anything(), 'sms');
     expect(releaseOperatorReceiptClaim).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ emailDelivered: false, smsDelivered: true }));
   });
 
@@ -156,6 +158,7 @@ describe('POST /batch/send-receipts', () => {
     expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(1);
     expect(claimReceiptJobForOperatorSend.mock.invocationCallOrder[0]).toBeLessThan(closeOutVisitForIssuedInvoice.mock.invocationCallOrder[0]);
     expect(releaseOperatorReceiptClaim).toHaveBeenCalledTimes(1);
-    expect(releaseOperatorReceiptClaim).toHaveBeenCalledWith({ id: 'job-1', token: 't1', prior: null }, expect.objectContaining({ emailDelivered: true }));
+    expect(releaseOperatorReceiptClaim).toHaveBeenCalledWith({ id: 'job-1', token: 't1', prior: null }, expect.objectContaining({ emailDelivered: true, smsDelivered: true }));
+    expect(recordOperatorReceiptDelivered.mock.calls.map(([, leg]) => leg)).toEqual(['email', 'sms']);
   });
 });

@@ -28,6 +28,7 @@ const {
 } = require('../services/product-costing');
 const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
+const { validateRule } = require('../services/service-report/lawn-watering-rule');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: technicians keep DAY-TO-DAY stock operations —
@@ -709,6 +710,7 @@ function mapProduct(product, vendorPricing = []) {
     useConditions: product.use_conditions || null,
     heatRestrictions: product.heat_restrictions || null,
     irrigationNotes: product.irrigation_notes || null,
+    postApplicationWatering: product.post_application_watering || null,
     localRuleSensitivity: product.local_rule_sensitivity === true,
   };
 }
@@ -998,6 +1000,7 @@ router.get('/lawn-outline-facts', async (req, res, next) => {
             'label_source_url',
             'label_verified_at',
             'label_version',
+            'post_application_watering',
             'approved_for_public_page',
             'approved_for_estimate_packet',
             'approved_for_service_report',
@@ -1047,9 +1050,6 @@ router.get('/lawn-outline-facts', async (req, res, next) => {
 // =========================================================================
 router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
   try {
-    const product = await db('products_catalog').where({ id: req.params.id }).first();
-    if (!product) return res.status(404).json({ error: 'Product not found' });
-
     const allowed = {
       productType: 'product_type',
       manufacturer: 'manufacturer',
@@ -1077,31 +1077,44 @@ router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
     for (const [camel, snake] of Object.entries(allowed)) {
       if (req.body[camel] !== undefined) update[snake] = req.body[camel] === '' ? null : req.body[camel];
     }
-    if (!update.product_type) update.product_type = inferProductType({ ...product, ...update });
+    const wateringPatch = postApplicationWateringPatch(
+      req.body,
+      req.technician?.name || req.technicianId || null,
+    );
+    if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
+    if (!wateringPatch.skip) update.post_application_watering = wateringPatch.value;
 
-    const candidate = { ...product, ...update };
-    const readiness = lawnFactReadiness(candidate);
-    if (req.body.approve === true) {
-      if (!readiness.eligible) {
-        return res.status(422).json({
-          error: 'Product fact is not ready for estimate-packet approval',
-          readiness,
-        });
+    // Read, decide, update and audit on ONE locked row (the PUT's pattern), so
+    // overlapping edits produce a correct old -> A -> B audit trail and the
+    // readiness decision is taken on the row this write actually replaces.
+    const outcome = await db.transaction(async (trx) => {
+      const product = await trx('products_catalog').where({ id: req.params.id }).forUpdate().first();
+      if (!product) return { status: 404, body: { error: 'Product not found' } };
+      const rowUpdate = { ...update };
+      if (!rowUpdate.product_type) rowUpdate.product_type = inferProductType({ ...product, ...rowUpdate });
+
+      const readiness = lawnFactReadiness({ ...product, ...rowUpdate });
+      if (req.body.approve === true) {
+        if (!readiness.eligible) {
+          return {
+            status: 422,
+            body: { error: 'Product fact is not ready for estimate-packet approval', readiness },
+          };
+        }
+        rowUpdate.approved_for_estimate_packet = true;
+        rowUpdate.approved_for_public_page = true;
+        rowUpdate.approved_for_service_report = true;
+        rowUpdate.approved_by = req.technicianId || null;
+        rowUpdate.approved_at = new Date();
       }
-      update.approved_for_estimate_packet = true;
-      update.approved_for_public_page = true;
-      update.approved_for_service_report = true;
-      update.approved_by = req.technicianId || null;
-      update.approved_at = new Date();
-    }
-    const [updated] = await db('products_catalog')
-      .where({ id: product.id })
-      .update(update)
-      .returning('*');
-    res.json({
-      product: mapProduct(updated),
-      readiness: lawnFactReadiness(updated),
+      const [updated] = await trx('products_catalog')
+        .where({ id: product.id })
+        .update(rowUpdate)
+        .returning('*');
+      await auditWateringRuleChange(req, product, wateringPatch, trx);
+      return { status: 200, body: { product: mapProduct(updated), readiness: lawnFactReadiness(updated) } };
     });
+    res.status(outcome.status).json(outcome.body);
   } catch (err) {
     next(err);
   }
@@ -3313,6 +3326,74 @@ async function recalcBestPriceLocked(productId, dbc) {
   await dbc('vendor_pricing').where({ id: best.row.id }).update({ is_best_price: true });
 }
 
+// products_catalog.post_application_watering — validated on every admin save.
+// null / '' clears the rule (falls back to the derived default). An object (or
+// JSON string) must pass validateRule; a rule sent without source / verified_*
+// is stamped as an owner edit by the acting admin. Returns { skip } when the
+// body does not mention the field, { error } for a 400, else { value } (the
+// JSON text to store, or null).
+
+// Audit an admin edit of the product's watering rule (a compliance field that
+// completion snapshots freeze). No-op when the field was not in the request or
+// did not change. Never throws: the row is already saved.
+async function auditWateringRuleChange(req, product, wateringPatch, trx = null) {
+  if (!wateringPatch || wateringPatch.skip) return;
+  const before = product?.post_application_watering ?? null;
+  const beforeText = before == null ? null : (typeof before === 'string' ? before : JSON.stringify(before));
+  // Compare VALUES: Postgres returns JSONB with its own key order, so a
+  // resubmitted identical rule must not read as a change.
+  const parse = (text) => { try { return text == null ? null : JSON.parse(text); } catch { return text; } };
+  if (require('util').isDeepStrictEqual(parse(beforeText), parse(wateringPatch.value ?? null))) return;
+  // Inside a transaction the audit row is critical: a swallowed insert
+  // failure would abort the Postgres transaction and lose the catalog save
+  // while the route still returned 200, so the audit and the update commit
+  // or roll back together. Outside a transaction (PATCH) a failed audit only
+  // warns; the row is already saved.
+  const { recordAuditEvent } = require('../services/audit-log');
+  const event = (extra) => ({
+      actor_type: 'technician',
+      actor_id: req.technicianId || null,
+      action: 'products_catalog.post_application_watering.updated',
+      resource_type: 'products_catalog',
+      resource_id: String(product.id),
+      metadata: {
+        product: product.name || null,
+        before: beforeText ? JSON.parse(beforeText) : null,
+        after: wateringPatch.value ? JSON.parse(wateringPatch.value) : null,
+        actor_name: req.technician?.name || null,
+      },
+      trx,
+      ...extra,
+    });
+  if (trx) return recordAuditEvent(event({ critical: true }));
+  try {
+    await recordAuditEvent(event({}));
+  } catch (err) {
+    logger?.warn?.(`[admin-inventory] watering-rule audit failed: ${err.message}`);
+  }
+}
+
+function postApplicationWateringPatch(body, actor) {
+  const raw = body?.postApplicationWatering;
+  if (raw === undefined) return { skip: true };
+  if (raw === null || raw === '') return { value: null };
+  let candidate = raw;
+  if (typeof candidate === 'string') {
+    try { candidate = JSON.parse(candidate); } catch { return { error: 'postApplicationWatering must be valid JSON' }; }
+  }
+  if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+    candidate = {
+      ...candidate,
+      source: candidate.source == null ? 'owner' : candidate.source,
+      verified_at: candidate.verified_at == null ? new Date().toISOString() : candidate.verified_at,
+      verified_by: candidate.verified_by == null ? (actor || null) : candidate.verified_by,
+    };
+  }
+  const checked = validateRule(candidate);
+  if (!checked.valid) return { error: `Invalid postApplicationWatering: ${checked.errors.join('; ')}` };
+  return { value: JSON.stringify(checked.rule) };
+}
+
 // POST / — create a new product
 router.post('/', async (req, res, next) => {
   try {
@@ -3458,6 +3539,12 @@ router.put('/:id', async (req, res, next) => {
     for (const [camel, snake] of Object.entries(allowed)) {
       if (req.body[camel] !== undefined) upd[snake] = req.body[camel];
     }
+    const wateringPatch = postApplicationWateringPatch(
+      req.body,
+      req.technician?.name || req.technicianId || null,
+    );
+    if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
+    if (!wateringPatch.skip) upd.post_application_watering = wateringPatch.value;
     // The inline editor sends containerSize alone, and scoreVendorRows treats
     // a positive unit_size_oz as authoritative (Codex #3974 r3 P1): a
     // container edit without an explicit unitSizeOz re-derives it from the
@@ -3526,6 +3613,7 @@ router.put('/:id', async (req, res, next) => {
       const lockedSizeChanged = (upd.container_size !== undefined && (upd.container_size || null) !== (locked.container_size || null))
         || (upd.unit_size_oz !== undefined && numberOrNull(upd.unit_size_oz) !== numberOrNull(locked.unit_size_oz));
       await trx('products_catalog').where({ id: req.params.id }).update(upd);
+      await auditWateringRuleChange(req, locked, wateringPatch, trx);
       if (stockChanged) {
         const before = stockBefore || 0;
         const after = nextStock || 0;

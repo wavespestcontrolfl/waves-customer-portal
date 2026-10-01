@@ -69,6 +69,9 @@ const GATE_RETRY_INSTRUCTIONS = {
   CITABILITY_CONCRETE_SPECIFICS: 'Citability (non-blocking): preserve supported measurements as numbers with units instead of vague qualifiers; never invent a number or use a dollar amount.',
   CITABILITY_COMPARISON: 'Citability (non-blocking): when the post frames a real choice, use one neutral <ComparisonTable>; do not add a filler comparison.',
   CITABILITY_HOW_TO_CHOOSE: 'Citability (non-blocking): pair a real comparison with a How-to-choose H2 and 3–5 observable condition-to-option bullets.',
+  // Citability backfill completion (binding on that lane only): the gate
+  // message names the unresolved gaps / regressed traits.
+  CITABILITY_BACKFILL_GAPS_CLEARED: 'Citability refresh (binding): close every planned citability gap in required_sections with the actual structure — a named source in prose, a stated measurement, a <ComparisonTable>, a How-to-choose H2 with 3–5 criteria — and keep every table, How-to-choose section, named source and measurement the live page already has; never invent a source or a number to do it.',
 };
 
 // The header defaults to the RUN-LEVEL framing (one feedback-informed

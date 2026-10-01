@@ -134,6 +134,12 @@ describe('notification trigger push tags', () => {
   });
 
   test('KB audit trigger summarizes flagged entries for the admin bell', () => {
+    const notDispatched = TRIGGER_REGISTRY.newsletter_send_not_dispatched.build({ sendId: 'send-42', subject: 'Pest Insider' });
+    expect(notDispatched.link).toBe('/admin/newsletter?tab=compose&draftId=send-42'); // codex round 14 P2: THE affected draft
+    // the proof notices deep-link their draft too (codex round 16 P2); without an id the generic tab stays
+    expect(TRIGGER_REGISTRY.newsletter_proof_sent.build({ sendId: 'send-7', subject: 'x', recipient: 'r', recipientCount: 1 }).link).toBe('/admin/newsletter?tab=compose&draftId=send-7');
+    expect(TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['e'] }).link).toBe('/admin/newsletter?tab=compose&draftId=send-7');
+    expect(TRIGGER_REGISTRY.newsletter_proof_blocked.build({ subject: 'x', errors: ['e'] }).link).toBe('/admin/newsletter?tab=compose');
     const built = TRIGGER_REGISTRY.kb_audit_flagged.build({
       count: 2,
       entries: [
@@ -640,5 +646,16 @@ describe('payment failure settlement recheck', () => {
     expect(result.bellWritten).toBe(true);
     expect(result.push.skipped).toBe('superseded_before_push');
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+  });
+});
+
+describe('sms_reply keeps the whole text for the bell', () => {
+  test('a text over 140 characters carries the full message as detail; a short one carries none', () => {
+    const long = `Could you come back out this week? ${'The ants are back by the patio door. '.repeat(5)}Thanks.`;
+    const built = TRIGGER_REGISTRY.sms_reply.build({ fromName: 'Dana Example', message: long, threadId: 'customer-123' });
+    expect(built.body).toHaveLength(140);
+    expect(built.detail).toBe(long);
+    const short = TRIGGER_REGISTRY.sms_reply.build({ fromName: 'Dana Example', message: 'See you at 4.', threadId: 'customer-123' });
+    expect(short.detail).toBeUndefined();
   });
 });

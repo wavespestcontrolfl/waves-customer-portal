@@ -77,6 +77,7 @@
  */
 
 const { etParts, etDateString, addETDays, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
+const { callStartedAt } = require('../utils/call-timeline');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
@@ -249,7 +250,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   // moved when the call named one. humanOverride is a person's decision.
   let movedDate = null;
   if (!humanOverride) {
-    const agreement = groundRescheduleAgreement({ v2, transcript: call.transcription, callStartedAt: call.created_at });
+    const agreement = groundRescheduleAgreement({ v2, transcript: call.transcription, callStartedAt: callStartedAt(call) || call.created_at });
     if (!agreement.ok) return skip('reschedule_not_agreed', { agreementReason: agreement.reason });
     movedDate = agreement.movedDate;
   }

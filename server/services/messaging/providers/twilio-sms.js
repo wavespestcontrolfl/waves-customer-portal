@@ -192,6 +192,15 @@ async function sendViaTwilioOnce(input, {
       agentDecisionId: input.metadata && input.metadata.agentDecisionId,
       parkedDecisionIds: input.metadata && input.metadata.parkedDecisionIds,
       scheduledSmsLogId: input.metadata && input.metadata.scheduled_sms_log_id,
+      // Which sms_templates row rendered this body — set by callers that
+      // render through router.getTemplate / renderSmsTemplate /
+      // renderRequiredSmsTemplate and thread the exact key they requested
+      // into metadata.templateKey (never inferred here). Persisted on the
+      // accepted sms_log row as template_key/template_variant_id
+      // (services/twilio.js) and flows into messaging_audit_log.metadata
+      // as-is via input.metadata below.
+      templateKey: input.metadata && input.metadata.templateKey,
+      templateVariantId: input.metadata && input.metadata.templateVariantId,
       // Durable linkage back to the review ask this text IS. The
       // stranded-send reconciliation proves a send from it, so an ask
       // whose template carries no review link (the private check-ins)
@@ -417,6 +426,9 @@ module.exports = {
   // may still have reached Twilio.
   classifyProviderFailure,
   SENDER_SIDE_TERMINAL_TWILIO_CODES,
+  // Shared with the booking-link lane, which treats a recipient-side
+  // rejection as an expected refusal rather than a lane failure.
+  RECIPIENT_TERMINAL_TWILIO_CODES,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.

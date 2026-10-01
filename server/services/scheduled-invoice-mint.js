@@ -13,6 +13,14 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+// The ONE canonical "this visit never ran and never will" status set
+// (invoice-helpers.js — already shared by settlement/send/void refusal
+// across admin-invoices.js, invoice-manual-payment.js, invoice-email.js,
+// invoice-send-replay-eligibility.js and invoice.js itself). Mint-time
+// refusal reuses it rather than hand-rolling a second list: 'completed' is
+// deliberately absent (normal completion billing) and so is 'rescheduled'
+// (a pending reschedule REQUEST parks the same row — not yet terminal).
+const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 
 // Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
 // estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
@@ -151,10 +159,21 @@ async function acquireScheduledMintLockChain(trx, {
     );
   }
   if (assertEligibleInTrx) await assertEligibleInTrx(trx);
-  return trx('scheduled_services')
+  // 'status' rides along on EVERY call regardless of the caller's own
+  // visitColumns (deduped) — this FOR UPDATE read is the ONE place every
+  // scheduled-price writer observes the visit under the mint lock, so it is
+  // also the ONE place that can catch a cancellation (or any other
+  // never-ran transition) that committed while this transaction waited on
+  // the advisory lock (Codex #5244 r7 P0: a cancel that wins the lock race
+  // must not be resumed past by a mint that started before it and never
+  // re-reads status). assertScheduledVisitLive throws BEFORE the caller's
+  // own price/replay checks so a terminal visit never reaches them.
+  const lockedSvc = await trx('scheduled_services')
     .where({ id: scheduledServiceId })
     .forUpdate()
-    .first(...visitColumns);
+    .first(...new Set([...visitColumns, 'status']));
+  if (lockedSvc) assertScheduledVisitLive(lockedSvc);
+  return lockedSvc;
 }
 
 // The ONE stale-price refusal every scheduled-price writer throws (codex
@@ -178,6 +197,40 @@ function scheduledPriceMovedError(lockedSvc) {
     e.currentPrimaryLinePriceCents = cents(lockedSvc.primary_line_price);
   }
   return e;
+}
+
+// The ONE terminal-visit refusal every scheduled-service invoice mint
+// throws (Codex #5244 r7 P0). A cancellation (or no-show/skip) that
+// acquires this same mint lock first and commits while a concurrent mint
+// waits behind it must not let that mint resume and bill a visit that will
+// never happen — same shape/status style as scheduledPriceMovedError:
+// terminal for retry loops (err.status), a stable machine-readable code.
+function scheduledVisitNotLiveError(status) {
+  const e = new Error(`Scheduled visit is ${status} — refusing to mint an invoice for it`);
+  e.status = 409;
+  e.statusCode = 409;
+  // isOperational (invoice-helpers.js's own visit_busy sets it too): this
+  // error can now surface through a plain create() caller with no
+  // dedicated `.status` catch (e.g. the manual admin-invoice route), which
+  // falls through to the shared errors.js handler — that handler renders a
+  // MASKED 500 for anything not flagged isOperational. A caller with its
+  // own `.status`/`.code` handling (the mint helpers, dispatch, Charge Now)
+  // is unaffected either way.
+  e.isOperational = true;
+  e.code = 'SCHEDULED_VISIT_NOT_LIVE';
+  e.visitStatus = status;
+  return e;
+}
+
+// Call on a visit row read UNDER the mint lock (the row must carry
+// 'status'). Throws scheduledVisitNotLiveError for any status in the
+// canonical VISIT_NEVER_RAN_STATUSES set (invoice-helpers.js) — never a
+// hand-rolled list, so a status added to that set for settlement/send/void
+// refusal also refuses a mint without a second edit. A missing row is the
+// caller's own "not found" concern, not this function's.
+function assertScheduledVisitLive(visitRow) {
+  const status = String(visitRow?.status || '').trim().toLowerCase();
+  if (VISIT_NEVER_RAN_STATUSES.includes(status)) throw scheduledVisitNotLiveError(status);
 }
 
 // Replay = the double-tap window returning the FIRST request's fresh
@@ -376,5 +429,7 @@ module.exports = {
   findAdoptableScheduledInvoice,
   adoptScheduledInvoiceUnderMintLock,
   scheduledPriceMovedError,
+  scheduledVisitNotLiveError,
+  assertScheduledVisitLive,
   mintScheduledServiceInvoiceWithDeposit,
 };

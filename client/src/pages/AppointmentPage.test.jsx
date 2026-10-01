@@ -47,6 +47,10 @@ function upcomingPayload(overrides = {}) {
     plan: { isRecurring: true, collectiveAnchor: true },
     weather: { rainChance: 15, stormy: false },
     rescheduleToken: 'deadbeef',
+    // Dead-link guard (C3/C6): true unless the visit already starts inside
+    // the self-serve move-notice window, where /reschedule/:token would
+    // refuse the move.
+    canMoveOnline: true,
     // Server-computed ICS servability (codex r33 P2) — the page renders the
     // Add-to-calendar action only when the .ics route would serve it.
     calendarEligible: true,
@@ -230,6 +234,19 @@ describe('AppointmentPage upcoming visit', () => {
     expect(cal.closest('a')).toHaveAttribute('href', expect.stringContaining('/calendar.ics'));
     expect(screen.getByText('See open times').closest('a')).toHaveAttribute('href', '/reschedule/deadbeef');
   });
+
+  it('a visit already too close to move online (canMoveOnline: false) hides the See open times card and the pre-confirm hint, but keeps the token-independent Questions card (C3/C6)', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ canMoveOnline: false })) });
+
+    renderPage();
+
+    await screen.findByRole('button', { name: 'Confirm this appointment' });
+    expect(screen.queryByText('See open times')).toBeNull();
+    expect(screen.queryByText('Need a different time?')).toBeNull();
+    expect(screen.getByText("Time doesn't work? Text or call us and we'll sort it out.")).toBeTruthy();
+    // The always-present contact fallback still renders.
+    expect(screen.getByText('Questions?')).toBeInTheDocument();
+  });
 });
 
 // GATE_VISIT_PREP_PHOTOS (customer-visit-photos-scope-20260928.md). The
@@ -276,7 +293,7 @@ describe('AppointmentPage visit prep photos block', () => {
 
     await screen.findByText('Anything you want your technician to look at?');
     const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
-    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
@@ -299,7 +316,7 @@ describe('AppointmentPage visit prep photos block', () => {
 
     await screen.findByText('Anything you want your technician to look at?');
     const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
-    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
@@ -315,7 +332,7 @@ describe('AppointmentPage visit prep photos block', () => {
 
     await screen.findByText('Anything you want your technician to look at?');
     const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
-    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
@@ -332,7 +349,7 @@ describe('AppointmentPage visit prep photos block', () => {
 
     await screen.findByText('Anything you want your technician to look at?');
     const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
-    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 

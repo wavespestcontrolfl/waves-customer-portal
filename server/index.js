@@ -270,6 +270,24 @@ app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, 
 // response the page never reads, so this route sets no CORS headers.
 app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
 
+// /book "Can't find a time?" preferred-time request (GATE_BOOK_PREFERRED_TIME,
+// dark). The guard (no-store/noindex/no-referrer headers + the generic
+// unknown-route 404 while the gate is off) is mounted ABOVE the global cors()
+// (an allowed-origin OPTIONS preflight would answer 204 while dark), the global
+// `/api/` limiter (429) and the body parsers (400/413) — the same position the
+// other dark public routes use (codex P0 r1 on #5399). The route re-runs it.
+app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredTimePreParserGuard);
+
+// Signed satellite image proxy (lead-form lookup, service report, portal
+// station map): serves Google imagery WITHOUT the server Maps key ever
+// reaching a customer. Mounted ABOVE the global cors() (which would otherwise
+// answer an OPTIONS preflight with a bare 204 before this router's limiter and
+// privacy headers ran), the global `/api/` limiter and the body parsers. The
+// router stamps its privacy headers + its own limiter on every request under
+// the mount and ends in a terminal generic 404, so nothing falls through.
+// <img> loads need no CORS headers, so this route sets none.
+app.use('/api/public/map-image', require('./routes/public-map-image'));
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -385,6 +403,11 @@ app.use('/api/public/secure-card', (req, res, next) => {
   res.set('X-Robots-Tag', 'noindex');
   next();
 });
+// Live-tracking pre-parser guard (middleware/track-public-preparser.js):
+// privacy headers on every outcome incl. the GLOBAL /api limiter's 429s
+// (same reasoning as secure-card above), and POST /:token/view's malformed-
+// token 404 + body-ignore decided before the shared body parsers.
+app.use('/api/public/track', require('./middleware/track-public-preparser').trackPublicPreparser);
 // The public agent surfaces (MCP + A2A) carry the same unobservable-when-
 // dark contract as the funnels above: while their gates are off they must
 // read 404 even for an IP that already exhausted the global /api/ limiter
@@ -455,6 +478,11 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
   next();
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
+
+// Estimate map-image proxy: privacy headers + the dark overlay 404 must land
+// BEFORE the global limiter, or an over-budget IP gets a 429 (and no
+// no-store/CORP) from a route that is supposed to be dark / generic.
+app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 
 app.use('/api/', limiter);
 
@@ -682,6 +710,8 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Outside-link click redirect for prep guides — registered destinations only.
+app.use('/go', require('./routes/outbound-redirect'));
 // Digital business card — public token-scoped data + Save-contact vCard.
 app.use('/api/card', require('./routes/card-public'));
 // Universal-link association files (apple-app-site-association / assetlinks.json).
@@ -692,6 +722,8 @@ app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);
 app.use('/api/client-errors', require('./routes/client-errors'));
 app.use('/api/push', require('./routes/push'));
+// Customer activity beacons (GATE_PORTAL_ACTIVITY, dark) — authenticated, writes analytics rows only.
+app.use('/api/customer/activity', require('./routes/customer-activity'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
@@ -704,6 +736,8 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 // Mounted before adminCustomerRoutes so the customer router doesn't
 // shadow the turf-profile sub-routes. Both routers share the
 // /api/admin/customers prefix; Express tries them in mount order.
+app.use('/api/admin/schedule/:serviceId/property-areas', require('./routes/admin-property-service-areas').serviceRouter);
+app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require('./routes/admin-property-service-areas').propertyRouter);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));

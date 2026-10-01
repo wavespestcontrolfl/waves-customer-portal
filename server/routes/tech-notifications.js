@@ -39,6 +39,17 @@ router.get('/', async (req, res, next) => {
     if (!require('../config/feature-gates').gateEnvValue('GATE_NOSHOW_DETECTOR')) {
       q = q.whereNot({ type: 'follow_through_tracking' });
     }
+    // Photo cards point at the Visit Brief's customer photos, which 404
+    // while either visit-prep gate is off: hide them at request time the
+    // same way (Codex #5303 r2). Re-enabling brings undismissed ones back.
+    const photoAlerts = require('../services/visit-prep-tech-alert');
+    if (!photoAlerts.isEnabled()) {
+      q = q.whereNot({ type: 'customer_visit_photos' });
+    } else {
+      // A photo card shows only while its visit is still this tech's and
+      // still on the route (reassigned / rescheduled / cancelled → hidden).
+      q = photoAlerts.scopePhotoCardsToLiveVisits(q, db);
+    }
     if (unreadOnly) q = q.where({ read: false });
     // FRESH non-storm rows outrank everything inside the 20-row window: a
     // storm burst must never crowd an actionable geofence/timer prompt out
@@ -54,7 +65,11 @@ router.get('/', async (req, res, next) => {
     // `new_appointment` type the client never rendered) must not starve
     // every schedule-change card out of the window either. Texts on a tech's
     // own line (tech_line_sms — tech-line.js) are kept the same way and sit
-    // in the same bucket. Missing-tracking notices (follow_through_tracking
+    // in the same bucket, as does a customer's visit-prep photo submission
+    // (customer_visit_photos — visit-prep-tech-alert.js): also persistent,
+    // also fine to share the never-expiring bucket rather than starve out
+    // an older un-dismissed one for the sake of a fresher storm/reminder.
+    // Missing-tracking notices (follow_through_tracking
     // — no-show-detector.js) are their OWN bucket 0, regardless of age: they
     // are undismissed only while the visit is still overdue with no arrival
     // evidence (the sweep's reconcile pass dismisses them the moment that
@@ -69,7 +84,7 @@ router.get('/', async (req, res, next) => {
     // stage-2 card from the window (codex P2 round 17). The other buckets
     // keep their relative order, one step down.
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
       // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
       // truncates: a tech with more than 20 undismissed tracking cards would
       // otherwise lose an older critical arrival check behind 20 newer
@@ -78,7 +93,9 @@ router.get('/', async (req, res, next) => {
       .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN COALESCE((payload->>'stage')::int, 0) ELSE 0 END DESC")
       .orderBy('created_at', 'desc')
       .limit(20);
-    res.json({ notifications: rows.map(parseRow) });
+    let parsed = rows.map(parseRow);
+    if (photoAlerts.isEnabled()) parsed = await photoAlerts.refreshPhotoCardDates(parsed, db);
+    res.json({ notifications: parsed });
   } catch (err) { next(err); }
 });
 

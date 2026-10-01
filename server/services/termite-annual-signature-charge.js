@@ -55,6 +55,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { isCollectionHoldRefusal } = require('./collections/collection-hold');
 
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 const PAY_LINK_OUTCOMES = new Set(['declined', 'skipped']);
@@ -261,6 +262,25 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   if (invoice.payer_statement_id) return { status: 'payer_routed', reason: 'payer_statement' };
   if (invoice.payer_id) return { status: 'skipped', reason: 'payer_billed' };
 
+  // Automatic (sweep) charges honor an active collections dispute hold
+  // (B10); the signature-time charge answers the customer's own signing and
+  // does not. Nothing has been attempted, so the claim is released and the
+  // daily sweep retries once the office releases the hold. A lookup failure
+  // reads as held (fail closed). The binding recheck under the charge's own
+  // locks is refuseWhenCollectionHold below.
+  if (trigger !== 'signature') {
+    let held = true;
+    try {
+      held = await require('./collections/collection-hold').customerHasActiveCollectionHold(invoice.customer_id, conn);
+    } catch (err) {
+      logger.warn(`[termite-annual-charge] collection-hold lookup failed for estimate ${ctx.estimateId} — not charging: ${err.message}`);
+    }
+    if (held) {
+      await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold (or it could not be checked); the daily sweep will retry once the office releases it' });
+      return { release: true, reason: 'collection_hold' };
+    }
+  }
+
   let frozen;
   try {
     const estimate = await conn('estimates').where({ id: ctx.estimateId }).first('id', 'annual_plan_deferred_invoice');
@@ -343,8 +363,24 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
       // Serialize against an Auto Pay pause/opt-out committing mid-charge.
       requireAutopayForCustomerId: invoice.customer_id,
       requireSelfPayCustomerId: invoice.customer_id,
+      // The daily sweep is machine-initiated: the charge primitive refuses
+      // an active collections dispute hold for it BY DEFAULT (B10). The
+      // signature-time charge answers the customer's own signing
+      // (customerInitiated above) and is exempt.
     });
   } catch (err) {
+    // A collections dispute hold (B10) that landed after the preflight and
+    // was caught by the binding check under the charge locks: the refusal is
+    // pre-Stripe (the attempt row is released, nothing charged), so it is
+    // RETRYABLE, never a terminal outcome — hand the claim back so the daily
+    // sweep resumes once the office releases the hold. Not a decline, not a
+    // payer refusal, no pay link.
+    // Also covers COLLECTION_HOLD_CHECK_FAILED: the locked hold lookup itself
+    // failed after a good preflight (still pre-Stripe) — same retry.
+    if (isCollectionHoldRefusal(err)) {
+      await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold (or it could not be checked); the daily sweep will retry once the office releases it' });
+      return { release: true, reason: 'collection_hold' };
+    }
     return classifyChargeError(err);
   }
   // The charge committed once the call returned — a failed re-read is
@@ -392,7 +428,7 @@ async function chargeAnnualInvoiceAtSignature({
     const outcome = await runClaimedCharge({ conn, ctx, trigger });
     if (outcome.release) {
       await releaseClaim(conn, estimateId, claimToken);
-      return { status: 'deferred', reason: 'consent_record_failed', deliverPayLink: false };
+      return { status: 'deferred', reason: outcome.reason || 'consent_record_failed', deliverPayLink: false };
     }
     const { belled, ...recorded } = outcome;
     await resolveClaim(conn, estimateId, claimToken, recorded);

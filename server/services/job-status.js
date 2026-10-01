@@ -1096,11 +1096,39 @@ const STATUS_ROUTE_ALLOWED_TARGETS = new Set([
   'confirmed', 'en_route', 'on_site', 'skipped', 'no_show', 'cancelled', 'completed',
 ]);
 
+// Read-only preview of what processCancelNoticeClaim (above, inside
+// transitionJobStatus) would do for THIS visit if it were cancelled right
+// now — for a caller (the Intelligence Bar cancel_appointment confirmation
+// card, appointment-cancel-impact.js) that needs to DISCLOSE the real
+// hook's outcome before committing anything, never silently suppress it
+// (the 2026-08-05 fix, GATE_CANCEL_NOTICE_HOOK, exists precisely so a
+// cancellation surface can't go silent on the customer).
+//
+// Mirrors only the ONE condition that is a process-level value and
+// therefore CANNOT change between this preview and the moment the cancel
+// actually commits: whether the gate is on at all. Every DB-backed
+// condition is mutable within that window and must never ground a 'none'
+// (Codex round-2 P1: a "merged-slot survivor" can appear/disappear before
+// commit; Codex round-3 P1: so can the `appointment_reminders` row itself —
+// the reminder self-healer (server/services/appointment-reminders.js) can
+// insert a missing row for this visit between ANY read here and the hook's
+// own in-transaction claim, so "no row right now" is not evidence the hook
+// has nothing to claim at commit time either). 'none' only when the gate
+// is off (no claim is ever minted, in any transaction, ever); 'may_send'
+// otherwise — this function never claims to know WHEN a text goes out, or
+// whether any DB-backed condition will still read the same at commit, so a
+// card showing 'may_send' can never under-disclose a real send.
+async function previewCancellationNoticeVerdict(scheduledServiceId) {
+  const { isEnabled } = require('../config/feature-gates');
+  return isEnabled('cancelNoticeHook') ? 'may_send' : 'none';
+}
+
 module.exports = {
   nextClaimTs,
   transitionJobStatus,
   STATUS_ROUTE_ALLOWED_TARGETS,
   evaluateTerminalTransition,
+  previewCancellationNoticeVerdict,
   CUSTOMER_EVENT,
   ADMIN_EVENT,
   ADMIN_ROOM,

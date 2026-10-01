@@ -927,6 +927,13 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null }), now);
       expect(u.subscriberAction).toBeNull();
     });
+    test('a merge-cleared subscriber_id still bounce-counts a Gmail mailbox (codex #5413 r3)', () => {
+      const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null, email: 'john.doe@gmail.com' }), now);
+      expect(u.subscriberAction).toBe('bounce_increment');
+      for (const email of ['old@example.test', 'john@gmail.com@invalid.test', '.john@gmail.com']) {
+        expect(computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null, email }), now).subscriberAction).toBeNull();
+      }
+    });
     test('idempotent — already-bounced row is a no-op', () => {
       const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ bounced_at: now }), now);
       expect(u).toBeNull();
@@ -1468,6 +1475,47 @@ describe('sendgrid newsletter suppression ledger writes', () => {
       status: 'unsubscribed',
       unsubscribed_at: expect.any(Date),
     }));
+  });
+
+  test('a bounce is fenced to the address the delivery was mailed to', async () => {
+    // A delivery re-pointed at the surviving subscriber by a typo-correction
+    // merge must not let a late bounce from the OLD mailbox bounce-count the
+    // corrected address.
+    const { client, calls } = fakeClient();
+    await handleNewsletterEvent({ event: 'bounce', type: 'bounce', email: 'Old.Typo@Example.com' }, {
+      id: 'delivery-5', send_id: 'send-5', subscriber_id: 16, email: ' Old.Typo@example.com ',
+    }, client);
+    const q = calls.newsletter_subscribers[0];
+    expect(q.where).toHaveBeenCalledWith({ id: 16 });
+    expect(q.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ?', ['old.typo@example.com']);
+    expect(q.update).toHaveBeenCalled();
+  });
+
+  test('a Gmail bounce matches the subscriber by mailbox identity (any spelling), not by id', async () => {
+    const { client, calls } = fakeClient();
+    await handleNewsletterEvent({ event: 'bounce', type: 'bounce', email: 'John.Doe+home@googlemail.com' }, {
+      id: 'delivery-6', send_id: 'send-6', subscriber_id: 17, email: 'John.Doe+home@googlemail.com',
+    }, client);
+    const q = calls.newsletter_subscribers[0];
+    expect(q.where).not.toHaveBeenCalled();
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("IN ('gmail.com', 'googlemail.com')"), ['johndoe', expect.stringMatching(/gmail|googlemail/)]);
+    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ last_bounced_at: expect.any(Date) }));
+  });
+
+  test('opt-outs are never fenced by address: unsubscribe and spam complaint always apply', async () => {
+    for (const ev of [
+      { event: 'spamreport', email: 'Old.Typo@Example.com' },
+      { event: 'dropped', reason: 'Unsubscribed Address', email: 'Old.Typo@Example.com' },
+    ]) {
+      const { client, calls } = fakeClient();
+      await handleNewsletterEvent(ev, {
+        id: 'delivery-5', send_id: 'send-5', subscriber_id: 16, email: ' Old.Typo@example.com ',
+      }, client);
+      const q = calls.newsletter_subscribers[0];
+      expect(q.where).toHaveBeenCalledWith({ id: 16 });
+      expect(q.whereRaw).not.toHaveBeenCalled();
+      expect(q.update).toHaveBeenCalled();
+    }
   });
 });
 

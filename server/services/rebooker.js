@@ -184,6 +184,15 @@ async function probeMoveConflicts({
     excludeServiceIds,
     excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
     ...(travel !== undefined ? { travel } : {}),
+    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark): the
+    // PUBLIC self-serve reschedule alone opts into capacityPlacement (see
+    // reschedule-public.js), and its picker offers slots with the same
+    // tech-aware occupancy mirror /book uses — so its commit probe counts only
+    // the kept technician's rows plus unassigned ones. Every other caller
+    // (admin, rain-out, SMS, auto-dispatch) omits capacityPlacement and stays
+    // tech-blind; the occupancy probe ignores the option while the gate is off.
+    ...(options.capacityPlacement === true && target.technicianId
+      ? { technicianId: target.technicianId } : {}),
     ...(useArrivalWindows ? { arrivalWindow: {
       serviceId: target.id,
       technicianId: target.technicianId || null,
@@ -1756,6 +1765,14 @@ class SmartRebooker {
           windowStart: updates.window_start,
           windowEnd: occupancyGateEnd,
           durationMinutes: service.estimated_duration_minutes || undefined,
+          // GRACE-EXEMPT: no arrivalGraceMinutes here (owner ruling 2026-09-28, scope cut
+          // Codex r1 P1 #5314): public reschedule's own commit runs a STRICT
+          // pre-verify travel probe (probeMoveConflicts) a grace-kept slot
+          // would fail before this check ever ran — grace is estimate-picker
+          // and /book only (GATE_BOOK_ARRIVAL_GRACE, 2026-09-29: /book's
+          // createSelfBooking waives the same clashes in its own probe; this
+          // rebooker probe does not yet, so public reschedule stays strict).
+          // See scheduling/policy.js and find-time.js's packCapacityEnds.
         })
         : null;
       // A reviewed move also pins the route whose destination was probed.

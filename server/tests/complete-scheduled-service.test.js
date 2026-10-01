@@ -889,6 +889,14 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     expect(noticeBlock).toMatch(/const failResult = throwIfDeliveryUnverified\(await sendCustomerMessage\(\{/);
   });
 
+  test('the decline notice threads the rendered template key (payment_failed) into the send metadata', () => {
+    expect(noticeBlock).toMatch(/templateKey: 'payment_failed'/);
+  });
+
+  test('the completion SMS threads sentSmsType — whichever of the report/invoice/paid/prepaid/service_complete rungs actually rendered — as templateKey', () => {
+    expect(source).toMatch(/const smsMetadata = \{ original_message_type: sentSmsType,.*templateKey: sentSmsType \};/);
+  });
+
   test('restoreSendClaim is called through ONE shared, checked helper — never an unchecked bare await (Codex pre-push P1, round 1 of the owner\'s audit)', () => {
     // restoreSendClaim catches its own DB errors and resolves false rather
     // than throwing — an unchecked await would silently treat a transient

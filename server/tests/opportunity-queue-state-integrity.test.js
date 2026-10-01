@@ -155,8 +155,14 @@ describe('claimNext lifetime attempt budget', () => {
     const swept = await queue.sweepExhaustedAttempts();
 
     expect(swept).toBe(2);
-    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("status = 'pending' AND attempt_count >= ?"), [5]);
-    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('NOT EXISTS'), [5]);
+    const bindings = [5, 'named_competitor_review', 'affiliate_review', ...queue._internals.RECONCILIATION_HOLD_REASONS];
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("status = 'pending' AND attempt_count >= ?"), bindings);
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('NOT EXISTS'), bindings);
+    // Every may-have-published hold survives the sweep, including an
+    // interrupted approval and an unreconciled refresh write.
+    expect(bindings).toEqual(expect.arrayContaining(['named_competitor_publish_interrupted', 'refresh_publish_unreconciled']));
+    const [sql] = q.whereRaw.mock.calls[0];
+    expect((sql.match(/\?/g) || []).length).toBe(bindings.length);
     expect(db.raw).toHaveBeenCalledWith(expect.stringMatching(/CASE WHEN COALESCE[\s\S]+THEN 'skipped' ELSE 'pending_review' END/));
     expect(db.raw).toHaveBeenCalledWith("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END");
 
@@ -196,7 +202,27 @@ describe('recoverStaleClaims vs named-competitor approval claims', () => {
     expect(ordinaryQ._filters).toEqual(expect.arrayContaining([
       ['raw', expect.stringContaining("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)"), ['page_edit_superseded']],
     ]));
-    expect(ordinaryUpdates[0]).toMatchObject({ status: 'pending', claimed_at: null });
+    expect(ordinaryUpdates[0]).toMatchObject({ claimed_at: null });
+    expect(ordinaryUpdates[0].status.__raw).toMatch(/THEN 'pending_review' ELSE 'pending' END/);
+  });
+
+  test('a stale claim whose own run recorded an unreconciled refresh write parks instead of re-pending or retiring', async () => {
+    const supersededUpdates = [];
+    const ordinaryUpdates = [];
+    db.raw.mockImplementation((sql, bindings = []) => ({ __raw: sql, bindings }));
+    const supersededQ = chain({ update: jest.fn((patch) => { supersededUpdates.push(patch); return Promise.resolve(0); }) });
+    const ordinaryQ = chain({ update: jest.fn((patch) => { ordinaryUpdates.push(patch); return Promise.resolve(1); }) });
+    db.mockImplementationOnce(() => supersededQ).mockImplementationOnce(() => ordinaryQ);
+
+    await queue.recoverStaleClaims();
+
+    const evidence = /r\.queue_claim_id IS NOT DISTINCT FROM opportunity_queue\.claim_id[\s\S]+r\.skip_reason = 'refresh_publish_unreconciled'/;
+    expect(ordinaryUpdates[0].status.__raw).toMatch(evidence);
+    expect(ordinaryUpdates[0].skip_reason.__raw).toMatch(/THEN 'refresh_publish_unreconciled' ELSE skip_reason END/);
+    // Superseded rows keep the hold too rather than being retired as skipped.
+    expect(supersededUpdates[0].status.__raw).toMatch(evidence);
+    expect(supersededUpdates[0].skip_reason.__raw).toMatch(/CASE WHEN [\s\S]+ THEN 'refresh_publish_unreconciled' END/);
+    expect(supersededUpdates[0].completed_at.__raw).toMatch(evidence);
   });
 });
 

@@ -956,7 +956,11 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       // the hold rail immediately before the row lands, serialized on the
       // same scheduled_services row the repair script locks to repoint.
       const inserted = await db.transaction(async (trx) => {
-        await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
+        // Liveness re-read UNDER the lock (Codex r9 on #5244): a cancel that
+        // took this row lock first and committed while this waited must
+        // not get a fresh request (or, on the SMS branch, a text) after it.
+        const lockedVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id', 'status');
+        if (!lockedVisit || !LIVE_VISIT_STATUSES.includes(lockedVisit.status)) return 'visit_not_live';
         const holdRow = await trx('estimate_card_holds')
           .where({ scheduled_service_id: visit.id })
           .first('id');
@@ -974,6 +978,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           .returning('id');
       });
       if (inserted === 'card_hold_lane') return skip('card_hold_lane');
+      if (inserted === 'visit_not_live') return skip('visit_not_live');
       if (!inserted || !inserted.length) {
         const raced = await db('appointment_card_requests')
           .where({ scheduled_service_id: visit.id })
@@ -1072,7 +1077,8 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         // the row must not land after a repoint that committed since the
         // fast-path check — serialize on the visit row the script locks.
         const inserted = await db.transaction(async (trx) => {
-          await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
+          const lockedVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id', 'status');
+          if (!lockedVisit || !LIVE_VISIT_STATUSES.includes(lockedVisit.status)) return 'visit_not_live';
           const holdRow = await trx('estimate_card_holds')
             .where({ scheduled_service_id: visit.id })
             .first('id');
@@ -1093,10 +1099,28 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           await releaseClaim();
           return skip('card_hold_lane');
         }
+        if (inserted === 'visit_not_live') {
+          await releaseClaim();
+          return skip('visit_not_live');
+        }
         if (!inserted || !inserted.length) {
           // A row landed between check 3 and the claim — funnel already ran.
           await releaseClaim();
           return skip('request_exists');
+        }
+      } else {
+        // Re-sending an existing pending request inserts nothing, so it never
+        // reached the locked insert above — re-read liveness under the same
+        // visit lock before texting the link (Fable review on #5309: a
+        // cancel committed after the fast-path read would otherwise still get
+        // a card text pointing at a dead /secure page).
+        const live = await db.transaction(async (trx) => {
+          const lockedVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id', 'status');
+          return Boolean(lockedVisit && LIVE_VISIT_STATUSES.includes(lockedVisit.status));
+        });
+        if (!live) {
+          await releaseClaim();
+          return skip('visit_not_live');
         }
       }
     } catch (insertErr) {
@@ -1882,12 +1906,48 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   // whose plan_required refusal then applies. selected_plan can only
   // change while the row is 'pending', so the completing lease below never
   // needs the guard.
-  let claimQuery = db('appointment_card_requests')
-    .where({ id: request.id, status: 'pending' });
-  claimQuery = request.selected_plan == null
-    ? claimQuery.whereNull('selected_plan')
-    : claimQuery.where({ selected_plan: request.selected_plan });
-  let claimed = await claimQuery.update({ status: 'completing', updated_at: new Date() });
+  // The claim ALSO takes this visit's scheduled-invoice mint lock (Codex
+  // #5253 follow-up — "reprice/card-completion serialization"): a plain
+  // UPDATE here raced the re-price save's own plain 'completing' read
+  // (admin-schedule.js's findCompletingCardRequestVisitId), so a claim that
+  // landed in the gap between that read and the save's commit went
+  // undetected and completed against whatever price the save had just set.
+  // The re-price save takes the SAME lock (acquireScheduledInvoiceMintLock/
+  // tryAcquireScheduledInvoiceMintLock, admin-schedule.js) before it ever
+  // reads this visit's row or checks for a 'completing' request, so one of
+  // two things now happens: the save already holds the lock and this claim
+  // blocks until it commits or rolls back, then proceeds against the
+  // settled row; or this claim holds the lock first, so the save's own
+  // acquisition blocks until this transaction commits — it then finds this
+  // row 'completing' and refuses with VISIT_BUSY_RETRY. Lock order: this is
+  // the ONLY lock this function takes here, and it is released on commit —
+  // never held across the Stripe SetupIntent re-read just below (a fresh
+  // pooled connection, no transaction) or any other network call. The final
+  // completing→completed write further down re-acquires the same lock in
+  // its OWN short transaction for the same reason.
+  const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
+  // Eligibility is RE-READ under the lock: the pre-claim read at the top of
+  // this function ran with no lock, so a re-price save (or a free re-service
+  // conversion) that committed between that read and this claim would
+  // otherwise let the capture complete against the state it never saw. The
+  // re-read is DB-only (visit row + payer lookup, no row locks taken, no
+  // network), so the mint lock is never held across a Stripe call.
+  let claimRefusal = null;
+  let claimed = await db.transaction(async (trx) => {
+    await acquireScheduledInvoiceMintLock(trx, request.scheduled_service_id);
+    const stillNeededLocked = await secureVisitStillNeedsCard(request, { database: trx });
+    if (!stillNeededLocked.ok) {
+      claimRefusal = stillNeededLocked;
+      return 0;
+    }
+    let claimQuery = trx('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' });
+    claimQuery = request.selected_plan == null
+      ? claimQuery.whereNull('selected_plan')
+      : claimQuery.where({ selected_plan: request.selected_plan });
+    return claimQuery.update({ status: 'completing', updated_at: new Date() });
+  });
+  if (claimRefusal) return claimRefusal;
   if (claimed !== 1) {
     const fresh = await db('appointment_card_requests').where({ id: request.id })
       .first('id', 'status', 'updated_at', 'stripe_setup_intent_id', 'fee_agreed_at', 'sticky_window_disclosed');
@@ -2066,17 +2126,32 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     } catch (err) {
       logger.warn(`[appt-card-request] disclosed-terms read failed for request ${request.id} — completing without fee consent stamp: ${err.message}`);
     }
-    await db('appointment_card_requests')
-      .where({ id: request.id, status: 'completing' })
-      .update({
-        status: 'completed',
-        stripe_setup_intent_id: setupIntentId,
-        stripe_payment_method_id: stripePaymentMethodId,
-        payment_method_id: saved?.id || null,
-        completed_at: new Date(),
-        updated_at: new Date(),
-        ...frozenFeeTerms,
-      });
+    // Re-acquires the SAME scheduled-invoice mint lock as the claim above,
+    // in its OWN short transaction (never spanning the Stripe re-read or
+    // the enrollment/consent writes above, which run on plain pooled
+    // connections with no lock held) — a re-price save that starts after
+    // the claim released the lock, finds the row 'completing' via its
+    // plain read and refuses, could otherwise still race this FINAL write
+    // if this write took no lock of its own. Taking it here means a
+    // re-price save that instead wins the lock race blocks until this
+    // transition commits (then sees 'completed', not 'completing' — its
+    // own guard has already run by the time it could acquire this lock,
+    // so this ordering only affects which of the two finishes first, never
+    // which one sees stale state).
+    await db.transaction(async (trx) => {
+      await acquireScheduledInvoiceMintLock(trx, request.scheduled_service_id);
+      await trx('appointment_card_requests')
+        .where({ id: request.id, status: 'completing' })
+        .update({
+          status: 'completed',
+          stripe_setup_intent_id: setupIntentId,
+          stripe_payment_method_id: stripePaymentMethodId,
+          payment_method_id: saved?.id || null,
+          completed_at: new Date(),
+          updated_at: new Date(),
+          ...frozenFeeTerms,
+        });
+    });
     logger.info(`[appt-card-request] capture completed for visit ${request.scheduled_service_id} (request ${request.id})`);
     return { ok: true };
   } catch (err) {
@@ -2912,6 +2987,14 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
     }
     await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
       .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
+    // A collections DISPUTE hold (B10) refused the fee before Stripe: claim
+    // reopened, nothing terminal recorded, no customer message; reported as
+    // its own reason (the no-show route: definite no-charge 'held' outcome;
+    // the cancellation rails: unresolved fee for office review).
+    if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) {
+      logger.warn(`[appt-card-request] no-show fee withheld (collections dispute hold) for visit ${scheduledServiceId}`);
+      return { charged: false, reason: 'collection_hold', error: err.message };
+    }
     logger.error(`[appt-card-request] no-show fee charge FAILED (no charge) for visit ${scheduledServiceId}: ${err.message}`);
     return { charged: false, reason: 'charge_failed', error: err.message };
     }
@@ -3091,7 +3174,7 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
     // outcome (charged, payer_billed, revoked, stale refusals — all of
     // which stamped the fee event closed) releases cleanly.
     const unresolvedCharge = chargeResult?.charged !== true
-      && ['charge_review', 'charge_failed'].includes(chargeResult?.reason);
+      && ['charge_review', 'charge_failed', 'collection_hold'].includes(chargeResult?.reason);
     return { ...chargeResult, handled: true, released: !unresolvedCharge };
   }
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
@@ -3496,18 +3579,24 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
         requireAutopayForCustomerId: svc.customer_id,
         requireSelfPayScheduledServiceId: scheduledServiceId,
         requireOneTimeLane: true,
+        // The charge primitive refuses an active collections dispute hold BY
+        // DEFAULT (B10) -> collection_hold office review.
       });
     } catch (err) {
-      logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);
-      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'charge_failed' });
+      // A collections dispute hold (B10) is a pre-charge, office-review
+      // refusal — reported as such, never as a failed/declined charge.
+      const onHold = require('./collections/collection-hold').isCollectionHoldRefusal(err);
+      logger.error(`[appt-card-request] recap completion charge ${onHold ? 'withheld (collections hold)' : 'failed'} for visit ${scheduledServiceId}: ${err.message}`);
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: onHold ? 'collection_hold' : 'charge_failed' });
       // Awaited so a rejected audit write is caught here, never an
       // unhandled rejection (pre-push r2 P1 — floating-promise rule).
       try {
-        await require('./autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
+        // A hold refusal is a SKIP, not a failed charge: distinct event type.
+        await require('./autopay-log').logAutopay(svc.customer_id, onHold ? 'skipped_collection_hold' : 'charge_failed', {
           details: { source: 'appointment_card_recap_completion', invoice_id: invoice.id, scheduled_service_id: scheduledServiceId, error: err.message },
         });
       } catch (e) { logger.warn(`[appt-card-request] autopay audit write failed: ${e.message}`); }
-      return { charged: false, reason: 'charge_failed', error: err.message };
+      return { charged: false, reason: onHold ? 'collection_hold' : 'charge_failed', error: err.message };
     }
     try {
       await require('./autopay-log').logAutopay(svc.customer_id, 'charge_success', {

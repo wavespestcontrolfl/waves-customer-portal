@@ -151,6 +151,9 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
   });
 
   test('returns null for every comparison phrasing named in review round 2 (Codex P1 follow-up)', () => {
+    // Codex r10 on #5216 narrows the bare and/or/from/not connectors to
+    // a pest named on BOTH sides; "brown recluse" still counts through the
+    // catalog's organism head nouns (recluse), so these stay null.
     expect(matchSpecies('brown recluse and huntsman spider')).toBeNull();
     expect(matchSpecies('difference between a brown recluse and a huntsman spider')).toBeNull();
     expect(matchSpecies('huntsman spider compared to brown recluse')).toBeNull();
@@ -182,6 +185,32 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
     expect(matchSpecies('bugs that look like fire ants')).toBeNull();
     expect(matchSpecies('what looks like a fire ant but isn\'t')).toBeNull();
     expect(matchSpecies('fire ant-like insects in Florida')).toBeNull();
+  });
+
+  // Codex r10 on #5216 ("Restrict comparison matching to comparison
+  // phrases"): and/or/from/not are ordinary connector words too, and
+  // matching them unconditionally nulled everyday single-species
+  // identification topics that happen to contain one.
+  // Codex r6–r9 on #5272: every narrowing of the connector words let a
+  // two-subject topic through, so and/or/from/not stay unconditional (as on
+  // main). The cost is fail-closed: these single-species topics get no
+  // automatic photo, and a human fills the slot.
+  test('a standalone connector word fails closed (no automatic photo)', () => {
+    expect(matchSpecies('where do fire ants come from')).toBeNull();
+    expect(matchSpecies('fire ant signs and identification')).toBeNull();
+    expect(matchSpecies('is it a fire ant or not')).toBeNull();
+    expect(matchSpecies('fire ants and insects')).toBeNull();
+    expect(matchSpecies('fire ants or pests')).toBeNull();
+    expect(matchSpecies('fire ants and gnats')).toBeNull();
+  });
+
+  test('a connector naming a pest on BOTH sides still reads as a comparison', () => {
+    expect(matchSpecies('fire ants or red ants')).toBeNull();
+    expect(matchSpecies('fire ants and ghost ants')).toBeNull();
+    // "termite" has no catalog entry at all — the generic pest-noun list
+    // (not the catalog aliases) is what must catch this, or the topic
+    // would wrongly resolve to the carpenter-ant photo.
+    expect(matchSpecies('carpenter ants from termites')).toBeNull();
   });
 
   test('a multi-species-ambiguous topic flags every photo slot rather than guessing', () => {
@@ -268,5 +297,88 @@ describe('isIdentificationPost matches the publisher\'s normalized post_type', (
     const shipped = normalizeAutonomousBlogFrontmatter({ title: 'T', meta_description: 'x', ...fmIn }, {}).post_type;
     expect(isIdentificationPost(fmIn)).toBe(shipped === 'diagnostic');
   });
+});
+
+describe('connector comparisons use the catalog\'s organism names', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['southern black widow or huntsman spider', null],
+    ['huntsman spider and brown widows', null],
+    ['fire ant bites and mounds', null],
+    ['fire ant signs and identification', null],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+
+// Codex r1 on #5272 ("Keep bare "like" comparison phrases fail-closed").
+describe('bare "like" stays comparison-shaped', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['bugs like fire ants', null],
+    ['insects like huntsman spiders', null],
+    ['what do fire ants look like', 'fire ant'],
+    ['what do fire ants look like in Florida?', 'fire ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+
+// Codex r2 on #5272 ("Recognize pluralized catalog head nouns").
+test('a pluralized catalog-only head noun still names a pest', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  expect(matchSpecies('brown recluses and huntsman spider')).toBeNull();
+  expect(matchSpecies('southern black widows or huntsman spider')).toBeNull();
+});
+
+// Codex r3 on #5272 ("Match complete catalog aliases around connectors"):
+// a topic that names any other catalog organism by its full name or alias
+// is a comparison, whatever joins the two.
+describe('a second pest named by its full catalog name', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['huntsman spider and daddy long legs', null],
+    ['fire ants and no-see-ums', null],
+    ['florida huntsman spider identification guide', 'huntsman spider'],
+    ['red imported fire ants in lawns', 'fire ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+
+// Codex r6 on #5272 ("Detect longer species names before blanking shared
+// aliases").
+describe('a longer species name that contains the matched alias', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['fire ants and little fire ants', null],
+    ['tawny crazy ant and longhorn crazy ant', null],
+    ['florida carpenter ants in the attic', 'Florida carpenter ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+
+// Codex r7 on #5272 ("Treat broad other-organism classes as a second pest").
+describe('"other" plus a broad organism class is a second subject', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['fire ants and other insects', null],
+    ['fire ants or other pests', null],
+    ['huntsman spiders and other arachnids', null],
+    ['house geckos and other reptiles', null],
+    ['fire ant pest control in bradenton', 'fire ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+
+// Codex r8 on #5272 ("Reject negated species topics before assigning photos").
+test.each([
+  ['this is not a fire ant'],
+  ['how to know it is not a fire ant'],
+])('%s names no species to photograph', (topic) => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  expect(matchSpecies(topic)).toBeNull();
 });
 

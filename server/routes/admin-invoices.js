@@ -1502,7 +1502,7 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
     }
 
     const { sendReceiptEmail } = require('../services/invoice-email');
-    const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
+    const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
     const sent = [];
     const failed = [];
     const skipped = [];
@@ -1546,35 +1546,23 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
           await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
         }
 
-        try {
-          const r = await sendReceiptEmail(invoiceId);
-          emailRes = r || null;
-          if (r?.ok) {
-            emailOk = true;
-            await recordOperatorReceiptEmail(claim);
-          }
-          else if (r?.error) errs.push(`email: ${r.error}`);
-        } catch (err) {
-          errs.push(`email: ${err.message}`);
-        }
+        emailRes = (await sendReceiptEmail(invoiceId).catch((err) => ({ ok: false, error: err.message }))) || null;
+        emailOk = emailRes?.ok === true;
+        if (emailOk) await recordOperatorReceiptDelivered(claim, 'email');
+        else if (emailRes?.error) errs.push(`email: ${emailRes.error}`);
 
-        try {
-          // The batch path pairs every SMS with the sendReceiptEmail attempt
-          // above — declare the sidecar so email-only customers skip the text.
-          // operatorInitiated: the admin confirmed "Send N receipts via
-          // SMS + email?" for these specific invoices, same as the single
-          // manual-resend routes below — without it an after-hours batch
-          // holds the SMS leg, the email success stamps receipt_sent_at,
-          // and the chosen text is dropped for good.
-          const r = await InvoiceService.sendReceipt(invoiceId, { hasEmailLeg: true, operatorInitiated: true });
-          if (r?.sent) {
-            smsOk = true;
-          } else {
-            errs.push(`sms: ${r?.reason || r?.code || 'not-sent'}`);
-          }
-        } catch (err) {
-          errs.push(`sms: ${err.message}`);
-        }
+        // The batch path pairs every SMS with the sendReceiptEmail attempt
+        // above — declare the sidecar so email-only customers skip the text.
+        // operatorInitiated: the admin confirmed "Send N receipts via
+        // SMS + email?" for these specific invoices, same as the single
+        // manual-resend routes below — without it an after-hours batch
+        // holds the SMS leg, the email success stamps receipt_sent_at,
+        // and the chosen text is dropped for good.
+        const sms = await InvoiceService.sendReceipt(invoiceId, { hasEmailLeg: true, operatorInitiated: true })
+          .catch((err) => ({ sent: false, reason: err.message }));
+        smsOk = sms?.sent === true;
+        if (smsOk) await recordOperatorReceiptDelivered(claim, 'sms');
+        else errs.push(`sms: ${sms?.reason || sms?.code || 'not-sent'}`);
 
         if (emailOk || smsOk) {
           await db('invoices').where({ id: invoiceId }).update({
@@ -1876,7 +1864,9 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
         status: 'scheduled',
         scheduled_send_at: when,
         scheduled_send_attempts: 0,
-        scheduled_send_error: null,
+        // The accepted-Text/pending-Email marker (a Text leg the visit summary text carries)
+        // survives a reschedule: clearing it would text the pay link a second time.
+        scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED%' OR scheduled_send_error LIKE 'SUMMARY_TEXT_PLANNED%' THEN scheduled_send_error ELSE NULL END"),
         scheduled_request_review: Boolean(requestReview),
         scheduled_review_delay_minutes: requestReview ? reviewDelayMinutes : null,
         updated_at: new Date(),
@@ -1921,7 +1911,18 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
     const result = await StripeService.chargeInvoiceWithSavedCard(
       req.params.id,
       paymentMethodId,
-      { expectedTotal },
+      // Staff ordered this charge explicitly: exempt from the default
+      // collections dispute-hold guard (an operator may override a hold).
+      // The override is recorded at the charge boundary (stripe.js) when a
+      // dispute hold is active, naming this admin.
+      {
+        expectedTotal,
+        operatorOverride: true,
+        overrideTrail: {
+          actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
+          route: 'admin_invoice_charge_card', invoiceId: req.params.id,
+        },
+      },
     );
     res.json({ success: true, ...result });
   } catch (err) {
@@ -2513,7 +2514,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
     }
 
     const { sendReceiptEmail } = require('../services/invoice-email');
-    const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
+    const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
 
     // The invoice's queued receipt job (if any) is claimed before anything
     // else runs, so it cannot deliver a second receipt around this send.
@@ -2547,7 +2548,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 
       if (via === 'email' || via === 'both') {
         emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
-        if (emailResult.ok) await recordOperatorReceiptEmail(claim);
+        if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
       }
       if (via === 'sms' || via === 'both') {
         // Manual operator resend — pass force:true to override the auto-send
@@ -2561,6 +2562,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
         } catch (err) {
           smsResult = { ok: false, error: err.message };
         }
+        if (smsResult.ok) await recordOperatorReceiptDelivered(claim, 'sms');
       }
 
       // Stamp receipt metadata whenever at least one channel succeeded. If

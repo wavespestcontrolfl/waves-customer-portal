@@ -3481,7 +3481,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
-        { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
+        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
       );
     } catch (e) {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);
@@ -4317,7 +4317,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
         'estimate',
         `Upsell added: ${firstName} ${lastName}`.trim(),
         `+ ${addLabels.join(', ')}`,
-        { icon: '\u{2728}', link: '/admin/leads', metadata: { leadId: lead.id } }
+        { icon: '\u{2728}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id } }
       );
     } catch (e) { logger.error(`[public-quote] Upsell admin notification failed: ${e.message}`); }
 

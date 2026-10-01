@@ -12,6 +12,15 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { TOOLS, executeToolCall } = require('./tools');
+const { recordGap } = require('../agent-gap-reports');
+
+// One texting-AI gap report for an escalation its caller marked as the
+// assistant not knowing how to help. Fire-and-forget; never throws.
+function recordEscalationGap(customerMessage, reason) {
+  const summary = (reason && String(reason).trim()) || customerMessage;
+  const attempted = customerMessage && customerMessage !== reason ? `Customer text: ${customerMessage}` : 'Escalated to staff';
+  recordGap({ source: 'texting-ai', summary, attempted }).catch(() => {});
+}
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -235,7 +244,8 @@ class WavesAssistant {
         for (const toolUse of toolUses) {
           // Check if it's an escalation
           if (toolUse.name === 'escalate') {
-            const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation');
+            const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
+              { gap: toolUse.input.not_supported === true });
             return escResult;
           }
 
@@ -393,7 +403,7 @@ class WavesAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason) {
+  async escalate(conversation, customerMessage, reason, { gap = false } = {}) {
     const customer = conversation.customer_id
       ? await db('customers').where('id', conversation.customer_id).first()
       : null;
@@ -414,6 +424,13 @@ class WavesAssistant {
       priority,
       status: 'pending',
     }).returning('*');
+
+    // Gap reports (server/services/agent-gap-reports.js): the caller says
+    // whether this escalation is the assistant not knowing how to help
+    // (`gap`), since classifyEscalation's keyword buckets can't tell a
+    // missing feature from a staff workflow. Fire-and-forget — a failed write
+    // must never affect the escalation reply.
+    if (gap) recordEscalationGap(customerMessage, reason);
 
     // The ai_escalations row above is the source of truth. Once it exists,
     // the customer must get the escalation reply — session bookkeeping and

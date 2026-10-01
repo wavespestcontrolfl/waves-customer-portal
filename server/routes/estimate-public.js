@@ -69,6 +69,8 @@ const {
   reconcilePricedTrenchingWarrantyEvidence,
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+const { lockSmsPhone, withSmsConsentLock } = require('../utils/customer-comms-lock');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const { pricedTreeShrubPalmCount } = require('../services/pricing-engine/tree-shrub-palm-priced');
@@ -144,6 +146,7 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
+const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
 function lawnCalendarBlock(services) {
@@ -161,6 +164,8 @@ const acceptanceTerms = require('../services/acceptance-terms-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
 const { buildEstimateConsultationOffer } = require('../services/estimate-consultation-offer');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
+const estimateMapImage = require('../services/estimate-map-image');
+const { ipFallbackKey } = require('../middleware/rate-limit-key');
 const {
   parcelOverlayEnabled,
   buildParcelOverlayParam,
@@ -4440,7 +4445,12 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     complexity ? { label: 'Complexity', value: complexity } : null,
   ]);
 
-  const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
+  // Never the raw stored value: a Static Maps URL carries the server key. The
+  // public payload gets the token-scoped proxy path instead (no token -> null).
+  const satelliteUrl = estimateMapImage.publicSatelliteUrl(
+    estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null,
+    estimate.token,
+  );
   // One-time-ONLY estimate whose rows all resolve to one service copy pack
   // (roach cleanout, flea, wasp, bed bug, …): the card describes THAT
   // service instead of the generic "reviewed your property" line. Mixed
@@ -4525,13 +4535,11 @@ function showYourWorkCountyName(county) {
 // estimator's own Static Maps overlay builder. Read-only: ANY miss or
 // error returns null so the page falls back to the stored satellite_url,
 // and nothing here logs the address/parcel/coords (public-route PII rule).
-async function resolveShowYourWorkOverlayUrl(estimate = {}) {
+async function resolveShowYourWorkOverlayStaticUrl(estimate = {}) {
   try {
     if (!parcelOverlayEnabled()) return null;
     const address = estimate.address || null;
     if (!address) return null;
-    const googleKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
-    if (!googleKey) return null;
     const row = await getCachedLookup(address);
     if (!row) return null;
     let parcel = row.parcel;
@@ -4543,10 +4551,20 @@ async function resolveShowYourWorkOverlayUrl(estimate = {}) {
     if (!parcel?.polygon || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
     const overlayParam = buildParcelOverlayParam(parcel.polygon);
     if (!overlayParam) return null;
-    return `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&${overlayParam}&key=${googleKey}`;
+    // KEYLESS on purpose: the server key is appended only inside the
+    // token-scoped proxy fetch (GET /:token/map/overlay), never in a payload.
+    return `${estimateMapImage.STATIC_MAP_BASE}?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&${overlayParam}`;
   } catch {
     return null;
   }
+}
+
+// The public payload only ever carries the proxy path; the proxy route
+// re-resolves the keyless URL itself from the same cached lookup row.
+async function resolveShowYourWorkOverlayUrl(estimate = {}) {
+  if (!estimate.token || !estimateMapImage.serverMapsKey()) return null;
+  const staticUrl = await resolveShowYourWorkOverlayStaticUrl(estimate);
+  return staticUrl ? estimateMapImage.publicMapProxyPath(estimate.token, 'overlay') : null;
 }
 
 async function buildShowYourWork(estimate = {}, estData = {}) {
@@ -5901,7 +5919,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
   const intelligence = isRegulatedCertificateSurface
     ? null
-    : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+    : buildWaveGuardIntelligencePayload({ ...est, token: est.token || token }, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
   // image swaps in for the plain one when available, and the facts /
   // parcel-match / quality-note block lands after the metrics grid. All
@@ -8220,7 +8238,17 @@ function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) 
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
     .set('Content-Type', 'text/html; charset=utf-8')
-    .send(renderPage(token, estimate, estData, membership, opts));
+    // Scrub the SOURCE values before renderPage HTML-escapes them (an escaped
+    // `&amp;key=` is no longer a param boundary), then scrub the finished HTML
+    // (entity-aware) as a backstop: no Maps key in any SSR HTML, whatever blob
+    // it rode in on, and whether or not it matches the configured key.
+    .send(estimateMapImage.scrubMapsKeysFromString(renderPage(
+      token,
+      estimateMapImage.scrubMapsKeysDeep(estimate),
+      estimateMapImage.scrubMapsKeysDeep(estData),
+      estimateMapImage.scrubMapsKeysDeep(membership),
+      estimateMapImage.scrubMapsKeysDeep(opts),
+    )));
 }
 
 // Existing-customer estimate treatment — waived WaveGuard setup fee and no
@@ -8926,7 +8954,7 @@ async function handleEstimateView(req, res, next) {
       createdAt: estimate.created_at,
       // This property's own offer deadline (#4309 round 7).
       expiresAt: estimate.expires_at,
-      satelliteUrl: estimate.satellite_url || null,
+      satelliteUrl: estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token),
       showOneTimeOption: !!estimate.show_one_time_option,
       oneTimeChoicePrice,
       pricingFrequencies: Array.isArray(pricingBundleForView?.frequencies)
@@ -11099,6 +11127,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       };
       let customerId = estimate.customer_id;
+      // True only when THIS accept minted the profile below (no linked,
+      // sibling, or phone-matched customer). Handed to the converter so the
+      // insert's own defaults (pipeline_stage 'active_customer' + the quoted
+      // monthly_rate) are never read as a pre-existing monthly membership.
+      let customerCreatedThisAccept = false;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -11246,11 +11279,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // explicit non-membership tier (the column defaults to 'Bronze'
             // if omitted, so it must be set).
             waveguard_tier: treatAsOneTime ? 'One-Time' : (estimate.waveguard_tier || 'Bronze'),
-            monthly_rate: treatAsOneTime ? null : effectiveMonthlyTotal,
+            // A termite-annual sign-before-pay accept PARKS in the converter
+            // before any customer write (activation, after signature, replays
+            // the whole conversion and re-stamps monthly_rate from the
+            // estimate's own monthly_total). Minting the profile with the
+            // quoted rate here would leave a bundled estimate's customer for
+            // up to 45 days with monthly_rate > 0 and billing_mode NULL —
+            // read as a monthly member by a second accept's phone match and
+            // admitted to the 1st-of-month charge sweep. NULL keeps it a
+            // non-member until the signature commits.
+            monthly_rate: (treatAsOneTime || isTermiteAnnualSignBeforePay) ? null : effectiveMonthlyTotal,
             member_since: etDateString(),
             referral_code: code,
           })).returning('*');
           customerId = newCust.id;
+          customerCreatedThisAccept = true;
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
@@ -12041,6 +12084,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          // IDENTITY of the profile this accept minted (null otherwise); the
+          // converter honors it only for that same row while its lane is
+          // still unstamped (see holdsExistingMembership).
+          createdCustomerId: customerCreatedThisAccept ? customerId : null,
           skipAutoSchedule: true,
           skipMembershipEmail: true,
           // Labeled manual-discount itemization on the prepay invoice (owner
@@ -12218,6 +12265,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          // IDENTITY of the profile this accept minted (null otherwise); the
+          // converter honors it only for that same row while its lane is
+          // still unstamped (see holdsExistingMembership).
+          createdCustomerId: customerCreatedThisAccept ? customerId : null,
           firstApplicationRowAmounts: firstApplicationRowAmounts.length ? firstApplicationRowAmounts : null,
           // The converter's own STANDARD draft-invoice branch runs on the
           // GLOBAL pool (its internal db.transaction + ledger reads), which
@@ -13138,13 +13189,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // SKIPPED conversion (converter found nothing to convert) may still
     // return a membershipEmail payload — no membership started, so send
     // nothing for it.
-    if (!annualPrepaySelected
-      && standardConversion?.membershipEmail
-      && standardConversion?.recurringConversionSkipped !== true) {
-      const AccountMembershipEmail = require('../services/account-membership-email');
-      void AccountMembershipEmail.sendMembershipStarted(standardConversion.membershipEmail)
-        .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
-    }
+    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): for a standard recurring
+    // signup the combined onboarding email below carries the property and the
+    // plan, so membership.started waits for that send and goes out inline right
+    // after it ONLY when the send did not cover it (decided at send time; owner
+    // ruling 2026-09-30). Gate off: exactly the block below, sent now.
+    const membershipDue = !annualPrepaySelected
+      && !!standardConversion?.membershipEmail
+      && standardConversion?.recurringConversionSkipped !== true;
+    const foldMembership = SignupSingleEmail.signupLaneEligible({ annualPrepaySelected, customerId, standardConversion });
+    const sendMembershipStarted = () => require('../services/account-membership-email')
+      .sendMembershipStarted(standardConversion.membershipEmail)
+      .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
+    if (membershipDue && !foldMembership) void sendMembershipStarted();
     // "You're booked — here's what happens next" onboarding email
     // (estimate.accepted_onboarding). Post-commit, fire-and-forget, and
     // idempotent per estimate so an accept retry can't double-send. The
@@ -13175,7 +13232,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
           : ad.localeCompare(bd);
       })[0] || null;
-      void sendEstimateAcceptedOnboarding({
+      const onboardingArgs = {
         customerId,
         estimateId: estimate.id,
         acceptanceId: acceptanceRecordId,
@@ -13184,7 +13241,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
           || 'service',
         appointment: firstAcceptedAppointment,
-      });
+      };
+      if (foldMembership) {
+        // The combined signup email, then membership.started unless that send
+        // covered it (anything but a covering send, including a throw, sends it).
+        void sendEstimateAcceptedOnboarding({ ...onboardingArgs, signup: { membershipEmail: standardConversion.membershipEmail } })
+          .catch((e) => logger.error(`[estimate-accept] onboarding email failed for customer ${customerId}: ${e.message}`))
+          .then((result) => (result?.coversMembership ? null : sendMembershipStarted()));
+      } else {
+        void sendEstimateAcceptedOnboarding(onboardingArgs);
+      }
     }
     if (customerId) {
       try {
@@ -24470,7 +24536,7 @@ function normalizeBreakdownItemLabel(item = {}) {
 // result.lineItems / engineResult.lineItems don't read as an empty mix here
 // (which would strip a setup fee the converter is going to invoice).
 function estimateDataRecurringServices(estData = {}) {
-  // Fall back to estData ITSELF like estimateRecurringKeysForDetails and the
+  // Fall back to estData ITSELF like estimateServiceDetailsScope and the
   // accept/read paths — some estimates store `recurring.services` at the
   // top level of estimate_data rather than under result/engineResult.
   const result = estData?.result && typeof estData.result === 'object'
@@ -24730,6 +24796,51 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
       ...(withContract.renderFlags?.manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
     },
   };
+}
+
+// The page's acceptance contract (acceptance.mode: whether the slot picker
+// renders at all) and the inputs /data reads alongside it. ONE resolution,
+// shared with the texting AI's estimate offers (estimate-slots-public
+// offerableEstimateSlots), so SMS offers times only where the page would
+// let the customer pick one.
+async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
+  const defaultServiceMode = defaultServiceModeForEstimate(estData, estimate);
+  const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+  const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+    serviceModes: adoptionServiceModesForContract(estimate, estData),
+  });
+  // Narrow low-confidence commercial recurring estimate (the population whose
+  // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
+  // its accept, whatever the billing mode — invoice-mode holds the first-
+  // invoice mint, non-invoice bills per application after the confirmed visit,
+  // and annual prepay is rejected/hidden until the price is confirmed. Drives
+  // /data's payment copy + deposit overrides AND the no-slot accept mode
+  // (slots return the empty commercial-manual list for every commercial auto
+  // estimate). Matches the accept-handler hold predicate.
+  const siteConfirmationHold = defaultServiceMode !== 'one_time'
+    && (() => {
+      const lc = commercialLowConfidenceRange(estData);
+      return lc.hasLowConfidence && !lc.forceSiteQuote;
+    })();
+  const commercialNoSlotAccept = siteConfirmationHold;
+  // Guarantee-only renewals accept with NO appointment: the acceptance
+  // contract tells the React view to skip the slot picker and offer the
+  // payment-only (invoice) accept. An existing linked appointment keeps
+  // precedence inside the contract — accepting against it works as-is.
+  const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estData);
+  // Accept + deposit-intent reject an invoice-mode estimate with no linked
+  // customer and no customer phone (nothing to bill / deliver the invoice
+  // to) — an email-only renewal must not advertise an accept the server
+  // refuses. Contact-required renewals get the call-office contract.
+  const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
+  const acceptance = buildEstimateAcceptanceContract({
+    quoteRequirement,
+    existingAppointment: linkedAppointment,
+    invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
+    invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
+    commercialNoSlotAccept,
+  });
+  return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance };
 }
 
 function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false } = {}) {
@@ -26442,13 +26553,53 @@ const serviceDetailsSendLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again later.' },
 });
 
-// The packet only exists for services actually ON this estimate.
-function estimateRecurringKeysForDetails(estimate) {
+// One-time lawn specialty lines (engine keys — estimate-one-time-copy.json)
+// carry the lawn prep & service guide too, so an estimate whose only lawn work
+// is one of these rows can fetch/send the 'lawn_care' packet — in its
+// one-time variant (no visit count, re-service, or program promises). Keep in
+// step with the client's ONE_TIME_LAWN_GUIDE_SERVICES (EstimateViewPage.jsx).
+const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
+// Mechanical/material lawn work that applies no product (prep-guide-sender.js).
+const MECHANICAL_LAWN_GUIDE_SERVICES = new Set(['plugging', 'dethatching', 'top_dressing']);
+
+// The packet only exists for services actually ON this estimate: the
+// recurring lines, plus 'lawn_care' when the estimate carries a one-time lawn
+// line. Nothing else widens — a one-time pest/rodent/termite row never unlocks
+// its (recurring-program) packet. One-time rows are read from the SAME
+// replayed pricing bundle /data sends the page (pricingBundle.oneTimeBreakdown,
+// stored breakdown as the fallback), so an engine-inputs-only estimate whose
+// page shows the guide row can also fetch it.
+// `preferOneTime` (the one-time card's `scope=one_time` hint): an estimate
+// that carries BOTH a recurring lawn line and a one-time lawn row (lawn
+// toggle estimate, one-time mode) serves the one-time variant. The hint only
+// picks the variant when a one-time lawn row is actually present — it never
+// widens `keys`, and recurring stays the default.
+// Returns { keys, lawnScope, mechanicalOnly } — lawnScope is 'recurring',
+// 'one_time', or null; mechanicalOnly = every one-time lawn row applies no
+// product (the guide then omits the product sections).
+async function estimateServiceDetailsScope(estimate, { preferOneTime = false } = {}) {
   const estData = parseEstimateDataSafe(estimate);
   const estResult = estData?.result || estData?.engineResult || estData || {};
-  return new Set(
+  const keys = new Set(
     recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
   );
+  const recurringLawn = keys.has('lawn_care');
+  if (recurringLawn && !preferOneTime) return { keys, lawnScope: 'recurring', mechanicalOnly: false };
+  let lawnRows = [];
+  try {
+    let breakdown = null;
+    try {
+      breakdown = (await buildPricingBundle(estimate))?.oneTimeBreakdown || null;
+    } catch { /* replay failed: fall back to the stored breakdown */ }
+    if (!breakdown) breakdown = normalizeOneTimeBreakdown(estData);
+    const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+    lawnRows = items.filter((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service));
+  } catch { /* malformed one-time data: no widening (fail closed) */ }
+  if (lawnRows.length) {
+    keys.add('lawn_care');
+    return { keys, lawnScope: 'one_time', mechanicalOnly: lawnRows.every((item) => MECHANICAL_LAWN_GUIDE_SERVICES.has(item.service)) };
+  }
+  return { keys, lawnScope: recurringLawn ? 'recurring' : null, mechanicalOnly: false };
 }
 
 router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
@@ -26473,10 +26624,13 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     }
     const serviceKey = String(req.params.serviceKey || '');
     const { serviceDetailsAvailable, buildServiceDetailsContent } = require('../services/estimate-service-details');
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.query?.scope === 'one_time' })
+      : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const content = await buildServiceDetailsContent(serviceKey, estimate);
+    const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
     const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
     const buffer = await renderServiceDetailsPdf(content);
     res.set('Content-Type', 'application/pdf');
@@ -26501,6 +26655,14 @@ const SERVICE_DETAILS_SMS_DEDUP_MS = 10 * 60 * 1000;
 // makes the offer eligible again — found the claim still held and could
 // never send.
 const WITHHELD_SMS_CLAIM_RECLAIM_SECONDS = 6;
+const POLICY_BLOCKED_CLAIM_OUTCOME = 'policy_blocked';
+// Recipient-level refusal from the policy chain on the packet text. The page
+// shows body.error as-is, so this doubles as the customer-facing copy: it
+// points at the PDF button and does not say why the text was refused.
+const SERVICE_DETAILS_SMS_UNAVAILABLE = Object.freeze({
+  ok: false,
+  error: 'Text is unavailable for this number — use the PDF button to view the details instead.',
+});
 
 router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
   try {
@@ -26570,7 +26732,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Generic 404, matching the GET route and the public-route contract — a
     // distinct error here would make the send endpoint a service-membership
     // oracle for bearer-token links.
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.body?.scope === 'one_time' })
+      : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
 
@@ -26594,11 +26759,15 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
-    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
+    // A one-time guide keeps its variant through the texted link.
+    // Only the lawn guide has a one-time variant; every other guide keeps one
+    // URL and one idempotency key regardless of the estimate's lawn scope.
+    const oneTimeLawnGuide = serviceKey === 'lawn_care' && detailsScope.lawnScope === 'one_time';
+    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf${oneTimeLawnGuide ? '?scope=one_time' : ''}`;
 
     if (channel === 'email') {
       if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
-      const content = await buildServiceDetailsContent(serviceKey, estimate);
+      const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
       if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
@@ -26618,7 +26787,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           triggerEventId: `estimate_service_details:${estimate.id}:${serviceKey}`,
           // One send per estimate+service+day — the button is customer-initiated
           // but a retap shouldn't stack identical emails.
-          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
+          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${etDateString()}`,
           categories: ['estimate_service_details'],
           // Codex round 1 on #4608 (P1): content derivation would catch the
           // estimate_url in the payload anyway, but the explicit id is
@@ -26660,7 +26829,6 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     }
 
     if (!contact.customerPhone) return res.status(400).json({ error: 'No phone on this estimate' });
-    const TwilioService = require('../services/twilio');
     // Retry/retap dedup, scoped to THIS estimate+service+recipient: the email
     // branch is idempotency-keyed per day, but TwilioService has no
     // idempotency support, so a double-tap or client retry would stack
@@ -26672,7 +26840,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // per estimate+service, underscore-safe; never a different packet)
     // covers restarts, best-effort: its failure never blocks the send.
     const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
-    const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    // The lawn guide's one-time variant is a different packet (its own link):
+    // it gets its own claim so neither variant dedups the other.
+    const dedupKey = `${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${tenDigits}`;
     const claimKey = dedupKey;
     // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably so
     // a concurrent loser's poll can read the SAME refusal — best-effort,
@@ -26683,6 +26853,18 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     const markClaimWithheld = async () => {
       try {
         await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: 'withheld' });
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
+    };
+    // Same durable stamp for a policy-chain refusal (suppression / consent /
+    // DNC): a cross-process loser polling the claim row reads it and answers
+    // the SAME generic 409 the winner does, instead of timing out into a 502.
+    // Bounded exactly like 'withheld': the claim-acquire takeover below lets a
+    // retap reclaim the row after WITHHELD_SMS_CLAIM_RECLAIM_SECONDS, so a
+    // stale marker can never keep answering 409 once the number is cleared.
+    // outcome is a free-form varchar(32) — no migration.
+    const markClaimPolicyBlocked = async () => {
+      try {
+        await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: POLICY_BLOCKED_CLAIM_OUTCOME });
       } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
     };
     const priorClaim = serviceDetailsSmsClaims.get(dedupKey);
@@ -26702,6 +26884,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // every other one on this route.
       if (shared?.success) return await withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
       if (shared?.withheld || shared?.code === 'ANNUAL_OFFER_WITHHELD') return res.status(404).json({ error: 'Estimate not found' });
+      if (shared?.policyBlocked) return res.status(409).json(SERVICE_DETAILS_SMS_UNAVAILABLE);
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     if (priorClaim?.sentAt && Date.now() - priorClaim.sentAt < SERVICE_DETAILS_SMS_DEDUP_MS) {
@@ -26713,12 +26896,31 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Cross-process gate: a SLIDING unique claim (atomic stale-takeover
     // upsert — no bucket edges) covers rolling-deploy overlap and any future
     // multi-replica config, where the Map only covers one process.
-    const recentPacketSend = async () => db('sms_log')
-      .where({ direction: 'outbound', message_type: 'estimate_service_details' })
-      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
-      .whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrl])
-      .whereRaw("created_at >= NOW() - interval '10 minutes'")
-      .first();
+    // sendCustomerMessage strips the leading https:// from every SMS link
+    // (owner directive; sms-link-policy), so the logged body carries the bare
+    // form. The bare URL is a substring of the scheme-ful one, so matching on
+    // it also still finds rows logged before this send moved onto the chokepoint.
+    const pdfUrlBare = stripSmsUrlScheme(pdfUrl);
+    const recentPacketSend = async () => {
+      let q = db('sms_log')
+        .where({ direction: 'outbound', message_type: 'estimate_service_details' })
+        .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
+        // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
+        // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
+        // so a row matches on the raw URL OR on a code minted for that exact URL.
+        .where(function packetLinkInBody() {
+          this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
+            .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
+        })
+        .whereRaw("created_at >= NOW() - interval '10 minutes'");
+      // The recurring lawn URL is a prefix of the one-time one, so a one-time
+      // text must not dedup a recurring request. (A wrapped body carries only
+      // /l/<code>, never the raw URL, so this never excludes a short-link row.)
+      if (serviceKey === 'lawn_care' && !oneTimeLawnGuide) {
+        q = q.whereRaw('strpos(COALESCE(message_body, \'\'), ?) = 0', [`${pdfUrlBare}?scope=one_time`]);
+      }
+      return q.first();
+    };
     const sendPromise = (async () => {
       // Claim acquired = fresh insert OR takeover of a claim older than the
       // window (a crashed winner never blocks forever). Claim-infra failure
@@ -26738,7 +26940,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           `INSERT INTO sms_send_claims (claim_key) VALUES (?)
            ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW(), outcome = NULL
            WHERE sms_send_claims.created_at < NOW() - interval '10 minutes'
-              OR (sms_send_claims.outcome = 'withheld'
+              OR (sms_send_claims.outcome IN ('withheld', '${POLICY_BLOCKED_CLAIM_OUTCOME}')
                   AND sms_send_claims.created_at < NOW() - interval '${WITHHELD_SMS_CLAIM_RECLAIM_SECONDS} seconds')
            RETURNING id`,
           [claimKey],
@@ -26782,6 +26984,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           try {
             const claimRow = await db('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
             if (claimRow?.outcome === 'withheld') return { success: false, withheld: true };
+            if (claimRow?.outcome === POLICY_BLOCKED_CLAIM_OUTCOME) return { success: false, policyBlocked: true };
           } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome poll skipped: ${e.message}`); }
         }
         return { success: false, claimHeldElsewhere: true };
@@ -26806,55 +27009,85 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         await markClaimWithheld();
         return { success: false, withheld: true };
       }
-      const smsSendResult = await TwilioService.sendSMS(
-        contact.customerPhone,
-        `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
-        {
-          customerId: estimate.customer_id || null,
-          messageType: 'estimate_service_details',
-          // Send-window classification at the provider handoff: this text
-          // is the customer's OWN live request — they tapped "text me the
-          // packet" on the estimate page seconds ago — the same
-          // self-service class as an inbound reply, so it carries
-          // conversationalContext and sends at night by design. Routed
-          // through the canonical validator anyway (this legacy path
-          // bypasses sendCustomerMessage) so any future change to that
-          // classification automatically applies here too.
-          //
-          // Codex round 1 on #4608 (P1): this path bypasses sendCustomerMessage
-          // entirely, so the chokepoint guard never gets a chance to run —
-          // composed in here instead, window check first (unchanged shape/
-          // priority), then the annual-offer guard on THIS estimate. A
-          // blocked verdict returns the same not-ok shape checkSendWindow
-          // does, so TwilioService.sendSMS withholds the send exactly like a
-          // window hold — no Twilio call — and the existing claim-release
-          // path above (a rejected sendPromise) runs unchanged. A guard
-          // infra error is caught by TwilioService's own preSendCheck
-          // wrapper and fails closed the same way (see services/twilio.js
-          // runPreSendCheck).
-          preSendCheck: async () => {
-            const { checkSendWindow } = require('../services/messaging/validators/send-window');
-            const windowVerdict = checkSendWindow({
-              channel: 'sms',
-              audience: 'customer',
-              purpose: 'conversational',
-              conversationalContext: true,
-              to: contact.customerPhone,
-            }, null, null);
-            if (!windowVerdict.ok) return windowVerdict;
-            const { annualHandoffGuard } = require('../services/estimate-annual-guard');
-            const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
-            if (verdict.blocked) {
-              return { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
-            }
-            return { ok: true };
-          },
+      // Routed through sendCustomerMessage (the policy chain) like every other
+      // customer/lead SMS: suppression (STOP / wrong_number / manual_dnc /
+      // non_mobile), sms_enabled consent, the send window, the annual-offer
+      // guard, the SMS link wrap and the audit row all run there. This used
+      // to call TwilioService.sendSMS directly with only a hand-composed
+      // window + annual preSendCheck, which never read messaging_suppression
+      // or notification_prefs. The claim/dedupe machinery above and below is
+      // unchanged; only the provider handoff moved. sms_log.message_type is
+      // still 'estimate_service_details' (metadata.original_message_type),
+      // which recentPacketSend() above keys on.
+      //
+      // The send window is exempt through the estimate_service_details_send
+      // customer-action entry point (validators/send-window): the customer
+      // tapped "text me the packet" seconds ago, the same self-service class
+      // as the estimate-accept texts.
+      const cmResult = await sendCustomerMessage({
+        to: contact.customerPhone,
+        body: `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
+        channel: 'sms',
+        audience: estimate.customer_id ? 'customer' : 'lead',
+        purpose: 'estimate_followup',
+        customerId: estimate.customer_id || undefined,
+        estimateId: estimate.id,
+        identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'estimate_token_verified',
+        consentBasis: estimate.customer_id ? undefined : {
+          status: 'transactional_allowed',
+          source: 'estimate_token_service_details',
+          capturedAt: new Date().toISOString(),
         },
-      );
-      // Codex round 3 on #4608 (P0): the SAME durable stamp for the OTHER
-      // withheld path — the composed preSendCheck's annual-offer block,
-      // resolved above as a coded refusal rather than a throw.
-      if (smsSendResult?.code === 'ANNUAL_OFFER_WITHHELD') await markClaimWithheld();
+        entryPoint: 'estimate_service_details_send',
+        // Suppression writers (STOP / wrong-number / DNC) serialize through
+        // lockSmsPhone. Taking the same lock here makes sendCustomerMessage
+        // re-read consent + suppression on the locked connection immediately
+        // before the Twilio call, and it FAILS CLOSED there (retryable
+        // SUPPRESSION_LOOKUP_FAILED / CONSENT_LOOKUP_FAILED) when suppression
+        // state cannot be positively loaded — so an opt-out committed after
+        // the initial read, or a read error the initial chain fails open on,
+        // can never send. Same shape as admin-leads / lead-auto-reply.
+        //
+        // A customer-backed estimate also takes the customer-comms lock BEFORE
+        // the phone lock (withSmsConsentLock's order): the global sms_enabled
+        // opt-out writer (routes/notifications.js) serializes on customer-comms,
+        // not the phone, so the notification_prefs re-read under this handoff
+        // sees it committed or the writer waits until Twilio has the request.
+        // Leads have no customer row, so they stay phone-lock only.
+        withSmsHandoff: estimate.customer_id
+          ? (dispatch) => withSmsConsentLock(db, { phone: contact.customerPhone, customerId: estimate.customer_id }, (trx) => dispatch(trx))
+          : (dispatch) => db.transaction(async (trx) => {
+            await lockSmsPhone(trx, contact.customerPhone);
+            return dispatch(trx);
+          }),
+        metadata: {
+          original_message_type: 'estimate_service_details',
+          estimate_id: estimate.id,
+          service: serviceKey,
+        },
+      });
+      // Map the chokepoint result onto the { success, deduped, code, withheld }
+      // contract the claim/response code below already speaks. `policyBlocked`
+      // = a definitive, non-retryable refusal by the policy chain (suppression,
+      // consent, DNC, identity ...): answered with one generic 409 that names
+      // no reason, and never retried.
+      const withheldByOffer = cmResult?.code === 'ANNUAL_OFFER_WITHHELD';
+      // A lookup/infra failure inside the chain (CONSENT_LOOKUP_FAILED carries
+      // no retryable flag) is transient, never a verdict on the number: it
+      // keeps the retryable 502, not the permanent 409.
+      const transientRefusal = /_(LOOKUP_)?FAILED$|_UNAVAILABLE$/.test(String(cmResult?.code || ''));
+      const smsSendResult = {
+        success: cmResult?.sent === true,
+        deduped: cmResult?.deduped === true ? true : undefined,
+        code: cmResult?.code,
+        withheld: withheldByOffer || undefined,
+        policyBlocked: cmResult?.sent !== true && cmResult?.blocked === true
+          && !withheldByOffer && !transientRefusal && cmResult?.retryable !== true,
+      };
+      // Codex round 3 on #4608 (P0): the durable stamp for the annual-offer
+      // withhold, resolved as a coded refusal rather than a throw.
+      if (withheldByOffer) await markClaimWithheld();
+      if (smsSendResult.policyBlocked) await markClaimPolicyBlocked();
       return smsSendResult;
     })();
     serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });
@@ -26880,7 +27113,12 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // claim would reopen the duplicate window it is guarding.
       if (smsResult?.claimHeldElsewhere) {
         serviceDetailsSmsClaims.delete(dedupKey);
-      } else if (withheld) {
+      } else if (withheld || smsResult?.policyBlocked) {
+        // A policy-chain refusal keeps its DB claim row for the same reason
+        // (its outcome is stamped 'policy_blocked' inside sendPromise): a
+        // cross-process loser mid-poll must still be able to read it. Only
+        // the in-process Map entry clears; the row is reclaimable after
+        // WITHHELD_SMS_CLAIM_RECLAIM_SECONDS, so a retap re-evaluates.
         // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): keep the DB
         // claim row (its outcome is already stamped 'withheld' inside
         // sendPromise, above) so a concurrent loser's poll can still read
@@ -26896,6 +27134,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         releaseClaims();
       }
       if (withheld) return res.status(404).json({ error: 'Estimate not found' });
+      // Policy-chain refusal (suppression / consent / DNC ...): one generic
+      // 409 whatever the reason, mirroring the email branch's address-level
+      // block — never says WHICH rule fired.
+      if (smsResult?.policyBlocked) return res.status(409).json(SERVICE_DETAILS_SMS_UNAVAILABLE);
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     // Structural fix (round 6): the LAST response site on this route —
@@ -27063,27 +27305,11 @@ async function composeEstimateDataPayload(estimate, {
     // risks handing it two different answers (pre-push audit P1).
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
     const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
-    const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
-    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const {
+      defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance,
+    } = await resolveEstimateAcceptance(estimate, estimateDataForIntelligence, pricingBundle);
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
       && estimateTrenchingReviewRequired(estimateDataForIntelligence);
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence, {
-      serviceModes: adoptionServiceModesForContract(estimate, estimateDataForIntelligence),
-    });
-    // Narrow low-confidence commercial recurring estimate (the population whose
-    // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
-    // its accept, whatever the billing mode — invoice-mode holds the first-
-    // invoice mint, non-invoice bills per application after the confirmed visit,
-    // and annual prepay is rejected/hidden until the price is confirmed. Drives
-    // the payment copy + deposit overrides below AND the no-slot accept mode
-    // (slots return the empty commercial-manual list for every commercial auto
-    // estimate). Matches the accept-handler hold predicate.
-    const siteConfirmationHold = defaultServiceMode !== 'one_time'
-      && (() => {
-        const lc = commercialLowConfidenceRange(estimateDataForIntelligence);
-        return lc.hasLowConfidence && !lc.forceSiteQuote;
-      })();
-    const commercialNoSlotAccept = siteConfirmationHold;
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -27116,24 +27342,7 @@ async function composeEstimateDataPayload(estimate, {
     // authored-proposal estimate): no line covering the whole estimate, on
     // the page or in Ask Waves, may state them.
     const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
-    // Guarantee-only renewals accept with NO appointment: the acceptance
-    // contract tells the React view to skip the slot picker and offer the
-    // payment-only (invoice) accept. An existing linked appointment keeps
-    // precedence inside the contract — accepting against it works as-is.
-    const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estimateDataForIntelligence);
     const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
-    // Accept + deposit-intent reject an invoice-mode estimate with no linked
-    // customer and no customer phone (nothing to bill / deliver the invoice
-    // to) — an email-only renewal must not advertise an accept the server
-    // refuses. Contact-required renewals get the call-office contract.
-    const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
-    const acceptance = buildEstimateAcceptanceContract({
-      quoteRequirement,
-      existingAppointment: linkedAppointment,
-      invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
-      invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
-      commercialNoSlotAccept,
-    });
     const intelligence = isRegulatedCertificateSurface
       ? null
       : buildWaveGuardIntelligencePayload(
@@ -27800,15 +28009,18 @@ async function composeEstimateDataPayload(estimate, {
         // Pinned override only on a signed pdf render pass — see docRenderPin.
         expiresAt: docRenderPin?.validThrough || estimate.expires_at,
         status: estimate.status,
-        // On a pdf render pass the HEADLESS SERVER browser fetches this URL,
-        // so it must be a known-good public imagery host — satellite_url is
-        // staff-writable free text, and an internal/arbitrary URL here would
-        // let a saved estimate steer server-side GETs (SSRF; codex #3281 r1).
-        // The customer's own browser (normal page loads) keeps the stored
-        // value unfiltered, today's behavior.
+        // A stored Google Static Maps URL is served as the token-scoped proxy
+        // path (GET /:token/map/satellite) — the server key never rides in a
+        // customer payload. The proxy rebuilds the URL from allow-listed
+        // stored params and only ever fetches maps.googleapis.com, so the PDF
+        // render pass (headless browser) can no longer be steered at an
+        // internal/arbitrary URL either (SSRF; codex #3281 r1): on that pass
+        // a non-Google stored value is dropped, as before.
         satelliteUrl: isPdfRenderPass
-          ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
-          : (estimate.satellite_url || null),
+          ? (estimateMapImage.isGoogleStaticMapUrl(estimate.satellite_url)
+            ? estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token)
+            : null)
+          : estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token),
         intelligence,
         // The server's regulated-surface decision (WDO / pre-treatment
         // certificate — AGENTS.md: no AI narrative, no ask bar), computed from
@@ -28154,7 +28366,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    res.json(await composeEstimateDataPayload(estimate, {
+    // scrubMapsKeysDeep: last line of defense — no server Maps key in this
+    // public JSON even if a keyed URL sits in some blob the builders missed.
+    res.json(estimateMapImage.scrubMapsKeysDeep(await composeEstimateDataPayload(estimate, {
       adminDraftPreview,
       isPdfRenderPass,
       docRenderPin,
@@ -28162,9 +28376,126 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       currentViewRecorded,
       isInternalRefresh,
       includeConsultationOffer: true,
-    }));
+    })));
   } catch (err) { next(err); }
 });
+
+// ── Token-scoped satellite image proxy ─────────────────────────────
+// The customer page/JSON/PDF pass reference these paths instead of a Google
+// Static Maps URL, because that URL carried the server's Maps key (the same
+// key Geocoding/Routes use, so it cannot be referrer-restricted). The route
+// validates the estimate token like the other public reads, rebuilds the
+// Static Maps URL server-side from the estimate's OWN stored parameters — it
+// reads NOTHING from the caller's query string, so it cannot be steered into
+// an open proxy or an arbitrary map — appends the key, and streams the bytes.
+const mapImageLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  // Shared key: collapses an IPv6 client's /64 to one bucket (raw req.ip
+  // would let it rotate addresses inside its subnet to dodge the limit).
+  keyGenerator: (req) => ipFallbackKey(req.ip),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
+// Headers every map response carries (404s included). Cross-Origin-Resource-
+// Policy is `cross-origin` because helmet defaults to same-origin, which would
+// block these <img> loads when the SPA is built against a separate API origin
+// (VITE_API_URL). The image is the estimate's own satellite view, already
+// behind the bearer token.
+function stampMapImageHeaders(res) {
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.set('X-Content-Type-Options', 'nosniff');
+}
+
+function mapImageNotFound(res) {
+  // ONE 404 body for every branch (gate off, malformed/unknown token,
+  // non-viewable row, no usable stored map, upstream failure): the route must
+  // not become an existence oracle for bearer-token links.
+  stampMapImageHeaders(res);
+  return res.status(404).set('Cache-Control', 'no-store').json({ error: 'Estimate not found' });
+}
+
+// The overlay route is dark while estimateShowYourWork is off: answer the
+// generic 404 BEFORE any limiter (a dark route must not 429) and before any
+// database work.
+function overlayGateOpen(req, res, next) {
+  if (!featureGates.isEnabled('estimateShowYourWork')) return mapImageNotFound(res);
+  return next();
+}
+
+// Matches exactly what Express routes to the two map handlers below: the
+// router is case-insensitive and non-strict (optional trailing slash), `:token`
+// is one non-slash segment, and GET handlers also answer HEAD. Matching is
+// against the raw path (path-to-regexp does not decode or collapse slashes), so
+// encoded or doubled-slash variants never reach these handlers either.
+const MAP_IMAGE_PATH_RE = /^\/[^/]+\/map\/(satellite|overlay)\/?$/i;
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/
+// limiter (which runs ahead of this router). It stamps the privacy headers
+// first — so router.param's malformed-token 404, the global limiter's 429 and
+// the route limiter's 429 all inherit no-store + CORP; a successful image
+// response overwrites Cache-Control — and answers the dark overlay's generic
+// 404 before the global limiter can turn it into a 429.
+function mapImagePreGuard(req, res, next) {
+  const match = MAP_IMAGE_PATH_RE.exec(req.path || '');
+  if (!match || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
+  stampMapImageHeaders(res);
+  res.set('Cache-Control', 'no-store');
+  if (match[1].toLowerCase() === 'overlay') return overlayGateOpen(req, res, next);
+  return next();
+}
+
+async function handleEstimateMapImage(kind, req, res, next) {
+  try {
+    stampMapImageHeaders(res);
+    // (router.param('token') already 404s a malformed token before this.)
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return mapImageNotFound(res);
+    // Same viewability contract as GET /:token/data (minus the staff-preview
+    // and signed-pdf-pin bypasses: an <img> carries no Bearer/pin, so drafts
+    // and expired links simply have no map).
+    if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
+      return mapImageNotFound(res);
+    }
+    const groupLinkViewBypass = Boolean(estimate.estimate_group_id)
+      && ['sent', 'viewed', 'expired'].includes(estimate.status)
+      && !estimate.archived_at
+      && !estimateOffCustomerSurface(estimate)
+      && groupLinkStillViewable(estimate);
+    if (!isEstimateCustomerViewable(estimate) && !groupLinkViewBypass) return mapImageNotFound(res);
+
+    let keylessUrl = null;
+    if (kind === 'overlay') {
+      keylessUrl = await resolveShowYourWorkOverlayStaticUrl(estimate);
+    } else {
+      const parsed = parseEstimateDataSafe(estimate);
+      keylessUrl = estimateMapImage.sanitizedStaticMapUrlFromStored(
+        estimate.satellite_url || parsed.satelliteUrl || null,
+      );
+    }
+    if (!keylessUrl) return mapImageNotFound(res);
+
+    const image = await estimateMapImage.fetchStaticMapImage(keylessUrl, {
+      cacheKey: `${estimate.id}:${kind}:${keylessUrl}`,
+    });
+    if (!image) {
+      logger.warn(`[estimate-map] ${kind} image unavailable upstream`);
+      return mapImageNotFound(res);
+    }
+    return res
+      .status(200)
+      .set('Content-Type', image.contentType)
+      .set('Content-Length', String(image.buffer.length))
+      .set('Cache-Control', 'private, max-age=3600')
+      .send(image.buffer);
+  } catch (err) { next(err); }
+}
+
+router.get('/:token/map/satellite', mapImageLimiter, (req, res, next) => handleEstimateMapImage('satellite', req, res, next));
+router.get('/:token/map/overlay', overlayGateOpen, mapImageLimiter, (req, res, next) => handleEstimateMapImage('overlay', req, res, next));
 
 async function handleEstimateAsk(req, res, next) {
   try {
@@ -28250,6 +28581,8 @@ async function handleEstimateAsk(req, res, next) {
 module.exports = router;
 // Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
+module.exports.mapImagePreGuard = mapImagePreGuard;
+module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.selectTierCeiling = selectTierCeiling;
@@ -28282,6 +28615,7 @@ module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServic
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
+module.exports.resolveEstimateAcceptance = resolveEstimateAcceptance;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.monthlyForRecurringPartsExact = monthlyForRecurringPartsExact;
@@ -28443,6 +28777,7 @@ module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
 module.exports.buildPricingServices = buildPricingServices;
+module.exports.estimateServiceDetailsScope = estimateServiceDetailsScope;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;

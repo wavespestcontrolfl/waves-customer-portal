@@ -902,6 +902,43 @@ describe('admin email template routes', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
+  // codex P1 round 4 — the REAL gate reader (not the mock): a non-prod
+  // explicit 'false'/'off' kill switch must make both admin execution
+  // endpoints report disabled, the same as production.
+  test.each(['false', 'off'])('reports disabled under the REAL gate when NODE_ENV=development and GATE_EMAIL_TEMPLATE_AUTOMATIONS=%s', async (gateValue) => {
+    const realGates = jest.requireActual('../config/feature-gates');
+    const savedGate = process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+    const savedNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = gateValue;
+    isEnabled.mockImplementation((gate) => realGates.isEnabled(gate));
+    try {
+      await withServer(async (baseUrl) => {
+        const triggerRes = await fetch(`${baseUrl}/admin/email-templates/automations/trigger`, {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ triggerEventKey: 'estimate.auto_renewed', payload: { estimate_id: 'est-1' } }),
+        });
+        expect(triggerRes.status).toBe(403);
+        expect(await triggerRes.json()).toEqual({ error: 'Email template automations are disabled' });
+
+        const processRes = await fetch(`${baseUrl}/admin/email-templates/automations/runs/process-due`, {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ limit: 10 }),
+        });
+        expect(processRes.status).toBe(403);
+      });
+      expect(db).not.toHaveBeenCalled();
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      else process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = savedGate;
+      process.env.NODE_ENV = savedNodeEnv;
+      isEnabled.mockReset();
+      isEnabled.mockReturnValue(true);
+    }
+  });
+
   test('lists automation execution run history for an automation', async () => {
     const runs = [{ id: 'run-1', automation_key: 'estimate.extension_notice', status: 'sent' }];
     const runsQuery = chain({ result: runs });

@@ -5,6 +5,9 @@
  *
  * Returned states:
  *   first_marker          — no prior score
+ *   rescaled              — earlier scores exist but none on this score's scale
+ *                           (#4741 tap-vs-blended); set by calculate.js, never
+ *                           by resolveTrend, and carries no delta
  *   improving             — delta <= improvingAtOrBelow (negative)
  *                           OR delta is negative and |delta| > stableBand
  *   stable                — |delta| <= stableBand
@@ -24,6 +27,7 @@
 
 const VALID_TRENDS = Object.freeze([
   'first_marker',
+  'rescaled',
   'improving',
   'stable',
   'increasing',
@@ -68,4 +72,14 @@ function resolveTrend(score, previousScore, thresholds) {
   return { trend: delta < 0 ? 'improving' : 'increasing', delta };
 }
 
-module.exports = { resolveTrend, VALID_TRENDS };
+// The trend a completion persists. Earlier scores that exist only on the other
+// scale (#4741 tap-vs-blended) are not a first score and carry no delta or
+// up/down claim: neutral 'rescaled'.
+function resolvePersistedTrend(score, previousScore, thresholds, { previousOnOtherScaleOnly = false } = {}) {
+  const resolved = resolveTrend(score, previousScore, thresholds);
+  return resolved.trend === 'first_marker' && previousOnOtherScaleOnly === true
+    ? { trend: 'rescaled', delta: null }
+    : resolved;
+}
+
+module.exports = { resolveTrend, resolvePersistedTrend, VALID_TRENDS };

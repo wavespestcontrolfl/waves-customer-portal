@@ -101,28 +101,28 @@ async function existingCustomerNotification(customerId, dedupeKey, connection = 
 // sweep. Customer-facing notifications are untouched.
 const { stripEmoji } = require('../utils/strip-emoji');
 
-// Admin brevity guard (owner ruling 2026-09-28, admin-alerts-brevity scope):
-// next to the no-emoji rule above, an `ops_digest` BODY over this length is
-// cut at a word boundary rather than left to run on for a screen-length
-// jargon dump — MAX_ADMIN_BODY_CHARS matches the scope doc's "one sentence,
-// 110 characters or less" rule. Scoped to `ops_digest` ONLY (see
-// DIGEST_CATEGORY below): only the Agents → Activity feed ever reads
-// `detail` (services/agent-activity.js, category ops_digest rows only), so
-// moving another admin category's body there would make the full text
-// unreachable — the bell would show a truncated line with nowhere to read
-// the rest. Every other admin category is stored byte-for-byte and merely
-// LOGGED when its body runs long, exactly like the title rule below. The
-// TITLE is never cut for ANY category (see MAX_ADMIN_TITLE_CHARS) —
-// several senders dedupe/refresh by an exact title lookup against the
-// stored row (google-business.js's "Review sync health escalation [...]"
-// signature marker and its per-location review-request title,
-// voice-agent/relay-alert.js); a title this guard silently shortened would
-// never match that probe again and the alert would re-ring on every run.
+// Admin brevity guard (owner rulings 2026-09-28 and 2026-09-30): an admin
+// BODY over this length is cut to one sentence rather than left to run on for
+// a screen-length jargon dump — MAX_ADMIN_BODY_CHARS matches the scope doc's
+// "one sentence, 110 characters or less" rule — and the full original moves to
+// `detail`, so no text is lost. Live for EVERY admin category unless
+// ADMIN_BODY_GUARD_ALL is killed (feature-gates.js adminBodyGuardAllLive);
+// killed, only `ops_digest` (DIGEST_CATEGORY below) is cut and every other
+// category is stored byte-for-byte and merely LOGGED when its body runs long.
+// `detail` is read back in two places: the bell's "Show full text" on any
+// non-digest row (client NotificationBell.jsx; the bell list endpoint returns
+// the whole row) and the Agents → Activity feed for `ops_digest` rows
+// (services/agent-activity.js). The TITLE is never cut for ANY category (see
+// MAX_ADMIN_TITLE_CHARS) — several senders dedupe/refresh by an exact title
+// lookup against the stored row (google-business.js's "Review sync health
+// escalation [...]" signature marker and its per-location review-request
+// title, voice-agent/relay-alert.js); a title this guard silently shortened
+// would never match that probe again and the alert would re-ring on every run.
 // ops-digest.js composes its OWN ≤60-char headline before this guard ever
 // sees it, so that path is unaffected either way.
 const DIGEST_CATEGORY = 'ops_digest'; // written by services/ops-digest.js and routes/ops-digest-ingest.js
 const MAX_ADMIN_TITLE_CHARS = 80; // logged when exceeded; never enforced by cutting
-const MAX_ADMIN_BODY_CHARS = 110; // enforced (cut into detail) for ops_digest only; logged for every other category
+const MAX_ADMIN_BODY_CHARS = 110; // enforced (cut into detail) for every admin category; ops_digest only when ADMIN_BODY_GUARD_ALL is killed
 
 // Cuts `text` to at most `max` chars, breaking on the last word boundary
 // inside the budget and appending an ellipsis — never mid-word, never over
@@ -139,16 +139,38 @@ function truncateAtWord(text, max) {
   return `${cut.trimEnd()}${ellipsis}`;
 }
 
-// Admin-only: for `ops_digest` rows, cuts an over-length BODY at a word
-// boundary and moves the full original into `detail` (the Activity feed's
-// only reader of it). A caller-supplied detail is kept ALONGSIDE the full
-// body (full body first), unless it already contains it verbatim. Every
-// OTHER admin category's body is stored unchanged and merely logged when
-// it runs long — nothing reads THEIR `detail`, so cutting would just lose
-// text. The TITLE is never cut for any category (see MAX_ADMIN_TITLE_CHARS
-// above) — only logged, so an offender can be found without breaking a
-// sender's own exact-title dedupe/refresh probe. Never logs title/body
-// text — they carry customer names — only the category.
+// ADMIN_BODY_GUARD_ALL through its canonical reader, asked at call time. A
+// reader that is missing or throws reads as LIVE: create() swallows its own
+// errors and returns null, so a failed gate read here would silently drop the
+// alert it was only meant to shorten.
+function bodyGuardAllLive() {
+  try {
+    const reader = require('../config/feature-gates').adminBodyGuardAllLive;
+    return typeof reader === 'function' ? reader() !== false : true;
+  } catch {
+    return true;
+  }
+}
+
+// A multi-line list body ("Follow-ups overdue:\n• item\n• item") cuts at its
+// first line break when that first line alone leaves room for the ellipsis;
+// anything else (one long line) is a plain word-boundary cut.
+function cutAdminBody(body) {
+  const trimmed = body.trim();
+  const firstLine = trimmed.split(/\r?\n/)[0].trim();
+  if (firstLine.length < MAX_ADMIN_BODY_CHARS && firstLine.length < trimmed.length) {
+    return `${firstLine.replace(/[\s:;,]+$/, '')}…`;
+  }
+  return truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
+}
+
+// Admin-only: cuts an over-length BODY (see the block above for which
+// categories) and moves the full original into `detail`. A caller-supplied
+// detail is kept ALONGSIDE the full body (full body first), unless it already
+// contains it verbatim. The TITLE is never cut for any category (see
+// MAX_ADMIN_TITLE_CHARS above) — only logged, so an offender can be found
+// without breaking a sender's own exact-title dedupe/refresh probe. Never logs
+// title/body text — they carry customer names — only the category.
 function applyAdminBrevityGuard({ category, title, body, detail }) {
   let nextBody = body;
   let nextDetail = detail || null;
@@ -157,8 +179,9 @@ function applyAdminBrevityGuard({ category, title, body, detail }) {
     logger.info(`[notifications] admin title over ${MAX_ADMIN_TITLE_CHARS} chars (${category || 'notification'})`);
   }
   if (typeof body === 'string' && body.length > MAX_ADMIN_BODY_CHARS) {
-    if (category === DIGEST_CATEGORY) {
-      nextBody = truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
+    const allLive = bodyGuardAllLive();
+    if (category === DIGEST_CATEGORY || allLive) {
+      nextBody = allLive ? cutAdminBody(body) : truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
       nextDetail = nextDetail && nextDetail.includes(body)
         ? nextDetail
         : [body, nextDetail].filter(Boolean).join('\n\n');
@@ -177,8 +200,9 @@ function applyAdminBrevityGuard({ category, title, body, detail }) {
 function normalizeAdminNotificationText({ category, title, body, detail }) {
   const strippedTitle = stripEmoji(title) || title;
   const strippedBody = stripEmoji(body) || null;
-  // `detail` is admin notification text too — the Activity feed renders it
-  // — so the no-emoji rule covers it like title/body (codex r2 P2 on #5236).
+  // `detail` is admin notification text too — the bell and the Activity feed
+  // render it — so the no-emoji rule covers it like title/body (codex r2 P2
+  // on #5236).
   const strippedDetail = stripEmoji(detail) || null;
   return applyAdminBrevityGuard({ category, title: strippedTitle, body: strippedBody, detail: strippedDetail });
 }
@@ -287,10 +311,18 @@ function createPlainAdmin(service, { category, title, body, createOpts, ringGate
 const NotificationService = {
   scopeAdminFeedToRole,
   // The admin row text exactly as create() would persist it (emoji-stripped,
-  // brevity-cut for ops_digest) — for a caller that rewrites a standing row
+  // brevity-cut) — for a caller that rewrites a standing row
   // directly instead of through notifyAdmin (google-business.js's
   // same-signature digest refresh), so its stored text can't drift.
   normalizeAdminText: normalizeAdminNotificationText,
+  // The `body` + `detail` columns for a direct rewrite of a standing admin row
+  // (setup-fee reconcile, manual-billing alert refresh): the one-sentence body
+  // and the full text, so the row's "Show full text" never keeps an obsolete
+  // instruction. `detail` is null when the body fits — the rewrite clears it.
+  adminBodyColumns(category, body) {
+    const { body: nextBody, detail } = normalizeAdminNotificationText({ category, title: '', body });
+    return { body: nextBody, detail };
+  },
   // Create a notification.
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
@@ -448,7 +480,10 @@ const NotificationService = {
         if (Number.isFinite(windowMs) && windowMs > 0) {
           existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
         }
-        const existing = await existingQuery.first();
+        // Newest row first: a key with a rolling window (or a duplicate left by
+        // an old race) can hold several rows, and the LATEST is the standing
+        // one — never an arbitrary older row.
+        const existing = await existingQuery.orderBy('created_at', 'desc').first();
         if (existing) {
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an
@@ -465,7 +500,18 @@ const NotificationService = {
           // A same-count backlog can contain new deadlines or reopened work.
           // Its optional version refreshes the one standing bell as well.
           const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
-          const detailChanged = (existing.detail || null) !== (nextDetail || null);
+          // A standing row stored BEFORE the guard cut this category holds the
+          // whole text in `body` and no `detail`. The same text arriving again
+          // is not news: without this, every such row would re-ring once on
+          // the first emission after the guard went live.
+          const storedUncut = !existing.detail && Boolean(nextDetail) && existing.body === nextDetail;
+          // The mirror, after ADMIN_BODY_GUARD_ALL is killed: a row stored cut
+          // (full text in `detail`) and the same whole text arriving uncut.
+          // Only when the caller supplied no detail of its own, so the stored
+          // detail can only be the guard's copy of that body.
+          const storedCut = !createOpts.detail && Boolean(existing.detail) && !nextDetail && existing.detail === nextBody;
+          const sameText = storedUncut || storedCut;
+          const detailChanged = !sameText && (existing.detail || null) !== (nextDetail || null);
           // Routing metadata is content too: a FIX -> ACT flip with identical
           // text must still merge the new feed/kind/audience, or the owner's
           // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
@@ -479,14 +525,14 @@ const NotificationService = {
           // Compared by JSON so an itemKeys array compares by value.
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(metadata[k] ?? null));
-          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
             // A row that newly enters the owner audience (engineering/fyi ->
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
             const enteredOwner = metadata.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
             const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
-            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged ? { detail: nextDetail } : {}), link: nextLink,
+            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null } : {}) };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
@@ -791,7 +837,8 @@ const NotificationService = {
     )
       .whereNull('read_at')
       .where('created_at', '<=', before);
-    if (customerId) q = q.where('link', `/admin/communications?thread=${customerId}`);
+    // The thread link, bare or with the alerted message (&message=<sid>, sms_reply).
+    if (customerId) q = q.whereRaw("split_part(link, '&message=', 1) = ?", [`/admin/communications?thread=${customerId}`]);
     if (sids.length) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [sids]);
     return q.update({ read_at: new Date() });
   },

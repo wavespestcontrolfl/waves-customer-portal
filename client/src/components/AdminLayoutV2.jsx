@@ -43,6 +43,7 @@ import GlobalCommandPalette from "./admin/GlobalCommandPalette";
 import { clearEmailDrafts } from "../lib/emailDrafts";
 import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
 import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
+import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -205,6 +206,11 @@ export default function AdminLayoutV2() {
   }, [authStatus, location.pathname, location.search]);
 
   const handleLogout = () => {
+    // Sign-out navigates by calling navigate() from a plain button — no
+    // popstate, no <a href> click — so it reaches neither CustomersPageV2's
+    // own guardLink/guardHistory nor any other page's in-app draft guard.
+    // Ask the shared registry (client/src/lib/navigation-guard.js) first.
+    if (!confirmLeaveIfGuarded()) return;
     clearEmailDrafts();
     clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");

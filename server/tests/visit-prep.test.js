@@ -12,6 +12,11 @@ const mockUploadFunnelPhotoToS3 = jest.fn();
 const mockConvertHeicToJpeg = jest.fn();
 const mockDeletePhoto = jest.fn().mockResolvedValue(undefined);
 const mockLockStopForRow = jest.fn(async (trx, id) => id);
+const mockTriggerPestRead = jest.fn(async () => {});
+// The upload hook calls the ONE read dispatcher, which picks the engine.
+jest.mock('../services/visit-prep-read-dispatch', () => ({
+  dispatchVisitPrepRead: (...args) => mockTriggerPestRead(...args),
+}));
 
 jest.mock('../utils/funnel-photos', () => ({
   uploadFunnelPhotoToS3: (...args) => mockUploadFunnelPhotoToS3(...args),
@@ -27,6 +32,10 @@ jest.mock('../services/photos', () => ({
 }));
 jest.mock('../services/visit-groups', () => ({
   lockStopForRow: (...args) => mockLockStopForRow(...args),
+}));
+const mockNotifyTechVisitPrepPhotos = jest.fn().mockResolvedValue(undefined);
+jest.mock('../services/visit-prep-tech-alert', () => ({
+  notifyTechVisitPrepPhotos: (...args) => mockNotifyTechVisitPrepPhotos(...args),
 }));
 // sharp stand-in (identity): the real decode/normalize path is proven in
 // visit-prep-image-decode.test.js; here the stages are the subject.
@@ -46,6 +55,7 @@ function chain(table) {
   api.where = () => api;
   api.whereIn = () => api;
   api.join = () => api;
+  api.forShare = () => { queries.push({ table, lock: 'share' }); return api; };
   // No scheduled_services rows by default: stopMemberIds falls back to
   // [svc.id] (see its own "always including svc.id" fallback), so an
   // ungrouped/simple grouped test never needs to stub this.
@@ -353,6 +363,22 @@ describe('createVisitPrepSubmission', () => {
     expect(inserted[0]).toMatchObject({ customer_id: 'cust-RECHECKED', property_id: 'prop-RECHECKED', visit_id: 'visit-RECHECKED' });
   });
 
+  test('the customer row is locked FOR SHARE before the stop lock (createOrJoinVisit order, Codex #5306 r2 P2)', async () => {
+    queries.length = 0;
+    const order = [];
+    mockLockStopForRow.mockImplementationOnce(async (trx, id) => { order.push('stop'); return id; });
+    mockDb.mockImplementation((table) => {
+      const api = chain(table);
+      if (table === 'customers') api.forShare = () => { order.push('customer'); return api; };
+      return api;
+    });
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({
+      svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck({ ...RECURRING_SVC }),
+    });
+    expect(order.slice(0, 2)).toEqual(['customer', 'stop']);
+  });
+
   test('recheck is called with the SAME transaction the write uses (Finding 1) — never the global pool', async () => {
     const recheckSpy = jest.fn(async () => RECURRING_SVC);
     const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
@@ -372,5 +398,104 @@ describe('createVisitPrepSubmission', () => {
     await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() }))
       .rejects.toMatchObject({ statusCode: 404, code: 'PREP_NOT_FOUND', message: 'Not found' });
     expect(mockLockStopForRow).toHaveBeenCalledTimes(3); // initial + 2 retries
+  });
+
+  // PR 6 (tech card + push): the ONE post-commit hook lives inside this
+  // function (see its own comment above `return`), so both the appointment
+  // page and any future customer-auth route inherit it with no per-caller
+  // wiring. visit-prep-tech-alert.js owns its own gate and silence rules —
+  // here we only prove the hook fires exactly when a submission actually
+  // stored something new, with the RECHECKED row's id, and never
+  // for a duplicate-only resubmit.
+  describe('tech alert hook (visit-prep-tech-alert.js)', () => {
+    test('a new submission triggers the hook with the RECHECKED row', async () => {
+      const currentRow = { id: 'svc-RECHECKED', customer_id: 'cust-1', property_id: 'prop-1', visit_id: 'visit-9' };
+      const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+      const result = await createVisitPrepSubmission({
+        svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck(currentRow),
+      });
+      expect(result.created).toBe(true);
+      expect(mockNotifyTechVisitPrepPhotos).toHaveBeenCalledTimes(1);
+      // Only the id: the alert re-reads technician, visit key and date live.
+      expect(mockNotifyTechVisitPrepPhotos).toHaveBeenCalledWith({
+        scheduledServiceId: 'svc-RECHECKED',
+      });
+    });
+
+    test('a duplicate-only resubmit (nothing new stored) never triggers the hook', async () => {
+      const { hashBuffer } = require('../services/service-report/photo-chain');
+      const dupHash = hashBuffer(JPEG_BYTES);
+      mockDb.mockImplementation((table) => {
+        const api = chain(table);
+        if (table === 'visit_prep_photos') api.select = async () => [{ image_sha256: dupHash }];
+        return api;
+      });
+      const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+      const result = await createVisitPrepSubmission({
+        svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck(),
+      });
+      expect(result.created).toBe(false);
+      expect(result.stored).toBe(0);
+      expect(mockNotifyTechVisitPrepPhotos).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('pest read hook (PR 5)', () => {
+  const { createVisitPrepSubmission } = require('../services/visit-prep');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb.mockImplementation((table) => chain(table));
+    mockLockStopForRow.mockImplementation(async (trx, id) => id);
+    mockUploadFunnelPhotoToS3.mockResolvedValue('visitprep/svc-1/photo_0.jpg');
+  });
+  afterEach(() => {
+    delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_PREP_PLANT_READ;
+    delete process.env.GATE_VISIT_FACTS;
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+  });
+  const flushImmediate = () => new Promise((resolve) => setImmediate(resolve));
+
+  test('gates off: the read is never dispatched', async () => {
+    mockTriggerPestRead.mockClear();
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
+    await flushImmediate();
+    expect(mockTriggerPestRead).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the read starts on the next tick, after the submission returns', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+    mockTriggerPestRead.mockClear();
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
+    expect(mockTriggerPestRead).not.toHaveBeenCalled();
+    await flushImmediate();
+    expect(mockTriggerPestRead).toHaveBeenCalledTimes(1);
+    expect(mockTriggerPestRead.mock.calls[0][0]).toMatchObject({ svc: expect.objectContaining({ id: 'svc-1' }) });
+  });
+
+  test('both read gates on: ONE dispatch per upload, never one per engine (Codex #5320 r9)', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_PREP_PLANT_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
+    await flushImmediate();
+    expect(mockTriggerPestRead).toHaveBeenCalledTimes(1);
+  });
+
+  test('only the plant read gate on: the upload still dispatches', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PLANT_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
+    await flushImmediate();
+    expect(mockTriggerPestRead).toHaveBeenCalledTimes(1);
   });
 });

@@ -81,6 +81,37 @@ function formatEventBlock(events) {
  * is its own object so we can assemble Beehiiv-quality HTML with GIFs,
  * styled metadata blocks, and per-event sections server-side.
  */
+// Topics only — no figure, duration, temperature, date range or named-source
+// number lives here (codex round 14 P1, the same rule as the Pest Insider
+// rotation): a fact restated in a static prompt outlives its withdrawal from
+// the register, and the flagship lane has no claim scan to catch it. The
+// numbers reach the writer through factsPromptBlock alone.
+// pest-insider.test.js pins this.
+const FLAGSHIP_SEASONAL_CONTEXT = [
+  '- Jan–Feb: snowbird peak, dry lawns, red tide drift; winter termite flights only as the verified facts state them',
+  '- Mar: spring break, citrus bloom, native and Asian subterranean termite flight season (from the verified facts)',
+  '- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents, lovebugs (their flight season, from the verified facts)',
+  '- May: DeSoto Heritage Festival, lovebugs, rainy season starts — container mosquitoes after rain (egg-to-adult timeline and the dump-and-scrub rhythm, from the verified facts)',
+  '- Jun: hurricane season begins, daily thunderstorms, the summer fertilizer restrictions (dates and places only as the verified facts state them)',
+  '- Jul: Fourth of July, peak rainy season, chinch bugs (their season, from the verified facts), palmetto bugs indoors (why they wander in, from the verified facts)',
+  '- Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine',
+  '- Sep: hurricane peak, Siesta Key Crystal Classic, post-storm yard checklist; drywood termite flights (from the verified facts); native subterranean termites have ONE flight season and no second swarm after storms',
+  '- Oct: snowbirds return, rodent exclusion checklist (roof rat access and exclusion, from the verified facts — the source gives no rodent season), Halloween on barrier islands',
+  '- Nov: Sarasota Season of Sculpture, turkey trots, winter annuals',
+  '- Dec: boat parades, winter termite flights only as the verified facts state them, holiday pantry pests',
+  '- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms',
+].join('\n');
+
+async function loadFactsBlock({ required }) {
+  try {
+    return await require('./email-division/fact-register').factsPromptBlock();
+  } catch (err) {
+    if (required) throw err;
+    logger.warn(`[newsletter-draft] flagship facts block unavailable, drafting without pest facts: ${err.message}`);
+    return '';
+  }
+}
+
 function buildFlagshipSystemPrompt(voice, month) {
   return `You write the Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
 
@@ -88,19 +119,8 @@ This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven w
 
 CURRENT MONTH: ${month}
 
-SWFL SEASONAL CONTEXT (pick what's relevant):
-- Jan–Feb: snowbird peak, dry lawns, red tide drift
-- Mar: spring break, love bugs, citrus bloom
-- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents
-- May: DeSoto Heritage Festival, mosquito ramp, no-see-um peak
-- Jun: hurricane season begins, daily thunderstorms, nitrogen blackout on lawns
-- Jul: 4th of July, peak rainy season, German roach pressure, palmetto bugs
-- Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine
-- Sep: hurricane peak, Siesta Key Crystal Classic, termite swarms after storms
-- Oct: snowbirds return, rodent season begins, Halloween on barrier islands
-- Nov: Sarasota Season of Sculpture, turkey trots, winter annuals
-- Dec: boat parades, cooler weather drives indoor pest activity
-- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms
+SWFL SEASONAL CONTEXT (pick what's relevant — TOPICS ONLY; every pest fact, date, count or timeline you state must come from the VERIFIED FACTS block at the end of this prompt, or be left out):
+${FLAGSHIP_SEASONAL_CONTEXT}
 
 VOICE:
 - Irreverent but not mean. Energetic but not chaotic. A hype-y group-chat friend, single narrator.
@@ -195,66 +215,73 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
 // season, override any month via the Compose prompt). Built from the
 // SWFL pest calendar: each month carries the featured service (the ONE
 // pitch), the Lawn Corner beat, and the content angles that month owns.
+//
+// Every slate names TOPICS only — never a figure, a duration, a
+// temperature, a date or a named-source number (codex PR #5187 r11). The
+// numbers live in the fact register alone and reach the prompt through
+// factsPromptBlock, so a fact withdrawn from the register (deactivated or
+// flagged) stops reaching the writer; a figure restated here would outlive
+// it. pest-insider.test.js pins this.
 const PEST_INSIDER_ROTATION = {
   January: {
-    service: 'rodent control & pest inspections (cool weather drives rats/mice indoors; snowbirds reopening closed-up homes — the "welcome-back inspection")',
+    service: 'rodent control & pest inspections (snowbirds reopening closed-up homes — the "welcome-back inspection"; roof rat exclusion from the verified facts — the source gives no rodent season, so do not invent one)',
     lawn: 'dry-season lawn watering discipline + winter annuals',
-    beats: 'rodents seeking warmth; surprises in snowbird homes',
+    beats: 'surprises in snowbird homes; how roof rats get in (reach and jumping, from the verified facts); winter termite flights — only what the verified facts say about native subterranean flight season',
   },
   February: {
     service: 'termite protection & WDO inspections (pre-swarm prep — the single most important content window of the year starts NOW)',
     lawn: 'pre-emergent timing before spring weeds wake up',
-    beats: 'flying ants vs termites — the 10-second test; drywood vs subterranean',
+    beats: 'flying ants vs termites — the quick look test; drywood vs subterranean',
   },
   March: {
-    service: 'subterranean termite treatment (swarm season is ON)',
-    lawn: 'spring lawn wake-up: first mow height, aeration timing',
-    beats: 'termite swarmers after warm rain; love bug season opener (pure engagement — everyone in SWFL has opinions)',
+    service: 'subterranean termite treatment (swarm season is ON — native and Asian subterranean flight seasons, from the verified facts)',
+    lawn: 'spring lawn wake-up: first mow height for St. Augustine (from the verified facts), aeration timing',
+    beats: 'termite swarmers after warm rain; citrus bloom (pure engagement — everyone in SWFL has opinions)',
   },
   April: {
-    service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mounds wake with spring rain)',
+    service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mating flights after spring rain, from the verified facts)',
     lawn: 'weed pre-emergents last call + aeration',
-    beats: 'love bugs peak; spring buyers need WDO',
+    beats: 'lovebugs on the road (their flight season, from the verified facts); spring buyers need WDO',
   },
   May: {
-    service: 'mosquito treatment (rainy-season kickoff = mosquito explosion — the biggest add-on push of the year)',
-    lawn: 'rainy-season mowing rhythm; watch for early chinch activity',
+    service: 'mosquito treatment (rainy-season kickoff — container mosquitoes after rain: the egg-to-adult timeline and the dump-and-scrub rhythm, from the verified facts — the biggest add-on push of the year)',
+    lawn: 'rainy-season mowing and watering rhythm for St. Augustine (from the verified facts); watch for early chinch activity',
     beats: 'standing-water audit checklist ("walk your yard with this list"); Memorial Day backyard prep',
   },
   June: {
-    service: 'mosquito treatment (daily thunderstorms = standing water everywhere)',
-    lawn: 'chinch bugs starting on St. Augustine; nitrogen blackout begins',
-    beats: 'hurricane season opens — what storms do to pests (displaced rodents, mosquito boom in debris, fire ant rafts)',
+    service: 'mosquito treatment (daily thunderstorms = standing water everywhere; container mosquitoes, from the verified facts)',
+    lawn: 'chinch bugs on St. Augustine (their season, from the verified facts); the summer fertilizer restrictions — dates and places only as the verified facts state them',
+    beats: 'hurricane season opens — the post-storm yard checklist (standing water and container mosquitoes, from the verified facts; clear debris); say only what the register supports about pests after storms',
   },
   July: {
-    service: 'quarterly pest defense (German cockroach & palmetto bug peak indoor pressure; ghost ants in kitchens)',
-    lawn: 'chinch bug damage spreading — brown patches that aren\'t drought',
-    beats: 'ghost ants, palmetto bugs, post-storm pest surges',
+    service: 'quarterly pest defense (palmetto bugs indoors — why they wander in, from the verified facts; ghost ants in kitchens — where they nest, from the verified facts)',
+    lawn: 'chinch bug damage (their peak, from the verified facts) — brown patches that aren\'t drought; the coffee-can flotation test',
+    beats: 'ghost ants, palmetto bugs, the coffee-can chinch test',
   },
   August: {
     service: 'lawn pest control (chinch bugs shredding St. Augustine — before/after season)',
-    lawn: 'sod webworms move in; recovery plan for chinch damage',
+    lawn: 'recovery plan for chinch damage (mowing height and watering for St. Augustine, from the verified facts)',
     beats: 'peak hurricane risk — post-storm yard checklist; back-to-school',
   },
   September: {
-    service: 'termite inspection (post-storm swarms) + lawn recovery',
-    lawn: 'fall fertilization window opens as blackout ends',
-    beats: 'hurricane peak; termite swarms after storms',
+    service: 'termite & WDO inspection (drywood flight seasons from the verified facts — native subterranean termites have ONE flight season and no second swarm after storms) + lawn recovery',
+    lawn: 'fall fertilization window opens as the summer restrictions end (dates only as the verified facts state them)',
+    beats: 'hurricane peak; post-storm yard checklist (standing water and container mosquitoes, from the verified facts; clear debris) — say only what the register supports about pests after storms; drywood termite flights in fall — never a "second subterranean swarm after storms"',
   },
   October: {
-    service: 'rodent exclusion (season begins as nights cool)',
-    lawn: 'fall fertilization + winterizing the irrigation schedule',
-    beats: 'spooky season fun: spider myths debunked, which Florida bugs are ACTUALLY dangerous',
+    service: 'rodent exclusion (roof rat access and exclusion, from the verified facts — the source gives no rodent season)',
+    lawn: 'fall fertilization (as the summer restrictions end — dates only as the verified facts state them) + watering days — state a district restriction ONLY if the verified facts below carry a current one; if they do not, say nothing about a schedule',
+    beats: 'spooky season fun: spider myths, which Florida bugs are ACTUALLY dangerous — sourced facts only, no invented seasonality',
   },
   November: {
-    service: 'rodent control (attics fill as snowbirds return)',
+    service: 'rodent control (attic checks as snowbirds return — roof rat exclusion from the verified facts; the source gives no rodent season)',
     lawn: 'winter annuals in; last fertilization call',
     beats: 'pantry pests before holiday baking; firewood hitchhikers',
   },
   December: {
     service: 'pest inspections (pest-proof the house before holiday guests; gift-a-service for elderly parents)',
     lawn: 'cool-season lawn care + holiday lighting vs irrigation',
-    beats: 'Christmas tree hitchhikers; pantry pests; cooler weather drives indoor activity',
+    beats: 'Christmas tree hitchhikers; pantry pests; winter termite flights — only what the verified facts say about native subterranean flight season',
   },
 };
 
@@ -1798,9 +1825,22 @@ async function createNewsletterDraft({
   //    prompt (no events, no anchoring); everything else gets the
   //    flagship events prompt.
   const isPestInsider = typeConfig?.key === 'pest-insider-monthly';
-  const systemPrompt = isPestInsider
+  // Pest Insider is grounded in the email fact register: the verified facts
+  // and the rule binding the writer to them are part of its system prompt.
+  // A draft that cannot load its facts fails rather than being written
+  // ungrounded.
+  // Both lanes are grounded in the same live register: the flagship's
+  // seasonal context names topics only, so its pest facts too come from the
+  // block appended here and stop reaching the writer the moment a fact is
+  // withdrawn (codex round 14 P1). The Pest Insider IS its facts and fails
+  // closed without them; the weekly events guide is not — an empty or
+  // unreachable register logs, the block is omitted, and the prompt's own
+  // rule ("from the verified facts block, or left out") keeps pest facts
+  // out of that issue (pre-push audit P1 on e0dd938596).
+  const factsBlock = await loadFactsBlock({ required: isPestInsider });
+  const systemPrompt = (isPestInsider
     ? buildPestInsiderSystemPrompt(voice, month)
-    : buildFlagshipSystemPrompt(voice, month);
+    : buildFlagshipSystemPrompt(voice, month)) + factsBlock;
 
   // Homeowner Minute RETIRED from the flagship (owner 2026-07-30) —
   // homeownerMinuteTopic is accepted for caller compatibility but no
@@ -2109,6 +2149,7 @@ module.exports = {
   sanitizePestInsiderDraft,
   assemblePestInsiderNewsletter,
   PEST_INSIDER_ROTATION,
+  FLAGSHIP_SEASONAL_CONTEXT,
   // Greeting personalization — token + per-recipient value + archive strip
   GREETING_NAME_TOKEN,
   greetingWithNameToken,

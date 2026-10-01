@@ -59,26 +59,46 @@ describe('safetyGate honors the durable engagement opt-out', () => {
   });
 });
 
-describe('opt-out key lockstep (contract)', () => {
-  // The follow-up sender and the engagement engine deliberately duplicate
-  // the predicate (a require cycle would hand one a partial export) — this
-  // pins BOTH to the same estimate_data key so they cannot drift apart.
+describe('opt-out key: ONE shared rule (contract)', () => {
+  // The predicate used to be duplicated per sender (a require cycle between
+  // the follow-up sender and the engagement engine kept them apart) and
+  // pinned in lockstep here. It now lives ONCE in the dependency-free leaf
+  // estimate-comms-eligibility.js (codex round 6 on #5154); this pins that
+  // every automated estimate sender imports it instead of re-deriving it.
   const fs = require('fs');
   const path = require('path');
   const read = (p) => fs.readFileSync(path.join(__dirname, p), 'utf8');
+  const { estimateOptedOutOfEngagement, estimateFollowupBlockedReason } = require('../services/estimate-comms-eligibility');
 
-  test('every enforcement module and the mint reference the same marker key', () => {
-    expect(read('../services/estimate-follow-up.js')).toMatch(/noEngagementAutomation === true/);
-    expect(read('../services/estimate-engagement-engine.js')).toMatch(/noEngagementAutomation === true/);
+  test('the shared rule reads the marker key the mint stamps (string or object form)', () => {
+    expect(read('../services/estimate-comms-eligibility.js')).toMatch(/noEngagementAutomation === true/);
+    expect(read('../services/service-report/click-estimate-mint.js')).toMatch(/noEngagementAutomation: true/);
+    expect(estimateOptedOutOfEngagement({ estimate_data: '{"noEngagementAutomation":true}' })).toBe(true);
+    expect(estimateOptedOutOfEngagement({ estimate_data: { noEngagementAutomation: true } })).toBe(true);
+    expect(estimateOptedOutOfEngagement({ estimate_data: '{not json' })).toBe(false);
+    expect(estimateFollowupBlockedReason({ archived_at: new Date(), estimate_data: {} })).toMatch(/archived/);
+    expect(estimateFollowupBlockedReason({ archived_at: null, estimate_data: { noEngagementAutomation: true } })).toMatch(/noEngagementAutomation/);
+    expect(estimateFollowupBlockedReason({ archived_at: null, estimate_data: {} })).toBeNull();
+  });
+
+  test.each([
+    'estimate-follow-up.js',
+    'estimate-engagement-engine.js',
     // The auto-renew sender extends AND emails — both forbidden for
     // opted-out estimates (uncapped audit r4 P1).
-    expect(read('../services/estimate-auto-renew.js')).toMatch(/noEngagementAutomation === true/);
+    'estimate-auto-renew.js',
     // extendEstimate forces silent for opted-out rows — the extension is
-    // allowed but its SMS/email announcement is not, and the PUBLIC
-    // extension-request flow calls it non-silently (in-hook audit on
-    // #3391 round 9). Central here so every caller inherits the guard.
-    expect(read('../services/estimate-extension.js')).toMatch(/noEngagementAutomation === true/);
-    expect(read('../services/service-report/click-estimate-mint.js')).toMatch(/noEngagementAutomation: true/);
+    // allowed but its SMS/email announcement is not (in-hook audit on
+    // #3391 round 9).
+    'estimate-extension.js',
+    // The email_template_automation lifecycle: marker + direct emit, and
+    // execution-time re-judgement of every estimate-entity run.
+    'estimate-expiration.js',
+    'email-template-automation-executor.js',
+  ])('%s imports the shared rule and keeps no local copy of the key check', (file) => {
+    const source = read(`../services/${file}`);
+    expect(source).toMatch(/require\('\.\/estimate-comms-eligibility'\)/);
+    expect(source).not.toMatch(/noEngagementAutomation === true/);
   });
 });
 

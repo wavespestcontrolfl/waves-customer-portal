@@ -4602,6 +4602,9 @@ async function parkTermiteAnnualPlanAccept({
     allowFirstApplicationFallback: opts.allowFirstApplicationFallback !== false,
     manualDiscountItemization: opts.manualDiscountItemization || null,
     adoptedExistingAppointmentId: opts.adoptedExistingAppointmentId || null,
+    // Identity of the customer this accept minted (see holdsExistingMembership);
+    // a legacy boolean key is deliberately not persisted or replayed.
+    createdCustomerId: opts.createdCustomerId ? String(opts.createdCustomerId) : null,
     // "Start date raw" — the caller's own booked-first-date override, if
     // any (prepay-on-book / manual accept with a booked appointment). Never
     // derived from a scheduled visit here, since none exists yet.
@@ -5098,7 +5101,27 @@ const EstimateConverter = {
     // (pre-push codex P1): a billing-mode change committing before the lock
     // must not bypass the unpriced-add-on refusal or reject a now-monthly
     // member on a stale pre-lock read.
-    let preservesExistingMembership = customerPreservesMonthlyMembership(customer);
+    // A profile minted by THIS accept (opts.createdCustomerId = its id, set only
+    // by the public accept route's own customer insert) is never an existing
+    // member: the insert's column defaults (pipeline_stage 'active_customer')
+    // plus the quoted monthly_rate satisfy the predicate, but nothing was
+    // billed before this accept. It converts exactly like a pre-existing
+    // non-member. The exemption is by IDENTITY, not a boolean, because a
+    // termite-annual accept parks and replays this opt at activation up to
+    // 45 days later: it holds only for that same customer row while its
+    // billing lane is still unstamped (billing_mode NULL). A merge that
+    // repointed the estimate to another customer, or a lane stamped since
+    // (e.g. monthly_membership), falls back to the normal predicate. Every
+    // other caller leaves the option unset (status quo).
+    const createdCustomerId = opts.createdCustomerId ? String(opts.createdCustomerId) : null;
+    const holdsExistingMembership = (row) => {
+      const mintedByThisAccept = createdCustomerId != null
+        && row != null
+        && String(row.id) === createdCustomerId
+        && row.billing_mode == null;
+      return !mintedByThisAccept && customerPreservesMonthlyMembership(row);
+    };
+    let preservesExistingMembership = holdsExistingMembership(customer);
     // An ADD-ON accept (existing recurring customer buying a NEW service
     // family) must not clobber monthly_rate with just the add-on's monthly:
     // for a monthly member the cron charges monthly_rate directly, so the
@@ -5139,7 +5162,7 @@ const EstimateConverter = {
         .first();
       if (lockedCustomerRow) {
         effectiveCustomer = lockedCustomerRow;
-        preservesExistingMembership = customerPreservesMonthlyMembership(effectiveCustomer);
+        preservesExistingMembership = holdsExistingMembership(effectiveCustomer);
       }
     }
     const addOnContext = suppressRecurringConversion

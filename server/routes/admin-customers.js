@@ -2621,6 +2621,63 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/collection-holds — active collections holds
+// (B10). A dispute hold ("stops_charges") halts every off-session charge and
+// the customer was told billing follow-up is on hold; this is how staff see it.
+router.get('/:id/collection-holds', requireAdmin, async (req, res, next) => {
+  try {
+    const { listCollectionHolds } = require('../services/collections/collection-hold-admin');
+    res.json({ holds: await listCollectionHolds(req.params.id) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/customers/:id/collection-holds/release — lift the hold after
+// the dispute is resolved. Body { holdId } (the id GET returned) releases
+// exactly that row, only while it is still active for this customer; a stale
+// or mismatched id is a 409 so a release can never lift a different (newer)
+// hold than the one staff were looking at. Audited; every charge lane resumes
+// on its next attempt.
+router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next) => {
+  try {
+    const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+    const holdId = typeof req.body?.holdId === 'string' ? req.body.holdId.trim() : '';
+    if (!holdId) {
+      return res.status(400).json({ error: 'holdId is required', code: 'HOLD_ID_REQUIRED' });
+    }
+    const conflict = () => Object.assign(new Error('This hold changed — reload'), {
+      statusCode: 409, status: 409, isOperational: true, code: 'HOLD_CHANGED',
+    });
+    // A non-uuid id can never match a hold row: stale/foreign, not a server fault.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(holdId)) throw conflict();
+    // The release and its CRITICAL audit row commit together: a failed audit
+    // write rolls the release back and the request errors.
+    const result = await db.transaction(async (trx) => {
+      const released = await releaseCollectionHold(req.params.id, { holdId, trx });
+      if (!released.ok) throw Object.assign(new Error('Could not release the hold'), { statusCode: 500 });
+      if (released.released < 1) throw conflict();
+      await recordAuditEvent({
+        actor_type: 'technician',
+        actor_id: req.technicianId || null,
+        action: 'customer.collection_hold_released',
+        resource_type: 'customer',
+        resource_id: req.params.id,
+        metadata: { released: released.released, hold_id: holdId, ...(released.fallbackRestored ? { fallback_restored: true } : {}) },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent') || null,
+        critical: true,
+        trx,
+      });
+      return released;
+    });
+    res.json({
+      released: result.released,
+      // The dispute was released but an earlier wrong-number / wrong-party hold on the
+      // same row stays active (all-channel outreach block); Customer 360 says so.
+      ...(result.fallbackRestored ? { fallbackRestored: true, message: 'Dispute released; the earlier wrong-number/wrong-party hold stays.' } : {}),
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
 // Lazily backfills a primary property for customers created after the migration.
 // requireAdmin: returns every active property address on the account — a
@@ -2670,7 +2727,11 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
-    res.json({ properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM') });
+    res.json({
+      properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
+      // Read once here so the panel mounts per-row area editors only when on.
+      propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
+    });
   } catch (err) { next(err); }
 });
 
@@ -2715,6 +2776,28 @@ router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const history = require('../services/customer-history');
     res.json(await history.listCustomerTimeline(db, customerId, req.query || {}));
+  } catch (err) {
+    if (err?.status === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+// GET /api/admin/customers/:id/activity — read-only "what they were sent and
+// what they did" feed (GATE_CUSTOMER_ACTIVITY_TIMELINE, dark by default).
+// requireAdmin: it shows message previews, link clicks and page views.
+// Dark = 200 { enabled: false } so the panel hides itself; no other read or
+// write happens. Query: before (ISO cursor from the previous page), limit.
+router.get('/:id/activity', requireAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').customerActivityTimelineLive()) return res.json({ enabled: false });
+    const { getCustomerActivity } = require('../services/customer-activity-timeline');
+    const { before, limit } = req.query || {};
+    const result = await getCustomerActivity(req.params.id, {
+      before: typeof before === 'string' && before ? before : null,
+      limit,
+    });
+    if (!result) return res.status(404).json({ error: 'Customer not found' });
+    res.json({ enabled: true, ...result });
   } catch (err) {
     if (err?.status === 400) return res.status(400).json({ error: err.message });
     next(err);

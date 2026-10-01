@@ -39,14 +39,15 @@ const NotificationService = require('./notification-service');
 const commitments = require('./call-commitments');
 const { etDateString, etCalendarDayOf, etParts } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const {
+  STAFF_APPROVED_SMS_TYPES, STAFF_CALL_SOURCES, operatorReply, personCallBack, smsDelivered,
+  operatorSentSql, smsContactSelects, callContactSelects,
+} = require('./staff-contact');
 
 // Same trigger as the overdue watchdog: registered tech-visible, so the
 // bell reaches the staff who work the Owed tab.
 const TRIGGER_KEY = 'call_commitment_overdue';
 const SLA_KINDS = Object.freeze(['callback', 'send_estimate', 'schedule_visit']);
-// Human-authored texts, as the callback proof counts them: typed by staff,
-// or an AI draft staff approved or revised before it went out.
-const HUMAN_TEXT_TYPES = Object.freeze(['manual', 'ai_approved', 'ai_revised']);
 const SLA_MINUTES = 60;
 const DAY_OPEN = '08:00';
 const DAY_CLOSE = '20:00';
@@ -135,9 +136,10 @@ function selectMissed(rows, { now = new Date(), calendar = OPEN_CALENDAR } = {})
 }
 
 // Customer activity after the promise that the fulfillment proof does not
-// model: a visit booked, a call that reached the customer (on any SLA kind,
-// not only callbacks), or a staff-typed text that was sent. Automated
-// texts (reminders, confirmations) never count as a follow-up.
+// model: a visit booked, a person's call that reached the customer (on any
+// SLA kind, not only callbacks), or a person's text that was delivered.
+// Automated calls and texts (collections, reminders, confirmations) never
+// count as a follow-up.
 // The caller's number on the promise's call: the dialed number on an
 // outbound call, the caller ID on an inbound one.
 // The call-commitments digits rule (phoneDigits / phoneWhere), so the pager
@@ -289,12 +291,14 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
   const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
     .where('created_at', '>', bookedFloor).whereNull('recurring_parent_id').whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at', 'scheduled_date', 'window_start') : [];
-  // A call that reached the customer — the proof's bar for a returned
-  // callback (completed customer leg of 60 s or more, affirmatively not
-  // voicemail), applied to every SLA kind; never a voice-relay sandbox call.
-  const calls = await byContact(conn('call_log'))
+  // A call a person placed that reached the customer: the proof's bar for a
+  // returned callback (staff-contact.js personCallBack: a staff-bridge
+  // source, a live conversation in the reviewed extraction, a card call's
+  // customer leg completed at 60 s or more), applied to every SLA kind;
+  // never an automated outbound call, never a voice-relay sandbox call.
+  const calls = (await byContact(conn('call_log'))
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-    .whereRaw("direction LIKE 'outbound%'").where('created_at', '>', floor)
+    .whereRaw("direction LIKE 'outbound%'").whereIn('source', STAFF_CALL_SOURCES).where('created_at', '>', floor)
     // The proof's two connected-call arms: a callback-card bridge whose
     // customer leg completed (>= 60 s, affirmatively not voicemail), or an
     // ordinary outbound call — no card link — whose own duration is >= 60 s.
@@ -309,15 +313,20 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
           .whereRaw('COALESCE(duration_seconds, 0) >= 60');
       });
     })
-    .select('id', 'customer_id', 'to_phone', 'created_at');
-  // A text a person typed that actually went out: the staff send paths stamp
-  // BOTH message_type 'manual' and admin_user_id (either alone admits
-  // automated texts), and only queued/sent/delivered rows reached anyone.
-  const texts = await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
+    .select('id', 'customer_id', 'to_phone', 'created_at', ...callContactSelects(conn))).filter(personCallBack);
+  // A text a person sent that reached the customer: the proof's rule
+  // (staff-contact.js operatorReply + smsDelivered: the composer's stamp,
+  // the sending admin or a staff-approved draft, and a delivered text). A
+  // bare 'manual' type is reused by automated senders, and a queued text
+  // reached no one yet.
+  const texts = (await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
     .whereRaw("direction LIKE 'out%'").where('created_at', '>', floor)
-    .whereIn('message_type', HUMAN_TEXT_TYPES).whereNotNull('admin_user_id')
-    .whereIn('status', ['queued', 'sent', 'delivered'])
-    .select('customer_id', 'to_phone', 'created_at');
+    .where(function personSent() {
+      this.whereRaw(operatorSentSql('sms_log')).orWhereIn('message_type', STAFF_APPROVED_SMS_TYPES);
+    })
+    .whereIn('status', ['sent', 'delivered'])
+    .select('customer_id', 'to_phone', 'created_at', 'status', 'message_type', 'from_phone', ...smsContactSelects(conn)))
+    .filter((t) => operatorReply(t) && smsDelivered(t));
   // A quote delivered to the customer rather than linked to this call: the
   // canonical proof records it as an association hint on the promise
   // (fulfillment kind estimate_sent, status still open) — its ownership rules
@@ -537,7 +546,7 @@ async function runInner({ now = new Date() } = {}) {
   let changed = 0;
   const latest = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body');
+    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body', 'detail', 'link');
   const meta = (latest && (typeof latest.metadata === 'string' ? JSON.parse(latest.metadata) : latest.metadata)) || {};
   const shown = latest && !meta.emptied ? (meta.missed_commitment_ids || []).map(String) : [];
   // A promise held over this way still drops off when later activity
@@ -574,10 +583,14 @@ async function runInner({ now = new Date() } = {}) {
     const { stripEmoji } = require('../utils/strip-emoji');
     const title = stripEmoji(`${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`);
     const body = stripEmoji(`Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${onList.map((r) => `• ${describe(r)}`).join('\n')}`);
+    // One miss opens its call; several open the Owed list.
+    const link = onList.length === 1 && onList[0].call_log_id
+      ? `/admin/communications#tab=calls&call=${encodeURIComponent(onList[0].call_log_id)}`
+      : '/admin/communications#tab=owed';
     if (fresh.length) {
       const key = `${ROLLING_KEY}:${now.toISOString()}`;
       const notif = await NotificationService.notifyAdmin('alert', title, body, {
-        link: '/admin/communications#tab=owed', dedupeKey: key, bell: true, trx,
+        link, dedupeKey: key, bell: true, trx,
         metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
       });
       if (!notif?.id || notif.suppressed) return;
@@ -591,12 +604,17 @@ async function runInner({ now = new Date() } = {}) {
     // emptied → read and flagged (a returning miss posts fresh); fewer
     // items or changed details → rewritten in place, read state kept.
     if (!shown.length) return;
+    // The brevity guard's form of this text (one-sentence body, full list in
+    // `detail`), exactly as the fresh post above is stored.
+    const next = NotificationService.normalizeAdminText({ category: 'alert', title, body });
     const patch = ids.length
-      ? { title, body, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
+      ? { title: next.title, body: next.body, detail: next.detail, link, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
       : { read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) };
-    // Same items, same words: nothing to write (an emptied patch carries no
-    // title, so it never matches).
-    if (patch.title === latest.title && patch.body === latest.body && ids.length === shown.length) return;
+    // Same items, same words, same link: nothing to write (an emptied patch
+    // carries no title, so it never matches). A post from before the link
+    // followed the list size is rewritten here, quietly.
+    if (patch.title === latest.title && patch.body === latest.body && (patch.detail ?? null) === (latest.detail ?? null) && ids.length === shown.length
+      && patch.link === latest.link) return;
     await trx('notifications').where({ id: latest.id }).update(patch);
   });
   return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: onList.length, alerted, changed, unverified: unverified.size };

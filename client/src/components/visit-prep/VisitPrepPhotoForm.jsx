@@ -8,7 +8,7 @@
  * which does the actual POST (today: the public tokened appointment-page
  * route with no auth; PR 4 reuses this same component from the app's
  * authenticated "Add photos for this visit" sheet with a different
- * onSubmit). This file owns only the form itself — chips, note, picker,
+ * onSubmit). This file owns only the form itself — note, camera/library pickers,
  * send, and the success/error/gone states — never an outer card/sheet
  * chrome, so either caller can wrap it in its own container.
  *
@@ -61,27 +61,6 @@ const EXT_MIME = {
 function mimeFromName(name) {
   return EXT_MIME[String(name || '').split('.').pop().toLowerCase()] || null;
 }
-
-// Same value sets server/services/visit-prep.js's TOPICS and
-// server/routes/requests.js's VALID_LOCATIONS accept. Labels are this
-// block's own plain customer copy (scope §4) — deliberately not
-// PhotoIdLocationOptions' Title Case labels for the same values.
-export const TOPIC_OPTIONS = [
-  { value: 'pest', label: 'Pest' },
-  { value: 'lawn', label: 'Lawn' },
-  { value: 'tree_shrub', label: 'Trees & shrubs' },
-  { value: 'other', label: 'Something else' },
-];
-
-export const LOCATION_OPTIONS = [
-  { value: 'front_yard', label: 'Front yard' },
-  { value: 'back_yard', label: 'Back yard' },
-  { value: 'side_yard', label: 'Side yard' },
-  { value: 'inside_home', label: 'Inside' },
-  { value: 'garage_lanai', label: 'Garage or lanai' },
-  { value: 'garden_beds', label: 'Garden beds' },
-  { value: 'other', label: 'Something else' },
-];
 
 const photoWord = (n) => (n === 1 ? 'photo' : 'photos');
 
@@ -152,28 +131,34 @@ async function processPickedFile(file) {
   return { file: outFile, preview };
 }
 
-function Chip({ label, active, onClick, disabled }) {
+function PickerButton({ icon, label, onClick, disabled }) {
   return (
     <button
       type="button"
+      data-glass="soft"
       onClick={onClick}
       disabled={disabled}
-      aria-pressed={active}
       style={{
-        minHeight: 48,
-        padding: '0 16px',
-        display: 'inline-flex',
+        width: '100%',
+        display: 'flex',
         alignItems: 'center',
-        borderRadius: 9999,
+        justifyContent: 'center',
+        gap: 8,
+        minHeight: 48,
+        padding: '0 12px',
+        borderRadius: 8,
+        // Same soft-glass secondary treatment as the page's own
+        // "Add to calendar" action.
+        border: `1px solid ${S.softBorder}`,
+        background: S.soft,
+        color: S.text,
         fontSize: 16,
         fontWeight: 600,
-        border: `1px solid ${active ? COLORS.glassNavy : S.borderStrong}`,
-        background: active ? COLORS.glassNavy : '#FFFFFF',
-        color: active ? COLORS.white : S.text,
         cursor: disabled ? 'default' : 'pointer',
         opacity: disabled ? 0.6 : 1,
       }}
     >
+      <Icon name={icon} size={16} />
       {label}
     </button>
   );
@@ -189,8 +174,6 @@ function Chip({ label, active, onClick, disabled }) {
  *   `.status === 404` switches this form to its "gone" state.
  */
 export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
-  const [topic, setTopic] = useState(null);
-  const [location, setLocation] = useState(null);
   const [note, setNote] = useState('');
   const [photos, setPhotos] = useState([]); // [{ file, preview }]
   const [phase, setPhase] = useState('form'); // 'form' | 'sending' | 'sent' | 'gone' | 'full'
@@ -201,7 +184,11 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
   // submit the OLD `photos` state and silently omit a photo still being
   // processed.
   const [pickingPhotos, setPickingPhotos] = useState(false);
-  const fileInputRef = useRef(null);
+  // Two pickers, same handler: the camera input opens the phone camera
+  // directly (`capture`), the library input opens photos/files — the
+  // take-or-upload choice the Photo ID flow offers, owner 2026-09-28.
+  const cameraInputRef = useRef(null);
+  const libraryInputRef = useRef(null);
   const mountedRef = useRef(true);
   const ackHeadingRef = useRef(null);
   // Explicitly set true on run, not just false on cleanup — React 18
@@ -290,8 +277,6 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
     photos.forEach((p) => formData.append('photos', p.file, p.file.name || 'photo.jpg'));
     const trimmedNote = note.trim();
     if (trimmedNote) formData.append('note', trimmedNote);
-    if (topic) formData.append('topic', topic);
-    if (location) formData.append('locationOnProperty', location);
     try {
       const response = await onSubmit(formData);
       if (!mountedRef.current) return;
@@ -394,31 +379,6 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         Add up to {maxPickable} {photoWord(maxPickable)} and a short note.
       </div>
 
-      <div role="group" aria-label="What it's about" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
-        {TOPIC_OPTIONS.map((opt) => (
-          <Chip
-            key={opt.value}
-            label={opt.label}
-            active={topic === opt.value}
-            onClick={() => setTopic((prev) => (prev === opt.value ? null : opt.value))}
-            disabled={formFrozen}
-          />
-        ))}
-      </div>
-
-      <div id="visit-prep-location-label" style={{ fontSize: 16, fontWeight: 600, color: S.text, marginBottom: 8 }}>Where on the property?</div>
-      <div role="group" aria-labelledby="visit-prep-location-label" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
-        {LOCATION_OPTIONS.map((opt) => (
-          <Chip
-            key={opt.value}
-            label={opt.label}
-            active={location === opt.value}
-            onClick={() => setLocation((prev) => (prev === opt.value ? null : opt.value))}
-            disabled={formFrozen}
-          />
-        ))}
-      </div>
-
       <label htmlFor="visit-prep-note" style={{ fontSize: 16, fontWeight: 600, color: S.text, display: 'block', marginBottom: 6 }}>
         A short note (optional)
       </label>
@@ -446,7 +406,17 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
       />
 
       <input
-        ref={fileInputRef}
+        ref={cameraInputRef}
+        data-testid="visit-prep-camera-input"
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={(e) => { handleFiles(e.target.files); e.target.value = ''; }}
+        style={{ display: 'none' }}
+      />
+      <input
+        ref={libraryInputRef}
+        data-testid="visit-prep-library-input"
         type="file"
         accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"
         multiple
@@ -517,32 +487,25 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
       ) : null}
 
       {photos.length < maxPickable ? (
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={pickerDisabled}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 8,
-            width: '100%',
-            minHeight: 48,
-            padding: '0 16px',
-            borderRadius: 8,
-            border: `1px dashed ${S.borderStrong}`,
-            background: S.soft,
-            color: S.text,
-            fontSize: 16,
-            fontWeight: 600,
-            cursor: pickerDisabled ? 'default' : 'pointer',
-            opacity: pickerDisabled ? 0.6 : 1,
-            marginBottom: 14,
-          }}
-        >
-          <Icon name="camera" size={16} />
-          {pickingPhotos ? 'Adding…' : 'Add photos'}
-        </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+          <PickerButton
+            icon="camera"
+            label="Take a photo"
+            onClick={() => cameraInputRef.current?.click()}
+            disabled={pickerDisabled}
+          />
+          <PickerButton
+            icon="upload"
+            label="Upload a photo"
+            onClick={() => libraryInputRef.current?.click()}
+            disabled={pickerDisabled}
+          />
+        </div>
+      ) : null}
+      {pickingPhotos ? (
+        <div role="status" style={{ fontSize: 16, color: S.muted, marginTop: -6, marginBottom: 14 }}>
+          Adding photos…
+        </div>
       ) : null}
 
       {error ? (
@@ -559,6 +522,11 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
 
       <button
         type="button"
+        data-glass-accent=""
+        // Without the size tag the glass theme's accent rule pins buttons
+        // at 44px !important; primary keeps the 48px customer touch target
+        // (same tag PhotoId's submit uses).
+        data-glass-size="primary"
         onClick={send}
         disabled={sendDisabled}
         style={{

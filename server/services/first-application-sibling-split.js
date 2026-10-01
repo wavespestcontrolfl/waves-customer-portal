@@ -205,14 +205,15 @@ const SETTLED_INVOICE_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES;
 // (cancelled/skipped/no-show) left the office holding money for work that
 // will not happen, with no alert telling them to refund or credit it.
 // 'processing' is deliberately NOT here (Codex round 14 P1): on an invoice it
-// means an ACH debit still in flight — not collected money yet. It can still
+// means a payment still in flight (an ACH debit, or a card / Terminal /
+// saved-card attempt parked for reconciliation) — not collected money yet. It can still
 // bounce, so "refund or credit" copy for it would be wrong; it gets its own
 // verdict (payment_pending_never_ran) below.
 const PAID_INVOICE_STATUSES = Object.freeze(['paid', 'prepaid']);
 function isInvoicePaid(status) {
   return PAID_INVOICE_STATUSES.includes(String(status));
 }
-// An ACH payment still settling: settled for collection purposes (nothing more
+// A payment still processing (any tender): settled for collection purposes (nothing more
 // to send the customer) but not yet money in hand. A never-ran covered member
 // here gets a "wait for the payment to resolve" alert, never a refund
 // instruction; once the invoice turns paid the paid_never_ran alert takes over
@@ -351,7 +352,7 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
     // split off with its own live invoice, the office already collected
     // money for work that will not happen — that needs a refund/credit
     // alert, distinct from the "split it by hand while still open" one
-    // below. A 'processing' (ACH in flight) invoice gets the "wait for the
+    // below. A 'processing' (payment in flight) invoice gets the "wait for the
     // payment to settle" variant instead. A voided/refunded/canceled/
     // cancelled invoice never collected outstanding money (or already gave
     // it back), so it keeps clearing unconditionally exactly as before.
@@ -468,69 +469,103 @@ function divergenceStateFingerprint({ anchor, diverging, invoiceId, invoiceTotal
 // standing alert stayed open forever with no future sweep able to
 // re-evaluate or clear it). The plain invoiceId match is kept only for
 // alerts raised before stampedInvoiceId existed.
-async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
-  const rows = await conn('scheduled_services as m')
-    .join('invoices as i', 'i.id', 'm.first_application_invoice_id')
-    .whereNotNull('m.first_application_invoice_id')
-    .where((scope) => {
-      scope.whereNotIn('i.status', SETTLED_INVOICE_STATUSES)
-        .orWhereExists(function standingUnresolvedAlertExists() {
-          this.select(1).from('notifications as n')
-            .where('n.recipient_type', 'admin')
-            .whereRaw("n.metadata->>'dedupeKey' LIKE 'first_application_sibling_divergence:%'")
-            .whereRaw("(n.metadata->>'stampedInvoiceId' = i.id::text OR n.metadata->>'invoiceId' = i.id::text)")
-            .whereRaw("n.metadata->>'autoCleared' IS DISTINCT FROM 'true'");
-        })
-        .orWhere((terminalWithLiveReplacement) => {
-          terminalWithLiveReplacement
-            .whereIn('i.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
-            .whereExists(function liveReplacementOnAnchorExists() {
-              this.select(1).from('invoices as r')
-                .whereRaw('r.scheduled_service_id = i.scheduled_service_id')
-                .whereRaw('r.id <> i.id')
-                .whereNotIn('r.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
-            });
-        })
-        // P1-C: a PAID (collected) invoice is normally excluded by the
-        // first clause above (it's in SETTLED_INVOICE_STATUSES) — but a
-        // group whose payment covers a stamped member that will never run
-        // (cancelled/skipped/no-show) and has no own live invoice needs a
-        // fresh refund/credit alert (evaluateGroupDivergence's
-        // paid_never_ran verdict) the FIRST time that member goes never-ran,
-        // before any standing alert exists to be recovered by the clause
-        // above. Scoped to the invoice's OWN stamped members via the
-        // first_application_invoice_id linkage (never the whole estimate),
-        // and only a member with no own live invoice — one already
-        // hand-split off is excluded here exactly like everywhere else in
-        // this module, so a resolved paid group never becomes a candidate
-        // through this clause alone.
-        //
-        // Also a 'processing' (ACH in flight) invoice — the same shape gets
-        // the payment_pending_never_ran alert (Codex round 14 P1). And the
-        // ANCHOR itself qualifies when never-ran, with NO own-live-invoice
-        // exclusion (Codex round 14 P1): the combined invoice sits on the
-        // anchor's own scheduled_service_id, so "own live invoice" would
-        // always find the paid combined invoice itself and hide a cancelled
-        // paid anchor forever; and a separate live invoice on the anchor is
-        // never evidence the combined charge moved (neverRanCoveredMembers).
-        .orWhere((paidWithNeverRanMember) => {
-          paidWithNeverRanMember
-            .whereIn('i.status', MONEY_REVIEW_INVOICE_STATUSES)
-            // Discovery admits EVERY paid/processing group with a never-ran
-            // stamped member; whether that member was already split off is
-            // decided in evaluation by flagOwnLiveInvoices' base-application
-            // check (invoiceBillsBaseApplication), never by "any live invoice
-            // on the row" in SQL — an unrelated add-on or repair invoice used
-            // to hide the whole group here before evaluation could run
-            // (Codex r17 P1, PR #5021). A genuinely split member evaluates to
-            // no alert, at the cost of one cheap evaluation.
-            .whereExists(function neverRanMemberOnInvoiceExists() {
-              this.select(1).from('scheduled_services as nr')
-                .whereRaw('nr.first_application_invoice_id = i.id')
-                .whereIn('nr.status', VISIT_NEVER_RAN_STATUSES);
-            });
+function applyCandidateScope(scope) {
+  scope.whereNotIn('i.status', SETTLED_INVOICE_STATUSES)
+    .orWhereExists(function standingUnresolvedAlertExists() {
+      this.select(1).from('notifications as n')
+        .where('n.recipient_type', 'admin')
+        .whereRaw("n.metadata->>'dedupeKey' LIKE 'first_application_sibling_divergence:%'")
+        .whereRaw("(n.metadata->>'stampedInvoiceId' = i.id::text OR n.metadata->>'invoiceId' = i.id::text)")
+        .whereRaw("n.metadata->>'autoCleared' IS DISTINCT FROM 'true'");
+    })
+    .orWhere((terminalWithLiveReplacement) => {
+      terminalWithLiveReplacement
+        .whereIn('i.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
+        .whereExists(function liveReplacementOnAnchorExists() {
+          this.select(1).from('invoices as r')
+            .whereRaw('r.scheduled_service_id = i.scheduled_service_id')
+            .whereRaw('r.id <> i.id')
+            .whereNotIn('r.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
         });
     })
+    // P1-C: a PAID (collected) invoice is normally excluded by the
+    // first clause above (it's in SETTLED_INVOICE_STATUSES) — but a
+    // group whose payment covers a stamped member that will never run
+    // (cancelled/skipped/no-show) and has no own live invoice needs a
+    // fresh refund/credit alert (evaluateGroupDivergence's
+    // paid_never_ran verdict) the FIRST time that member goes never-ran,
+    // before any standing alert exists to be recovered by the clause
+    // above. Scoped to the invoice's OWN stamped members via the
+    // first_application_invoice_id linkage (never the whole estimate),
+    // and only a member with no own live invoice — one already
+    // hand-split off is excluded here exactly like everywhere else in
+    // this module, so a resolved paid group never becomes a candidate
+    // through this clause alone.
+    //
+    // Also a 'processing' (payment in flight) invoice — the same shape gets
+    // the payment_pending_never_ran alert (Codex round 14 P1). And the
+    // ANCHOR itself qualifies when never-ran, with NO own-live-invoice
+    // exclusion (Codex round 14 P1): the combined invoice sits on the
+    // anchor's own scheduled_service_id, so "own live invoice" would
+    // always find the paid combined invoice itself and hide a cancelled
+    // paid anchor forever; and a separate live invoice on the anchor is
+    // never evidence the combined charge moved (neverRanCoveredMembers).
+    .orWhere((paidWithNeverRanMember) => {
+      paidWithNeverRanMember
+        .whereIn('i.status', MONEY_REVIEW_INVOICE_STATUSES)
+        // Discovery admits EVERY paid/processing group with a never-ran
+        // stamped member; whether that member was already split off is
+        // decided in evaluation by flagOwnLiveInvoices' base-application
+        // check (invoiceBillsBaseApplication), never by "any live invoice
+        // on the row" in SQL — an unrelated add-on or repair invoice used
+        // to hide the whole group here before evaluation could run
+        // (Codex r17 P1, PR #5021). A genuinely split member evaluates to
+        // no alert, at the cost of one cheap evaluation.
+        .whereExists(function neverRanMemberOnInvoiceExists() {
+          this.select(1).from('scheduled_services as nr')
+            .whereRaw('nr.first_application_invoice_id = i.id')
+            .whereIn('nr.status', VISIT_NEVER_RAN_STATUSES);
+        });
+    });
+}
+
+// Keyset page of candidate invoice ids (Codex r14 P2 on #5021): the sweep
+// pages invoice ids in SQL — invoice id ascending, strictly after `afterId`
+// — BEFORE loading any member rows, so the cursor bounds the DB read and
+// memory, not only the per-group transactions. Same candidate predicate as
+// loadCandidates (applyCandidateScope); an invoice counts only while at
+// least one visit is stamped to it. `atOrBeforeId` (the wrap-around page)
+// restarts from the beginning up to and including the cursor.
+async function loadCandidateInvoiceIdPage(conn, { afterId = null, atOrBeforeId = null, limit = SWEEP_BATCH_LIMIT } = {}) {
+  const q = conn('invoices as i')
+    .whereExists(function stampedMemberExists() {
+      this.select(1).from('scheduled_services as m').whereRaw('m.first_application_invoice_id = i.id');
+    })
+    .where(applyCandidateScope);
+  if (afterId != null) q.where('i.id', '>', afterId);
+  if (atOrBeforeId != null) q.where('i.id', '<=', atOrBeforeId);
+  return q.orderBy('i.id', 'asc').limit(limit).pluck('i.id');
+}
+
+// One tick's batch, a stable round-robin over every candidate invoice: the
+// page after the cursor, then (short of `limit`) a wrap-around page from
+// the start up to the cursor. Every candidate is visited within
+// ceil(candidates / limit) ticks and never starved behind the head of the
+// list; a batch never repeats an invoice.
+async function loadSweepBatchInvoiceIds(conn, { cursor = null, limit = SWEEP_BATCH_LIMIT } = {}) {
+  const page = await loadCandidateInvoiceIdPage(conn, { afterId: cursor, limit });
+  if (page.length >= limit || cursor == null) return page;
+  const wrap = await loadCandidateInvoiceIdPage(conn, { atOrBeforeId: cursor, limit: limit - page.length });
+  return [...page, ...wrap];
+}
+
+async function loadCandidates(conn, { limit = SWEEP_LIMIT, invoiceIds = null } = {}) {
+  const query = conn('scheduled_services as m')
+    .join('invoices as i', 'i.id', 'm.first_application_invoice_id')
+    .whereNotNull('m.first_application_invoice_id')
+    .where(applyCandidateScope);
+  if (invoiceIds) query.whereIn('m.first_application_invoice_id', invoiceIds);
+  const rows = await query
     .orderBy('m.first_application_invoice_id', 'asc')
     .orderBy('m.id', 'asc')
     .select(
@@ -618,8 +653,10 @@ function alertInvoiceReference(invoice, estimateId) {
 // empty for it — the branches below still cover it defensively rather than
 // assuming that invariant holds forever.
 //
-// payment_pending_never_ran (Codex round 14 P1): the invoice's ACH payment is
-// still settling ('processing'), so nothing is collected yet and it may still
+// payment_pending_never_ran (Codex round 14 P1): the invoice's payment is
+// still processing — an ACH debit, or a card / Terminal / saved-card attempt
+// parked for reconciliation (Codex r17 P2 on #5021: the copy stays
+// tender-neutral) — so nothing is collected yet and it may still
 // bounce — the copy says to WAIT for it to resolve, never to refund or credit
 // now. The alert clears on its own once the payment settles (the paid alert
 // takes over) or fails.
@@ -630,9 +667,9 @@ const MONEY_ALERT_COPY = Object.freeze({
     actionSentence: 'The combined first-application invoice already collected money for it — refund or credit that share.',
   },
   payment_pending_never_ran: {
-    memberAction: 'its share is part of an ACH payment that is still settling',
-    leadSentence: 'A same-trip visit from one estimate will not be serviced, and the combined invoice\'s ACH payment is still settling',
-    actionSentence: 'Wait for the ACH payment to settle or fail before refunding or crediting that share — this alert updates when it resolves.',
+    memberAction: 'its share is part of a payment that is still processing',
+    leadSentence: 'A same-trip visit from one estimate will not be serviced, and the combined invoice\'s payment is still processing (not yet settled or reconciled)',
+    actionSentence: 'Wait for that payment to settle, fail, or be reconciled before refunding or crediting that share — this alert updates when it resolves.',
   },
 });
 function buildDivergenceAlertCopy({ diverging, anchorDate, alertKind }) {
@@ -662,7 +699,7 @@ function buildDivergenceAlertCopy({ diverging, anchorDate, alertKind }) {
 
 const ALERT_TITLES = Object.freeze({
   paid_never_ran: 'Paid first-application invoice covers a visit that will not run',
-  payment_pending_never_ran: 'First-application ACH payment still settling for a visit that will not run',
+  payment_pending_never_ran: 'First-application payment still processing for a visit that will not run',
   diverged: 'First-application invoice may need to be split by hand',
 });
 
@@ -753,8 +790,8 @@ async function raiseDivergenceAlert(conn, {
         // Which kind of alert this is (P1-C): 'paid_never_ran' when the
         // combined invoice already collected money and a covered member
         // will never run (refund/credit action),
-        // 'payment_pending_never_ran' when that payment is an ACH debit
-        // still settling (wait, then act), 'diverged' for the ordinary
+        // 'payment_pending_never_ran' when that payment is still
+        // processing (wait, then act), 'diverged' for the ordinary
         // still-open split-by-hand alert. Informational only — no read path
         // branches on it; the dedupeKey's own 'refund:' / 'pending:' marker
         // (see evaluateEstimateCandidates) is what actually keeps the alert
@@ -1063,37 +1100,18 @@ async function saveSweepCursor(conn, lastInvoiceId) {
     .merge({ last_estimate_id: lastInvoiceId, updated_at: conn.fn.now() });
 }
 
-// Bound the candidate groups to a fair, per-tick batch so one tick can
-// never run unbounded. groups is ordered the same way loadCandidates'
-// query is (invoice id ascending), so slicing after the cursor and
-// wrapping is a stable keyset walk: every candidate is visited within
-// ceil(groupCount / SWEEP_BATCH_LIMIT) ticks, never starved behind an
-// always-same head of the list. Unlike the old structural-guessing
-// design, there is no separate "established, never bounded" category any
-// more — every stamped candidate loadCandidates returns (including a
-// standing-alert recovery case) is equally current, so the SAME batch
-// covers everything.
-function selectSweepBatch(groups, cursor) {
-  if (groups.length <= SWEEP_BATCH_LIMIT) return groups;
-  const invoiceIdOf = (group) => String(group[0].invoice_id);
-  let startIndex = 0;
-  if (cursor != null) {
-    const afterCursor = groups.findIndex((group) => invoiceIdOf(group) > String(cursor));
-    startIndex = afterCursor === -1 ? 0 : afterCursor;
-  }
-  const batch = [];
-  for (let i = 0; i < groups.length && batch.length < SWEEP_BATCH_LIMIT; i += 1) {
-    batch.push(groups[(startIndex + i) % groups.length]);
-  }
-  return batch;
-}
-
+// Per tick: a keyset page of candidate invoice ids after the persisted
+// cursor (loadSweepBatchInvoiceIds — paged in SQL, Codex r14 P2 on #5021),
+// then member rows for exactly those invoices. The read and memory are
+// bounded by SWEEP_BATCH_LIMIT invoices, however many candidates exist.
 async function runSweepInner() {
-  const candidates = await loadCandidates(db);
-  const allGroups = groupCandidatesByInvoice(candidates);
-
-  const cursor = allGroups.length > SWEEP_BATCH_LIMIT ? await loadSweepCursor(db) : null;
-  const groups = selectSweepBatch(allGroups, cursor);
+  let cursor = null;
+  try { cursor = await loadSweepCursor(db); } catch (err) {
+    logger.warn(`[first-application-sibling-split] sweep cursor read failed (starting from the beginning): ${err.message}`);
+  }
+  const batchIds = await loadSweepBatchInvoiceIds(db, { cursor });
+  const candidates = batchIds.length ? await loadCandidates(db, { invoiceIds: batchIds }) : [];
+  const groups = groupCandidatesByInvoice(candidates);
 
   let alerted = 0;
   let cleared = 0;
@@ -1108,14 +1126,12 @@ async function runSweepInner() {
       logger.error(`[first-application-sibling-split] sweep failed for invoice group ${group[0].invoice_id}: ${err.message}`);
     }
   }
-  // Advance the cursor to the LAST invoice this tick actually touched, so
-  // the next tick resumes right after it — even a batch that included a
-  // failure still advances (the failed group is retried on its own next
-  // natural pass through the rotation; it never blocks the cursor from
-  // moving forward and starving everyone behind it).
-  if (allGroups.length > SWEEP_BATCH_LIMIT && groups.length) {
-    const lastInvoiceId = groups[groups.length - 1][0].invoice_id;
-    try { await saveSweepCursor(db, lastInvoiceId); } catch (err) {
+  // Advance the cursor to the LAST invoice of this tick's batch in rotation
+  // order, so the next tick resumes right after it — even a batch that
+  // included a failure still advances (the failed group is retried on its
+  // next natural pass; it never blocks everyone behind it).
+  if (batchIds.length) {
+    try { await saveSweepCursor(db, batchIds[batchIds.length - 1]); } catch (err) {
       logger.warn(`[first-application-sibling-split] sweep cursor save failed (non-fatal): ${err.message}`);
     }
   }
@@ -1123,7 +1139,7 @@ async function runSweepInner() {
     throw new Error(`${failed} of ${groups.length} first-application sibling-split group(s) failed this tick — left for the next run`);
   }
   return {
-    scanned: candidates.length, alerted, cleared, failed, groupsTotal: allGroups.length, groupsThisTick: groups.length,
+    scanned: candidates.length, alerted, cleared, failed, groupsThisTick: groups.length,
   };
 }
 
@@ -1182,7 +1198,8 @@ module.exports = {
   raiseDivergenceAlert,
   evaluateEstimateCandidates,
   SETTLED_INVOICE_STATUSES,
-  selectSweepBatch,
+  loadCandidateInvoiceIdPage,
+  loadSweepBatchInvoiceIds,
   loadSweepCursor,
   saveSweepCursor,
   SWEEP_BATCH_LIMIT,

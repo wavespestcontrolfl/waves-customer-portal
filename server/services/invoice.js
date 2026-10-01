@@ -452,6 +452,48 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // conversion, or annual-prepay stamping can commit between the two, and the
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
+// True when this invoice bills an upcoming visit OTHER than its own anchor,
+// read from the invoice's own lines (client_id scheduled_<id>_primary — every
+// service mint writes one) plus the combined first-application stamp
+// (scheduled_services.first_application_invoice_id). Fails closed.
+async function invoiceBillsAnotherUpcomingVisit(conn, invoiceRow) {
+  let items = invoiceRow.line_items;
+  if (typeof items === "string") { try { items = JSON.parse(items); } catch { items = []; } }
+  const lines = Array.isArray(items) ? items : [];
+  const itemized = lines.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ""))?.[1]).filter(Boolean);
+  const lineIds = itemized.filter((id) => id !== String(invoiceRow.scheduled_service_id));
+  // An unitemized base-application invoice on an anchor bills every member
+  // of that anchor's combined group (the re-price side reads it the same
+  // way — Codex r8 P1 on #5301), whichever stamp those members carry.
+  const aggregateOnAnchor = itemized.length === 0 && invoiceRow.scheduled_service_id
+    && lines.some((li) => lineIsBaseApplication(li));
+  if (!invoiceRow.id && !lineIds.length) return false; // nothing to match on
+  try {
+    // The stamp column postdates some schemas (dev/preview/rolling deploys);
+    // without it only the invoice's own member lines can match (Codex r9 P2).
+    const hasStamp = await conn.schema.hasColumn("scheduled_services", "first_application_invoice_id");
+    if (!hasStamp && !lineIds.length) return false;
+    const row = await conn("scheduled_services")
+      .where(function () {
+        if (hasStamp) this.where("first_application_invoice_id", invoiceRow.id);
+        if (lineIds.length) this.orWhereIn("id", lineIds);
+        if (hasStamp && aggregateOnAnchor) {
+          this.orWhereIn("first_application_invoice_id", function () {
+            this.select("id").from("invoices").where("scheduled_service_id", invoiceRow.scheduled_service_id);
+          });
+        }
+      })
+      .whereNot("id", invoiceRow.scheduled_service_id)
+      // Only statuses that prove the billed work won't be charged; a COMPLETED
+      // member can still be re-priced (Codex r9 P1 on #5301).
+      .whereNotIn("status", ["cancelled", "canceled", "no_show", "skipped", "rescheduled"])
+      .first("id");
+    return Boolean(row);
+  } catch (err) {
+    throw new Error(`Could not verify the other visits this invoice bills — refusing to unvoid (${err.message})`);
+  }
+}
+
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
   // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) additions — both
   // independent of the scheduled_service_id early-return below, so they
@@ -573,6 +615,16 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   ) {
     throw new Error(
       "Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead",
+    );
+  }
+  // A combined first-application invoice also bills OTHER visits (owner
+  // ruling 2026-09-29 on #5301): restoring one while it bills another
+  // upcoming visit could revive an old price that visit was re-priced away
+  // from while this invoice was void. Refused outright — staff create a new
+  // invoice instead.
+  if (await invoiceBillsAnotherUpcomingVisit(conn, invoiceRow)) {
+    throw new Error(
+      "Cannot unvoid — this invoice also bills other upcoming visits whose prices may have changed since it was voided; create a new invoice instead",
     );
   }
 }
@@ -2664,7 +2716,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // line. Runs under `database` (the caller's own transaction) so the
 // enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
-  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, database = db,
+  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, templateKey = null, database = db,
 }) {
   // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
   // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
@@ -2704,6 +2756,8 @@ async function queuePendingChannelReplay({
       // which keep finalizeDeferredCompletionSend's SMS-only stamp).
       partial_fanout_retry: true,
       original_block_code: originalBlockCode,
+      // The frozen body's template row; the scheduler replay forwards it.
+      ...(templateKey ? { template_key: templateKey } : {}),
       // sendViaSMSAndEmail's nested leg: the wrapper's own sendInvoiceEmail
       // already owns (and sent) this notice's Email, so the replay must keep
       // Email out of its fan-out exactly like the nested call did; the
@@ -3384,7 +3438,9 @@ async function dequeuePayerOwnedZeroDueInvoice(inv, reasonText) {
 // and claimPacketInvoiceForSend's requireDue branch so a fairness change
 // (the attempt cap, the due predicate) only has to be made once.
 async function claimDueScheduledInvoiceForSend(database, invoiceId) {
-  const claimToken = crypto.randomUUID();
+  // A recognizable queue claim (see newQueueSendClaimToken): the visit summary lets a planned,
+  // email-only queue claim pass, and drops its link for any other claim.
+  const claimToken = require("./invoice-helpers").newQueueSendClaimToken();
   // Full row (pre-push audit P1, #4131 slice 4): claimPacketInvoiceForSend's
   // requireDue branch used to return "*" as claim.invoice before sharing
   // this helper, and downstream consumers of a packet claim read fields
@@ -3505,6 +3561,14 @@ async function claimInvoiceForSend(invoiceId, {
     throw invoiceNotSendableError(latest);
   }
   invoice.send_claim_token = freshClaimToken;
+  // A first send that waited for the visit summary's handoff (which holds this invoice through the
+  // pay-link text) finds the claim free only once the text is out. The invoice is stamped after
+  // that release, so the summary's own record is read: a link text that started or was accepted
+  // means the customer has the link, and this first send is refused, not repeated.
+  if (firstDeliveryOnly && current.visit_completion_packet_id && await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link")) {
+    await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
+    throw invoiceAlreadyDeliveredError(invoice);
+  }
   await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status, database);
   const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, freshClaimToken, adoptsQueuedInvoiceSend, database);
   return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
@@ -3829,7 +3893,7 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
   }
 }
 
-const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
+const { BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED, SUMMARY_TEXT_CARRIED_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require("./invoice-helpers");
 
 async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSmsAt) {
   if (!claimToken) return false;
@@ -4024,6 +4088,60 @@ function cancelVoidAmountsMatch(a, b) {
   return ["total", "credit_applied", "deposit_credit"].every((k) => (a[k] ?? null) === (b[k] ?? null));
 }
 
+// The customer's link rides the visit summary text, and the invoice Email that backs it up
+// did not go: the office is told (one alert per invoice, the existing admin feed).
+async function alertSummaryCarriedEmailFailed(invoiceId, invoiceNumber, reason) {
+  try {
+    await require("./admin-alert-compose").raiseAdminAlert("alert", {
+      area: "Billing",
+      action: "confirm the customer got the invoice link",
+      why: "The link went out by text only, and the invoice email did not go.",
+      severity: "needs-you",
+      link: `/admin/invoices?invoice=${invoiceId}`,
+      subject: { type: "invoice", id: String(invoiceId) },
+      doneWhen: "invoice_link_confirmed",
+      who: "person",
+    }, {
+      detail: `Invoice ${invoiceNumber || invoiceId}: its pay link was sent only in the visit summary text, and the invoice email did not go (${reason}). Check that the customer has the link, or resend the invoice.`,
+      dedupeKey: `summary-carried-email:${invoiceId}`,
+      metadata: { invoice_id: invoiceId },
+    });
+  } catch (err) {
+    logger.warn(`[invoice] summary-carried email alert failed for ${invoiceId}: ${err.message}`);
+  }
+}
+
+// The text a parked invoice's error carries when neither the visit summary text nor the invoice
+// email carried its link (the summary's acceptance later finalizes it).
+const SUMMARY_LINK_PARK_TEXT = "the visit summary text did not carry the link";
+
+// Neither the visit summary text nor the invoice email carried the link: parked for the office.
+async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
+  try {
+    await require("./admin-alert-compose").raiseAdminAlert("alert", {
+      area: "Billing",
+      action: "send the customer their invoice link",
+      why: "Neither the visit summary text nor the invoice email carried it.",
+      severity: "needs-you",
+      link: `/admin/invoices?invoice=${invoiceId}`,
+      subject: { type: "invoice", id: String(invoiceId) },
+      doneWhen: "invoice_link_delivered",
+      who: "person",
+    }, {
+      detail: `Invoice ${invoiceNumber || invoiceId}: the visit summary text did not carry its pay link and the invoice email did not go (${reason}). It is parked for review: send the link to the customer.`,
+      dedupeKey: `summary-link-undelivered:${invoiceId}`,
+      metadata: { invoice_id: invoiceId },
+    });
+    // The summary text may have been accepted between the park and this insert: its acceptance
+    // closes the alert key, which did not exist yet. Read again now that the alert does.
+    if ((await db("invoices").where({ id: invoiceId }).first("sms_sent_at"))?.sms_sent_at) {
+      await require("./admin-alert-episodes").closeAdminAlertKeys(db, [`summary-link-undelivered:${invoiceId}`], "summary_text_accepted");
+    }
+  } catch (err) {
+    logger.warn(`[invoice] summary-link undelivered alert failed for ${invoiceId}: ${err.message}`);
+  }
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -4160,8 +4278,18 @@ const InvoiceService = {
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
-          const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
-          await acquireScheduledInvoiceMintLock(database, linkedScheduledServiceId);
+          // The SHARED lock chain (mint advisory lock → customer KEY SHARE →
+          // visit row FOR UPDATE + the never-ran status refusal), not a bare
+          // visit FOR UPDATE: this path is every linked create() caller that
+          // does not otherwise route through the chain (manual admin, project/
+          // WDO, prepay-switch undo, estimate converter). A cancellation that
+          // won the mint lock and committed while this waited must not be
+          // billed past (Codex #5244 r7), and the customer key-share must come
+          // BEFORE the visit lock — the invoice insert's customer FK would
+          // otherwise take it after, inverting the order the chain exists to
+          // hold against the extension accept (ABBA deadlock).
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(database, { scheduledServiceId: linkedScheduledServiceId, customerId });
         }
         if (stampedEstimateIdInNotes) {
           await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
@@ -5947,6 +6075,10 @@ const InvoiceService = {
     // variant). If the row is missing/disabled, we skip the SMS rather than
     // falling back to inline copy.
     let body = null;
+    // Tracks whichever of the three rows below actually rendered — never
+    // guessed, so a caught template-lookup error below (body stays null)
+    // leaves this null too.
+    let renderedTemplateKey = null;
     try {
       const templates = require("../routes/admin-sms-templates");
       const tplOpts = {
@@ -5980,6 +6112,7 @@ const InvoiceService = {
           first_visit_clause: firstVisitClause,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
       }
       // Upfront invoices — the setup + first-application invoice auto-sent at
       // estimate acceptance, or any invoice billed before its service date —
@@ -5996,6 +6129,7 @@ const InvoiceService = {
           service_type: serviceType,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_upfront";
       }
       if (!body) {
         // Either an ordinary invoice, or the prepay template was missing/disabled
@@ -6007,6 +6141,7 @@ const InvoiceService = {
           service_date: formattedDate || "today",
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent";
       }
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
@@ -6118,6 +6253,7 @@ const InvoiceService = {
       if (updated && pendingChannelToQueue) {
         const queueOutcome = await queuePendingChannelReplay({
           invoiceId, customerId: customer.id, toPhone: customer.phone || "", body,
+          templateKey: renderedTemplateKey,
           database: trx, ...pendingChannelToQueue,
         });
         pendingChannelQueued = queueOutcome.queued === true;
@@ -6184,6 +6320,10 @@ const InvoiceService = {
           original_message_type: "invoice",
           billingDeliveryCategory: "invoice",
           notificationEventKey: `invoice:${invoiceId}:sent`,
+          // Which of the three invoice_sent* rows actually rendered
+          // (never inferred — the messageType above is the fixed
+          // kill-switch key, not the rendering row).
+          ...(renderedTemplateKey ? { templateKey: renderedTemplateKey } : {}),
         },
         ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
         // The canonical sender owns push-first / push+SMS / Twilio routing.
@@ -6301,6 +6441,7 @@ const InvoiceService = {
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
         err.smsBody = body;
+        if (renderedTemplateKey) err.smsTemplateKey = renderedTemplateKey;
         err.toPhone = customer.phone;
         throw err;
       }
@@ -6687,9 +6828,16 @@ const InvoiceService = {
     // Third-party Bill-To: a payer-billed invoice must NOT text the homeowner
     // a pay link — AR and the pay link route to the payer (email) instead.
     // The homeowner is the service recipient, not the party being asked to pay.
+    const plannedBySummary = !operatorInitiated
+      && String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR);
     if (claim.invoice?.payer_id) {
       sms.error = "Suppressed — invoice billed to a third-party payer";
       sms.code = "payer_billed";
+    } else if (plannedBySummary) {
+      // The Text leg belongs to the visit summary text, which has not been accepted: this
+      // sender never texts the invoice, and the leg does not count as delivered.
+      sms.error = "Text carried by the visit summary";
+      sms.code = "text_carried_by_summary";
     } else if (!operatorInitiated
       && String(claim.invoice.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)) {
       // A prior automated attempt delivered Text/App but could not start its
@@ -6844,6 +6992,7 @@ const InvoiceService = {
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
+        if (err.smsTemplateKey) sms.heldTemplateKey = err.smsTemplateKey;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
     }
@@ -6892,6 +7041,8 @@ const InvoiceService = {
               billingDeliveryCategory: "invoice",
               notificationEventKey: `invoice:${invoiceId}:sent`,
               hasEmailLeg: true,
+              // The held body's template row; the scheduler replay forwards it.
+              ...(sms.heldTemplateKey ? { template_key: sms.heldTemplateKey } : {}),
               original_block_code: sms.code,
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
@@ -6921,6 +7072,7 @@ const InvoiceService = {
       }
     }
     delete sms.heldBody;
+    delete sms.heldTemplateKey;
     delete sms.heldToPhone;
 
     // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a
@@ -6967,6 +7119,9 @@ const InvoiceService = {
         if (r?.error) email.error = r.error;
         if (r?.code) email.code = r.code;
         if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
+        // A refusal (suppressed address, the choice no longer selecting Email) is not a transient failure.
+        if (r?.blocked) email.blocked = true;
+        if (r?.skipped) email.skipped = true;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
         if (r?.recipient) email.recipient = r.recipient;
         if (r?.messageId) email.messageId = r.messageId;
@@ -6975,7 +7130,34 @@ const InvoiceService = {
       }
     }
 
-    const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    // A Text leg the visit summary text carries leaves the Email as the customer's path to the
+    // link: a transient failure retries (the queue's attempt cap ends it, see processScheduledSends),
+    // not only an unreadable preference. A deterministic refusal (blocked, or the choice no
+    // longer selecting Email) retries nothing: like any accepted-Text row whose Email fails,
+    // the invoice finalizes as sent (so dunning arms) and the office is told.
+    const carriedBySummary = String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR);
+    // A planned Text leg counts as delivered only if the summary's text was accepted since
+    // (its acceptance stamps sms_sent_at); read fresh, after the email leg.
+    let summaryAcceptedNow = false;
+    if (plannedBySummary) {
+      const fresh = await db("invoices").where({ id: invoiceId }).first("sms_sent_at");
+      if (fresh?.sms_sent_at) {
+        summaryAcceptedNow = true;
+        sms.ok = true;
+        sms.deduped = true;
+        sms.eventVisibleAt = fresh.sms_sent_at;
+        delete sms.code;
+        delete sms.error;
+      }
+    }
+    // A planned leg whose summary text was accepted while this send ran is a carried one from
+    // here on (the claim's snapshot still says planned): same retry and refusal handling.
+    const summaryCarried = carriedBySummary || (plannedBySummary && summaryAcceptedNow);
+    const emailMustRetry = !operatorInitiated && (email.code === "billing_prefs_unavailable"
+      || ((carriedBySummary || plannedBySummary) && !email.ok && !email.blocked && !email.skipped));
+    if (summaryCarried && !operatorInitiated && !email.ok && !emailMustRetry) {
+      await alertSummaryCarriedEmailFailed(invoiceId, claim.invoice.invoice_number, email.error || email.code || "refused");
+    }
     const acceptedSmsAt = sms.ok ? (sms.deduped ? billingLegContactTime(sms) : new Date()) : null;
     if (emailMustRetry && sms.ok && claimed && !allowClaimed
       && ["draft", "scheduled"].includes(previousStatus)) {
@@ -7119,7 +7301,10 @@ const InvoiceService = {
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
         // allowClaimed). Resend-safe via the priorStatus gate.
         if (ownedDeliveryFinalized) {
-          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at
+            // The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
+            || (claim.invoice.sms_sent_at && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+              && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR))) });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -7270,6 +7455,7 @@ const InvoiceService = {
       smsEventVisibleAt = undefined,
       emailEventVisibleAt = undefined,
       deduped = false,
+      summaryCarried = false,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
@@ -7332,7 +7518,14 @@ const InvoiceService = {
     // this call performed the write; the helper's priorStatus gate (read pre-
     // update) keeps a resend of an already-sent invoice from converting.
     if (updated) {
-      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status,
+        // The visit summary text's stamp on a carried invoice is its Text leg, not a prior delivery
+        // (the same exception sendViaSMSAndEmail applies when the queue finalizes it). The caller
+        // says so: the failed attempts have already rewritten the row's marker to its plain form.
+        priorDelivered: Boolean(invoice.sent_at
+          || (invoice.sms_sent_at && !summaryCarried
+            && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+            && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR))) });
     }
 
     try {
@@ -7547,7 +7740,8 @@ const InvoiceService = {
         // lookup error: worst case an email waits for 8:00 AM, never a
         // night text.
         const acceptedChannelPendingEmail = String(inv.scheduled_send_error || "")
-          .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+          .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)
+          || String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR);
         let hasSmsLeg = !inv.payer_id && !acceptedChannelPendingEmail;
         if (hasSmsLeg) {
           try {
@@ -7733,9 +7927,82 @@ const InvoiceService = {
         REPLAY_HOLD_CODES.includes(result.sms?.code)
         && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED", "BILLING_EMAIL_PREPARATION_HOLD"].includes(result.sms?.code)
         && result.sms?.nextAllowedAt;
-      const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
-        ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
-        : error;
+      // The carried marker stays through every retry: losing it would text the pay link.
+      const summaryCarriedRow = String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR);
+      const summaryPlannedRow = String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR);
+      // A planned Text leg (the summary text not accepted) with an Email that cannot deliver, refused
+      // or out of attempts, goes to office review rather than "sent": nothing carried the link.
+      // If the summary's text was accepted meanwhile the invoice finalizes like a carried one.
+      if (!smsHeld && summaryPlannedRow
+        && (result.email?.blocked || result.email?.skipped || Number(inv.scheduled_send_attempts || 0) + 1 >= 5)) {
+        failed += 1;
+        const summaryTextAccepted = async () => Boolean((await db("invoices").where({ id: inv.id }).first("sms_sent_at"))?.sms_sent_at);
+        const finalizeAccepted = async () => {
+          await this.markDeliverySent(inv.id, {
+            source: "summary_carried_email_refused", summaryCarried: true, claimToken: claimed.send_claim_token,
+            requestReview: Boolean(claimed.scheduled_request_review), reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
+          });
+          await alertSummaryCarriedEmailFailed(inv.id, inv.invoice_number, error);
+        };
+        if (await summaryTextAccepted()) {
+          await finalizeAccepted();
+        } else {
+          // One conditional write under the row lock: the summary's acceptance stamp writes the same
+          // row, so either it lands first (this matches nothing, and the invoice is finalized as
+          // carried) or the park lands first (the acceptance then finalizes the parked invoice).
+          const parked = await db("invoices")
+            .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
+            .whereNull("sms_sent_at")
+            .update({
+              status: "scheduled",
+              scheduled_send_at: null,
+              scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+              scheduled_send_error: `${require("./invoice-helpers").STALE_SEND_PARK_ERROR} — ${SUMMARY_LINK_PARK_TEXT} and the invoice email did not go: ${error}`,
+              send_claim_token: null,
+              updated_at: new Date(),
+            });
+          if (!parked) {
+            if (await summaryTextAccepted()) await finalizeAccepted();
+            else logger.warn(`[invoice] Summary-planned invoice ${inv.invoice_number}: its send claim changed before it could be parked — left to stale-claim recovery`);
+            continue;
+          }
+          // Nothing was delivered: the credit this send auto-applied is returned, exactly as after any
+          // other failed scheduled send (the row is 'scheduled' again, so the reversal is allowed).
+          if (result.creditApplied > 0) {
+            try {
+              await require("./customer-credit").reverseAppliedCredit({ invoiceId: inv.id, amount: result.creditApplied, createdBy: "system:scheduled_send_failed" });
+            } catch (e) {
+              logger.warn(`[invoice] credit reversal after parking ${inv.id} skipped: ${e.message}`);
+            }
+          }
+          await alertSummaryLinkUndelivered(inv.id, inv.invoice_number, error);
+          logger.error(`[invoice] Summary-planned invoice ${inv.invoice_number}: neither the summary text nor the email carried the link — parked for office review: ${error}`);
+        }
+        continue;
+      }
+      // A planned row whose summary text was accepted during this attempt is carried now.
+      const durableSendError = summaryPlannedRow
+        ? `${result.sms?.ok ? SUMMARY_TEXT_CARRIED_ERROR : SUMMARY_TEXT_PLANNED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
+        : summaryCarriedRow
+        ? `${SUMMARY_TEXT_CARRIED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
+        : result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
+          ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
+          : error;
+      // A carried invoice that reaches the attempt cap must not strand: it is finalized as
+      // sent (dunning arms, as for any accepted-Text row whose Email fails) and the office is told.
+      if (!smsHeld && summaryCarriedRow && Number(inv.scheduled_send_attempts || 0) + 1 >= 5) {
+        failed += 1;
+        await this.markDeliverySent(inv.id, {
+          source: "summary_carried_email_exhausted",
+          summaryCarried: true,
+          claimToken: claimed.send_claim_token,
+          requestReview: Boolean(claimed.scheduled_request_review),
+          reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
+        });
+        await alertSummaryCarriedEmailFailed(inv.id, inv.invoice_number, error);
+        logger.error(`[invoice] Summary-carried invoice ${inv.invoice_number} email failed ${Number(inv.scheduled_send_attempts || 0) + 1} times — finalized as sent, office alerted: ${error}`);
+        continue;
+      }
       let restored = 0;
       if (smsHeld) {
         deferred += 1;
@@ -7808,6 +8075,61 @@ const InvoiceService = {
   // carries the receipt. Manual single-channel operator sends (via='sms')
   // must NOT declare it: the operator explicitly chose the text, and there is
   // no email leg on that route to carry the receipt (codex round 5).
+  // The shortened receipt link a text carries. /receipt/, not /pay/: the pay
+  // page forwards paid invoices to the receipt but renders a refunded one as
+  // a "Refunded" payment page. Empty when the invoice has no token.
+  async receiptSmsUrl(invoice) {
+    const longReceiptUrl = invoice.token
+      ? `${publicPortalUrl()}/receipt/${invoice.token}`
+      : "";
+    return longReceiptUrl
+      ? shortenOrPassthrough(longReceiptUrl, {
+          kind: "receipt",
+          entityType: "invoices",
+          entityId: invoice.id,
+          customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        })
+      : "";
+  },
+
+  // The shortened pay link, minted exactly as sendViaSMS mints it, for the one
+  // other text that may carry it: the combined-visit summary
+  // (visit-completion-summary.js).
+  // The visit summary text carrying this invoice's pay link was accepted: the Text leg is
+  // recorded as delivered, and a planned invoice is promoted to the accepted-channel marker
+  // (the sender then counts the leg as delivered, and never texts it).
+  async markSummaryTextAccepted(invoiceId) {
+    const updated = await db("invoices").where({ id: invoiceId }).update({
+      sms_sent_at: db.raw("COALESCE(sms_sent_at, NOW())"),
+      scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE ? THEN ? ELSE scheduled_send_error END",
+        [`${SUMMARY_TEXT_PLANNED_ERROR}%`, SUMMARY_TEXT_CARRIED_ERROR]),
+      updated_at: new Date(),
+    });
+    // An invoice the office was asked to review because neither the summary text nor the email
+    // carried its link (SUMMARY_LINK_PARK_TEXT) now has the link delivered: finalize it as sent
+    // through the ordinary path (lead conversion, dunning) and resolve the alert.
+    const row = await db("invoices").where({ id: invoiceId }).first("status", "scheduled_send_at", "scheduled_send_error");
+    if (row?.status === "scheduled" && !row.scheduled_send_at
+      && String(row.scheduled_send_error || "").includes(SUMMARY_LINK_PARK_TEXT)) {
+      await this.markDeliverySent(invoiceId, { source: "summary_text_accepted", summaryCarried: true });
+      await require("./admin-alert-episodes").closeAdminAlertKeys(db, [`summary-link-undelivered:${invoiceId}`], "summary_text_accepted")
+        .catch((err) => logger.warn(`[invoice] could not resolve the undelivered-link alert for ${invoiceId}: ${err.message}`));
+    }
+    return updated;
+  },
+
+  async payLinkSmsUrl(invoice) {
+    if (!invoice.token) return "";
+    return shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+      kind: "invoice",
+      entityType: "invoices",
+      entityId: invoice.id,
+      customerId: invoice.customer_id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+  },
+
   /**
    * The customer-facing money facts a payment-receipt text needs: exact
    * amount collected, the " (Visa ending 4242)" card clause, and the
@@ -7822,21 +8144,7 @@ const InvoiceService = {
    * credit). Falls back to amount due when no payment row exists.
    */
   async receiptSmsFacts(invoice) {
-    const domain = publicPortalUrl();
-    // /receipt/, not /pay/: the pay page forwards paid invoices to the
-    // receipt but renders a refunded one as a "Refunded" payment page.
-    const longReceiptUrl = invoice.token
-      ? `${domain}/receipt/${invoice.token}`
-      : "";
-    const receiptUrl = longReceiptUrl
-      ? await shortenOrPassthrough(longReceiptUrl, {
-          kind: "receipt",
-          entityType: "invoices",
-          entityId: invoice.id,
-          customerId: invoice.customer_id,
-          codePrefix: invoiceShortCodePrefix(invoice),
-        })
-      : "";
+    const receiptUrl = await InvoiceService.receiptSmsUrl(invoice);
     const cardLine = formatCardLine(invoice.card_brand, invoice.card_last_four);
     const amount = await InvoiceService.receiptAmountFor(invoice);
     return { amount, cardLine, receiptUrl };
@@ -7946,6 +8254,7 @@ const InvoiceService = {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",
         notificationEventKey: `invoice:${invoiceId}:receipt`,
+        templateKey: "invoice_receipt",
       },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
@@ -11495,6 +11804,31 @@ const InvoiceService = {
           );
       })
       .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+  },
+
+  /**
+   * ALL invoices linked to this scheduled service, in ANY status — the
+   * same direct-or-through-service-record link
+   * unresolvedInvoicesForCancelledService uses above, minus its
+   * resolved-status filter. Owner ruling 2026-09-28 ("bare visits only"):
+   * the Intelligence Bar cancel card refuses a visit with ANY invoice on
+   * record at all — paid, void, refunded, draft, whatever — since a bare
+   * visit is one with nothing on the books to begin with, not just nothing
+   * currently voidable. Accepts `conn` (db or a trx) so the commit-time
+   * recheck (tools.js cancelAppointment) can run this same query under the
+   * row lock it already holds. Returns a query builder; callers decide the
+   * columns/limit (an existence check at proposal time, the identical shape
+   * re-run under the lock at commit).
+   */
+  anyInvoiceLinkedToVisit(conn, scheduledServiceId) {
+    return conn("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            conn("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      });
   },
 
   async getStats() {

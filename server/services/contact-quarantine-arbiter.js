@@ -60,28 +60,9 @@ const MODEL_TIMEOUT_MS = 60000;
 const ADOPT_CONFIDENCE_FLOOR = 0.9;
 const STORE_CONFIDENCE_FLOOR = 0.6;
 
-// Google is the one major provider that ignores dots in the local part:
-// local-part dot-variants on these domains are literally the same mailbox.
-// Do NOT extend this to other providers (dots are significant elsewhere),
-// and do NOT strip +tags anywhere (a tag is deliberate, not a mishear).
-const GOOGLE_DOT_INSENSITIVE_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
-
-/**
- * Canonical mailbox for Google's dot-insensitivity, or null when the rule
- * does not apply. googlemail.com aliases gmail.com, so both collapse to the
- * same canonical key.
- */
-function gmailCanonicalMailbox(email) {
-  const [local, domain] = String(email || '').toLowerCase().split('@');
-  if (!local || !domain || !GOOGLE_DOT_INSENSITIVE_DOMAINS.has(domain)) return null;
-  // Strip dots only from the mailbox name BEFORE any +tag: the tag is the
-  // deliberate part (filters can key on its exact text), so tag spellings
-  // that differ by a dot stay distinct candidates for the model to weigh.
-  const plusAt = local.indexOf('+');
-  const mailbox = plusAt === -1 ? local : local.slice(0, plusAt);
-  const tag = plusAt === -1 ? '' : local.slice(plusAt);
-  return `${mailbox.replace(/\./g, '')}${tag}@gmail.com`;
-}
+// Google dot-insensitivity lives in utils/email-equivalence.js (shared with
+// the read-back card).
+const { gmailCanonicalMailbox } = require('../utils/email-equivalence');
 
 // Did the caller actually SAY a dot IN THE LOCAL PART? A dotted candidate is
 // dictation-faithful only when the word was spoken there — otherwise the dot
@@ -485,7 +466,6 @@ module.exports = {
   gatherEmailDomainEvidence,
   buildArbiterPrompt,
   parseArbiterResponse,
-  gmailCanonicalMailbox,
   dotSpokenInDictation,
   ADOPT_CONFIDENCE_FLOOR,
   STORE_CONFIDENCE_FLOOR,

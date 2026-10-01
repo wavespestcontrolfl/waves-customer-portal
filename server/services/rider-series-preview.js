@@ -1,0 +1,864 @@
+/**
+ * Rider-series READ-ONLY PREVIEW (pest-rides-the-lawn-rhythm, owner decision
+ * 2026-09-28: ship a read-only preview first after five non-converging
+ * Codex rounds on the write engine — see PR #5268, now a paused draft).
+ *
+ * This module NEVER writes. It answers one question — "if a pest series
+ * rode a lawn series' dates, what would the plan look like, and is the
+ * pair even eligible?" — using the SAME date rule and the SAME read-side
+ * eligibility rules the (unmerged) write engine settled on across five
+ * review rounds, reused here so the eventual write engine and this preview
+ * can never silently disagree about what "eligible" or "the plan" means.
+ * `docs/design/rider-series-scheduling.md` has the full rule set.
+ *
+ * Nothing in this repository sets `scheduled_services.rides_parent_id` yet
+ * (schema-only migration 20260928220000_scheduled_services_rides_parent —
+ * see its own header) and nothing calls `previewRiderPair` from any hook,
+ * cron, or writer. It is reached ONLY from
+ * scripts/rider-series-preview-report.js, a read-only ops report the owner
+ * runs by hand.
+ *
+ * Everything below is a plain (non-locking, non-transactional) read: no
+ * `FOR UPDATE`/`FOR SHARE`, no advisory lock, no row lock, no write of any
+ * kind — `previewRiderPair` accepts any knex connection (the pool, a
+ * transaction, or the ops script's own READ ONLY transaction) and never
+ * calls `.transaction()` itself.
+ */
+const {
+  parseETDateTime, etDateString, addETDays, etCalendarDayOf,
+} = require('../utils/datetime-et');
+const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
+// The canonical plan-row predicate: the root, explicit or legacy NULL-flagged
+// children; never a booster, a callback or an included follow-up.
+const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
+// Tracker state can run ahead of status (the best-effort status sync lags):
+// the same two-column rule customer-lifecycle-guard.js#whereVisitRowLive
+// applies. A terminal tracker state is finished; a live one is in progress.
+const { TERMINAL_TRACK_STATES } = require('./customer-lifecycle-guard');
+const { LIVE_TRACK_STATES } = require('./cancellation-eligibility');
+const { LIVE_COMPLETION_CLAIM_STATUSES } = require('./visit-groups');
+const { getBlackoutLayers } = require('./scheduling/blackout-dates');
+const { clearOfBlackout } = require('./scheduling/blackout-nudge');
+
+const MIN_GAP_DAYS = 77;
+const TARGET_GAP_DAYS = 84;
+const MAX_WAIT_DAYS = 105;
+// Owner ruling: existing customers' pest dates move with NO texts — a row
+// inside this window is close enough that the customer may already be
+// acting on it, so it's a fixed anchor regardless of what any
+// reminder/confirmation ledger shows. Same value the write engine uses.
+const NEAR_TERM_DAYS = 7;
+// How long an overdue rider (anchor so old the next step would land before
+// the plan floor) waits for a host date before taking a standalone date on
+// the floor: the normal window's width, MAX_WAIT_DAYS - MIN_GAP_DAYS.
+const OVERDUE_WAIT_DAYS = MAX_WAIT_DAYS - MIN_GAP_DAYS;
+// Same bound the write engine's computeRiderHorizon applies (see its own
+// comment there): at most ~2 years past the rider's own standalone
+// horizon, so a host row seeded or hand-edited an arbitrary distance out
+// can never blow the preview's horizon (and planRiderDates' own walk) out
+// to match it.
+const MAX_HORIZON_EXTRA_DAYS = 730;
+
+const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
+const MOVABLE_ROW_STATUSES = ['pending', 'confirmed'];
+const DEAD_CARD_STATUSES = ['released', 'cancelled', 'failed', 'expired'];
+const NON_PINNING_MESSAGE_PURPOSES = ['appointment_cancellation'];
+
+// Structural pair reasons that make a plan uncomputable (never merely
+// "the office wouldn't write this today") — see previewRiderPair's own
+// comment for why these, and only these, skip plan computation.
+const STRUCTURAL_BLOCKERS = new Set([
+  'rider_not_found', 'not_a_rider', 'host_missing', 'self_link', 'host_is_rider',
+  'cross_customer', 'not_recurring', 'not_series_root',
+]);
+
+// Table-driven pair-structure gates (Codex P2 round on PR #5290 —
+// previewRiderPair's own complexity): every ROW is a plain sync predicate
+// over the already-loaded pair context, evaluated in order and never
+// short-circuited (design doc: `reasons` lists every applicable gate).
+// `different_property` and `plan_stopped` stay OUTSIDE this table — both
+// need an extra DB read (the resolved property scope, the latest plan-alert
+// decision) that this table's sync predicates deliberately don't take on.
+const PAIR_STRUCTURE_GATES = [
+  ['self_link', (ctx) => String(ctx.resolvedHostId) === String(ctx.riderParentId)],
+  ['cross_customer', (ctx) => String(ctx.riderParent.customer_id) !== String(ctx.hostParent.customer_id)],
+  ['host_is_rider', (ctx) => !!ctx.hostParent.rides_parent_id],
+  ['not_series_root', (ctx) => !!ctx.riderParent.recurring_parent_id],
+  ['not_recurring', (ctx) => !ctx.riderParent.is_recurring || !ctx.riderParent.recurring_pattern],
+  ['not_ongoing', (ctx) => !(ctx.cols.recurring_ongoing ? !!ctx.riderParent.recurring_ongoing : false)],
+];
+
+function dateOnly(value) {
+  if (!value) return null;
+  return etCalendarDayOf(value);
+}
+
+function addDaysStr(dateStr, days) {
+  const base = parseETDateTime(`${dateOnly(dateStr)}T12:00`);
+  if (isNaN(base.getTime())) return null;
+  return etDateString(addETDays(base, days));
+}
+
+// Same weekend-shift arithmetic the seeder applies to every date it walks
+// (recurring-appointment-seeder.js#shiftPastWeekend), reused verbatim.
+function shiftPastWeekend(dateStr, skip, direction = 'forward') {
+  if (!skip || !dateStr) return dateStr;
+  const { shiftPastWeekend: seederShift } = require('./recurring-appointment-seeder');
+  return seederShift(dateStr, skip, direction);
+}
+
+// Pure — the horizon rule, byte-identical to the write engine's own
+// computeRiderHorizon (services/rider-series.js): the LATER of the host's
+// own last live date and the rider's own standalone horizon, bounded to at
+// most MAX_HORIZON_EXTRA_DAYS past the standalone horizon.
+function computeRiderHorizon(anchorDate, hostDates, pattern) {
+  const { plannedVisitCountForPattern } = require('./recurring-appointment-seeder');
+  const count = plannedVisitCountForPattern(pattern, {});
+  const gaps = Math.max(0, count - 1);
+  const standaloneHorizon = addDaysStr(anchorDate, gaps * TARGET_GAP_DAYS);
+  const sorted = Array.from(new Set((hostDates || []).map(dateOnly).filter(Boolean))).sort();
+  let horizon = standaloneHorizon;
+  if (sorted.length) {
+    const hostLast = sorted[sorted.length - 1];
+    if (hostLast > horizon) horizon = hostLast;
+  }
+  const maxHorizon = addDaysStr(standaloneHorizon, MAX_HORIZON_EXTRA_DAYS);
+  if (maxHorizon && horizon > maxHorizon) horizon = maxHorizon;
+  return horizon;
+}
+
+// One walk-step of the date rule (Codex P2 round on PR #5290 —
+// planRiderDates' own complexity): given the LAST planned/anchor date, the
+// plan floor, and the sorted host dates, returns the next candidate date or
+// null when the walk cannot continue at all (an unparseable `last`). Split
+// out so planRiderDates itself is just the loop/guard/stop conditions —
+// this function still contains every decision the rule makes for ONE step,
+// genuinely fewer of them per function, not the same branches relocated
+// into a single-call helper.
+function nextRiderDate({
+  last, floor, sortedHosts, skipWeekends, dir, blackoutDates,
+}) {
+  let minDate = addDaysStr(last, MIN_GAP_DAYS);
+  let maxDate = addDaysStr(last, MAX_WAIT_DAYS);
+  if (!minDate || !maxDate) return null;
+  const overdue = !!floor && minDate < floor;
+  if (overdue) {
+    minDate = floor;
+    maxDate = addDaysStr(floor, OVERDUE_WAIT_DAYS);
+  }
+  const hostCandidate = sortedHosts.find((d) => d >= minDate);
+  if (hostCandidate && hostCandidate <= maxDate) return hostCandidate;
+  const base = overdue ? floor : addDaysStr(last, TARGET_GAP_DAYS);
+  let next = shiftPastWeekend(base, skipWeekends, dir);
+  if (floor && next && next < floor) next = shiftPastWeekend(base, skipWeekends, 'forward');
+  if (next && blackoutDates) next = clearOfBlackout(next, blackoutDates, { skipWeekends });
+  return next;
+}
+
+/**
+ * Pure date rule — no DB access. Same rule the write engine's own
+ * planRiderDates (services/rider-series.js) applies, one step of which
+ * (nextRiderDate, above) is factored out for complexity, not behavior —
+ * see the 19 shared plan tests (rider-series-preview-plan.test.js). See
+ * that function's own header for the full parameter contract ("Date rule"
+ * in the design doc).
+ */
+function planRiderDates({
+  hostDates = [], lastRiderDate, horizonDate, skipWeekends = false, weekendShift = 'forward',
+  earliestDate = null, blackoutDates = null,
+} = {}) {
+  const anchor = dateOnly(lastRiderDate);
+  const horizon = dateOnly(horizonDate);
+  const floor = dateOnly(earliestDate);
+  const dates = [];
+  if (!anchor || !horizon) return dates;
+  const sortedHosts = Array.from(new Set((hostDates || []).map(dateOnly).filter(Boolean))).sort();
+  const dir = weekendShift === 'back' ? 'back' : 'forward';
+
+  let last = anchor;
+  for (let guard = 0; guard < 1000; guard++) {
+    const next = nextRiderDate({
+      last, floor, sortedHosts, skipWeekends, dir, blackoutDates,
+    });
+    if (!next || next <= last || next > horizon) break;
+    dates.push(next);
+    last = next;
+  }
+  return dates;
+}
+
+// Reused by BOTH the preview's own different_property gate and the report
+// script's candidate bucketing (Codex P1 round on PR #5290: the old
+// different_property gate only fired when BOTH parents already carried a
+// stamped property_id, and the script's bucketing collapsed every
+// null-property root into one 'unstamped' bucket per customer — neither
+// actually resolved "what property is this root at"). Built from the SAME
+// address resolution the duplicate-series guard scopes on
+// (admin-schedule.js#topUpScopeInput: the override-aware stamped address,
+// else an unstamped root's own source estimate, else the customer's
+// primary address) plus estimate-property-linkage.js's canonical
+// property-tuple key (normalizedEstimatePropertyKey/samePropertyKey —
+// "identical street+unit in different cities/ZIPs are DISTINCT
+// properties", the same primitive the duplicate-series guard's own street
+// compare is built from). `resolved: false` means neither a property_id
+// nor a parseable address could be found anywhere for this root — the
+// conservative `property_unresolved` case, never guessed either way.
+async function resolveSeriesPropertyScope(conn, parent) {
+  const { topUpScopeInput } = require('../routes/admin-schedule');
+  const { normalizedEstimatePropertyKey } = require('./estimate-property-linkage');
+  // Savepoint: topUpScopeInput swallows a failed source-estimate read as a
+  // best-effort fallback, but that failed statement aborts the transaction
+  // (25P02) for its own customer-address read after it. Isolate the lookup
+  // so the caller's transaction stays usable, and treat a failed lookup as
+  // unresolved (reported property_unresolved, never guessed).
+  let scope;
+  try {
+    scope = await conn.transaction((sp) => topUpScopeInput(sp, parent));
+  } catch {
+    return { propertyId: null, key: null, resolved: false };
+  }
+  const propertyId = scope.property_id ? String(scope.property_id) : null;
+  const key = scope.address ? normalizedEstimatePropertyKey(scope.address) : null;
+  return { propertyId, key, resolved: !!(propertyId || key) };
+}
+
+// Symmetric same-property compare over two resolveSeriesPropertyScope
+// results, returned as one of 'same' / 'different' / 'unresolved'.
+// property_id decides when BOTH sides carry one (authoritative, no street
+// compare — mirrors the duplicate-series guard's own rule); otherwise the
+// normalized property-tuple key decides. Either side unresolved, or a
+// mismatched pair (one id-only, one key-only — nothing comparable), is
+// conservatively NEVER a match: unresolved reports as such, and the
+// mismatched-shape case reports 'different' rather than guessing.
+function seriesPropertyVerdict(a, b) {
+  const { samePropertyKey } = require('./estimate-property-linkage');
+  if (!a?.resolved || !b?.resolved) return 'unresolved';
+  if (a.propertyId && b.propertyId) return a.propertyId === b.propertyId ? 'same' : 'different';
+  if (a.key && b.key) return samePropertyKey(a.key, b.key) ? 'same' : 'different';
+  return 'different';
+}
+
+// Pure, per-ROW twin of resolveSeriesPropertyScope (Codex P1 round #2 on PR
+// #5290 — loadHostDates' own host-date filter, below): a plain child row's
+// own stamped `property_id` and `service_address_*` columns, reduced to the
+// same {propertyId, key, resolved} shape with the SAME normalized key
+// (`estimate-property-linkage.js#normalizedEstimatePropertyKey`), but never
+// falling back to an estimate or the customer's primary address — that
+// fallback only makes sense for resolving a SERIES ROOT's own scope
+// (topUpScopeInput), never for a plain child row mid-series. `resolved:
+// false` (no property_id, no stamped address on the row itself) is the
+// ordinary case for most child rows — the caller reads that as "this row
+// carries no scope of its own" and inherits the host's effective scope,
+// exactly as the old raw-property_id compare treated a NULL property_id.
+function rowPropertyScope(row) {
+  const { normalizedEstimatePropertyKey } = require('./estimate-property-linkage');
+  const propertyId = row.property_id ? String(row.property_id) : null;
+  const address = [
+    row.service_address_line1, row.service_address_line2, row.service_address_city,
+    `${row.service_address_state || ''} ${row.service_address_zip || ''}`.trim(),
+  ].filter(Boolean).join(', ');
+  const key = address ? normalizedEstimatePropertyKey(address) : null;
+  return { propertyId, key, resolved: !!(propertyId || key) };
+}
+
+// Batched "is this rider row pinned by a durable record" lookup — same
+// tables and same DEAD/NON_PINNING exclusions the write engine's
+// immovableRowIdSet applies, but returns WHICH category matched (for the
+// preview's own `pinned[].why`) instead of a flat boolean set. Read-only:
+// plain SELECTs, no lock of any kind.
+async function messagedRowIds(conn, ids) {
+  // A non-null sent_at alone isn't delivery: a suppressed send (owner
+  // silence, a disabled gate or template) records a synthetic provider id
+  // and sent_at, and a real text can end undelivered. Apply the same
+  // real-send checks as no-show-detector.js#loadPromiseEvents
+  // (textActuallyWentOut: push, a live sms_log delivery state, or an
+  // unlinked real Twilio SM/MM sid; not blocked; no provider error).
+  const { textActuallyWentOut } = require('./no-show-detector');
+  return conn('messaging_audit_log as a')
+    .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
+    .whereIn('a.appointment_id', ids.map(String))
+    .whereNotIn('a.purpose', NON_PINNING_MESSAGE_PURPOSES)
+    .whereNotNull('a.sent_at')
+    .whereNull('a.blocked_code')
+    .whereNull('a.provider_error')
+    .where(textActuallyWentOut)
+    .distinct()
+    .pluck('a.appointment_id');
+}
+
+// Reuses no-show-detector.js's canonical "was the customer told" evidence
+// unification (loadPromiseEvents) instead of re-deriving it from
+// messaging_audit_log alone (Codex P1 round on PR #5290): a messaging_audit_log
+// scan keyed on appointment_id ALONE misses pre-2026-08-06 rows linked only
+// by metadata.scheduled_service_id (appointment_id wasn't stamped on those
+// senders until that date), a delivered appointment EMAIL (no SMS row at
+// all — email_messages/customer_interactions), and a call-derived promise
+// (an applied phone reschedule, or the call that booked the visit —
+// neither ever sends a text of its own). loadPromiseEvents already reads
+// every one of those sources and is the SAME evidence the no-show detector
+// itself alerts against, so this preview can never disagree with it about
+// what counts as a delivered promise. Read-only: loadPromiseEvents issues
+// plain SELECTs, no lock, no write — same posture as every other read
+// here. A cancellation notice still never pins: loadPromiseEvents only
+// reads scheduling-notice purposes (confirmation/reminder tiers) and
+// call-derived events, never appointment_cancellation, so the "a
+// cancellation notice doesn't pin" rule holds with no extra exclusion
+// needed here.
+async function deliveredPromiseRowIds(conn, ids) {
+  const { loadPromiseEvents } = require('./no-show-detector');
+  const events = await loadPromiseEvents(conn, ids.map(String));
+  return [...new Set(events.map((e) => e.visit_id).filter(Boolean).map(String))];
+}
+
+async function attributeReasonMap(conn, rowIds) {
+  const ids = (rowIds || []).filter(Boolean);
+  const map = new Map();
+  if (!ids.length) return map;
+  // Sequential, not Promise.all: every read runs on the caller's one
+  // transaction connection, and pg rejects concurrent queries on one client
+  // (deprecated now, an error in pg 9).
+  const invoiced = await conn('invoices').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id');
+  const cardHeld = await conn('estimate_card_holds').whereIn('scheduled_service_id', ids)
+    .whereNotIn('status', DEAD_CARD_STATUSES).pluck('scheduled_service_id');
+  const cardRequested = await conn('appointment_card_requests').whereIn('scheduled_service_id', ids)
+    .whereNotIn('status', DEAD_CARD_STATUSES).pluck('scheduled_service_id');
+  const packeted = await conn('visit_completion_packet_items').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id');
+  const completionClaims = await conn('service_completion_attempts').whereIn('service_id', ids)
+    .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES).pluck('service_id');
+  const messagedRows = await messagedRowIds(conn, ids);
+  const promisedRows = await deliveredPromiseRowIds(conn, ids);
+  // Priority order only matters for which SINGLE `why` a row reports when
+  // more than one applies — every category still independently pins the
+  // row either way. promisedRows and messagedRows share the SAME `why`
+  // ('messaged') — both are "the customer was told" evidence, just read
+  // from two different scopes of the same underlying record set.
+  for (const id of promisedRows) map.set(id, 'messaged');
+  for (const id of messagedRows) map.set(id, 'messaged');
+  for (const id of completionClaims) map.set(id, 'completion_claim');
+  for (const id of packeted) map.set(id, 'closeout_packet');
+  for (const id of cardRequested) map.set(id, 'card_request');
+  for (const id of cardHeld) map.set(id, 'card_hold');
+  for (const id of invoiced) map.set(id, 'invoice');
+  return map;
+}
+
+// Classifies one rider row for the preview: {terminal:true} (excluded from
+// both the movable and the pinned picture — history, never touched),
+// {booster:true} (not a plan row: booster, callback or included follow-up;
+// never a move/cancel/anchor candidate), {pinned:true, why}
+// (a live row that cannot move, with the reason), or {movable:true}.
+// Byte-identical rule set to the write engine's immovableByOwnFields +
+// attributeImmovable + near-term cutoff (services/rider-series.js), with
+// two additions the design doc calls for:
+//  - a NULL-status row (a legacy base row with no stamped status) is
+//    reported pinned with why: 'null_status' rather than silently falling
+//    through every check — the write engine achieves the same "never
+//    movable" outcome for it implicitly (it's outside
+//    MOVABLE_ROW_STATUSES), but the preview's job is to SHOW why, not
+//    just to leave it out.
+//  - a 'rescheduled' row (is_recurring plan row only — a booster's own
+//    rescheduled status is unaffected and still classifies as `terminal`
+//    below, exactly as before) is a LIVE visit awaiting re-placement, not
+//    history: reported pinned with why: 'rescheduled_pending' instead of
+//    `terminal` (Codex P1 round on PR #5290). Its date is stale — the row
+//    is waiting to be MOVED, not sitting at a date anyone should read as
+//    "when pest last actually happened" — so previewRiderPair excludes it
+//    from the anchor computation even though it is `pinned`, the one case
+//    where a pinned row does not anchor.
+// Pins read straight off the row's own columns, checked in order.
+const OWN_FIELD_PINS = [
+  ['prepaid', (r) => r.prepaid_amount != null],
+  ['customer_confirmed', (r) => r.customer_confirmed === true],
+  ['field_confirmed', (r) => r.field_confirmed_at != null],
+  ['visit_id', (r) => r.visit_id != null],
+  ['arrival_sms_sent', (r) => r.arrival_sms_sent_at != null],
+  ['prep_sent', (r) => r.prep_sent_at != null],
+];
+
+function classifyRiderRow(row, reasonMap, nearTermCutoff, todayStr) {
+  // A tracker-cancelled visit is gone, whatever status says. A 'rescheduled'
+  // status wins over a stale 'complete' tracker (the legacy customer
+  // reschedule path flips only status), so check it before 'complete'.
+  if (row.track_state === 'cancelled') return { terminal: true };
+  if (isPlanSeriesRow(row) && row.status === 'rescheduled') {
+    return { pinned: true, why: 'rescheduled_pending' };
+  }
+  if (TERMINAL_TRACK_STATES.includes(row.track_state)) return { terminal: true };
+  if (JOIN_INELIGIBLE_STATUSES.includes(row.status)) return { terminal: true };
+  if (!isPlanSeriesRow(row)) return { booster: true };
+  if (IN_PROGRESS_STATUSES.includes(row.status) || LIVE_TRACK_STATES.includes(row.track_state)) {
+    return { pinned: true, why: 'in_progress' };
+  }
+  const ownPin = OWN_FIELD_PINS.find(([, test]) => test(row));
+  if (ownPin) return { pinned: true, why: ownPin[0] };
+  if (reasonMap.has(row.id)) return { pinned: true, why: reasonMap.get(row.id) };
+  if (row.status == null) return { pinned: true, why: 'null_status' };
+  const d = dateOnly(row.scheduled_date);
+  // A live row dated before today never happened (still pending/confirmed):
+  // report it as overdue, never as near-term.
+  if (d != null && todayStr && d < todayStr) return { pinned: true, why: 'overdue' };
+  if (d != null && d <= nearTermCutoff) return { pinned: true, why: 'near_term' };
+  if (MOVABLE_ROW_STATUSES.includes(row.status)) return { movable: true };
+  return { pinned: true, why: 'other_status' };
+}
+
+// Pure diff (byte-identical shape to the write engine's diffRiderPlan,
+// minus the host-join window/technician refresh — the preview reports
+// DATES only, never a technician or window assignment, so there is no
+// "refresh" concept here): claims at most one movable row per planned
+// date (lowest id wins a same-date tie), then pairs the remaining
+// unmatched movable rows with the remaining unmatched planned dates in
+// order (earliest movable row <-> earliest unmatched date) as moves; any
+// planned dates left over are inserts, any movable rows left over are
+// cancels.
+function diffPlan(plan, movableRows) {
+  const movableByDate = new Map();
+  for (const r of movableRows) {
+    const d = dateOnly(r.scheduled_date);
+    if (!d) continue;
+    if (!movableByDate.has(d)) movableByDate.set(d, []);
+    movableByDate.get(d).push(r);
+  }
+  for (const rows of movableByDate.values()) rows.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
+  const claimedIds = new Set();
+  const keep = [];
+  const unmatchedPlanned = [];
+  for (const d of plan) {
+    const candidates = movableByDate.get(d) || [];
+    const existing = candidates.find((r) => !claimedIds.has(r.id));
+    if (existing) {
+      claimedIds.add(existing.id);
+      keep.push({ id: existing.id, date: d });
+    } else {
+      unmatchedPlanned.push(d);
+    }
+  }
+  const unmatchedMovable = movableRows
+    .filter((r) => !claimedIds.has(r.id))
+    // Id tie-break: same-date rows must pair the same way on every run, not
+    // in PostgreSQL's physical row order.
+    .sort((a, b) => dateOnly(a.scheduled_date).localeCompare(dateOnly(b.scheduled_date))
+      || String(a.id).localeCompare(String(b.id)));
+
+  const pairCount = Math.min(unmatchedMovable.length, unmatchedPlanned.length);
+  const move = [];
+  for (let i = 0; i < pairCount; i++) {
+    move.push({ id: unmatchedMovable[i].id, from: dateOnly(unmatchedMovable[i].scheduled_date), to: unmatchedPlanned[i] });
+  }
+  const insert = unmatchedPlanned.slice(pairCount);
+  const cancel = unmatchedMovable.slice(pairCount).map((r) => ({ id: r.id, date: dateOnly(r.scheduled_date) }));
+  return {
+    keep, move, insert, cancel,
+  };
+}
+
+// --- previewRiderPair, split into phases (Codex P2 round on PR #5290 —
+// previewRiderPair's own complexity) ---------------------------------------
+
+// Phase 1: resolve the two parent rows and the pair's basic shape. Returns
+// either { blocked: reason } for the id-resolution failures that make
+// everything past this point uncomputable (rider_not_found / not_a_rider /
+// host_missing), or the loaded context every later phase reads.
+async function loadPairContext(conn, riderParentId, hostParentId) {
+  if (!riderParentId) return { blocked: 'rider_not_found' };
+  const cols = await conn('scheduled_services').columnInfo();
+  const riderParent = await conn('scheduled_services').where({ id: riderParentId }).first();
+  if (!riderParent) return { blocked: 'rider_not_found' };
+  const resolvedHostId = hostParentId || riderParent.rides_parent_id;
+  if (!resolvedHostId) return { blocked: 'not_a_rider' };
+  const hostParent = await conn('scheduled_services').where({ id: resolvedHostId }).first();
+  if (!hostParent) return { blocked: 'host_missing' };
+  return {
+    cols, riderParent, hostParent, riderParentId, resolvedHostId,
+  };
+}
+
+// Phase 2: every pair/customer/series gate. Returns { reasons, hostScope }
+// — reasons is the full array (every applicable gate, never first-hit; the
+// caller decides whether a STRUCTURAL_BLOCKERS hit skips plan computation),
+// hostScope is the host's own resolved property scope (Codex P1 round #2 on
+// PR #5290 — computed here once, alongside the pair's own property compare,
+// and handed to loadHostDates below so it never re-resolves it).
+async function evaluatePairGates(conn, ctx) {
+  const {
+    cols, riderParent, hostParent, riderParentId,
+  } = ctx;
+  const reasons = PAIR_STRUCTURE_GATES.filter(([, test]) => test(ctx)).map(([reason]) => reason);
+
+  // Property scope: only meaningful for the SAME customer (a cross-customer
+  // pair is already structurally blocked above, and comparing two
+  // different customers' addresses is not a "same property" question at
+  // all — skip the extra reads for that case).
+  const sameCustomer = String(riderParent.customer_id) === String(hostParent.customer_id);
+  let hostScope = null;
+  if (cols.property_id && sameCustomer) {
+    const riderScope = await resolveSeriesPropertyScope(conn, riderParent);
+    hostScope = await resolveSeriesPropertyScope(conn, hostParent);
+    const verdict = seriesPropertyVerdict(riderScope, hostScope);
+    if (verdict === 'unresolved') reasons.push('property_unresolved');
+    else if (verdict === 'different') reasons.push('different_property');
+  }
+
+  const latestDecision = await conn('recurring_plan_alerts')
+    .where({ recurring_parent_id: riderParentId })
+    .whereNotNull('resolved_at')
+    .orderBy('resolved_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('resolved_action');
+  const stoppedBy = latestDecision?.resolved_action;
+  if (stoppedBy === 'cancel_series' || stoppedBy === 'let_lapse') reasons.push('plan_stopped');
+
+  // Customer gates — the shared table the write engine and the nightly
+  // top-up both use (services/series-customer-eligibility.js), read-only,
+  // no FOR SHARE (the engine takes one; this preview commits nothing so
+  // there is nothing to serialize against). All-hits variant: the preview
+  // lists every applicable gate, not just the first.
+  const { SERIES_CUSTOMER_COLUMNS, seriesCustomerSkipReasons } = require('./series-customer-eligibility');
+  const customer = await conn('customers').where({ id: riderParent.customer_id }).first(SERIES_CUSTOMER_COLUMNS);
+  reasons.push(...seriesCustomerSkipReasons(customer));
+
+  // Series gates — admin-schedule.js's all-hits topupAllSeriesSkipReasons
+  // (annual prepay / family plan hold / duplicate active series), reused
+  // READ-ONLY: no advisory lock taken (see this module's own header and
+  // that export's own comment in admin-schedule.js). Passed the OVERLAID
+  // rider parent (Codex P2 round #2 on PR #5290), same as
+  // topUpRecurringSeriesLocked overlays parent BEFORE calling
+  // topupSeriesSkipReason itself: a series-scope price/service edit
+  // (recurring_template_overrides, GATE_EDIT_APPT_PRICE_SERVICE_SCOPE)
+  // redirects service_id/service_type, which plan_hold's own family
+  // classification and duplicate_series' own family/address match both
+  // read straight off `parent` — reading the STALE raw parent here would
+  // classify the series by a service it no longer is (or isn't yet), the
+  // one thing this preview exists to never disagree with the top-up about.
+  try {
+    const { topupAllSeriesSkipReasons } = require('../routes/admin-schedule');
+    const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
+    const overlaidRiderParent = overlayRecurringTemplateOverrides(riderParent, cols);
+    // Savepoint: a failed read here must not abort the caller's
+    // transaction (25P02) for every read after it.
+    const seriesSkips = await conn.transaction((sp) => topupAllSeriesSkipReasons(sp, overlaidRiderParent, riderParentId, cols));
+    // Owner ruling 2026-09-29: an annual-prepay pest series rides the lawn
+    // rhythm too. Its prepaid visits stay pinned ('prepaid'), and only the
+    // visits after them join lawn dates, so the prepay refusal the top-up
+    // applies doesn't apply to a rider.
+    reasons.push(...seriesSkips.filter((r) => r !== 'annual_prepay_series'));
+  } catch {
+    reasons.push('series_check_error');
+  }
+
+  return { reasons, hostScope };
+}
+
+// Phase 3: host dates — base rows only, null-safe status, same EFFECTIVE
+// property scope per row, future, not join-ineligible.
+//
+// Codex P1 round #2 on PR #5290: the old filter compared each child row's
+// raw `property_id` against the host PARENT's own raw `property_id` column
+// — stale the moment the host moved via
+// `recurring_template_overrides.appointment_address` (the parent's own
+// column never changes; only its EFFECTIVE, override-aware scope does, the
+// same one the pair's own `different_property` gate resolves), and
+// entirely skipped (every child counted, drifted or not) whenever the
+// parent's raw column happened to be null. Both are fixed by resolving the
+// host's effective scope ONCE (`hostScope`, evaluatePairGates — the exact
+// same resolveSeriesPropertyScope call the pair gate uses, over the
+// OVERLAID parent) and comparing each candidate row's own resolved scope
+// (`rowPropertyScope`, above — its own property_id/service_address_*
+// columns) against it with the SAME comparator, `seriesPropertyVerdict`.
+// The host PARENT's own row always matches (it IS the effective scope,
+// however stale its own raw columns are). A child row with no resolved
+// scope of its own (no property_id, no stamped address — the ordinary case
+// for most child rows) still inherits the host's scope, same as the old
+// null-safe behavior; only a row whose OWN resolved scope actively
+// disagrees is dropped.
+// A host plan visit waiting to be rescheduled has a stale date, so it's left
+// out of the host dates; but until the rebooker places it, the rider's plan
+// could still change. Report it so the pair is never shown as approvable.
+async function hostReschedulePending(conn, hostParent, cols) {
+  const rows = await conn('scheduled_services')
+    .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
+    .where('status', 'rescheduled')
+    .modify((q) => { if (cols.track_state) q.whereNot('track_state', 'cancelled'); })
+    .select('id', 'is_recurring', 'recurring_parent_id', ...['is_callback', 'followup_included'].filter((c) => cols[c]));
+  return rows.some(isPlanSeriesRow);
+}
+
+async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
+  const addressCols = [
+    'service_address_line1', 'service_address_line2', 'service_address_city',
+    'service_address_state', 'service_address_zip',
+  ].filter((c) => cols[c]);
+  const hostRowsRaw = await conn('scheduled_services')
+    .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
+    .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
+    .modify((q) => {
+      if (cols.track_state) q.where((t) => { t.whereNull('track_state').orWhereNotIn('track_state', TERMINAL_TRACK_STATES); });
+    })
+    .where('scheduled_date', '>=', todayStr)
+    .orderBy('scheduled_date', 'asc')
+    .select(
+      'id', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
+      ...['is_callback', 'followup_included'].filter((c) => cols[c]),
+      ...(cols.property_id ? ['property_id'] : []), ...addressCols,
+    )
+    .then((rows) => rows.filter(isPlanSeriesRow));
+  const filtered = (cols.property_id && hostScope?.resolved)
+    ? hostRowsRaw.filter((r) => {
+      if (String(r.id) === String(hostParent.id)) return true;
+      const rowScope = rowPropertyScope(r);
+      if (!rowScope.resolved) return true;
+      return seriesPropertyVerdict(rowScope, hostScope) === 'same';
+    })
+    : hostRowsRaw;
+  return Array.from(new Set(filtered.map((r) => dateOnly(r.scheduled_date)).filter(Boolean))).sort();
+}
+
+// Phase 4: every rider row (parent + children), classified, with the
+// anchor date and the reschedule-pending flag. A 'rescheduled' plan row is
+// pinned (see classifyRiderRow) but explicitly excluded from anchoring —
+// its date is stale, it is waiting to be replaced, not a real "last pest
+// happened here" date.
+// One rider row's role in the anchor decision, from its tracker-aware
+// classification (never raw status: a lagging status can say 'rescheduled'
+// after the tracker cancelled the visit, or 'confirmed' after it completed).
+// A row anchors when it was performed, or when it's pinned and still live:
+// ahead of today, or in progress (even across midnight). A cancelled,
+// skipped, no-show or rescheduled status wins over a stale 'complete'
+// tracker, and an overdue unperformed row never anchors.
+function anchorRole(r, c, todayStr) {
+  if (!isPlanSeriesRow(r)) return { reschedule: false, anchorDate: null };
+  if (c.why === 'rescheduled_pending') return { reschedule: true, anchorDate: null };
+  const operationallyTerminal = ['cancelled', 'skipped', 'no_show', 'rescheduled'].includes(r.status);
+  const performed = !operationallyTerminal && (r.track_state === 'complete'
+    || (r.status === 'completed' && !TERMINAL_TRACK_STATES.includes(r.track_state)));
+  const d = dateOnly(r.scheduled_date);
+  const pinnedLive = c.pinned === true && c.why !== 'overdue'
+    && ((d != null && d >= todayStr) || c.why === 'in_progress');
+  return { reschedule: false, anchorDate: (performed || pinnedLive) ? d : null };
+}
+
+async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
+  const riderRows = await conn('scheduled_services')
+    .where((q) => { q.where('id', riderParentId).orWhere('recurring_parent_id', riderParentId); })
+    .select('*');
+  const reasonMap = await attributeReasonMap(conn, riderRows.map((r) => r.id));
+  const nearTermCutoff = addDaysStr(todayStr, NEAR_TERM_DAYS);
+
+  let lastRiderDate = null;
+  let reschedulePending = false;
+  const classifications = new Map();
+  for (const r of riderRows) {
+    const c = classifyRiderRow(r, reasonMap, nearTermCutoff, todayStr);
+    classifications.set(r.id, c);
+    const { reschedule, anchorDate } = anchorRole(r, c, todayStr);
+    if (reschedule) reschedulePending = true;
+    if (anchorDate && (!lastRiderDate || anchorDate > lastRiderDate)) lastRiderDate = anchorDate;
+  }
+  // Codex P2 round #2 on PR #5290: when the RIDER PARENT ROW ITSELF is the
+  // one awaiting reschedule (status 'rescheduled') and nothing else in the
+  // series anchors, its own `scheduled_date` is exactly the stale date it
+  // is waiting to be moved off of — the same reason a rescheduled CHILD row
+  // never anchors (see classifyRiderRow's own comment). Falling back to it
+  // here would silently reintroduce that stale date as "when this last
+  // actually happened." No other anchor-eligible row at all means no
+  // anchor — previewRiderPair reports `no_anchor` alongside
+  // `rider_reschedule_pending` rather than planning off a date that was
+  // never really kept.
+  // The parent's own date is the fallback anchor only for a brand-new
+  // series whose first visit is still live. A skipped, no-show, cancelled or
+  // rescheduled parent never happened on that date, so it never anchors
+  // (completed already anchored above).
+  // An overdue parent (still pending/confirmed, dated before today) never
+  // happened either, so it can't be the fallback anchor.
+  const parentClass = classifications.get(riderParent.id);
+  const parentAnchorable = !JOIN_INELIGIBLE_STATUSES.includes(riderParent.status)
+    && !TERMINAL_TRACK_STATES.includes(riderParent.track_state)
+    && !(parentClass && parentClass.why === 'overdue');
+  if (!lastRiderDate && parentAnchorable) lastRiderDate = dateOnly(riderParent.scheduled_date);
+  return {
+    riderRows, classifications, lastRiderDate, reschedulePending,
+  };
+}
+
+/**
+ * Read-only preview of ONE rider/host pairing — computable whether or not
+ * `scheduled_services.rides_parent_id` is actually set (nothing writes it
+ * yet): pass `hostParentId` explicitly to preview a CANDIDATE pair the ops
+ * report found by its own heuristic (same customer, same property, an
+ * active ongoing lawn series + an active ongoing pest series), or omit it
+ * to read the rider's own already-stamped link.
+ *
+ * Never throws for an ordinary ineligible/incomplete pair — every reason
+ * lands in `reasons`. Returns `{ eligible: false, reasons: ['error'] }`
+ * only if a read itself fails (fails closed, same posture as the write
+ * engine's own top-level catch).
+ *
+ * `reasons` collects EVERY applicable pair/customer/series gate (not just
+ * the first, unlike the write engine's own short-circuiting skip check) so
+ * an office list can show every reason a pair is blocked, not just one.
+ * Plan computation (anchor/horizon/plan/keep/move/insert/cancel/pinned) is
+ * skipped only for the STRUCTURAL_BLOCKERS — reasons that make "the plan"
+ * meaningless, not merely "the office wouldn't act on it today" — so a
+ * pair blocked only by a policy gate (customer held, duplicate series, an
+ * unresolved plan_stopped decision, a rider row awaiting reschedule, …)
+ * still shows what the plan WOULD be.
+ *
+ * @param {import('knex').Knex | import('knex').Knex.Transaction} conn
+ * @param {{riderParentId: string, hostParentId?: string}} args
+ * @returns {Promise<{eligible: boolean, reasons: string[], anchor: ?string,
+ *   planFloor: ?string, horizon: ?string, plan: string[], keep: Array,
+ *   move: Array, insert: string[], cancel: Array,
+ *   retained: Array<{id: string, date: string}>,
+ *   beyondSchedule: Array<{id: string, date: string}>,
+ *   pinned: Array<{id: string, date: ?string, why: string}>}>}
+ */
+async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
+  const empty = (reasons) => ({
+    eligible: false,
+    reasons,
+    anchor: null,
+    planFloor: null,
+    horizon: null,
+    plan: [],
+    keep: [],
+    move: [],
+    insert: [],
+    cancel: [],
+    retained: [],
+    beyondSchedule: [],
+    pinned: [],
+  });
+
+  try {
+    const loaded = await loadPairContext(conn, riderParentId, hostParentId);
+    if (loaded.blocked) return empty([loaded.blocked]);
+    const { cols, riderParent, hostParent } = loaded;
+
+    const { reasons, hostScope } = await evaluatePairGates(conn, loaded);
+    if (reasons.some((r) => STRUCTURAL_BLOCKERS.has(r))) return empty(reasons);
+
+    // --- Plan computation (read-only, same rules as buildRiderSyncPlan) ---
+    const todayStr = etDateString();
+    const hostDates = await loadHostDates(conn, hostParent, cols, todayStr, hostScope);
+    if (await hostReschedulePending(conn, hostParent, cols)) reasons.push('host_reschedule_pending');
+    const {
+      riderRows, classifications, lastRiderDate, reschedulePending,
+    } = await classifyRiderRows(conn, riderParentId, riderParent, todayStr);
+    if (reschedulePending) reasons.push('rider_reschedule_pending');
+    const pinnedRows = () => riderRows
+      .map((r) => ({ row: r, c: classifications.get(r.id) }))
+      .filter(({ c }) => c && c.pinned === true)
+      .map(({ row, c }) => ({ id: row.id, date: dateOnly(row.scheduled_date), why: c.why }));
+    // No anchor: the plan stays empty, but the live pinned visits (e.g. a
+    // rescheduled_pending row) are still reported.
+    if (!lastRiderDate) { reasons.push('no_anchor'); return { ...empty(reasons), pinned: pinnedRows() }; }
+
+    const futureMovable = riderRows.filter((r) => {
+      const c = classifications.get(r.id);
+      return c && c.movable === true && dateOnly(r.scheduled_date) >= todayStr;
+    });
+    const movableRows = futureMovable.filter((r) => dateOnly(r.scheduled_date) > lastRiderDate);
+    // Movable visits dated on or before the anchor (a later visit is pinned)
+    // are left where they are. Report them so every future visit appears in
+    // exactly one list.
+    const retained = futureMovable
+      .filter((r) => dateOnly(r.scheduled_date) <= lastRiderDate)
+      .map((r) => ({ id: r.id, date: dateOnly(r.scheduled_date) }));
+
+    const nearTermCutoff = addDaysStr(todayStr, NEAR_TERM_DAYS);
+    const planFloor = addDaysStr(nearTermCutoff, 1);
+    const standaloneAnchor = lastRiderDate > planFloor ? lastRiderDate : planFloor;
+    const horizonDate = computeRiderHorizon(standaloneAnchor, hostDates, riderParent.recurring_pattern);
+
+    const { customerPrefersNoWeekends } = require('./recurring-appointment-seeder');
+    const skipRiderStamp = !!riderParent.skip_weekends;
+    const skipRiderEffective = skipRiderStamp || await customerPrefersNoWeekends(conn, riderParent.customer_id);
+    const weekendShift = riderParent.weekend_shift === 'back' ? 'back' : 'forward';
+
+    // Owner blackout days — same shared read-only lookup every series
+    // generator uses. A read error still plans (without blackout clearing)
+    // but adds blackout_check_error, so the pair is never shown as eligible.
+    let blackoutDates = null;
+    try {
+      const from = standaloneAnchor < todayStr ? standaloneAnchor : todayStr;
+      const to = horizonDate > from ? horizonDate : from;
+      blackoutDates = await conn.transaction((sp) => getBlackoutLayers(from, to, sp));
+    } catch {
+      // The plan still computes (without blackout clearing), but the pair is
+      // flagged so the office never approves dates it couldn't check.
+      blackoutDates = null;
+      reasons.push('blackout_check_error');
+    }
+
+    const plan = planRiderDates({
+      hostDates,
+      lastRiderDate,
+      horizonDate,
+      earliestDate: planFloor,
+      skipWeekends: skipRiderEffective,
+      weekendShift,
+      blackoutDates,
+    });
+
+    // Movable visits after the horizon (the last scheduled lawn date, or the
+    // rider's own bounded horizon) aren't surplus: they'd join lawn dates
+    // once lawn is extended. Report them as beyond the lawn schedule, never
+    // as cancellations.
+    const beyondSchedule = movableRows
+      .filter((r) => dateOnly(r.scheduled_date) > horizonDate)
+      .map((r) => ({ id: r.id, date: dateOnly(r.scheduled_date) }));
+    const diff = diffPlan(plan, movableRows.filter((r) => dateOnly(r.scheduled_date) <= horizonDate));
+    const pinned = pinnedRows();
+
+    return {
+      eligible: reasons.length === 0,
+      reasons,
+      anchor: lastRiderDate,
+      planFloor,
+      horizon: horizonDate,
+      plan,
+      keep: diff.keep,
+      move: diff.move,
+      insert: diff.insert,
+      cancel: diff.cancel,
+      retained,
+      beyondSchedule,
+      pinned,
+    };
+  } catch (err) {
+    return {
+      eligible: false,
+      reasons: ['error'],
+      anchor: null,
+      planFloor: null,
+      horizon: null,
+      plan: [],
+      keep: [],
+      move: [],
+      insert: [],
+      cancel: [],
+      retained: [],
+      beyondSchedule: [],
+      pinned: [],
+      error: err.message,
+    };
+  }
+}
+
+module.exports = {
+  MIN_GAP_DAYS,
+  TARGET_GAP_DAYS,
+  MAX_WAIT_DAYS,
+  NEAR_TERM_DAYS,
+  OVERDUE_WAIT_DAYS,
+  MAX_HORIZON_EXTRA_DAYS,
+  planRiderDates,
+  computeRiderHorizon,
+  previewRiderPair,
+  resolveSeriesPropertyScope,
+  seriesPropertyVerdict,
+  _internals: {
+    dateOnly, addDaysStr, classifyRiderRow, diffPlan, attributeReasonMap, computeRiderHorizon, nextRiderDate, rowPropertyScope,
+  },
+};

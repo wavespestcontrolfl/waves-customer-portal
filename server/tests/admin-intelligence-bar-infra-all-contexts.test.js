@@ -158,7 +158,7 @@ describe('infra tools load on every admin context, admin-only', () => {
     await withServer(async (baseUrl) => {
       for (const context of ['revenue', 'customers', 'dashboard']) {
         const call = await queryModelCall(baseUrl, 'admin', context);
-        expect(call.system[0].text).toContain('INFRASTRUCTURE (all READ-ONLY)');
+        expect(call.system[0].text).toContain('INFRASTRUCTURE (read-only, except the owner-only confirmation-card actions listed below)');
         expect(call.system[0].text).toContain('get_stripe_payment_intents');
       }
     });
@@ -172,7 +172,7 @@ describe('infra tools load on every admin context, admin-only', () => {
         for (const marker of INFRA_MARKERS) {
           expect(names).not.toContain(marker);
         }
-        expect(call.system[0].text).not.toContain('INFRASTRUCTURE (all READ-ONLY)');
+        expect(call.system[0].text).not.toContain('INFRASTRUCTURE (read-only, except the owner-only confirmation-card actions listed below)');
       }
     });
   });
@@ -181,7 +181,7 @@ describe('infra tools load on every admin context, admin-only', () => {
     await withServer(async (baseUrl) => {
       const call = await queryModelCall(baseUrl, 'tech', 'tech');
       expect(call.tools.map(t => t.name)).toEqual([]);
-      expect(call.system[0].text).not.toContain('INFRASTRUCTURE (all READ-ONLY)');
+      expect(call.system[0].text).not.toContain('INFRASTRUCTURE (read-only, except the owner-only confirmation-card actions listed below)');
     });
   });
 

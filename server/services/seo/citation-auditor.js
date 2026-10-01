@@ -1,73 +1,507 @@
+/**
+ * Directory-listing (citation) auditor.
+ *
+ * For every seo_citations row with a `listing_url`, fetch that page (read-only
+ * GET, nothing is submitted, no login, no claim, no edit) and compare the
+ * name / phone / address it shows against the right NAP from
+ * config/locations.js: the row's `location_id` office; an unassigned (brand)
+ * listing may show ANY of the four offices — Waves has four — and
+ * status_detail.office records which one matched.
+ *
+ * States (seo_citations.status, CHECK-constrained by migration
+ * 20260929230000_seo_citations_audit_states):
+ *   unverified     no listing URL recorded, or never checked; also a page that
+ *                  was fetched but whose shown address could not be confirmed
+ *                  (status_detail.reason = 'address_unconfirmed' — directory
+ *                  pages often show OTHER businesses' addresses, so this is
+ *                  never "mismatched" unless JSON-LD states our own address)
+ *   verified       fetched; name and phone match, plus the address when the
+ *                  page shows one. Conservative: a false "unverified" is fine, a
+ *                  false "verified" is not. Visible text confirms an address ONLY
+ *                  when it contains the office's whole normalized address
+ *                  ("<number> <street> <suffix> [directional] <city> fl <zip5>",
+ *                  unit dropped, contiguous, on word boundaries); any other
+ *                  address-like text is 'address_unconfirmed'. A page with no
+ *                  address-like string is judged on name + phone.
+ *                  Precedence: when the page's JSON-LD has a Waves entity (its
+ *                  name, or one of our office phones; never another node), that
+ *                  entity IS the listing's NAP — each field it states is judged
+ *                  on its own (street must EQUAL the office street; a stated
+ *                  locality, region and postal code must equal the office's) and
+ *                  page text can never erase a mismatch there; only fields it
+ *                  leaves unstated are read from the text.
+ *                  Only a Waves entity's STATED phone can prove a phone mismatch:
+ *                  a phone in visible text is not listing evidence, so ours
+ *                  confirms it and its absence is unverified /
+ *                  'phone_unconfirmed' (no phone anywhere is fetch-blocked /
+ *                  'phone_not_found'). Several Waves entities: the one matching
+ *                  the expected office (phone, then street, then city) is
+ *                  judged. A short page with a Waves entity that states a phone
+ *                  is judged on the entity, not called JS-only.
+ *                  Stored nap_name / nap_phone / nap_address are always what the
+ *                  page showed, never the office's canonical values.
+ *   mismatched     fetched; a field differs — status_detail.mismatches lists
+ *                  each { field, expected, seen }
+ *   fetch-blocked  the page could not be read: 403/429/5xx or any non-2xx,
+ *                  captcha/bot challenge, timeout or network error, empty or
+ *                  JS-only body, non-HTML body, or no NAP found in the text.
+ *                  A blocked fetch NEVER means "missing" — Yelp, Angi and
+ *                  Nextdoor routinely block bots and land here.
+ *   missing        recorded by a human via updateCitation ("no listing
+ *                  exists"). Only a human sets it; the audit never writes it
+ *                  and never re-checks a row a human marked missing.
+ *
+ * Fetching reuses contact-finder's SSRF-hardened fetchPage (private/loopback
+ * addresses refused and DNS-pinned to the real socket, every redirect hop
+ * re-validated, timeout, 600 KB body cap) — no second fetcher. `directory_url`
+ * is the directory's homepage, never our listing, so it is never audited.
+ *
+ * Scheduling: weekly cron in services/scheduler.js (Mon 4:47 AM ET), run
+ * exclusively. Kill switch: GATE_CITATION_AUDIT=false (default on; the audit is
+ * read-only GETs of public pages, sequential, one per row). Staff record each
+ * listing's URL and office in the SEO admin Citations editor (updateCitation).
+ */
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
+const { WAVES_LOCATIONS } = require('../../config/locations');
+const { _internals: contactFinder } = require('./contact-finder');
+const { classifyPageBody } = require('./page-body-classifier');
+const { decodeHTML } = require('entities');
+const { visibleText } = require('../content/content-registry-live-status');
 
-// Canonical NAP from locations.js
-const CANONICAL_NAP = {
-  name: 'Waves Pest Control',
-  phone: '(941) 318-7612',
-  website: 'https://wavespestcontrol.com',
+const STATES = ['unverified', 'verified', 'mismatched', 'fetch-blocked', 'missing'];
+const BRAND_NAME = 'Waves Pest Control'; // locations.js carries office names only, not the brand name
+const MIN_VISIBLE_CHARS = 200; // below this the body is a JS shell / empty page
+const MAX_REDIRECTS = 4;
+const FETCH_TIMEOUT_MS = 12000;
+
+// http(s) with a real host; a malformed URL (https://%) is rejected, not persisted.
+function isHttpUrl(value) {
+  try {
+    const u = new URL(value);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && Boolean(u.hostname);
+  } catch { return false; }
+}
+const invalid = (message) => Object.assign(new Error(message), { code: 'INVALID_CITATION_UPDATE' });
+const phoneKey = (s) => { const d = String(s || '').replace(/\D/g, ''); return d.length === 11 && d[0] === '1' ? d.slice(1) : d; };
+const alnum = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+const STREET_WORDS = {
+  st: 'street', ave: 'avenue', rd: 'road', blvd: 'boulevard', dr: 'drive', ln: 'lane', ct: 'court', cir: 'circle',
+  pl: 'place', trl: 'trail', hwy: 'highway', pkwy: 'parkway', n: 'north', s: 'south', e: 'east', w: 'west',
+  florida: 'fl',
+};
+// The ONE address normalizer (expected addresses, visible text and JSON-LD all go through it):
+// lowercase, drop unit designators and their value, strip punctuation, expand suffixes and
+// directionals, "florida" -> "fl", collapse spaces.
+function normalizeStreet(str) {
+  return String(str || '').toLowerCase()
+    .replace(/#\s*[a-z0-9-]+/g, ' ')
+    .replace(/\b(?:suite|ste|unit|apt|apartment|bldg|building)\b\.?\s*[a-z0-9-]+/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(' ').filter(Boolean).map((w) => STREET_WORDS[w] || w).join(' ');
+}
+
+const SUFFIX_WORDS = new Set(['street', 'avenue', 'road', 'boulevard', 'drive', 'lane', 'court', 'circle', 'place', 'way', 'trail', 'highway', 'parkway']);
+const DIRECTIONAL_WORDS = new Set(['north', 'south', 'east', 'west']);
+const endsStreet = (tokens) => {
+  const last = tokens[tokens.length - 1];
+  return SUFFIX_WORDS.has(last) || (DIRECTIONAL_WORDS.has(last) && SUFFIX_WORDS.has(tokens[tokens.length - 2]));
 };
 
+// The ONE address parser ("13649 Luxe Ave #110, Bradenton, FL 34211" -> street / city / region /
+// postal, each normalized). Used for the office addresses in locations.js and any string address.
+// Commas and newlines are optional separators: when the text before the first comma ends at a
+// street suffix (plus optional directional) it IS the street; otherwise ("13649 Luxe Ave #110
+// Bradenton FL 34211") a trailing "<state> <zip5>[-4]" is peeled off and the street is cut from the
+// city after the LAST street suffix (plus a directional when a city still follows it). A city
+// whose name itself begins with a directional ("North Port") right after a suffix is read as
+// part of the street: that errs to a mismatch/unverified, never a false verify.
+function parseAddress(str) {
+  const parts = String(str || '').split(/[,\n]/);
+  const firstStreet = normalizeStreet(parts[0]).split(' ').filter(Boolean);
+  const peel = (tokens) => {
+    if (tokens.length > 1 && /^\d{4}$/.test(tokens[tokens.length - 1]) && /^\d{5}$/.test(tokens[tokens.length - 2])) tokens.pop(); // ZIP+4
+    const postal = /^\d{5}$/.test(tokens[tokens.length - 1] || '') ? tokens.pop() : null;
+    const region = /^[a-z]{2}$/.test(tokens[tokens.length - 1] || '') ? tokens.pop() : null;
+    return { postal, region };
+  };
+  if (parts.length > 1 && endsStreet(firstStreet)) {
+    const tail = normalizeStreet(parts.slice(1).join(' ')).split(' ').filter(Boolean);
+    const { postal, region } = peel(tail);
+    return { street: firstStreet.join(' '), city: tail.join(' ') || null, region, postal };
+  }
+  const tokens = normalizeStreet(str).split(' ').filter(Boolean);
+  const { postal, region } = peel(tokens);
+  let end = -1;
+  for (let i = tokens.length - 1; i >= 1; i--) if (SUFFIX_WORDS.has(tokens[i])) { end = i; break; }
+  if (end < 0) return { street: normalizeStreet(parts[0]), city: normalizeStreet(parts.slice(1).join(' ')) || null, region, postal };
+  if (DIRECTIONAL_WORDS.has(tokens[end + 1]) && tokens.length > end + 2) end += 1;
+  return { street: tokens.slice(0, end + 1).join(' '), city: tokens.slice(end + 1).join(' ') || null, region, postal };
+}
+const streetOfAddress = (address) => parseAddress(address).street;
+
+// An office's accepted cities come from locations.js only: the postal city parsed from its
+// address, plus its display name (the bradenton office is "Lakewood Ranch"; for the others the
+// name equals the city, so it adds nothing).
+const officeOf = (loc) => {
+  const a = parseAddress(loc.address);
+  const labels = [String(loc.address).split(',')[1]?.trim(), loc.name].filter(Boolean);
+  const cities = [...new Set([a.city, normalizeStreet(loc.name)].filter(Boolean))];
+  return {
+    locationId: loc.id, name: BRAND_NAME, phone: loc.phone, phoneKey: phoneKey(loc.phone), address: loc.address, ...a,
+    cities, cityLabel: labels.filter((l, i) => cities.includes(normalizeStreet(l)) && labels.findIndex((x) => normalizeStreet(x) === normalizeStreet(l)) === i).join(' or '),
+    fulls: cities.map((city) => [a.street, city, a.region, a.postal].join(' ')),
+  };
+};
+// The office a row is assigned to, else the default office (WAVES_LOCATIONS[0]) — the dashboard's reference NAP.
+function expectedNapFor(row) {
+  return officeOf(WAVES_LOCATIONS.find((l) => l.id === row.location_id) || WAVES_LOCATIONS[0]);
+}
+// What a listing may legitimately show: its assigned office, or any office when unassigned.
+function candidatesFor(row) {
+  const assigned = WAVES_LOCATIONS.find((l) => l.id === row.location_id);
+  return (assigned ? [assigned] : WAVES_LOCATIONS).map(officeOf);
+}
+const hasSequence = (normalizedText, sequence) => Boolean(sequence) && ` ${normalizedText} `.includes(` ${sequence} `);
+
+const BRAND_RE = /waves\s+pest\s+control/i;
+const PHONE_RE = /(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\d{3}[-.\s]\d{3}[-.\s]\d{4})/g;
+const fmtPhone = (k) => `(${k.slice(0, 3)}) ${k.slice(3, 6)}-${k.slice(6)}`;
+
+// Every named/phoned/addressed schema.org node in the page's JSON-LD (arrays, @graph, mainEntity).
+function jsonLdNodes(html) {
+  const out = [];
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) return node.forEach(visit);
+    if (node.name || node.telephone || node.address) out.push(node);
+    if (node['@graph']) visit(node['@graph']);
+    if (node.mainEntity) visit(node.mainEntity);
+  };
+  for (const m of String(html).matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try { visit(JSON.parse(m[1])); } catch { /* malformed block: ignore */ }
+  }
+  return out;
+}
+
+const OFFICE_PHONE_KEYS = new Set(WAVES_LOCATIONS.map((l) => phoneKey(l.phone)));
+const isWavesNode = (n) => alnum(n.name).includes(alnum(BRAND_NAME))
+  || [].concat(n.telephone || []).some((p) => OFFICE_PHONE_KEYS.has(phoneKey(p)));
+
+// ONLY entities that are Waves (their name says so, or their phone is one of our four offices)
+// are evidence; a directory's own Organization or another business's node never is. A page can
+// carry several (a parent Organization plus a branch LocalBusiness): pick the one that matches
+// the expected office(s) — phone first, then street, then city; with nothing matching, the first
+// address-bearing one is judged (a stated mismatch). Name, phone and address come from that one node.
+function wavesEntity(html, candidates = []) {
+  const mine = jsonLdNodes(html).filter(isWavesNode);
+  const score = (node) => {
+    const phones = [].concat(node.telephone ?? []).map(phoneKey);
+    const addr = node.address ? (addressStrings(node.address, candidates) || {}).parsed || null : null;
+    const best = candidates.reduce((max, c) => Math.max(max,
+      (phones.includes(c.phoneKey) ? 100 : 0) + (addr && addr.street === c.street ? 10 : 0) + (addr && addr.city && c.cities.includes(addr.city) ? 1 : 0)), 0);
+    return best + (node.address ? 0.5 : 0);
+  };
+  return mine.reduce((top, n) => (top === null || score(n) > score(top) ? n : top), null);
+}
+
+// An `address` given as an array lists several: judge the entry matching the expected office(s)
+// (street, then city — the node-selection scoring), else the first.
+function pickAddress(entries, candidates) {
+  let best = null;
+  let bestScore = -1;
+  for (const entry of entries) {
+    const parsed = addressStrings(entry).parsed;
+    const score = candidates.reduce((max, c) => Math.max(max, (parsed.street === c.street ? 10 : 0) + (parsed.city && c.cities.includes(parsed.city) ? 1 : 0)), 0);
+    if (score > bestScore) { best = entry; bestScore = score; }
+  }
+  return best;
+}
+
+// A JSON-LD address (object or string) as { parsed, raw, display }: `parsed` is normalized for
+// comparison (postal = first 5 digits); `raw` and `display` are the values AS GIVEN.
+function addressStrings(address, candidates = []) {
+  if (Array.isArray(address)) address = pickAddress(address.filter(Boolean), candidates);
+  if (!address) return null;
+  if (typeof address === 'string') {
+    const parsed = parseAddress(address);
+    return { parsed, raw: { street: address.split(/[,\n]/)[0].trim(), city: parsed.city, region: parsed.region, postal: parsed.postal }, display: address };
+  }
+  const raw = { street: address.streetAddress || null, city: address.addressLocality || null, region: address.addressRegion || null, postal: address.postalCode || null };
+  const parsed = {
+    street: normalizeStreet(raw.street) || null,
+    city: normalizeStreet(raw.city) || null,
+    region: normalizeStreet(raw.region) || null,
+    postal: (String(raw.postal || '').match(/\d{5}/) || [null])[0],
+  };
+  const display = [raw.street, raw.city, [raw.region, raw.postal].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null;
+  return { parsed, raw, display };
+}
+
+// A JSON-LD text value as stated: string, first-class array or {"@value"}; anything else is
+// kept as its JSON so it is still judged (and fails) rather than read as unstated.
+function statedText(v) {
+  const one = Array.isArray(v) ? v.map((x) => (x && x['@value']) ?? x).filter((x) => x != null && String(x).trim() !== '').join(' ') : (v && typeof v === 'object' && '@value' in v ? v['@value'] : v);
+  if (one == null || (typeof one !== 'object' && String(one).trim() === '')) return null;
+  return typeof one === 'object' ? JSON.stringify(one) : String(one).trim();
+}
+
+const decodeHtmlText = (str) => decodeHTML(String(str || '')).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+// A malformed percent-encoding (href="tel:%") must not fail the whole page: fall back to the raw value.
+function safeDecodeURI(value) {
+  try { return decodeURIComponent(value); } catch { return String(value); }
+}
+
+// What the page says. `entity` is the Waves JSON-LD entity's own stated fields (null when the
+// page has none); `textPhones` is every phone in the visible text and tel: links.
+function extractNap(html, candidates = []) {
+  // Entities (&nbsp;, &amp;, numeric) are decoded before name, phone and address are read.
+  const text = decodeHtmlText(visibleText(html));
+  const textPhones = new Set();
+  for (const m of text.matchAll(PHONE_RE)) if (phoneKey(m[0]).length === 10) textPhones.add(phoneKey(m[0]));
+  for (const m of String(html).matchAll(/href\s*=\s*["']tel:([^"']+)["']/gi)) {
+    const k = phoneKey(safeDecodeURI(m[1])); if (k.length === 10) textPhones.add(k);
+  }
+  const title = decodeHtmlText((String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '');
+  const node = wavesEntity(html, candidates);
+  // "Stated" is tracked apart from "parsed": a field the entity gives but we cannot read is a
+  // stated field that fails, never an unstated one that page text may fill in.
+  const rawPhones = [].concat(node ? node.telephone ?? [] : []).map((p) => String(p).trim()).filter(Boolean);
+  const entity = node && {
+    name: statedText(node.name),
+    rawPhones,
+    phones: rawPhones.map(phoneKey).filter((k) => k.length === 10),
+    address: addressStrings(node.address, candidates),
+  };
+  return { text, textPhones: [...textPhones], title: title.replace(/\s+/g, ' ').trim(), entity };
+}
+
+// Street-address-like strings in visible text: number + street name + a common suffix.
+const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
+// Any Florida state + ZIP on the page means an address is shown, whatever its street looks like.
+const FL_ZIP_RE = /\b(?:FL|Florida)\.?,?\s+\d{5}(?:-\d{4})?\b/gi;
+const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
+
+// Address, conservative: a false "unverified" is fine, a false "verified" is not.
+// A Waves entity's stated address IS the listing's address: its street must EQUAL the office's
+// normalized street (not a substring), and any locality / postal code / region it states must
+// equal the office's; each stated field that differs is its own mismatch and page text cannot
+// change that. Without a stated street, the visible text confirms only when it contains the
+// office's whole normalized address ("<number> <street> <suffix> [directional] <city> fl <zip5>"; the city may be the postal city or the office's display name)
+// contiguously on word boundaries. Other address-like strings leave it unconfirmed (a sidebar
+// may list other businesses, so never a mismatch); none at all means the page shows no address.
+// `observed` is always what the page said, never the office's canonical address.
+function judgeAddress(nap, office) {
+  const a = nap.entity && nap.entity.address;
+  if (a) {
+    const { parsed, raw } = a;
+    const mismatches = [];
+    const stated = (v) => v != null && String(v).trim() !== ''; // stated, even if it did not parse
+    if (stated(raw.street) && parsed.street !== office.street) mismatches.push({ field: 'address', expected: office.address, seen: a.display });
+    if (stated(raw.city) && !office.cities.includes(parsed.city)) mismatches.push({ field: 'city', expected: office.cityLabel, seen: raw.city });
+    if (stated(raw.postal) && parsed.postal !== office.postal) mismatches.push({ field: 'postal_code', expected: office.postal, seen: raw.postal });
+    if (stated(raw.region) && parsed.region !== office.region) mismatches.push({ field: 'region', expected: 'FL', seen: raw.region });
+    if (mismatches.length) return { confirmed: false, checked: true, mismatches, unconfirmed: null, observed: a.display };
+    if (stated(raw.street)) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: a.display };
+  }
+  const seen = nap.text.match(ADDRESS_LIKE_RE) || [];
+  const normalizedText = normalizeStreet(nap.text);
+  if (office.fulls.some((full) => hasSequence(normalizedText, full))) {
+    const ours = seen.find((m) => normalizeStreet(m) === office.street) || seen[0] || null;
+    return { confirmed: true, checked: true, mismatches: [], unconfirmed: null, observed: ours };
+  }
+  // An address is shown when a street-like string OR any Florida "state ZIP" is on the page; the
+  // latter catches streets we cannot recognise (long names, "Terrace", ...). Not ours -> unconfirmed.
+  const fl = new RegExp(FL_ZIP_RE.source, 'i').exec(nap.text);
+  const first = seen[0] ? seen[0].trim() : (fl ? nap.text.slice(Math.max(0, fl.index - 60), fl.index + fl[0].length).trim() : null);
+  return { confirmed: false, checked: false, mismatches: [], unconfirmed: first, observed: (a && a.display) || first };
+}
+
+/**
+ * Pure classifier: a fetched page -> { status, nap_*, detail }. `page` is
+ * contact-finder's fetchPage result; `candidates` are the NAPs it may match
+ * (candidatesFor). Nothing here reaches the network.
+ */
+function classifyListing(page, candidates) {
+  const blocked = (reason, extra = {}) => ({ status: 'fetch-blocked', nap: null, detail: { reason, http_status: page.status || null, ...extra } });
+  if (page.blocked) return blocked('blocked_host');
+  if (page.error) return blocked(page.error);
+  if (page.status < 200 || page.status >= 300) return blocked(`http_${page.status}`);
+  const html = page.html || '';
+  const kind = classifyPageBody(html, page.contentType, { strictChallenge: true });
+  if (kind === 'challenge') return blocked('challenge');
+  if (kind === 'non_html') return blocked('non_html');
+  const nap = extractNap(html, candidates);
+  const { entity } = nap;
+  const phoneStated = Boolean(entity && entity.rawPhones.length);
+  // A short page is a JS shell / empty page unless it carries a usable Waves entity (one that
+  // states a telephone), which is then judged on its own.
+  if (nap.text.length < MIN_VISIBLE_CHARS && !phoneStated) return blocked('empty_or_js_only');
+
+  // ONE precedence rule: a field the Waves JSON-LD entity states IS the listing's value for it
+  // and page text never overrides it; only a field the entity leaves unstated is read from the
+  // visible text. Only the ENTITY's stated phone can prove a phone mismatch: a phone in the
+  // visible text (support line, ad, sidebar) is not listing evidence, so ours confirms and its
+  // absence leaves the phone unconfirmed. With several candidate offices, judge against the one
+  // whose phone matched (else the first, the default office).
+  const phonePool = phoneStated ? entity.phones : nap.textPhones;
+  const expected = candidates.find((c) => phonePool.includes(c.phoneKey)) || candidates[0];
+  const nameText = entity && entity.name ? entity.name : `${nap.text} ${nap.title}`;
+  const namePresent = alnum(nameText).includes(alnum(expected.name));
+  if (!namePresent && !phoneStated && !nap.textPhones.some((k) => candidates.some((c) => c.phoneKey === k))) return blocked('no_nap_found');
+
+  const mismatches = [];
+  if (!namePresent) mismatches.push({ field: 'name', expected: expected.name, seen: (entity && entity.name) || nap.title || null });
+  const phoneOk = phonePool.includes(expected.phoneKey);
+  const expectedPhones = candidates.map((c) => c.phone).join(' or ');
+  if (phoneStated && !entity.phones.length) mismatches.push({ field: 'phone', expected: expectedPhones, seen: entity.rawPhones.slice(0, 3) });
+  else if (phoneStated && !phoneOk) mismatches.push({ field: 'phone', expected: expectedPhones, seen: entity.phones.slice(0, 3).map(fmtPhone) });
+
+  const address = judgeAddress(nap, expected);
+  mismatches.push(...address.mismatches);
+
+  // Stored values are what the page showed, never the office's canonical values.
+  const observed = {
+    nap_name: (entity && entity.name) || (nap.text.match(BRAND_RE) || [null])[0],
+    nap_phone: phoneStated ? (entity.phones.length ? fmtPhone(phoneOk ? expected.phoneKey : entity.phones[0]) : entity.rawPhones[0]) : (phoneOk ? fmtPhone(expected.phoneKey) : null),
+    nap_address: address.observed,
+  };
+  const base = { http_status: page.status, final_url: page.finalUrl, office: expected.locationId, address_checked: address.checked };
+
+  // A cut-off body proves nothing either way: what was cut may hold a conflicting address or
+  // JSON-LD entity (so never verified) or may not repeat a mismatch (so never mismatched).
+  if (page.truncated) return blocked('truncated');
+  if (mismatches.length) {
+    return { status: 'mismatched', nap: observed, detail: { ...base, mismatches } };
+  }
+  if (!phoneOk) {
+    // No phone anywhere on the page: nothing readable to judge (fetch-blocked). Phones shown but
+    // none ours: the listing's phone is unconfirmed, never a mismatch.
+    if (!nap.textPhones.length) return blocked('phone_not_found', { final_url: page.finalUrl });
+    return { status: 'unverified', nap: observed, detail: { ...base, reason: 'phone_unconfirmed', seen: nap.textPhones.slice(0, 3).map(fmtPhone) } };
+  }
+  if (address.unconfirmed) return { status: 'unverified', nap: observed, detail: { ...base, reason: 'address_unconfirmed', seen: address.unconfirmed } };
+  return { status: 'verified', nap: observed, detail: base };
+}
+
+async function checkRow(row, seams = {}) {
+  if (!row.listing_url) return { status: 'unverified', nap: null, detail: { reason: 'no_listing_url' } };
+  const page = await contactFinder.fetchPage(row.listing_url, { ...seams, timeoutMs: FETCH_TIMEOUT_MS, maxRedirects: MAX_REDIRECTS });
+  return classifyListing(page, candidatesFor(row));
+}
+
+// nap_name / nap_phone are varchar(255) (20260401000045). A directory page can
+// state anything, so stored values are clipped to fit; a clipped value keeps its
+// fuller observed form (bounded) in status_detail.observed as evidence.
+const NAP_COLUMN_MAX = 255;
+const EVIDENCE_MAX = 2000;
+function napColumns(nap, detail) {
+  const out = { nap_name: null, nap_phone: null, nap_address: null };
+  if (!nap) return { columns: out, detail };
+  const observed = {};
+  for (const [col, max] of [['nap_name', NAP_COLUMN_MAX], ['nap_phone', NAP_COLUMN_MAX], ['nap_address', EVIDENCE_MAX]]) {
+    const value = nap[col] == null ? null : String(nap[col]);
+    out[col] = value == null ? null : value.slice(0, max);
+    if (value != null && value.length > max) observed[col] = value.slice(0, EVIDENCE_MAX);
+  }
+  return { columns: out, detail: Object.keys(observed).length ? { ...detail, observed } : detail };
+}
+
+function statusCounts(rows) {
+  return Object.fromEntries(STATES.map((s) => [s, rows.filter((r) => r.status === s).length]));
+}
+
 class CitationAuditor {
-  async audit() {
+  // `seams` ({ fetchFn, resolveHostFn }) exist for tests; production uses fetchPage's defaults.
+  async audit(seams = {}) {
     logger.info('Citation audit running...');
-    const citations = await db('seo_citations');
-
-    // For now, mark all as checked (real implementation would scrape each directory)
-    let consistent = 0, inconsistent = 0, missing = 0;
-
-    for (const cit of citations) {
-      if (cit.status === 'unchecked') {
-        // Mark as needs manual check
-        await db('seo_citations').where('id', cit.id).update({
-          last_checked: etDateString(),
-          status: 'unchecked', // stays unchecked until manually verified
-        });
-      } else if (cit.nap_consistent === true) {
-        consistent++;
-      } else if (cit.nap_consistent === false) {
-        inconsistent++;
-      } else {
-        missing++;
+    const rows = await db('seo_citations').whereNot('status', 'missing');
+    const audited = [];
+    let failed = 0;
+    for (const row of rows) {
+      let res;
+      try {
+        res = await checkRow(row, seams);
+      } catch (err) {
+        res = { status: 'fetch-blocked', nap: null, detail: { reason: `audit_error: ${err.message}` } };
       }
+      // Conditional on the row still being what was fetched: a staff edit (URL, office,
+      // missing/unverified) made mid-sweep must not be overwritten by this result.
+      let stillSame = db('seo_citations').where({ id: row.id, listing_url: row.listing_url, location_id: row.location_id, status: row.status })
+        .whereNot('status', 'missing');
+      stillSame = row.updated_at
+        ? stillSame.whereRaw('abs(extract(epoch from updated_at) * 1000 - ?) < 1', [new Date(row.updated_at).getTime()]) // pg keeps microseconds, JS ms
+        : stillSame.whereNull('updated_at');
+      const { columns, detail } = napColumns(res.nap, res.detail);
+      let changed;
+      try {
+        changed = await stillSame.update({
+          status: res.status,
+          status_detail: JSON.stringify(detail),
+          ...columns,
+          nap_consistent: res.status === 'verified' ? true : res.status === 'mismatched' ? false : null,
+          last_checked: etDateString(),
+          updated_at: new Date(),
+        });
+      } catch (err) {
+        // One row's write must never abort the rest of the weekly sweep.
+        logger.error(`Citation audit: row ${row.id} could not be saved: ${err.message}`);
+        failed += 1;
+        continue;
+      }
+      if (changed) audited.push({ status: res.status });
+      else logger.warn(`Citation audit: row ${row.id} changed during the sweep; result discarded`);
     }
-
-    logger.info(`Citation audit: ${consistent} consistent, ${inconsistent} inconsistent, ${missing} unchecked`);
-    return { total: citations.length, consistent, inconsistent, missing };
+    const counts = statusCounts(audited);
+    logger.info(`Citation audit: ${JSON.stringify(counts)} (${audited.length} of ${rows.length} written${failed ? `, ${failed} failed to save` : ''})`);
+    return { total: audited.length, skipped: rows.length - audited.length - failed, failed, ...counts };
   }
 
   async getDashboard() {
     const citations = await db('seo_citations').orderBy('priority', 'asc').orderBy('directory_name');
-
     return {
       total: citations.length,
-      byStatus: {
-        active: citations.filter(c => c.status === 'active').length,
-        inconsistent: citations.filter(c => c.status === 'inconsistent').length,
-        missing: citations.filter(c => c.status === 'missing').length,
-        claimed: citations.filter(c => c.status === 'claimed').length,
-        unchecked: citations.filter(c => c.status === 'unchecked').length,
-      },
+      byStatus: statusCounts(citations),
       byPriority: {
         high: citations.filter(c => c.priority === 'high').length,
         medium: citations.filter(c => c.priority === 'medium').length,
+        low: citations.filter(c => c.priority === 'low').length,
       },
       citations,
-      canonicalNAP: CANONICAL_NAP,
+      canonicalNAP: expectedNapFor({}),
+      locations: WAVES_LOCATIONS.map(({ id, name, phone, address }) => ({ id, name, phone, address })),
     };
   }
 
-  async updateCitation(citationId, updates) {
-    // Check NAP consistency
-    if (updates.nap_name || updates.nap_phone) {
-      updates.nap_consistent = (updates.nap_name || '').toLowerCase().includes('waves pest control') &&
-        (updates.nap_phone || '').includes('318-7612');
-      updates.status = updates.nap_consistent ? 'active' : 'inconsistent';
+  // Human edits only. `status` may be set to 'missing' (no listing exists) or reset
+  // to 'unverified'; verified / mismatched / fetch-blocked come from audit() alone.
+  // Changing the listing URL or office resets the row so the next audit re-checks it.
+  async updateCitation(citationId, updates = {}) {
+    const patch = {};
+    for (const k of ['listing_url', 'location_id', 'priority']) if (k in updates) patch[k] = String(updates[k] ?? '').trim() || null;
+    if (patch.location_id && !WAVES_LOCATIONS.some((l) => l.id === patch.location_id)) throw invalid(`Unknown location_id: ${patch.location_id}`);
+    if (patch.listing_url && !isHttpUrl(patch.listing_url)) throw invalid('listing_url must be an http(s) URL');
+    if ('priority' in patch && !['high', 'medium', 'low'].includes(patch.priority)) throw invalid('priority must be high, medium or low');
+    if (updates.status !== undefined) {
+      if (!['missing', 'unverified'].includes(updates.status)) throw invalid("status can only be set to 'missing' or 'unverified'; the audit sets the rest");
+      patch.status = updates.status;
+    } else if ('listing_url' in patch || 'location_id' in patch) {
+      // A save that changes neither the URL nor the office (same values, normalized alike)
+      // is a no-op and must not wipe the audit evidence.
+      const stored = await db('seo_citations').where('id', citationId).first();
+      if (!stored) return;
+      const norm = (v) => String(v ?? '').trim() || null;
+      const changed = ['listing_url', 'location_id'].some((k) => k in patch && patch[k] !== norm(stored[k]));
+      if (changed) patch.status = 'unverified';
     }
-
-    await db('seo_citations').where('id', citationId).update({ ...updates, last_checked: etDateString(), updated_at: new Date() });
+    // A reset drops every piece of stale audit evidence, not just the verdict.
+    if (patch.status) Object.assign(patch, { status_detail: null, nap_consistent: null, nap_name: null, nap_phone: null, nap_address: null, last_checked: null });
+    await db('seo_citations').where('id', citationId).update({ ...patch, updated_at: new Date() });
   }
 }
 
 module.exports = new CitationAuditor();
+module.exports.statusCounts = statusCounts; // shared with backlink-monitor's dashboard
+module.exports._internals = { classifyListing, candidatesFor, expectedNapFor, extractNap, normalizeStreet, parseAddress, streetOfAddress, STATES };

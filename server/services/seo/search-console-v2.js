@@ -66,6 +66,23 @@ function gscRequestTimeoutMs(value = process.env.GSC_REQUEST_TIMEOUT_MS) {
   return positiveInt(value, DEFAULT_GSC_REQUEST_TIMEOUT_MS);
 }
 
+// Scopes are set HERE, in our code. Every read (sync, sites.list, URL
+// inspection) uses the read-only client; only submitSitemap below gets its own
+// write-scoped one, so no read path can ever mutate Search Console.
+const GSC_READ_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
+const GSC_WRITE_SCOPE = 'https://www.googleapis.com/auth/webmasters';
+
+// Support both a JSON string (Railway) and a file path (local dev)
+function gscAuthOptions(saEnv, scope) {
+  try {
+    let jsonStr = saEnv.trim();
+    if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) jsonStr += '\n}';
+    return { credentials: JSON.parse(jsonStr), scopes: [scope] };
+  } catch {
+    return { keyFile: saEnv, scopes: [scope] };
+  }
+}
+
 function gscRequestOptions(signal = null) {
   const options = { timeout: gscRequestTimeoutMs() };
   if (signal) options.signal = signal;
@@ -117,6 +134,8 @@ class SearchConsoleService {
   constructor() {
     this.auth = null;
     this.webmasters = null;
+    this.writeAuth = null;
+    this.writeWebmasters = null;
   }
 
   async init() {
@@ -134,24 +153,7 @@ class SearchConsoleService {
         return false;
       }
 
-      // Support both a JSON string (Railway) and a file path (local dev)
-      let authOptions;
-      try {
-        let jsonStr = saEnv.trim();
-        if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) jsonStr += '\n}';
-        const credentials = JSON.parse(jsonStr);
-        authOptions = {
-          credentials,
-          scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
-        };
-      } catch {
-        authOptions = {
-          keyFile: saEnv,
-          scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
-        };
-      }
-
-      this.auth = new g.auth.GoogleAuth(authOptions);
+      this.auth = new g.auth.GoogleAuth(gscAuthOptions(saEnv, GSC_READ_SCOPE));
 
       this.webmasters = g.searchconsole({ version: 'v1', auth: this.auth });
       return true;
@@ -159,6 +161,81 @@ class SearchConsoleService {
       logger.error(`GSC init failed: ${err.message}`);
       return false;
     }
+  }
+
+  /**
+   * Submit a sitemap to Search Console (sitemaps.submit). The ONE write this
+   * service performs, on its own write-scoped client (webmasters) — separate
+   * from the read-only client every other method uses. `siteUrl` must be the
+   * exact property identifier resolveAccessibleProperty returned and
+   * `feedpath` the full sitemap URL; the Intelligence Bar passes the values
+   * its confirmation card showed.
+   *
+   * Returns { ok: true } or { error, writeAccessRequired? }. A 401/403 means
+   * the service account can read but is not a Full user / owner of the
+   * property — reported as writeAccessRequired, changing nothing.
+   */
+  async submitSitemap(siteUrl, feedpath) {
+    const g = getGoogle();
+    if (!g) return { error: 'googleapis is not installed — Search Console is unavailable.' };
+    const saEnv = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    if (!saEnv) return { error: 'GOOGLE_SERVICE_ACCOUNT_JSON is not set.' };
+    try {
+      if (!this.writeWebmasters) {
+        this.writeAuth = new g.auth.GoogleAuth(gscAuthOptions(saEnv, GSC_WRITE_SCOPE));
+        this.writeWebmasters = g.searchconsole({ version: 'v1', auth: this.writeAuth });
+      }
+      await this.writeWebmasters.sitemaps.submit({ siteUrl, feedpath }, gscRequestOptions());
+      return { ok: true };
+    } catch (err) {
+      const status = Number(err?.code || err?.response?.status || err?.status) || null;
+      if (status === 401 || status === 403) {
+        return {
+          error: 'The Search Console service account has read access only — it must be a Full user (or owner) of this property to submit sitemaps.',
+          writeAccessRequired: true,
+          status,
+        };
+      }
+      return { error: `Search Console sitemap submit failed${status ? ` (HTTP ${status})` : ''}.`, status };
+    }
+  }
+
+  /**
+   * Resolve a domain to the EXACT Search Console property identifier this
+   * service account can actually reach — reusing the same URL-prefix vs
+   * sc-domain: representations syncDailyData's retry already tries (a
+   * property can be verified in either form; only sites.list can say which
+   * one this account holds). Used by the Intelligence Bar's
+   * submit_gsc_sitemap preview (seo-tools.js) so a sitemap submission is
+   * pinned to a property Search Console will actually accept, never a
+   * synthesized URL that merely looks right (codex r3 P1 on #5275).
+   *
+   * Returns { siteUrl, permissionLevel } on a match, or { error } when GSC
+   * is not configured/reachable or neither representation is accessible.
+   */
+  async resolveAccessibleProperty(domain) {
+    const ready = await this.init();
+    if (!ready) return { error: 'Google Search Console is not configured or failed to initialize.' };
+    const urlPrefix = siteUrlForDomain(domain);
+    const domainProp = domainPropertyUrl(domain);
+    let sites;
+    try {
+      // Bounded like every other request here (GSC_REQUEST_TIMEOUT_MS) —
+      // this lookup runs synchronously inside a bar preview.
+      const res = await this.webmasters.sites.list({}, gscRequestOptions());
+      sites = res?.data?.siteEntry || [];
+    } catch (err) {
+      return { error: `Could not list Search Console properties: ${err.message}` };
+    }
+    // sites.list also returns properties this account only has
+    // siteUnverifiedUser / siteRestrictedUser on; sitemaps.submit needs owner
+    // or full user, so only those count — and when both representations are
+    // listed, the one with enough permission wins.
+    const canSubmit = (entry) => ['siteOwner', 'siteFullUser'].includes(entry?.permissionLevel);
+    const bySiteUrl = new Map(sites.map((s) => [String(s.siteUrl || '').toLowerCase(), s]));
+    const match = [bySiteUrl.get(urlPrefix.toLowerCase()), bySiteUrl.get(domainProp.toLowerCase())].find(canSubmit);
+    if (!match) return { error: 'not_accessible', checked: [urlPrefix, domainProp] };
+    return { siteUrl: match.siteUrl, permissionLevel: match.permissionLevel || null };
   }
 
   /**

@@ -187,6 +187,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { recordPageView } = require('../services/customer-page-views');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
@@ -195,7 +196,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
-const { isInServiceAreaBox } = require('../services/service-area');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox } = require('../services/service-area');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -680,9 +681,14 @@ async function checkServiceArea(location, address = null) {
   // reverseGeocodeCounty returns a bare county name, so an out-of-state
   // county with a served county's name (Charlotte County, VA) would pass
   // the name match alone. Outside the box is out of area, no network call.
-  if (!isInServiceAreaBox(location.lat, location.lng)) return { ok: false, county: null };
+  if (!isInServiceAreaCoarseBox(location.lat, location.lng)) return { ok: false, county: null };
   const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
-  if (!key) return { ok: true, county: null };
+  // No key: no county lookup, so the DeSoto rectangle applies unless the
+  // address's own ZIP proves a served locality (isInServiceAreaBox). With a
+  // key the reverse-geocoded county decides below and wins over the rectangle.
+  if (!key) {
+    return { ok: isInServiceAreaBox(location.lat, location.lng, { zip: address?.zip }), county: null };
+  }
   let county = null;
   try {
     county = await reverseGeocodeCounty({ latitude: location.lat, longitude: location.lng }, key);
@@ -776,6 +782,12 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // bookInsertionOffersLive() is what keeps that rebuild's capacityPlacement
     // and the commit's own preparedCapacity gate reading the same env.
     capacityPlacement: bookInsertionOffersLive(),
+    // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
+    // the gate is off). The commit is the same createSelfBooking, which
+    // re-reads the live grace for this date (no signed offer on this flow) —
+    // the rebuild and the commit run in the same request, so both see the
+    // same gate and grace value.
+    bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }
@@ -1584,6 +1596,10 @@ router.get('/:token', async (req, res, next) => {
     if (!lead) return res.json({ state: 'gone' });
 
     const custRow = await loadTrustedCustomer(db, lead, verified);
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    // Only the TRUSTED customer is attributed: leads.customer_id can come
+    // from unverified submitted contact info (see loadTrustedCustomer).
+    void recordPageView({ req, page: 'inspection', customerId: custRow?.id || null, subjectType: 'lead', subjectId: lead.id });
     const leadPayload = buildLeadPayload(lead, custRow);
 
     const eligibility = await readEligibility(lead, custRow, verified);

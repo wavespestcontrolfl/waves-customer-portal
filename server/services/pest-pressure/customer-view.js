@@ -9,6 +9,7 @@
  */
 
 const { DEFAULT_CONFIG } = require('./config');
+const { isComparable } = require('./score-scale');
 const { scoreSourceFromComponents } = require('./calculate');
 const { detectFrequencyKey, isOneTimeServiceLabel } = require('./review-window');
 const { detectServiceLine } = require('../service-report/service-line-configs');
@@ -86,10 +87,18 @@ function detectCadenceFromHistory(history) {
   return 'quarterly';
 }
 
-function shapeHistory(historyRows) {
+// allScales: keep every scored visit (for cadence, which only needs dates).
+// Default: only readings comparable to the newest reading's scale (#4741), so
+// the chart never draws a jump that is really the tap-vs-blended change.
+// Rows without a pressure_scale (older callers) are all kept.
+function shapeHistory(historyRows, { allScales = false } = {}) {
   if (!Array.isArray(historyRows) || historyRows.length === 0) return [];
-  return historyRows
-    .filter((row) => row && row.displayed_score !== null && row.displayed_score !== undefined && row.service_date)
+  const scored = historyRows
+    .filter((row) => row && row.displayed_score !== null && row.displayed_score !== undefined && row.service_date);
+  const newest = scored[0];
+  return scored
+    .filter((row) => allScales || row === newest || !newest.pressure_scale || !row.pressure_scale
+      || isComparable(row.pressure_scale, newest.pressure_scale))
     .map((row) => ({
       serviceDate: formatDate(row.service_date),
       score: Number(row.displayed_score),
@@ -145,7 +154,9 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null,
     : null;
 
   const history = shapeHistory(historyRows);
-  const cadence = detectCadenceFromHistory(history);
+  // Cadence is about visit spacing, not score scale: compute it from EVERY
+  // scored visit, not just the plotted (same-scale) ones.
+  const cadence = detectCadenceFromHistory(shapeHistory(historyRows, { allScales: true }));
 
   if (!scoreRow || scoreRow.data_completeness === 'insufficient' || scoreRow.displayed_score === null || scoreRow.displayed_score === undefined) {
     return {

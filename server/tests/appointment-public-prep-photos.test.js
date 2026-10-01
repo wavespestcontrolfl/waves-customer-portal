@@ -612,8 +612,10 @@ describe('POST /api/public/appointment/:token/photos', () => {
       });
       expect(res.status).toBe(201);
       expect(dbState.lockReads).toBeGreaterThanOrEqual(1);
-      // Customer row before the visit rows (Codex r3 P1).
-      expect(dbState.lockOrder.slice(0, 2)).toEqual(['customers', 'scheduled_services']);
+      // Customer row before the visit rows (Codex r3 P1), and taken before
+      // the stop lock too (Codex #5306 r2 P2: createOrJoinVisit's order).
+      expect(dbState.lockOrder[0]).toBe('customers');
+      expect(dbState.lockOrder.indexOf('customers')).toBeLessThan(dbState.lockOrder.indexOf('scheduled_services'));
       const body = await res.json();
       expect(body).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5, photosAdded: 1 } });
       expect(JSON.stringify(body)).not.toMatch(/1234|friendly|s3_key|visitprep/i);
@@ -829,6 +831,64 @@ describe('GET /api/public/appointment/:token — additive prepPhotos', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.prepPhotos).toEqual({ eligible: true, photoCount: 2, photosRemaining: 4 });
+    });
+  });
+});
+
+// Dead-link guard (C3/C6, 2026-09-28): canMoveOnline on the GET payload —
+// AppointmentPage hides its "See open times" card when this is false. Dates
+// are computed off the REAL wall clock (this file runs no fake timers, and
+// the default svcRow's far-future '2099-01-01' already relies on that same
+// convention) rather than hardcoded, so the suite never rots into the past.
+describe('GET /api/public/appointment/:token — canMoveOnline (C3/C6)', () => {
+  const { etDateString, etParts } = require('../utils/datetime-et');
+  const prevAppt = process.env.GATE_APPOINTMENT_PAGE;
+
+  function hoursFromNow(hours) {
+    const at = new Date(Date.now() + hours * 3600000);
+    const p = etParts(at);
+    return { scheduled_date: etDateString(at), window_start: `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}:00` };
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    resetDbState();
+    router = require('../routes/appointment-public');
+  });
+  afterAll(() => {
+    if (prevAppt === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prevAppt;
+  });
+
+  test('a visit far outside the move-notice window (the default far-future svcRow): canMoveOnline true', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await getAppointment(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.canMoveOnline).toBe(true);
+      expect(body.rescheduleToken).toBe('a'.repeat(64));
+    });
+  });
+
+  test('a visit starting 1 hour from now: canMoveOnline false, but the token itself is untouched (the client gates the CTA)', async () => {
+    resetDbState({ svcRow: { ...dbStateSvc(), ...hoursFromNow(1) } });
+    await withServer(async (baseUrl) => {
+      const res = await getAppointment(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.canMoveOnline).toBe(false);
+      expect(body.rescheduleToken).toBe('a'.repeat(64));
+    });
+  });
+
+  test('a visit 30 hours out clears the default 24h window: canMoveOnline true', async () => {
+    resetDbState({ svcRow: { ...dbStateSvc(), ...hoursFromNow(30) } });
+    await withServer(async (baseUrl) => {
+      const res = await getAppointment(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.canMoveOnline).toBe(true);
     });
   });
 });

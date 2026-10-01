@@ -1371,3 +1371,97 @@ describe('_composeBrief listicle_family provenance rides gsc_signal (Codex r5 on
     expect(brief.gsc_signal.family_variants[0].impressions).toBe(48);
   });
 });
+
+describe('citability backfill consumer — brief composition', () => {
+  const seeder = require('../services/content/citability-backfill-seeder');
+  const queue = require('../services/content/opportunity-queue');
+  const router = require('../services/content/decision-router');
+  afterEach(() => jest.restoreAllMocks());
+
+  function stubBuilder(opp) {
+    const builder = new ContentBriefBuilder();
+    jest.spyOn(queue, 'getById').mockResolvedValue(opp);
+    jest.spyOn(router, 'route').mockReturnValue({ action_type: 'refresh_existing_page', page_type: 'refresh', human_review_required: false, human_review_reason: null });
+    builder._gatherSignals = jest.fn().mockResolvedValue({ serp_profile: null, customer_signal: null, conversion_feedback: null });
+    builder._countExistingBriefs = jest.fn().mockResolvedValue(0);
+    builder._loadFactsPack = jest.fn().mockResolvedValue(null);
+    builder._loadRelatedPosts = jest.fn().mockResolvedValue([]);
+    builder._composeBrief = jest.fn(({ opportunity, decision }) => ({ opportunity, decision }));
+    return builder;
+  }
+  const opp = { id: 7, bucket: 'citability_backfill', page_url: '/termite/x/', service: 'termite', signal_metadata: { citability_gaps: ['named_sources', 'comparison'], specialty_topic: null } };
+
+  test('gaps already fixed on the live page → do_not_publish, no draft', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: [], results: {}, ineligible: false, service: 'termite', specialty_topic: null });
+    const out = await stubBuilder(opp).compose(7, { persist: false });
+    expect(out.decision).toMatchObject({ action_type: 'do_not_publish', human_review_required: false, human_review_reason: 'citability_gaps_already_resolved' });
+  });
+
+  test('a target that turned non-indexable → do_not_publish', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: [], results: {}, ineligible: true });
+    const out = await stubBuilder(opp).compose(7, { persist: false });
+    expect(out.decision).toMatchObject({ action_type: 'do_not_publish', human_review_reason: 'citability_target_not_indexable' });
+  });
+
+  test('live gaps and topic replace the seeded ones', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: ['comparison', 'how_to_choose'], results: { comparison: { ok: false } }, ineligible: false, service: 'pest', specialty_topic: 'bed-bug' });
+    const builder = stubBuilder(opp);
+    const out = await builder.compose(7, { persist: false });
+    expect(out.decision.action_type).toBe('refresh_existing_page');
+    expect(out.opportunity.service).toBe('pest');
+    expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['comparison', 'how_to_choose']);
+    expect(out.opportunity.signal_metadata.specialty_topic).toBe('bed-bug');
+    // The router and signal gathering see the live topic too.
+    expect(builder._gatherSignals.mock.calls[0][0].service).toBe('pest');
+  });
+
+  test('unreadable page → seeded gaps and topic kept', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue(null);
+    const out = await stubBuilder({ ...opp, signal_metadata: { ...opp.signal_metadata, specialty_topic: 'wasp' } }).compose(7, { persist: false });
+    expect(out.decision.action_type).toBe('refresh_existing_page');
+    expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['named_sources', 'comparison']);
+    expect(out.opportunity.signal_metadata.specialty_topic).toBe('wasp');
+  });
+
+  test('a re-scan error keeps the seeded gaps instead of failing compose', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockRejectedValue(new Error('github down'));
+    const out = await stubBuilder(opp).compose(7, { persist: false });
+    expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['named_sources', 'comparison']);
+  });
+
+  test('other buckets never re-scan', async () => {
+    const rescan = jest.spyOn(seeder, 'rescanLive');
+    await stubBuilder({ ...opp, bucket: 'decay_refresh' }).compose(7, { persist: false });
+    expect(rescan).not.toHaveBeenCalled();
+  });
+
+  test('_gatherSignals skips the customer cluster for a null-query backfill only', async () => {
+    const builder = new ContentBriefBuilder();
+    builder._matchCustomerCluster = jest.fn().mockResolvedValue({ topic: 'unrelated', service: 'termite' });
+    const backfill = await builder._gatherSignals({ bucket: 'citability_backfill', query: null, service: null, city: null }, { skipSerp: true });
+    expect(builder._matchCustomerCluster).not.toHaveBeenCalled();
+    expect(backfill.customer_signal).toBeNull();
+    const decay = await builder._gatherSignals({ bucket: 'decay_refresh', query: null, service: null, city: null }, { skipSerp: true });
+    expect(builder._matchCustomerCluster).toHaveBeenCalledTimes(1);
+    expect(decay.customer_signal).toEqual({ topic: 'unrelated', service: 'termite' });
+  });
+
+  test('surgical required_sections: slug + dateModified, one binding line per gap, gaps ride gsc_signal', () => {
+    const builder = new ContentBriefBuilder();
+    const base = { id: 1, page_url: '/termite/x/', service: 'termite', city: null, query: null };
+    const decision = { action_type: 'refresh_existing_page', page_type: 'refresh', human_review_required: false, human_review_reason: null };
+    const signals = { serp_profile: null, customer_signal: null, conversion_feedback: null };
+    const gaps = ['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose'];
+    const backfill = builder._composeBrief({ opportunity: { ...base, bucket: 'citability_backfill', signal_metadata: { citability_gaps: gaps } }, signals, decision, existingBriefVersions: 0 });
+    expect(backfill.required_sections.slice(0, 2)).toEqual(['preserve existing slug', 'update dateModified']);
+    expect(backfill.required_sections).not.toContain('add 1+ new section reflecting current data');
+    expect(backfill.required_sections).not.toContain('refresh CTAs to current promo');
+    for (const g of gaps) expect(backfill.required_sections.filter((l) => l.startsWith(`citability (${g}):`))).toHaveLength(1);
+    expect(backfill.gsc_signal).toMatchObject({ bucket: 'citability_backfill', citability_gaps: gaps });
+
+    const generic = builder._composeBrief({ opportunity: { ...base, bucket: 'decay_refresh', signal_metadata: { citability_gaps: gaps } }, signals, decision, existingBriefVersions: 0 });
+    expect(generic.required_sections).toContain('add 1+ new section reflecting current data');
+    expect(generic.required_sections.some((l) => l.startsWith('citability ('))).toBe(false);
+    expect(generic.gsc_signal.citability_gaps).toBeNull();
+  });
+});

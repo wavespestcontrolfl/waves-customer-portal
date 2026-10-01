@@ -34,6 +34,7 @@ jest.mock('../services/intelligence-bar/seo-tools', () => ({
     { name: 'get_seo_rankings', input_schema: { type: 'object', properties: {} } },
     { name: 'run_seo_pipeline', input_schema: { type: 'object', properties: {} } },
     { name: 'approve_seo_action', input_schema: { type: 'object', properties: {} } },
+    { name: 'submit_gsc_sitemap', input_schema: { type: 'object', properties: {} } },
   ],
   executeSeoTool: jest.fn(),
 }));
@@ -83,6 +84,16 @@ describe('Intelligence Bar tool offering — full access (owner ruling 2026-09-2
     expect(offered).toContain('approve_seo_action');
   });
 
+  // Codex r4 on #5275: the global infra prompt advertises the sitemap submit
+  // with the other outside-service writes, so it must be offered everywhere
+  // they are — and never twice on the seo page (duplicate names are rejected).
+  test('the full-access login is offered submit_gsc_sitemap on non-SEO pages, exactly once on the seo page', () => {
+    expect(names(getToolsForContext('customers', true, true))).toContain('submit_gsc_sitemap');
+    const seo = names(getToolsForContext('seo', true, true));
+    expect(seo.filter((n) => n === 'submit_gsc_sitemap')).toHaveLength(1);
+    expect(new Set(seo).size).toBe(seo.length);
+  });
+
   test('an ordinary admin (full access = false) never sees red-tier banking tools', () => {
     const offered = names(getToolsForContext('banking', true, false));
     expect(offered).toContain('get_stripe_balance');
@@ -118,5 +129,47 @@ describe('Intelligence Bar tool offering — full access (owner ruling 2026-09-2
         expect(offeredFullAccess).not.toContain(redName);
       }
     }
+  });
+});
+
+// Outside-service writes (IB scope expansion item 1, owner ruling
+// 2026-09-28): Sentry/Cloudflare/Railway/GitHub/Search Console write tools
+// are yellow-tier (a card, via WRITE_TWO_STEP_TOOL_NAMES) but STILL
+// full-access-only, unlike every other yellow-tier tool. These modules are
+// NOT mocked above (sentry/cloudflare/ops/github-ops-tools load for real),
+// so this exercises the actual INFRA_TOOLS the route composes, on a context
+// with no per-module fullAccess-aware export to fall back on (unlike SEO/
+// banking's own QUERY_TOOLS) — getToolsForContext's own filter is the ONLY
+// thing keeping these off a non-full-access list.
+const OUTSIDE_WRITE_NAMES = [
+  'resolve_sentry_issue', 'ignore_sentry_issue', 'assign_sentry_issue',
+  'purge_cloudflare_cache', 'retry_cloudflare_pages_build',
+  'redeploy_railway_service', 'restart_railway_service',
+  'rerun_failed_github_checks', 'add_github_pr_label', 'request_codex_review',
+];
+const OUTSIDE_READ_MARKERS = ['get_sentry_top_issues', 'get_cloudflare_zones', 'get_railway_status', 'get_recent_merged_prs'];
+
+describe('Intelligence Bar tool offering — outside-service writes (owner ruling 2026-09-28)', () => {
+  test('an ordinary admin (full access = false) sees the infra READS but none of the outside-write tools', () => {
+    const offered = names(getToolsForContext('customers', true, false));
+    for (const readName of OUTSIDE_READ_MARKERS) expect(offered).toContain(readName);
+    for (const writeName of OUTSIDE_WRITE_NAMES) expect(offered).not.toContain(writeName);
+  });
+
+  test('the full-access login sees every outside-write tool, alongside the reads', () => {
+    const offered = names(getToolsForContext('customers', true, true));
+    for (const readName of OUTSIDE_READ_MARKERS) expect(offered).toContain(readName);
+    for (const writeName of OUTSIDE_WRITE_NAMES) expect(offered).toContain(writeName);
+  });
+
+  test('a technician (isAdmin=false) never sees an outside-write tool regardless of the fullAccess flag', () => {
+    const offered = names(getToolsForContext('tech', false, true));
+    for (const writeName of OUTSIDE_WRITE_NAMES) expect(offered).not.toContain(writeName);
+  });
+
+  test('submit_gsc_sitemap follows the same full-access rule as the other outside writes, on every page', () => {
+    expect(names(getToolsForContext('customers', true, false))).not.toContain('submit_gsc_sitemap');
+    expect(names(getToolsForContext('seo', true, false))).not.toContain('submit_gsc_sitemap');
+    expect(names(getToolsForContext('tech', false, true))).not.toContain('submit_gsc_sitemap');
   });
 });

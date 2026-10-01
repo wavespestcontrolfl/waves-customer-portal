@@ -106,7 +106,32 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // covers both family and strangers alike. A spouse/partner still uses
 // spouse_partner, not this value. Feeds isAuthorizedFamilyMemberBooking
 // (call-triage-flags.js). Older payloads still validate.
-const SCHEMA_VERSION = '1.18.0';
+// 1.19.0: additive — consent.sms_declined (boolean|null). Codex P1 on
+// #5292: the dry-run removal of the sms_consent_given===false staging check
+// (owner ruling — that field is true only on an explicit yes, so false
+// means "never asked", not "refused", and blocked 151/159 real new-lead
+// calls) also stopped catching an explicit "no" to "may I text you?",
+// which the model recorded the SAME way (sms_consent_given=false).
+// sms_declined is the dedicated field: true ONLY on an explicit decline,
+// judged separately from sms_consent_given. Optional/nullable in BOTH
+// schemas (AGENTS.md: extraction schema changes never add to `required`) —
+// a pre-1.19 row, which never has the field at all, still validates. The
+// booking-link staging check (call-booking-link-text.js) fails CLOSED
+// whenever the field is absent or not a boolean: 'sms_refusal_unrecorded'.
+// 1.20.0: additive — scheduling.definite_commitment,
+// scheduling.relative_date_used and
+// scheduling.moved_appointment_relative_date_used (each boolean|null,
+// optional in both schemas, never `required`). Owner direction 2026-09-30
+// ("best outcome") after word-list review rounds on #5201 did not converge:
+// the extraction judges the LANGUAGE of a reschedule promise — whether the
+// agent definitely committed (not could/might/probably/upon X/once Y/if Z)
+// and whether the agreed or moved day was said relatively (next week, the
+// following Thursday, eight days away) — and resolves relative dates to the
+// absolute date it already writes in confirmed_start_at /
+// moved_appointment_date. call-reschedule-agreement.js only verifies the
+// flags, the quotes and the resolved date's weekday; a missing flag fails
+// closed there.
+const SCHEMA_VERSION = '1.20.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

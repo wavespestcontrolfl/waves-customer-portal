@@ -150,6 +150,38 @@ test('merge_customers is allowed on the platform path only while GATE_IB_MERGE_C
   }
 });
 
+test('outside-service writes are full-access-only on the platform path (IB scope expansion item 1, owner ruling 2026-09-28)', async () => {
+  const action = registry.actions.get('resolve_sentry_issue');
+  expect(action).toBeTruthy();
+  expect(action.approval).toBe('ui_confirm'); // structurally two-step, NOT confirmed_endpoint
+  const scope = { role: 'admin', context: 'customers' };
+
+  // Listing: absent without fullAccess, present with it. Infra-ops tools
+  // (this module included) reach the model via discover(), not the fixed
+  // initialTools() list — mirrored here rather than initialTools.
+  expect(registry.allowed(action, scope)).toBe(false);
+  expect(registry.allowed(action, { ...scope, fullAccess: true })).toBe(true);
+  const foundNoAccess = registry.discover({ query: 'resolve sentry issue' }, scope);
+  expect(foundNoAccess.definitions.some(t => t.name === 'resolve_sentry_issue')).toBe(false);
+  // Unlike a red-tier (confirmed_endpoint) tool, which stays visible in
+  // discover()'s capabilities summary even when its definition is withheld,
+  // a non-full-access request never even hears this one named.
+  expect(foundNoAccess.result.capabilities.some(c => c.id === 'resolve_sentry_issue')).toBe(false);
+  const foundFullAccess = registry.discover({ query: 'resolve sentry issue' }, { ...scope, fullAccess: true });
+  expect(foundFullAccess.definitions.some(t => t.name === 'resolve_sentry_issue')).toBe(true);
+
+  // Execution: refused for a non-full-access actor even with a forced call;
+  // fullAccess travels on actionContext, mirroring how confirmed does.
+  const denied = await registry.execute('resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A' }, { ...scope, actionContext: {} });
+  expect(denied).toMatchObject({ code: 'permission_denied' });
+
+  // A full-access actor reaches the tool's own executor (which refuses on
+  // its own dark-config/network path here — a real outcome, not a
+  // permission_denied — proving allowed() let it through).
+  const admitted = await registry.execute('resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A' }, { ...scope, actionContext: { fullAccess: true } });
+  expect(admitted.code).not.toBe('permission_denied');
+});
+
 test('dedicated estimate cabinet excludes every unrelated write and admin discovery', async () => {
   const scope = { role: 'admin', context: 'agent_estimate' };
   const names = require('../services/intelligence-bar/agent-estimate-policy');

@@ -417,6 +417,12 @@ export default function AppointmentPage() {
   // Server-computed in Eastern time — the visit date is an ET calendar day,
   // and the device clock can already disagree with it.
   const isTomorrow = !!data.isTomorrow;
+  // Dead-link guard (C3/C6): a token alone isn't enough — canMoveOnline is
+  // false for a visit that already starts inside the self-serve move-notice
+  // window, where /reschedule/:token would just refuse the move. Defaults
+  // true so an older cached payload (no canMoveOnline field yet) keeps
+  // today's behavior rather than hiding the card.
+  const canPickOnline = !!data.rescheduleToken && data.canMoveOnline !== false;
 
   return (
     <Page>
@@ -502,7 +508,7 @@ export default function AppointmentPage() {
               {confirming ? 'Confirming…' : 'Confirm this appointment'}
             </button>
             <div style={{ fontSize: 14, color: S.muted, marginTop: 10, textAlign: 'center', lineHeight: 1.5 }}>
-              {data.rescheduleToken
+              {canPickOnline
                 ? "Time doesn't work? Pick a different one below — no call needed."
                 : "Time doesn't work? Text or call us and we'll sort it out."}
             </div>
@@ -554,7 +560,7 @@ export default function AppointmentPage() {
         </Card>
       ) : null}
 
-      {data.rescheduleToken ? (
+      {canPickOnline ? (
         <Card>
           <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
             Need a different time?

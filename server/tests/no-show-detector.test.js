@@ -693,8 +693,12 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     // (round-24 P2).
     // On a clock taken NOW, not the tick's: the check is about what is true
     // at the moment the push leaves (round-24 P1).
-    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now: new Date() })) await techNotices.pushTrackingNotice(notice);');
-    expect(detector).toContain('async function stillOverdue(conn, notice, { now = new Date() } = {}) {');
+    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now: new Date() })) {');
+    expect(detector).toContain('async function stillOverdue(conn, notice, { now = new Date(), lock = true, rethrow = false } = {}) {');
+    // Asked again at each device's provider boundary, as a plain read (no
+    // stop lock or FOR UPDATE mid-send) — codex #5421 P1.
+    expect(detector).toContain('checkCurrent: (recheckConn) => stillOverdue(recheckConn, notice, { now: new Date(), lock: false, rethrow: true }),');
+    expect(detector).toContain('if (lock) await require(\'./visit-groups\').lockStopForRow(trx, serviceId);');
     // And a tech's own dismissal clears any supersession stamp the sweep
     // wrote in the meantime, or the next cycle resurrects the card it cleared.
     const route = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'tech-notifications.js'), 'utf8');

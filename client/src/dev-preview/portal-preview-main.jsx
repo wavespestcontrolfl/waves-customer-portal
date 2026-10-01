@@ -536,8 +536,7 @@ Object.assign(api, {
   sendReferralEmailInvite: async () => ({ success: true }),
 
   // satisfaction / requests / documents
-  getPendingSatisfaction: async () => ({ pending: [] }),
-  submitSatisfaction: async () => ({ success: true }),
+  getGoogleReviewCard: async () => ({ card: null }),
   getRequests: async () => ({ requests: [], total: 0 }),
   createRequest: async (data) => (data?.category === 'cancellation'
     ? { success: true, cancellation: { processed: true, visitsPulled: 2, confirmation: 'sms', confirmationChannels: ['sms', 'email'], effectiveDate: day(0), scope: data.families || 'account' } }

@@ -886,6 +886,10 @@ const TwilioService = {
         // billingDeliveryLeg==='sms') would never find it — reading a
         // genuinely accepted send as unsent and re-texting the customer.
         ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
+        // Same template evidence as buildSmsLogRow, so a promoted
+        // reservation row stays attributable to the row that rendered it.
+        ...(options.templateKey ? { template_key: options.templateKey } : {}),
+        ...(options.templateVariantId ? { template_variant_id: options.templateVariantId } : {}),
         // Durable provenance: the operator typed (or edited) this body in the
         // Comms composer. message_type 'manual' alone is overloaded across
         // automated senders, so readers that need "a human wrote this"
@@ -1023,6 +1027,11 @@ const TwilioService = {
           requestNotification: options.requestNotification,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
           preSendCheck: options.preSendCheck,
+          // Same rendering-template evidence the SMS leg's sms_log row gets
+          // (buildSmsLogRow below) — a push-delivered notice is the SAME
+          // logical send, so its proof row carries the same key.
+          templateKey: options.templateKey,
+          templateVariantId: options.templateVariantId,
         });
         if (pushed.delivered) {
           deliveryOutcome = 'accepted';
@@ -1144,6 +1153,16 @@ const TwilioService = {
             : {}),
           ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
           ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
+          // The sms_templates key requested for this body — never inferred
+          // from messageType (a guessed key is worse than none). Callers
+          // that render through router.getTemplate / renderSmsTemplate /
+          // renderRequiredSmsTemplate pass the exact key they requested;
+          // omitted when the send wasn't template-rendered (hand-typed
+          // composer text, etc.). getTemplate may render a variant of that
+          // key and does not report which, so template_variant_id stays
+          // empty until a caller can supply it.
+          ...(options.templateKey ? { template_key: options.templateKey } : {}),
+          ...(options.templateVariantId ? { template_variant_id: options.templateVariantId } : {}),
           // The visit this send is about, on the primary row itself: the
           // messaging audit is best-effort, and readers that scope by
           // property (SMS commitment evidence) must not depend on it
@@ -2056,7 +2075,7 @@ const TwilioService = {
             // manual tech/admin taps only; geofence/system transitions
             // never set it (validators/send-window.js).
             ...(operatorInitiated ? { operatorInitiated: true } : {}),
-            metadata: { original_message_type: "tech_en_route", useCustomerChannel: true, notificationEventKey },
+            metadata: { original_message_type: "tech_en_route", useCustomerChannel: true, notificationEventKey, templateKey: "tech_en_route" },
           }),
         );
       }
@@ -2253,6 +2272,7 @@ const TwilioService = {
               appointment_progress_event: "tech_arrived",
               useCustomerChannel: true,
               ...(scheduledServiceId ? { notificationEventKey: `scheduled-service:${arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, customerId })}:arrived` } : {}),
+              templateKey: "tech_arrived",
             },
           }),
         );
@@ -2362,7 +2382,7 @@ const TwilioService = {
       customerId,
       identityTrustLevel: "service_contact_authorized",
       messageType: "service_complete",
-      metadata: { serviceRecordId },
+      metadata: { serviceRecordId, templateKey: "service_complete" },
     });
   },
 

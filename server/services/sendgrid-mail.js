@@ -219,6 +219,25 @@ async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey
   };
 }
 
+// The annual-offer guard's WHOLE pre-provider decision as one function: the
+// template-keyed rewrite-vs-refuse resolution, then the guard over the
+// (possibly rewritten) content and explicit ids. sendOne runs it at the
+// live provider boundary; email-template-library.js's preflightTemplateSend
+// runs the SAME function for shadow mode's no-provider check (codex P2
+// round 5 on #5154), so the two can never disagree about which sends the
+// guard withholds. Throws the tagged refusals documented above
+// (annualOfferWithheld / annualOfferGuardFailed); otherwise returns the
+// content to send.
+async function applyAnnualOfferGuard({ html, text, estimateIds, templateKey, withheldLinkPolicy, database }) {
+  const rewrite = await resolveWithheldLinkRewrite({
+    html, text, estimateIds, templateKey, withheldLinkPolicy, database,
+  });
+  await runAnnualOfferGuard({
+    estimateIds: rewrite.sendEstimateIds, html: rewrite.sendHtml, text: rewrite.sendText, database,
+  });
+  return rewrite;
+}
+
 /**
  * Send one email. Used for test sends and one-off transactional. Returns
  * { messageId } where messageId is read from the X-Message-Id response header
@@ -228,14 +247,16 @@ async function sendOne({
   to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
   customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy,
   database, providerBoundaryCheck = async () => ({ ok: true }),
+  // Per-request bound override for callers that hold a connection/lock across
+  // the call and must not wait out the 120 s default (e.g. the newsletter
+  // confirmation). Default unchanged for every other caller.
+  timeoutMs,
 }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
-  const { sendHtml, sendText, sendEstimateIds, withheldLinksRewritten } = await resolveWithheldLinkRewrite({
+  const { sendHtml, sendText, withheldLinksRewritten } = await applyAnnualOfferGuard({
     html, text, estimateIds, templateKey, withheldLinkPolicy, database,
   });
-
-  await runAnnualOfferGuard({ estimateIds: sendEstimateIds, html: sendHtml, text: sendText, database });
 
   // Run caller authority after all asynchronous provider preparation. Once
   // this resolves, payload construction stays synchronous until fetch starts.
@@ -273,7 +294,7 @@ async function sendOne({
   const res = await fetch(`${API_BASE}/mail/send`, {
     method: 'POST',
     headers: authHeaders(),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, REQUEST_TIMEOUT_MS) : REQUEST_TIMEOUT_MS),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -500,6 +521,7 @@ function isAnnualOfferWithheld(err) {
 }
 
 module.exports = {
+  applyAnnualOfferGuard,
   isConfigured,
   isDefiniteRejection,
   isAnnualOfferWithheld,

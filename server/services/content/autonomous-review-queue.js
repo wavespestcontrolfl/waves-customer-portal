@@ -168,7 +168,11 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     .orderBy('claimed_at', 'desc')
     .first();
 
-  if ((run?.action_type || opportunity.action_type) === 'new_supporting_blog') {
+  // Autonomous blogs are engine-managed, except a may-have-published hold (an
+  // interrupted approval publish): a person who has checked GitHub must be
+  // able to dismiss it, and nothing else.
+  const blogHoldDismiss = normalizedDecision === 'dismiss' && unreconciledRefreshHold(opportunity);
+  if ((run?.action_type || opportunity.action_type) === 'new_supporting_blog' && !blogHoldDismiss) {
     const err = new Error('Autonomous blogs are managed by the engine; no review decision is required');
     err.statusCode = 409;
     err.isOperational = true;
@@ -190,7 +194,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     await db.transaction(async (trx) => {
       // Reselect + lock the current run and re-assert its state on the
       // LOCKED copy — the pre-transaction read can be stale (Codex r19).
-      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId);
+      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId, normalizedDecision);
       assertTrustBuildRun(currentRun);
       if (currentRun.trust_build_approved_at) {
         const err = new Error('This item was already decided; refresh before applying a decision');
@@ -249,7 +253,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     }
   } else if (normalizedDecision === 'requeue') {
     await db.transaction(async (trx) => {
-      await lockCurrentRun(trx, opportunityId, run, expectedRunId);
+      await lockCurrentRun(trx, opportunityId, run, expectedRunId, normalizedDecision);
       await updatePendingReviewOpportunity(trx, opportunityId, {
         status: 'pending',
         claim_id: null,
@@ -450,10 +454,13 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
 function reviewActions({ opportunity, run }) {
   const superseded = pageEditSuperseded(opportunity);
   const inReview = opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
-  const pendingReview = !superseded && inReview;
+  const unreconciled = unreconciledRefreshHold(opportunity);
+  const pendingReview = !superseded && !unreconciled && inReview;
+  // A may-have-published hold is dismissable on every lane, blogs included.
+  const holdDismissable = opportunity?.status === 'pending_review' && unreconciled;
   return {
     can_requeue: pendingReview,
-    can_dismiss: pendingReview || (inReview && supersededReconciliationHold(opportunity)),
+    can_dismiss: pendingReview || holdDismissable || (inReview && supersededReconciliationHold(opportunity)),
     can_approve_trust_build: pendingReview && isTrustBuildRun(run),
     can_approve_named_competitor: pendingReview && isNamedCompetitorReviewRun(run),
   };
@@ -472,7 +479,24 @@ function supersededReconciliationHold(opportunity) {
   return pageEditSuperseded(opportunity) && RECONCILIATION_HOLD_REASONS.includes(opportunity?.skip_reason);
 }
 
+// Holds whose publish may already have reached GitHub: a timed-out refresh
+// write that could not be reconciled, and an approval publish the janitor
+// found interrupted (including one whose unreconciled park itself failed).
+// Only Dismiss (terminal, after a person has checked GitHub) is allowed;
+// requeue or approval could open a duplicate PR (owner ruling 2026-09-28).
+const MAY_HAVE_PUBLISHED_HOLD_REASONS = ['refresh_publish_unreconciled', 'named_competitor_publish_interrupted'];
+
+function unreconciledRefreshHold(opportunity) {
+  return opportunity?.status === 'pending_review' && MAY_HAVE_PUBLISHED_HOLD_REASONS.includes(opportunity?.skip_reason);
+}
+
 function assertPageEditNotSuperseded(opportunity, decision = null) {
+  if (decision && decision !== 'dismiss' && unreconciledRefreshHold(opportunity)) {
+    const err = new Error('This publish may have opened a PR that could not be confirmed; check GitHub, then dismiss it');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
   if (!pageEditSuperseded(opportunity)) return;
   if (decision === 'dismiss' && supersededReconciliationHold(opportunity)) return;
   const err = new Error('This citability backfill was superseded by an ordinary page edit; review decisions are disabled while its PR is retired');

@@ -97,6 +97,16 @@ beforeEach(() => {
 });
 
 describe('Action Inbox generators', () => {
+  test('failed-payments-today alert leaves out never-attempted collection-hold deferrals (B10)', async () => {
+    const capture = primeDb({ payments: { count: '2' } });
+    const { alerts } = await computeDashboardAlertsUncached();
+    expect(alerts.find((alert) => alert.id === 'payments_failed_today')).toMatchObject({ count: 2, severity: 'critical' });
+    const holdExclusion = capture.filter((c) => c.table === 'payments' && c.method === 'whereRaw'
+      && /deferred_reason/.test(c.args[0]) && c.args[1]?.[0] === 'collection_hold');
+    expect(holdExclusion.length).toBeGreaterThanOrEqual(1);
+    expect(holdExclusion[0].args[0]).toMatch(/^NOT \(/);
+  });
+
   test('churn alert opens the directory scoped to high and critical risk', async () => {
     db.raw.mockImplementation((sql) => ({
       sql,

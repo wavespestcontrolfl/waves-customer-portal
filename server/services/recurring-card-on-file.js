@@ -37,6 +37,7 @@ const {
   followReplacementChain: followSetupIntentReplacementChain,
 } = require('./setup-intent-replacement');
 const logger = require('./logger');
+const { isCollectionHoldRefusal } = require('./collections/collection-hold');
 const StripeService = require('./stripe');
 
 function isRecurringCardOnFileEnabled() {
@@ -1561,6 +1562,15 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         } else {
           logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: payer guard refused the charge but the payer could not be confirmed`);
         }
+        continue;
+      }
+      // Collections DISPUTE hold (B10) — or a failed hold lookup — refused
+      // the charge before Stripe. Not a decline and not a payer refusal: no
+      // pay link, no office "charge failed" alert, nothing terminal. Leave
+      // the job claimed so the stale-claim lease re-attempts it; once the
+      // office releases the hold the very same charge goes through.
+      if (isCollectionHoldRefusal(err)) {
+        logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: collections hold (${err.code}) — no pay link, retried after release`);
         continue;
       }
       // A DETERMINISTIC failure (decline, guard refusal, missing method) —

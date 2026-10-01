@@ -29,11 +29,15 @@ const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
 // pending_review parks that stand for a POSSIBLE external write whose PR or
 // live URL could not be recorded. Supersession marks them but never
 // terminalizes them: only a person who has checked GitHub may retire one.
+const UNRECONCILED_REFRESH_REASON = 'refresh_publish_unreconciled';
 const RECONCILIATION_HOLD_REASONS = [
   'astro_pr_audit_failed', 'published_audit_failed',
   'astro_pr_queue_transition_failed', 'published_queue_complete_failed',
-  'named_competitor_publish_interrupted',
+  'named_competitor_publish_interrupted', UNRECONCILED_REFRESH_REASON,
 ];
+// sweepExhaustedAttempts never retires these: owner review kinds plus every
+// reconciliation hold, so a new hold reason cannot be missed by the sweep.
+const SWEEP_PROTECTED_REASONS = ['named_competitor_review', 'affiliate_review', ...RECONCILIATION_HOLD_REASONS];
 
 // Keep read-only catch-up probes and atomic claims on the same eligibility.
 // A failed status write may leave a published run's row pending. Fence every
@@ -594,6 +598,15 @@ class OpportunityQueue {
         AND r.astro_pr_url IS NOT NULL
         AND r.published_url IS NULL
       ORDER BY r.created_at DESC LIMIT 1)`;
+    // A worker whose timed-out GitHub write could not be reconciled records
+    // refresh_publish_unreconciled on its run before parking the row. If that
+    // park itself failed, the run is the durable evidence: recovery parks the
+    // row for a person instead of re-pending (a duplicate PR) or retiring it.
+    const unreconciledEvidence = `EXISTS (SELECT 1 FROM autonomous_runs r
+      WHERE r.opportunity_id = opportunity_queue.id
+        AND r.queue_claim_id IS NOT DISTINCT FROM opportunity_queue.claim_id
+        AND r.outcome = 'completed_pending_review'
+        AND r.skip_reason = '${UNRECONCILED_REFRESH_REASON}')`;
     const supersededAt = new Date();
     const superseded = await db('opportunity_queue')
       .where('status', 'claimed')
@@ -602,10 +615,10 @@ class OpportunityQueue {
       .whereRaw(`jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)`, [PAGE_EDIT_SUPERSEDED_KEY])
       .whereRaw(`skip_reason IS DISTINCT FROM 'named_competitor_publishing'`)
       .update({
-        status: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL THEN 'pending_review' ELSE 'skipped' END`),
+        status: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL OR ${unreconciledEvidence} THEN 'pending_review' ELSE 'skipped' END`),
         claimed_at: null,
-        skip_reason: db.raw(`COALESCE(${currentClaimPrReason}, ?)`, [PAGE_EDIT_SUPERSEDED_REASON]),
-        completed_at: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL THEN NULL ELSE ?::timestamptz END`, [supersededAt]),
+        skip_reason: db.raw(`COALESCE(${currentClaimPrReason}, CASE WHEN ${unreconciledEvidence} THEN '${UNRECONCILED_REFRESH_REASON}' END, ?)`, [PAGE_EDIT_SUPERSEDED_REASON]),
+        completed_at: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL OR ${unreconciledEvidence} THEN NULL ELSE ?::timestamptz END`, [supersededAt]),
         updated_at: supersededAt,
       });
     const recovered = await db('opportunity_queue')
@@ -623,7 +636,8 @@ class OpportunityQueue {
       .whereRaw(`NOT (bucket = 'citability_backfill'
         AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?))`, [PAGE_EDIT_SUPERSEDED_KEY])
       .update({
-        status: 'pending',
+        status: db.raw(`CASE WHEN ${unreconciledEvidence} THEN 'pending_review' ELSE 'pending' END`),
+        skip_reason: db.raw(`CASE WHEN ${unreconciledEvidence} THEN '${UNRECONCILED_REFRESH_REASON}' ELSE skip_reason END`),
         claimed_at: null,
         updated_at: new Date(),
       });
@@ -681,15 +695,14 @@ class OpportunityQueue {
       .whereRaw(`(status = 'pending' AND attempt_count >= ?) OR (
         ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
         -- A failed audit insert can leave no run evidence despite an external publish.
-        -- Reconciliation holds must survive until that external state is resolved.
-        AND COALESCE(skip_reason, '') NOT IN ('named_competitor_review', 'affiliate_review',
-          'astro_pr_audit_failed', 'published_audit_failed',
-          'astro_pr_queue_transition_failed', 'published_queue_complete_failed')
+        -- Reconciliation holds (every may-have-published reason, incl. an
+        -- interrupted approval) must survive until a person resolves them.
+        AND COALESCE(skip_reason, '') NOT IN (${SWEEP_PROTECTED_REASONS.map(() => '?').join(', ')})
         AND COALESCE(skip_reason, '') !~ '^trust_build_[0-9]+_of_[0-9]+$'
         AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
           WHERE r.opportunity_id = opportunity_queue.id
             AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
-      )`, [maxClaimAttempts()])
+      )`, [maxClaimAttempts(), ...SWEEP_PROTECTED_REASONS])
       .update({
         status: db.raw(`CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END`),
         skip_reason: db.raw("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END"),
@@ -744,4 +757,5 @@ module.exports._internals = {
   PAGE_EDIT_SUPERSEDED_KEY,
   PAGE_EDIT_SUPERSEDED_REASON,
   RECONCILIATION_HOLD_REASONS,
+  UNRECONCILED_REFRESH_REASON,
 };

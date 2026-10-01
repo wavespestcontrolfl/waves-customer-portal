@@ -157,17 +157,10 @@ function categoryEligible(est, rule) {
 // quiet-sweep rules here would still email the customer (#3391 audit P1).
 // Enforced at BOTH engine entries (the view hook's enqueue and the runner,
 // which re-reads fresh state before every send), so the marker holds even
-// for jobs enqueued before it existed.
-function estimateOptedOutOfEngagement(est) {
-  try {
-    const data = typeof est.estimate_data === 'string'
-      ? JSON.parse(est.estimate_data)
-      : est.estimate_data;
-    return data?.noEngagementAutomation === true;
-  } catch {
-    return false;
-  }
-}
+// for jobs enqueued before it existed. The ONE shared rule lives in
+// estimate-comms-eligibility.js (a dependency-free leaf every automated
+// estimate sender imports).
+const { estimateOptedOutOfEngagement } = require('./estimate-comms-eligibility');
 
 // Rules that share a send budget: the two expiring variants are ONE expiry
 // reminder per estimate (codex 2736 r3 — a never-viewed send followed by an

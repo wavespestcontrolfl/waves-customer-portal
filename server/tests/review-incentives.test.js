@@ -18,8 +18,17 @@ jest.mock('../utils/cron-lock', () => ({
   wasLockSkipped: (result) => !!(result && result.skipped === true
     && ['lease_held', 'no_connection'].includes(result.reason)),
 }));
+jest.mock('../services/email-template-automation-emitters', () => ({
+  emitReviewLinked5Star: jest.fn(async () => null),
+  // codex round 3 on #5154: manualAttributeGoogleReview now records a
+  // durable intent marker inside its own relink transaction BEFORE calling
+  // emitReviewLinked5Star — mocked here so that write is a harmless no-op
+  // for every test in this file that isn't specifically about it.
+  recordAutomationIntent: jest.fn(async () => ({ id: 'intent-mock' })),
+}));
 
 const ReviewIncentives = require('../services/review-incentives');
+const { emitReviewLinked5Star, recordAutomationIntent } = require('../services/email-template-automation-emitters');
 
 function createDbMock(initialRows = {}) {
   const state = {
@@ -146,7 +155,13 @@ function createDbMock(initialRows = {}) {
         return this;
       },
       limit(value) { this.limitValue = value; return this; },
-      async first() { return filteredRows(this)[0] || null; },
+      // A CLONE, not a live reference (codex P2 test coverage): real
+      // Postgres reads never alias a later UPDATE. A "prior state" read
+      // before a same-row UPDATE — review-incentives.js's own
+      // pre-write `prior` snapshot — needs this to behave like a real
+      // pre-write read; a shared reference would silently show the
+      // POST-write values by the time the caller compares them.
+      async first() { const row = filteredRows(this)[0]; return row ? { ...row } : null; },
       count() {
         return {
           first: async () => ({ count: String(filteredRows(this).length) }),
@@ -647,6 +662,83 @@ describe('review incentives', () => {
     expect(conn.__state.rows.customers.find((c) => c.id === 'customer-1')).toMatchObject({
       has_left_google_review: true,
     });
+  });
+
+  test('manual attribution of a previously-unmatched 5-star review also emits review.linked_5star (codex P2: the sync sites miss this attribution moment)', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true }],
+      technicians: [{ id: 'tech-1', name: 'Tech One', active: true }],
+      service_records: [{ id: 'service-1', customer_id: 'customer-1', technician_id: 'tech-1', service_date: '2026-05-27' }],
+      google_reviews: [{
+        id: 'google-5star', customer_id: null, reviewer_name: 'Customer One', star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z', location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/xyz',
+      }],
+    });
+
+    await ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-5star', customerId: 'customer-1', serviceRecordId: 'service-1', adminId: 'admin-1',
+    }, { conn, policy });
+
+    expect(emitReviewLinked5Star).toHaveBeenCalledWith({
+      reviewId: 'google-5star', customerId: 'customer-1', locationId: 'sarasota', starRating: 5,
+    }, 'intent-mock');
+    // codex round 3 on #5154: the durable intent marker is recorded inside
+    // the SAME relink transaction as the attribution write, before the
+    // direct emit call above — never against the bare `conn`.
+    expect(recordAutomationIntent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      triggerEventKey: 'review.linked_5star', entityType: 'review', entityId: 'google-5star',
+    }));
+  });
+
+  test('manual attribution of a previously-unmatched review BELOW five stars does not emit review.linked_5star', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true }],
+      technicians: [{ id: 'tech-1', name: 'Tech One', active: true }],
+      service_records: [{ id: 'service-1', customer_id: 'customer-1', technician_id: 'tech-1', service_date: '2026-05-27' }],
+      google_reviews: [{
+        id: 'google-4star', customer_id: null, reviewer_name: 'Customer One', star_rating: 4,
+        review_created_at: '2026-05-29T16:00:00.000Z', location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/four',
+      }],
+    });
+
+    await ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-4star', customerId: 'customer-1', serviceRecordId: 'service-1', adminId: 'admin-1',
+    }, { conn, policy });
+
+    // The emitter itself would no-op on a non-5-star rating (its own
+    // contract, tested directly in email-template-automation-emitters.test.js)
+    // — this proves the CALLER still routes the review's real star_rating
+    // through rather than assuming 5.
+    expect(emitReviewLinked5Star).toHaveBeenCalledWith(expect.objectContaining({ starRating: 4 }), null);
+    // No marker for THIS non-5-star review either — one would never be
+    // settled (the emitter's own guard returns before touching a marker
+    // id) and would sit 'pending' forever. (This file has no mock-clearing
+    // beforeEach — other tests' calls persist across the suite — so the
+    // assertion is scoped to this review's entityId, matching the file's
+    // existing style.)
+    expect(recordAutomationIntent).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ entityId: 'google-4star' }));
+  });
+
+  test('re-confirming an ALREADY-linked review (customer unchanged, not click_auto) does not re-emit review.linked_5star', async () => {
+    const conn = createDbMock({
+      customers: [{ id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true }],
+      technicians: [{ id: 'tech-1', name: 'Tech One', active: true }],
+      service_records: [{ id: 'service-1', customer_id: 'customer-1', technician_id: 'tech-1', service_date: '2026-05-27' }],
+      google_reviews: [{
+        id: 'google-repair', customer_id: 'customer-1', link_source: 'manual_no_visit',
+        reviewer_name: 'Customer One', star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z', location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/repair',
+      }],
+    });
+
+    await ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-repair', customerId: 'customer-1', serviceRecordId: 'service-1', adminId: 'admin-1',
+    }, { conn, policy });
+
+    expect(emitReviewLinked5Star).not.toHaveBeenCalledWith(expect.objectContaining({ reviewId: 'google-repair' }));
   });
 
   test('manual attribution rejects reviews before the program start', async () => {

@@ -25,7 +25,7 @@ const {
   releaseOperatorReceiptClaim,
   claimDueReceiptDeliveryJobs,
   enqueueReceiptDelivery,
-  recordOperatorReceiptEmail,
+  recordOperatorReceiptDelivered,
   _internals: { recoverStaleLocks },
 } = require('../services/receipt-delivery-queue');
 
@@ -50,7 +50,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
     await jobsMigration.up(mockPg);
     await customerInitiatedMigration.up(mockPg);
-    await mockPg.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.timestamp('receipt_sent_at'); });
+    await mockPg.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.timestamp('receipt_sent_at'); t.uuid('visit_completion_packet_id'); });
   });
   afterAll(async () => {
     await mockPg?.destroy();
@@ -127,7 +127,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
 
   test('a job the drain is delivering right now refuses the operator send and is left alone', async () => {
     const invoiceId = await seedJob({ status: 'running', locked_at: new Date(), locked_by: 'worker-1' });
-    expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ inFlight: true });
+    expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ inFlight: true, byOperator: false });
     expect(await job(invoiceId)).toMatchObject({ status: 'running', locked_by: 'worker-1' });
   });
 
@@ -178,7 +178,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
     const sentId = await seedJob();
     await mockPg('invoices').insert({ id: sentId, receipt_sent_at: null });
     const sentClaim = await claimReceiptJobForOperatorSend(sentId);
-    await recordOperatorReceiptEmail(sentClaim);
+    await recordOperatorReceiptDelivered(sentClaim, 'email');
     await age(sentClaim);
     // A job whose earlier drain attempt texted (its email still owed): the
     // operator claimed it and died before sending — no evidence for this claim.
@@ -224,7 +224,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
     const sentId = await seedJob();
     await mockPg('invoices').insert({ id: sentId, receipt_sent_at: null });
     const sentClaim = await claimReceiptJobForOperatorSend(sentId);
-    await recordOperatorReceiptEmail(sentClaim);
+    await recordOperatorReceiptDelivered(sentClaim, 'email');
     await mockPg('receipt_delivery_jobs').where({ id: sentClaim.id }).update({ locked_at: stale });
     expect(await claimReceiptJobForOperatorSend(sentId)).toEqual({ alreadySent: true });
     expect((await mockPg('invoices').where({ id: sentId }).first()).receipt_sent_at).toBeInstanceOf(Date);
@@ -245,7 +245,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
     const invoiceId = await seedJob();
     await mockPg('invoices').insert({ id: invoiceId, receipt_sent_at: null });
     const crashed = await claimReceiptJobForOperatorSend(invoiceId);
-    await recordOperatorReceiptEmail(crashed);
+    await recordOperatorReceiptDelivered(crashed, 'email');
     await mockPg('receipt_delivery_jobs').where({ id: crashed.id }).update({ locked_at: stale });
     // The route reads the invoice (unstamped)… then the drain's own recovery runs first.
     await recoverStaleLocks();
@@ -288,5 +288,33 @@ postgres('operator receipt claim on PostgreSQL', () => {
     await releaseOperatorReceiptClaim(claim, { emailDelivered: false, smsDelivered: true });
     expect((await mockPg('invoices').where({ id: invoiceId }).first()).receipt_sent_at).toBeInstanceOf(Date);
     expect(await job(invoiceId)).toMatchObject({ status: 'queued', locked_by: null });
+  });
+
+  test('a stale operator claim whose TEXT went out: invoice stamped (the requeued job never texts again); a queued job still owes its email, a claim-created row goes away', async () => {
+    const stale = new Date(Date.now() - 60 * 60 * 1000);
+    const heldId = await seedJob();
+    await mockPg('invoices').insert({ id: heldId, receipt_sent_at: null });
+    const held = await claimReceiptJobForOperatorSend(heldId, { sawUnsent: true });
+    await recordOperatorReceiptDelivered(held, 'sms');
+    await mockPg('receipt_delivery_jobs').where({ id: held.id }).update({ locked_at: stale });
+    const synthId = randomUUID();
+    await mockPg('invoices').insert({ id: synthId, receipt_sent_at: null });
+    const synth = await claimReceiptJobForOperatorSend(synthId, { sawUnsent: true });
+    await recordOperatorReceiptDelivered(synth, 'sms');
+    await mockPg('receipt_delivery_jobs').where({ id: synth.id }).update({ locked_at: stale });
+
+    await recoverStaleLocks();
+    expect((await mockPg('invoices').where({ id: heldId }).first()).receipt_sent_at).toBeInstanceOf(Date);
+    expect(await job(heldId)).toMatchObject({ status: 'retry_scheduled', locked_by: null });
+    expect((await mockPg('invoices').where({ id: synthId }).first()).receipt_sent_at).toBeInstanceOf(Date);
+    expect(await job(synthId)).toBeUndefined();
+  });
+
+  test('an in-flight refusal says whether another operator send or the drain holds the job', async () => {
+    const operatorHeld = randomUUID();
+    await claimReceiptJobForOperatorSend(operatorHeld);
+    expect(await claimReceiptJobForOperatorSend(operatorHeld)).toEqual({ inFlight: true, byOperator: true });
+    const drainHeld = await seedJob({ status: 'running', locked_at: new Date(), locked_by: 'host:123' });
+    expect(await claimReceiptJobForOperatorSend(drainHeld)).toEqual({ inFlight: true, byOperator: false });
   });
 });

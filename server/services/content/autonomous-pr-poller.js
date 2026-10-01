@@ -429,6 +429,99 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null, { ap
   return { ok: true, registryBaseSha };
 }
 
+// Codex r10 on #5216 ("Recheck related-post liveness before auto-merge"):
+// getLiveRelatedPaths only ran while deriving the pre-publish guard options
+// (_deriveGuardrailOptions) — a verified related post unpublished, noindexed
+// or moved AFTER this PR opened but BEFORE the poller merges it would still
+// ship a stale rail forever. Re-verify the HEAD file's own
+// frontmatter.related_posts against the live corpus right here, on the SAME
+// host set the file itself carries (frontmatter.domains, stamped by the
+// publisher after gating — astro-publisher.js), with the SAME helper the
+// runner uses (getLiveRelatedPaths / normalizePathForCompare, related-
+// posts.js). Same withhold posture as the neighbouring merge-time checks
+// (body images / affiliate belt): a stale path withholds, and so does a
+// failed liveness read (fail closed, transient — the next tick retries).
+// The brief's frozen related-post list (voice_constraints.related_posts),
+// derived exactly as the runner derives it (guardrail-options). A lookup
+// error THROWS — the caller withholds this tick (transient).
+// A run with no brief (citability backfill and other brief-less lanes)
+// was never granted related-post allowances — the pre-publish guard only
+// admits body/next_steps links to the brief's frozen list — so there is
+// nothing brief-frozen to recheck; its rail is still rechecked. No code
+// deletes content_briefs (brief_id SET NULL is the FK rule only), but a
+// brief_id whose row is missing is reported unavailable and withholds
+// (Codex r3 on #5272).
+async function frozenRelatedPostsForRun(run) {
+  if (!run?.brief_id) return { paths: [], hosts: undefined };
+  const brief = await db('content_briefs').where('id', run.brief_id).first();
+  if (!brief) return { unavailable: true };
+  const options = require('./guardrail-options').deriveSyncGuardrailOptions({}, brief);
+  return {
+    paths: Array.isArray(options.relatedPostLinks) ? options.relatedPostLinks : [],
+    hosts: Array.isArray(options.relatedPostHosts) && options.relatedPostHosts.length ? options.relatedPostHosts : undefined,
+  };
+}
+
+// The related-post paths a HEAD file ships: its rail plus any brief-frozen
+// related path linked from the rendered body or a next_steps button.
+function relatedPostSurfacePaths(content, fmHead, frozen) {
+  const { _internals: { normalizePathForCompare } } = require('./related-posts');
+  const frozenByKey = new Map((frozen?.paths || []).map((p) => [normalizePathForCompare(p), p]));
+  const rail = Array.isArray(fmHead.related_posts) ? fmHead.related_posts.filter((p) => typeof p === 'string' && p.trim()) : [];
+  const body = require('../content-astro/frontmatter').parse(content)?.content || '';
+  const nextStepHrefs = Array.isArray(fmHead.next_steps) ? fmHead.next_steps.map((step) => step && step.href).filter((h) => typeof h === 'string') : [];
+  const linked = [...require('./content-guardrails')._internals.renderedInternalDestinations(body), ...nextStepHrefs]
+    .map((dest) => frozenByKey.get(normalizePathForCompare(dest)))
+    .filter(Boolean);
+  return [...new Set([...rail, ...linked])];
+}
+
+// The registry is only as fresh as its daily sweep; each host's deployed
+// sitemap is checked too, so a post unpublished since then withholds. An
+// unreadable sitemap withholds this tick (transient).
+async function relatedPostsSitemapVerdict(paths, hosts, { getSitemapLiveRelatedPaths, normalizePathForCompare }) {
+  const inSitemap = await getSitemapLiveRelatedPaths(paths, hosts ? { hosts } : {});
+  if (inSitemap === null) return { ok: false, transient: true, reason: 'related-post sitemap recheck could not read a publish host\'s sitemap' };
+  const unlisted = paths.filter((p) => !inSitemap.has(normalizePathForCompare(p)));
+  if (unlisted.length) return { ok: false, reason: `related posts no longer in the live sitemap: ${unlisted.join(', ')}` };
+  return { ok: true };
+}
+
+async function relatedPostsLivenessVerdict(head, frozen = { paths: [] }) {
+  const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
+  if (frozen?.unavailable) return { ok: false, transient: true, reason: 'related-post brief lookup failed' };
+  if (content === null) return { ok: false, transient: true, reason: 'head blog file unavailable for the related-posts liveness recheck' };
+  let fmHead = {};
+  try {
+    fmHead = require('../content-astro/frontmatter').parse(content)?.data || {};
+  } catch (err) {
+    return { ok: false, transient: true, reason: `head frontmatter unreadable for the related-posts liveness recheck: ${err.message}` };
+  }
+  // Codex r2 on #5272: every surface a related post can ship on — the rail
+  // (frontmatter.related_posts) plus any brief-frozen related path the body
+  // or a next_steps button links to (the pre-publish guard treats all
+  // three the same).
+  let paths;
+  try {
+    paths = relatedPostSurfacePaths(content, fmHead, frozen);
+  } catch (err) {
+    return { ok: false, transient: true, reason: `related-post surfaces unreadable: ${err.message}` };
+  }
+  if (!paths.length) return { ok: true };
+  try {
+    const { getLiveRelatedPaths, getSitemapLiveRelatedPaths, _internals } = require('./related-posts');
+    const hosts = Array.isArray(fmHead.domains) && fmHead.domains.length ? fmHead.domains : frozen?.hosts;
+    const live = await getLiveRelatedPaths(paths, hosts ? { hosts } : {});
+    const stale = paths.filter((p) => !live.has(_internals.normalizePathForCompare(p)));
+    if (stale.length) {
+      return { ok: false, reason: `frontmatter related_posts no longer live: ${stale.join(', ')}` };
+    }
+    return await relatedPostsSitemapVerdict(paths, hosts, { getSitemapLiveRelatedPaths, normalizePathForCompare: _internals.normalizePathForCompare });
+  } catch (err) {
+    return { ok: false, transient: true, reason: `related-post liveness recheck failed: ${err.message}` };
+  }
+}
+
 // The belt's registry snapshot must still be the base tip right before the
 // merge call — a registry merge landing mid-gate invalidates the verdict.
 async function registryBaseMoved(aff, gh) {
@@ -1790,6 +1883,15 @@ async function maybeAutoMerge(run, pr) {
           withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
           return null;
         }
+        // 3.8b Related-post liveness — see relatedPostsLivenessVerdict. Reuses
+        //      the SAME head content the topic recheck just fetched (no
+        //      second GitHub read).
+        const related = await relatedPostsLivenessVerdict(topic.content, await frozenRelatedPostsForRun(run).catch(() => ({ unavailable: true })));
+        if (!related.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: related-post liveness — ${related.reason}`);
+          withheld = { pending: true, reason: `related_posts_stale: ${related.reason}`, transient: related.transient === true };
+          return null;
+        }
         // 3.8 The recheck above was more async work (GitHub + corpus reads):
         //     an operator dismiss/requeue landing during it must still block
         //     the merge — repeat the queue re-check immediately before merging.
@@ -1830,12 +1932,22 @@ async function maybeAutoMerge(run, pr) {
       let withheld = null;
       const { withTopicMergeLock } = require('./topic-targeting-gate');
       mergeRes = await withTopicMergeLock(db, async (trx) => {
-        const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh, {
+        // One fetch of the refresh target's HEAD file feeds both the
+        // affiliate belt and the related-post liveness recheck below.
+        const headContent = await headRefreshFileContent(run, pr);
+        const aff = await affiliateBeltVerdict(run, headContent, pr.head?.sha, gh, {
           approvedEvidenceChild: verifiedApprovedEvidenceChild,
         });
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
           withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
+          return null;
+        }
+        // 3.8b Related-post liveness — see relatedPostsLivenessVerdict.
+        const related = await relatedPostsLivenessVerdict(headContent, await frozenRelatedPostsForRun(run).catch(() => ({ unavailable: true })));
+        if (!related.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: related-post liveness — ${related.reason}`);
+          withheld = { pending: true, reason: `related_posts_stale: ${related.reason}`, transient: related.transient === true };
           return null;
         }
         if (!(await queueRowStillParkedLocked(run, trx))) {
@@ -2389,6 +2501,7 @@ module.exports = {
   _internals: {
     pollInternalLinkPr,
     affiliateBeltVerdict,
+    relatedPostsLivenessVerdict,
     autoMergeEnabled,
     blogMergeSocialShareEnabled,
     maxAutoMergesPerPoll,

@@ -13,10 +13,17 @@ let mockUpdates;
 jest.mock('../models/db', () => {
   const builder = (table) => {
     const conds = [];
+    let order = null;
     const b = {
       where(c) { Object.entries(c).forEach(([k, v]) => conds.push((r) => r[k] === v)); return b; },
       whereRaw(_sql, [key]) { conds.push((r) => (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata || {}).dedupeKey === key); return b; },
-      first: async () => (mockRows[table] || []).find((r) => conds.every((c) => c(r))) || null,
+      // The dedupe lookup reads the newest row first (orderBy created_at desc).
+      orderBy(col, dir) { order = { col, dir }; return b; },
+      first: async () => {
+        const hits = (mockRows[table] || []).filter((r) => conds.every((c) => c(r)));
+        if (order) hits.sort((x, y) => (new Date(y[order.col] || 0) - new Date(x[order.col] || 0)) * (order.dir === 'desc' ? 1 : -1));
+        return hits[0] || null;
+      },
       update: async (patch) => { const hit = (mockRows[table] || []).filter((r) => conds.every((c) => c(r))); hit.forEach((r) => Object.assign(r, patch)); mockUpdates.push(patch); return hit.length; },
       insert: (row) => ({ returning: async () => { const created = { id: `n-${(mockRows[table] ||= []).length + 1}`, ...row }; mockRows[table].push(created); return [created]; } }),
     };
@@ -346,5 +353,84 @@ describe('ring metadata (count/newCount/itemKeys) alone triggers a refresh', () 
     });
     expect(repeat.refreshed).toBeUndefined();
     expect(mockRows.notifications[0].read_at).not.toBeNull(); // untouched — no refresh happened
+  });
+});
+
+test('with several rows under one key the dedupe lookup refreshes the NEWEST one, never an older row', async () => {
+  const meta = (dedupeVersion) => JSON.stringify({ dedupeKey: 'k-multi', dedupeVersion });
+  mockRows.notifications = [
+    { id: 'n-old', recipient_type: 'admin', title: 'Alert', body: 'b', link: null, created_at: '2026-08-01T00:00:00Z', read_at: null, metadata: meta('v0') },
+    { id: 'n-new', recipient_type: 'admin', title: 'Alert', body: 'b', link: null, created_at: '2026-09-01T00:00:00Z', read_at: new Date('2026-09-02T00:00:00Z'), metadata: meta('v1') },
+  ];
+  const out = await NotificationService.notifyAdmin('alert', 'Alert', 'b', { dedupeKey: 'k-multi', dedupeVersion: 'v2', refreshOnDedupe: true });
+  expect(out).toMatchObject({ id: 'n-new', refreshed: true });
+  expect(mockRows.notifications[1].read_at).toBeNull();
+  expect(JSON.parse(mockRows.notifications[1].metadata).dedupeVersion).toBe('v2');
+  expect(JSON.parse(mockRows.notifications[0].metadata).dedupeVersion).toBe('v0');
+});
+
+// A standing row written before the brevity guard covered its category holds
+// the whole text in `body` and no `detail`. The guard going live must not read
+// that as new content: the same text arriving again stays a plain dedupe.
+describe('a standing row stored uncut, before the body guard covered its category', () => {
+  const LONG = `Promises made on calls with no follow-up within an hour: ${'callback promised to a caller; '.repeat(6)}end.`;
+  const seed = (extra = {}) => mockRows.notifications.push({
+    id: 'n-old', recipient_type: 'admin', category: 'alert', title: 'Follow-ups overdue', body: LONG, detail: null,
+    link: '/admin/communications#tab=owed', read_at: new Date('2026-09-29T12:00:00Z'), created_at: new Date('2026-09-29T11:00:00Z'),
+    metadata: JSON.stringify({ dedupeKey: 'k-uncut' }), ...extra,
+  });
+
+  test('the same text re-emitted is not a change: no rewrite, no re-bell', async () => {
+    seed();
+    const again = await NotificationService.notifyAdmin('alert', 'Follow-ups overdue', LONG, { dedupeKey: 'k-uncut', refreshOnDedupe: true, link: '/admin/communications#tab=owed' });
+    expect(again.deduped).toBe(true);
+    expect(again.refreshed).toBeUndefined();
+    expect(mockUpdates).toEqual([]);
+    expect(mockRows.notifications[0].read_at).not.toBeNull();
+  });
+
+  test('different text is a change, and the rewrite stores the guard form (one-sentence body, full text in detail)', async () => {
+    seed();
+    const next = `${LONG} One more.`;
+    const moved = await NotificationService.notifyAdmin('alert', 'Follow-ups overdue', next, { dedupeKey: 'k-uncut', refreshOnDedupe: true, link: '/admin/communications#tab=owed' });
+    expect(moved.refreshed).toBe(true);
+    expect(mockRows.notifications[0].body.length).toBeLessThanOrEqual(110);
+    expect(mockRows.notifications[0].detail).toBe(next);
+  });
+
+  test('a refresh for another reason (the title moved) also stores the guard form', async () => {
+    seed();
+    const moved = await NotificationService.notifyAdmin('alert', 'Follow-ups overdue (2)', LONG, { dedupeKey: 'k-uncut', refreshOnDedupe: true, link: '/admin/communications#tab=owed' });
+    expect(moved.refreshed).toBe(true);
+    expect(mockRows.notifications[0].body.length).toBeLessThanOrEqual(110);
+    expect(mockRows.notifications[0].detail).toBe(LONG);
+  });
+});
+
+// The mirror of the block above, after ADMIN_BODY_GUARD_ALL is killed: a row
+// stored cut (full text in `detail`) and the same whole text arriving uncut
+// must not re-ring every standing alert once.
+describe('a standing row stored cut, then re-emitted with the body guard killed', () => {
+  const LONG = `A recurring visit is still awaiting placement: ${'review availability and preferences; '.repeat(5)}end.`;
+  const OLD_ENV = process.env.ADMIN_BODY_GUARD_ALL;
+  afterEach(() => { if (OLD_ENV === undefined) delete process.env.ADMIN_BODY_GUARD_ALL; else process.env.ADMIN_BODY_GUARD_ALL = OLD_ENV; });
+
+  test('the same text is not a change; different text rewrites the row whole and clears detail', async () => {
+    const first = await NotificationService.notifyAdmin('alert', 'Placement needed', LONG, { dedupeKey: 'k-cut', refreshOnDedupe: true });
+    expect(first.deduped).toBe(false);
+    expect(mockRows.notifications[0].detail).toBe(LONG);
+    mockRows.notifications[0].read_at = new Date('2026-09-29T12:00:00Z');
+
+    process.env.ADMIN_BODY_GUARD_ALL = 'off';
+    const again = await NotificationService.notifyAdmin('alert', 'Placement needed', LONG, { dedupeKey: 'k-cut', refreshOnDedupe: true });
+    expect(again.refreshed).toBeUndefined();
+    expect(mockUpdates).toEqual([]);
+    expect(mockRows.notifications[0].read_at).not.toBeNull();
+
+    const next = `${LONG} Changed.`;
+    const moved = await NotificationService.notifyAdmin('alert', 'Placement needed', next, { dedupeKey: 'k-cut', refreshOnDedupe: true });
+    expect(moved.refreshed).toBe(true);
+    expect(mockRows.notifications[0].body).toBe(next);
+    expect(mockRows.notifications[0].detail).toBeNull();
   });
 });

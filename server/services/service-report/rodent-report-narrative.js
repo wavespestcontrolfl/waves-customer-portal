@@ -41,7 +41,7 @@ const {
   normalizeWordNumbers,
 } = require('./activity-indicators');
 const { validateCustomerCopy } = require('./premium-experience');
-const { nextVisitProblems, splitSentences, withoutStaleVisitClaims } = require('./next-visit-claims');
+const { nextVisitProblems, splitSentences, withoutTimedVisitClaims } = require('./next-visit-claims');
 const {
   EXTRA_FORBIDDEN,
   formatNextVisitDate,
@@ -56,7 +56,7 @@ const {
 // v4: + visitStage, so the first visit of a rodent trapping program reads as
 // the setup it is instead of a routine re-check (owner 2026-08-02).
 // v5: validate appointment date, window, and time claims through the shared guard.
-const PROMPT_VERSION = 'typed_report_narrative_v5';
+const PROMPT_VERSION = 'typed_report_narrative_v7';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -228,12 +228,18 @@ function groundingFacts({
     }
     : null;
   const groundedVisit = nextVisit && nextVisit.date ? nextVisit : null;
-  // Ratified copy enters the facts without appointment sentences the
-  // authoritative next visit contradicts ("We will return tomorrow" beside a
-  // dated visit). Every consumer reads these facts — the prompt, the
-  // deterministic fallback, and the mandatory-care append after validation —
-  // so no path can publish the stale sentence (codex P1 on #5055).
-  const ratified = (value) => cleanText(withoutStaleVisitClaims(cleanText(value), groundedVisit));
+  // With a visit on the schedule, ratified copy enters the facts without any
+  // sentence saying when we return (owner ruling 2026-09-28: the report's
+  // upcoming-visits section is the one place the date appears). Every
+  // consumer reads these facts — the prompt, the deterministic fallback, and
+  // the mandatory-care append after validation — so no path can publish one.
+  // A ratified sentence denying the scheduled visit ("This was our final
+  // visit") leaves too: the fallback and the care append copy ratified text
+  // without the model-output guard (codex P1 on #5262 r3).
+  const withoutDenials = (value) => (groundedVisit
+    ? splitSentences(value).filter((sentence) => !SCHEDULED_VISIT_DENIAL_RE.test(sentence)).join(' ')
+    : value);
+  const ratified = (value) => cleanText(withoutDenials(withoutTimedVisitClaims(cleanText(value), groundedVisit)));
   return {
     recap: ratified(recap),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
@@ -370,15 +376,10 @@ function deterministicSummary(facts) {
   if (facts.photoEvidence.length) {
     parts.push('Photos from this visit are included with this report.');
   }
-  if (facts.nextVisit) {
-    parts.push(facts.nextVisit.window
-      ? `Your next visit is scheduled for ${facts.nextVisit.date}, arriving ${facts.nextVisit.window}.`
-      : `Your next visit is scheduled for ${facts.nextVisit.date}.`);
-  }
   return parts.filter(Boolean).join(' ');
 }
 
-const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control & Lawn Care service report.
+const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control service report.
 
 ${HUMAN_PROSE_RULES}
 
@@ -397,13 +398,17 @@ Rules:
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
 - When visitStage is "initial_trap_setup" the traps were placed today. Describe them as set/placed on this visit, say what happens next (we return to check them and adjust placements), and never write that traps were checked, re-checked, reset, or that no captures were found — nothing has had a chance to catch yet. A setup can happen on any visit of a service program, so never state or imply that this is the first visit, and never rank it against earlier visits.
 - If the ratified result copy recommends a follow-up window or care instructions, carry them faithfully — never change the timing or drop the instruction.
-- If a next visit is provided, close with it, copying the date and arrival window EXACTLY as given in the facts — never restate, recompute, or reformat them.
+- Never say when Waves will return: no date, weekday, time, arrival window, or timeframe for a future visit. The report lists upcoming visits separately. When nextVisitScheduled is true you may say the next visit is on the schedule, without saying when.
 - Never say eliminated, guaranteed, pest-free, eradicated, infestation, toxic, poison, safe, or solved forever. Never blame the customer.
 
 Return JSON: {"summary": "<the summary>"}`;
 
 function buildUserMessage(facts) {
-  return `Grounding facts:\n${JSON.stringify(facts, null, 2)}\n\nReturn only the JSON object.`;
+  // The model never sees the next visit's date or window, only whether one is
+  // scheduled (owner ruling 2026-09-28); validation still reads facts.nextVisit.
+  const { nextVisit, ...rest } = facts;
+  const promptFacts = { ...rest, nextVisitScheduled: Boolean(nextVisit) };
+  return `Grounding facts:\n${JSON.stringify(promptFacts, null, 2)}\n\nReturn only the JSON object.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +450,11 @@ function collectNumbers(set, value) {
 
 function groundedNumberSet(facts) {
   const set = new Set();
-  collectNumbers(set, facts);
+  // The next visit's date and window never ground a number: the model is
+  // never shown them and may never state them (owner ruling 2026-09-28), so
+  // "3" and "5" from a 3–5 PM window must not authorize "5 improvements".
+  const { nextVisit: _hiddenNextVisit, ...rest } = facts;
+  collectNumbers(set, rest);
   return set;
 }
 
@@ -1325,6 +1334,26 @@ function contradictedCareCopy(text, facts) {
   return problems;
 }
 
+// With a visit on the schedule, copy that denies one ("No follow-up is
+// needed", "You won't need another visit") contradicts it. The ratified
+// follow-up sentence that used to ground contradictedCareCopy for this is
+// removed from the facts once it states timing (owner ruling 2026-09-28),
+// so the schedule itself is the evidence.
+const SCHEDULED_VISIT_DENIAL_RE = new RegExp([
+  String.raw`\bno\s+(?:further\s+|more\s+|additional\s+|other\s+)?(?:follow[-\s]?ups?|visits?|return\s+visits?|re-?treatments?|appointments?)\s+(?:is\s+|are\s+|will\s+be\s+)?(?:needed|necessary|required|planned|scheduled)\b`,
+  String.raw`\b(?:won[’']?t|will\s+not|don[’']?t|do\s+not|doesn[’']?t|does\s+not)\s+need\s+(?:a|another|any)\s+(?:more\s+)?(?:follow[-\s]?ups?|visits?|appointments?|re-?treatments?)\b`,
+  String.raw`\bwe\s+(?:won[’']?t|will\s+not)\s+(?:need\s+to\s+|have\s+to\s+)?(?:return|come\s+back|be\s+back)\b`,
+  String.raw`\b(?:follow[-\s]?ups?|another\s+visit|return\s+visits?)\s+(?:is\s+|are\s+)?(?:not|n[’']?t)\s+(?:needed|necessary|required)\b`,
+  String.raw`\bno\s+need\s+(?:for\s+(?:a\s+|another\s+)?(?:follow[-\s]?up|visit|return)|to\s+(?:come\s+back|return))\b`,
+  String.raw`\bwe\s+(?:do\s+not|don[’']?t|have\s+no|had\s+no)\s+(?:plans?|intention)\s+(?:to|of)\s+(?:return\w*|com\w*\s+back|visit\w*)\b`,
+  String.raw`\bno\s+(?:returns?|return\s+trips?|follow[-\s]?ups?|further\s+(?:visits?|service|treatments?))\s+(?:is|are|was|were|will\s+be)\s+(?:planned|scheduled|needed|necessary|required)\b`,
+  String.raw`\b(?:this|today(?:[’']s)?(?:\s+(?:visit|service|treatment))?)\s+(?:was|is)\s+(?:our|the|your)\s+(?:final|last)\s+(?:visit|service|treatment|appointment|stop)\b`,
+].join('|'), 'i');
+
+function deniedScheduledVisit(text, facts) {
+  return facts.nextVisit && SCHEDULED_VISIT_DENIAL_RE.test(String(text)) ? ['contradicted_scheduled_visit'] : [];
+}
+
 // Returns the list of ungrounded claims found in the text (empty = clean).
 // The global numeral check runs on the RAW text (a word-form "one" in
 // harmless prose must not be flagged as an ungrounded numeral); the
@@ -1360,6 +1389,7 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...contradictedZeroStates(text, facts));
   problems.push(...unpairedActionLocations(text, facts));
   problems.push(...contradictedCareCopy(text, facts));
+  problems.push(...deniedScheduledVisit(text, facts));
   problems.push(...contradictedActivityWording(text, facts));
   problems.push(...setupWordingProblems(text, facts));
   problems.push(...inventedProductIdentifiers(text, facts));

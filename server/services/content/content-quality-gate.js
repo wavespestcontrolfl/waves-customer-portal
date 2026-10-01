@@ -163,6 +163,12 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // Citability backfill only (isCitabilityBackfillBrief): every planned
+    // gap must clear and no trait the live page already had may be lost
+    // before the refresh may publish and complete its row. Weight-0 hard,
+    // so an unresolved row gets its one feedback redraft, then skips —
+    // never 'done' with open gaps. Every other refresh answers ok.
+    { name: 'citability_backfill_gaps_cleared', weight: 0, isHard: true, evaluate: checkCitabilityBackfillGapsCleared },
     // Blog refreshes use this bundle too. These remain weight-zero signals;
     // nonBlogTarget() makes them no-ops for ordinary service/city pages.
     { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
@@ -480,6 +486,18 @@ function isAeoQuestionGapBrief(brief) {
     && Array.isArray(s.aeo_engines_missing) && s.aeo_engines_missing.length > 0;
 }
 
+// citability_backfill briefs (citability-backfill-seeder) are page-anchored
+// refreshes mined from a corpus SCAN, not from GSC: the scan result — a
+// non-empty gsc_signal.citability_gaps list — IS the provenance. Same
+// anti-spoofing key (persisted gsc_signal.bucket) and presence rule as
+// isCompetitorGapBrief: a backfill brief that lost its gap list still
+// hard-fails no_gsc_signal.
+function isCitabilityBackfillBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'citability_backfill'
+    && Array.isArray(s.citability_gaps) && s.citability_gaps.length > 0;
+}
+
 function checkGscSignalAttached(_draft, brief) {
   if (isOperatorAuthoredBrief(brief)) {
     return { ok: true, reason: 'operator_authored_brief' };
@@ -489,6 +507,9 @@ function checkGscSignalAttached(_draft, brief) {
   }
   if (isAeoQuestionGapBrief(brief)) {
     return { ok: true, reason: 'aeo_question_gap_evidence' };
+  }
+  if (isCitabilityBackfillBrief(brief)) {
+    return { ok: true, reason: 'citability_backfill_scan_evidence' };
   }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
@@ -667,14 +688,105 @@ function checkLocalBusinessServiceSchema(draft) {
 // box's verdict IS the first answer: its text is judged, never the raw
 // component tag, and a direct verdict ("Yes, some species can.") need not
 // repeat a noun from the question (Codex r4 on #5216).
+// A box prop's rendered value: a quoted attribute, or a static string
+// expression ({"…"}, {'…'}, {`…`}) that MDX renders the same (Codex r4 on
+// #5272).
+// Values are read as they RENDER (Codex r5–r7 on #5272). Props are split
+// by the guardrails' own JSX attribute walker (eachJsxAttr). A quoted
+// value is HTML-decoded in full (entities.decodeHTML: &nbsp; &Tab;
+// &#160;…). A {…} expression is parsed as JavaScript (acorn — comments,
+// escapes and string concatenation as the renderer sees them); anything but
+// a static string reads as empty. Unicode spaces collapse to a plain space.
+// boxPropInfo → { text, opaque }: opaque when the prop is an expression
+// that is not a static string (a conditional, a variable…), or when the box
+// carries a JSX spread — the renderer
+// shows SOMETHING the checks cannot read, so callers fail closed (Codex r8
+// on #5272).
+function boxPropInfo(tag, name) {
+  const { eachJsxAttr } = require('./content-guardrails')._internals;
+  const attrs = String(tag).replace(/^<BottomLineBox\b/, '').replace(/\/?>\s*$/, '');
+  // A spread ({...{recommendation: "Call today."}}) can set or override any
+  // prop at render time and eachJsxAttr skips it, so a box that is not
+  // plain props only is opaque (fails closed).
+  if (!plainBoxAttrs(attrs)) return { text: '', opaque: true };
+  // A repeated prop renders its LAST value; rather than guess, a box that
+  // repeats verdict/recommendation is opaque and fails closed (Codex r9 on
+  // #5272).
+  const matches = eachJsxAttr(attrs).filter((a) => a.name === name);
+  if (matches.length > 1) return { text: '', opaque: true };
+  const [attr] = matches;
+  if (!attr) return { text: '', opaque: false };
+  let text = '';
+  if (attr.literal !== null && attr.literal !== undefined) text = require('entities').decodeHTML(String(attr.literal));
+  else if (attr.expr) {
+    const value = staticExpressionString(attr.expr);
+    if (value === null) return { text: '', opaque: true };
+    text = value;
+  }
+  return { text: text.replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' '), opaque: false };
+}
+// The box's attributes are plain props only — name, name="…", name='…' or
+// name={…}, separated by whitespace. The writer never emits anything else;
+// a spread, comment trivia or any other token makes the box unreadable
+// (#5380: pattern-matching spreads through comments did not converge).
+function plainBoxAttrs(attrs) {
+  const { closeOfExpressionAt } = require('./content-guardrails')._internals;
+  const s = String(attrs || '');
+  let i = 0;
+  for (;;) {
+    while (i < s.length && /\s/.test(s[i])) i += 1;
+    if (i >= s.length) return true;
+    const nm = /^[A-Za-z_$][\w$-]*/.exec(s.slice(i));
+    if (!nm) return false;
+    i += nm[0].length;
+    if (s[i] !== '=') {
+      if (i < s.length && !/\s/.test(s[i])) return false;
+      continue;
+    }
+    i += 1;
+    const c = s[i];
+    let end;
+    if (c === '"' || c === "'") end = s.indexOf(c, i + 1);
+    else if (c === '{') end = closeOfExpressionAt(s, i);
+    else return false;
+    if (end < 0) return false;
+    i = end + 1;
+    if (i < s.length && !/\s/.test(s[i])) return false;
+  }
+}
+function boxProp(tag, name) {
+  return boxPropInfo(tag, name).text;
+}
+function staticExpressionString(expr) {
+  const inner = String(expr).replace(/^\{/, '').replace(/\}$/, '');
+  let node;
+  try {
+    node = require('acorn').parse(`(${inner}\n)`, { ecmaVersion: 'latest' }).body[0]?.expression;
+  } catch {
+    return null;
+  }
+  const evaluate = (n) => {
+    if (!n) return null;
+    if (n.type === 'Literal' && typeof n.value === 'string') return n.value;
+    if (n.type === 'TemplateLiteral' && n.expressions.length === 0) return n.quasis.map((q) => q.value.cooked).join('');
+    if (n.type === 'BinaryExpression' && n.operator === '+') {
+      const left = evaluate(n.left);
+      const right = evaluate(n.right);
+      return left !== null && right !== null ? left + right : null;
+    }
+    return null;
+  };
+  return evaluate(node);
+}
+
 function leadingVerdictBox(body) {
   const trimmed = String(body || '').replace(/^\s+/, '');
   if (!/^<BottomLineBox\b/.test(trimmed)) return null;
-  const tag = trimmed.match(BOTTOM_LINE_BOX_TAG_RE);
+  const tag = findBottomLineBoxTag(trimmed);
   if (!tag || tag.index !== 0) return null;
   return {
-    verdict: String(attrValue(tag[0], 'verdict') || '').trim(),
-    recommendation: String(attrValue(tag[0], 'recommendation') || '').trim(),
+    verdict: boxProp(tag.text, 'verdict').trim(),
+    recommendation: boxProp(tag.text, 'recommendation').trim(),
   };
 }
 
@@ -1078,12 +1190,16 @@ function checkRedactionPassed(draft) {
 
 // ── refresh checks ──────────────────────────────────────────────────
 
-function checkImprovementOverPrior(draft, _brief, context) {
+function checkImprovementOverPrior(draft, brief, context) {
   const prev = context.previousVersion;
   if (!prev) return { ok: false, reason: 'no_previous_version_to_compare' };
   const prevLen = (prev.body || '').length;
   const newLen = String(draft.body || '').length;
   if (newLen < prevLen * 0.8) return { ok: false, reason: 'refresh_lost_>20%_of_prior_content' };
+  // A citability backfill is a targeted edit (an attribution or a number can
+  // be a few words), so body growth is not its improvement proof —
+  // citability_backfill_gaps_cleared is. The 20% loss floor above still holds.
+  if (isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'citability_backfill_targeted_edit' };
   if (newLen < prevLen + 200) return { ok: false, reason: 'refresh_adds_less_than_200_chars' };
   return { ok: true };
 }
@@ -1253,12 +1369,21 @@ function isIdentificationDraft(draft, brief, context) {
 // `^<BottomLineBox` check checkVerdictBoxFirst runs on the DRAFT.
 function isIdentificationOrQuestionDraft(draft, brief, context) {
   if (isIdentificationDraft(draft, brief, context) || brief?.page_type === 'customer-question') return true;
-  // A "decision" post carries a BottomLineBox by its own post-type contract
-  // (and answer-first does not apply to it), so its leading box proves
-  // nothing about the page being a question page (Codex r7).
+  if (brief?.action_type !== 'refresh_existing_page') return false;
+  // The durable marker is the run ledger: the runner reports whether this
+  // target was first published by a customer-question run
+  // (context.liveIsCustomerQuestion, from autonomous_runs) — any post_type,
+  // "decision" included (Codex r8 on #5216).
+  if (context?.liveIsCustomerQuestion === true) return true;
+  // Pages the ledger does not know (published by hand, or before the
+  // ledger), or a failed ledger read: a live body that opens on the box was
+  // published answer-first — except a "decision" post, whose own contract
+  // carries a box (Codex r7). A failed read holds even a decision post (fail
+  // closed).
+  if (!leadingVerdictBox(context?.previousVersion?.body)) return false;
+  if (context?.liveQuestionLedgerUnavailable) return true;
   const livePostType = String(context?.liveFrontmatter?.post_type || '').trim().toLowerCase();
-  if (brief?.action_type === 'refresh_existing_page' && livePostType !== 'decision' && leadingVerdictBox(context?.previousVersion?.body)) return true;
-  return false;
+  return livePostType !== 'decision';
 }
 
 // C2: the verdict box (BottomLineBox) must be the LITERAL first block of
@@ -1271,6 +1396,10 @@ function checkVerdictBoxFirst(draft, brief, context) {
   const body = String(draft.body || '').trim();
   if (!body) return { ok: false, reason: 'empty_body' };
   if (!/^<BottomLineBox\b/.test(body)) return { ok: false, reason: 'verdict_box_not_first_block' };
+  // A leading box whose tag cannot be read (unbalanced braces, comment
+  // trivia, a spread) is never a compliant answer box (#5380 r4).
+  const firstTag = findBottomLineBoxTag(body);
+  if (!firstTag || firstTag.index !== 0 || boxPropInfo(firstTag.text, 'verdict').opaque) return { ok: false, reason: 'verdict_box_unreadable' };
   // Codex r6 on #5216: an identification post's box must also say
   // something — the writer frames verdict as the answer to "Is it
   // dangerous?" and recommendation as "What to do now". The verdict is
@@ -1312,18 +1441,61 @@ const DANGER_TERMS_RE = /\b(dangerous|danger|harmless|safe|unsafe|venom\w*|sting
 // this is the fail-closed backstop for whatever reaches this check
 // without that having held.
 const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
-const BOTTOM_LINE_BOX_TAG_RE = /<BottomLineBox\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/;
+const BOX_PHONE_RE = /\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/;
+// The first <BottomLineBox …> tag, located the way MDX reads it: quoted
+// attribute values skip to their closing quote, and a {…} expression skips
+// to its balanced close through the guardrails' expression walker
+// (strings, escapes, comments) — an escaped quote inside {"Don\"t…"} does
+// not end the tag early (Codex r9 on #5272; the older quote-aware regex,
+// Codex r10 on #5216, could not see escapes). { index, text } or null.
+function findBottomLineBoxTag(body) {
+  const s = String(body || '');
+  const start = s.search(/<BottomLineBox\b/);
+  if (start < 0) return null;
+  const { closeOfExpressionAt } = require('./content-guardrails')._internals;
+  for (let j = start + '<BottomLineBox'.length; j < s.length; j += 1) {
+    const c = s[j];
+    if (c === '{') {
+      const end = closeOfExpressionAt(s, j);
+      if (end < 0) return null;
+      j = end;
+    } else if (c === '"' || c === "'") {
+      const end = s.indexOf(c, j + 1);
+      if (end < 0) return null;
+      j = end;
+    } else if (c === '>') {
+      return { index: start, text: s.slice(start, j + 1) };
+    }
+  }
+  return null;
+}
 function checkCtaAfterVerdictBox(draft, brief, context) {
   if (!isIdentificationOrQuestionDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_or_question' };
   const body = String(draft.body || '');
   // Codex P1 (r10): quote-aware — a naive `[^>]*` stopped at the first
   // literal `>` INSIDE a prop value ("more than > 1/4 inch"), truncating the
   // tag so a link later in the same prop escaped both checks below.
-  const boxMatch = body.match(BOTTOM_LINE_BOX_TAG_RE);
-  if (!boxMatch) return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
-  const boxStart = boxMatch.index;
+  const box = findBottomLineBoxTag(body);
+  if (!box) {
+    // A body that opens on a box tag nobody can read is not "no box" (#5380 r4).
+    if (/^\s*<BottomLineBox\b/.test(body)) return { ok: false, reason: 'verdict_box_unreadable' };
+    return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
+  }
+  const boxStart = box.index;
   ANY_MD_LINK_RE.lastIndex = 0;
-  if (ANY_MD_LINK_RE.test(boxMatch[0])) return { ok: false, reason: 'link_inside_verdict_box' };
+  if (ANY_MD_LINK_RE.test(box.text)) return { ok: false, reason: 'link_inside_verdict_box' };
+  // The box's props render as the reader's first answer — a sales pitch in
+  // plain text ("Get a free estimate now", "Call today", a phone number)
+  // is a pitch before the answer just like a link (Codex r8 on #5216).
+  // Same sales-copy detectors the blog meta gate uses; "call a licensed
+  // pro" style advice is not sales copy.
+  const verdictProp = boxPropInfo(box.text, 'verdict');
+  const recommendationProp = boxPropInfo(box.text, 'recommendation');
+  if (verdictProp.opaque || recommendationProp.opaque) return { ok: false, reason: 'verdict_box_prop_not_static' };
+  const boxText = `${verdictProp.text} ${recommendationProp.text}`;
+  if (SALESY_META_RE.test(boxText) || metaHasSalesCopy(boxText) || PHONE_TOKEN_RE.test(boxText) || CITY_PHONE_TOKEN_RE.test(boxText) || BOX_PHONE_RE.test(boxText) || BARE_PHONE_DIGITS_RE.test(boxText)) {
+    return { ok: false, reason: 'sales_pitch_inside_verdict_box' };
+  }
   ANY_MD_LINK_RE.lastIndex = 0;
   let m;
   while ((m = ANY_MD_LINK_RE.exec(body))) {
@@ -1344,11 +1516,34 @@ function checkCtaAfterVerdictBox(draft, brief, context) {
 // guardrails' blankNonRenderedMarkdown):
 //   Photo: [credit](source_page) ([license](license_url))
 const PHOTO_CATALOG_FIELDS = ['credit', 'license', 'license_url', 'source_page'];
-function validateLibraryPhoto(photo, alt, url, renderedBody) {
+// Codex r8 on #5216: the credit sits DIRECTLY below its own image — the
+// next non-blank rendered line after the image's line is the exact
+// attribution line (a credit in a distant footer, or one credit shared by
+// two copies of the photo, does not count).
+function validateLibraryPhoto(photo, alt, url, renderedBody, line, { viewLines = null, usedCreditLines = new Set() } = {}) {
   if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
   if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
   if (PHOTO_CATALOG_FIELDS.some((field) => !photo[field])) return { ok: false, reason: `identification_photo_catalog_entry_incomplete:${url}` };
-  if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+  // A raw <img>/srcset has no line here; it fails as an unsupported form
+  // right after this, so only its presence is judged.
+  if (!Number.isInteger(line)) {
+    if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+    return null;
+  }
+  // Lines the publisher's rendered view leaves blank — blank lines and
+  // non-rendered reference definitions, one line or several (Codex r1/r3 on
+  // #5272) — are skipped; the credit TEXT is read from the visible body.
+  // Each credit line is consumed by ONE image: two copies ending on the same
+  // line cannot share it (Codex r3 on #5272).
+  const lines = renderedBody.split('\n');
+  // A line left with only blockquote markers is empty too.
+  const skip = (i) => !(viewLines ? viewLines[i] || '' : lines[i]).replace(/^[\s>]+$/, '').trim();
+  let next = line + 1;
+  while (next < lines.length && skip(next)) next += 1;
+  if (next >= lines.length || lines[next].trim() !== photoAttributionLine(photo) || usedCreditLines.has(next)) {
+    return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+  }
+  usedCreditLines.add(next);
   return null;
 }
 // Every rendered image FORM is collected — Codex r5 on #5216 (3rd round on
@@ -1366,7 +1561,7 @@ function validateLibraryPhoto(photo, alt, url, renderedBody) {
 // form, never folded into 'markdown'. An MDX component is not an image
 // source today — SAFE_MDX_COMPONENTS carries none with an image-shaped prop;
 // add an entry here if one is ever added.
-const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware (see BOTTOM_LINE_BOX_TAG_RE)
+const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware
 const { htmlAttrValue: attrValue, isIdentificationPost, photoAttributionLine, libraryPhotoBySrc } = require('./licensed-photo-library');
 // alt is trimmed in every form.
 function collectBodyImageOccurrences(body, { mdx = true } = {}) {
@@ -1376,7 +1571,7 @@ function collectBodyImageOccurrences(body, { mdx = true } = {}) {
   // require — never top-level, or the two modules deadlock on load).
   const { bodyImageRefs } = require('../content-astro/astro-publisher')._internals;
   for (const ref of bodyImageRefs(body, { mdx })) {
-    out.push({ alt: String(ref.alt || '').trim(), url: String(ref.src || '').trim(), form: 'markdown' });
+    out.push({ alt: String(ref.alt || '').trim(), url: String(ref.src || '').trim(), form: 'markdown', line: Number.isInteger(ref.endLine) ? ref.endLine : ref.line });
   }
 
   let m;
@@ -1426,20 +1621,31 @@ function allowedIdentificationPhotoSrcs(brief, context) {
 function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   if (!isIdentificationDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_post' };
   const body = String(draft.body || '');
-  // Codex r6: the attribution must be READER-VISIBLE — comments and code
-  // blanked, then every definitely-hidden container (hidden, aria-hidden,
-  // display:none…) through the guardrails' own walker. Every image in the
-  // raw body is still judged (a hidden image still ships), but only a
-  // visible one counts as showing its slot.
-  const cg = require('./content-guardrails');
-  const renderedBody = cg.blankDefinitelyHiddenContent(cg.blankNonRenderedMarkdown(body));
-  const allowed = allowedIdentificationPhotoSrcs(brief, context);
   // Same Markdown/MDX flavor the publisher reads the target with (a legacy
   // .md refresh renders Markdown inside raw HTML as literal text) — Codex r7.
   const mdx = !markdownOnlyTarget(brief);
+  // Codex r6: the attribution must be READER-VISIBLE — comments and code
+  // blanked, then every definitely-hidden container (hidden, aria-hidden,
+  // display:none…) through the guardrails' own walker. The publisher's
+  // rendered view of the same text says which lines render at all (Codex r3
+  // on #5272: multi-line reference definitions). Every image in the raw body
+  // is still judged (a hidden image still ships), but only a visible one
+  // counts as showing its slot.
+  const cg = require('./content-guardrails');
+  const renderedBody = cg.blankDefinitelyHiddenContent(cg.blankNonRenderedMarkdown(body));
+  // Lines to skip between an image and its credit: blank once reference
+  // definitions (any length) are blanked — a visible MDX component on the
+  // way still counts as content (Codex r4 on #5272).
+  // Block context (blockquote depth, list membership) comes from the
+  // depth-aware blanker, so a definition inside "> [p]: …" is recognised
+  // too (Codex r5 on #5272).
+  const withDepths = cg.blankNonRenderedMarkdownWithDepths(body);
+  const viewLines = cg.blankReferenceDefinitions(cg.blankDefinitelyHiddenContent(withDepths.text), { depths: withDepths.depths, inList: withDepths.inList }).split('\n');
+  const allowed = allowedIdentificationPhotoSrcs(brief, context);
   const occurrences = collectBodyImageOccurrences(body, { mdx });
-  for (const { alt, url, form } of occurrences) {
-    const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody);
+  const usedCreditLines = new Set();
+  for (const { alt, url, form, line } of occurrences) {
+    const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody, line, { viewLines, usedCreditLines });
     if (failure) return failure;
     // Raw <img> (src or srcset) is outside the publisher's Markdown subset —
     // validateBodyImageRefs parks it at publish — so a library photo shipped
@@ -1857,6 +2063,79 @@ function checkCitabilityHowToChoose(draft, brief, context) {
   return { ok: true };
 }
 
+// ── citability backfill completion (refresh, weight-0 hard) ──────────
+//
+// Composes the four signals above — no heuristic of its own. Two traits
+// bind as STRUCTURE on a backfill: once a comparison / how_to_choose gap is
+// planned (or the live page already carried the structure), only the
+// <ComparisonTable> or the 3–5-criteria How-to-choose H2 itself satisfies
+// it. The signal checks answer "not applicable" once the choice framing is
+// gone, so without this a refresh could rename a heading and skip the work.
+const CITABILITY_GAP_CHECKS = {
+  named_sources: checkCitabilityNamedSources,
+  concrete_specifics: checkCitabilityConcreteSpecifics,
+  comparison: checkCitabilityComparison,
+  how_to_choose: checkCitabilityHowToChoose,
+};
+
+const CITABILITY_STRUCTURES = {
+  comparison: (body) => COMPARISON_TABLE_RE.test(body),
+  how_to_choose: (body) => {
+    const n = howToChooseSectionCriteria(body);
+    return n >= HOW_TO_CHOOSE_MIN_CRITERIA && n <= HOW_TO_CHOOSE_MAX_CRITERIA;
+  },
+};
+
+function citabilityStructurePresent(gap, body) {
+  return CITABILITY_STRUCTURES[gap](renderedCitabilityBody(body));
+}
+
+function checkCitabilityBackfillGapsCleared(draft, brief, context) {
+  if (!isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'not_citability_backfill' };
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const ctx = context || {};
+  const planned = brief.gsc_signal.citability_gaps;
+  const unresolved = [];
+  for (const gap of planned) {
+    const check = CITABILITY_GAP_CHECKS[gap];
+    if (!check) continue;
+    // A legacy .md target cannot carry the MDX table; the signal already
+    // answers not-applicable there, so the structure is never demanded.
+    if (CITABILITY_STRUCTURES[gap] && !(gap === 'comparison' && markdownOnlyTarget(brief))) {
+      if (!citabilityStructurePresent(gap, draft.body)) unresolved.push(`${gap}(structure_missing)`);
+      continue;
+    }
+    const r = check(draft, brief, ctx);
+    if (!r.ok) unresolved.push(`${gap}(${r.reason})`);
+  }
+  if (unresolved.length) return { ok: false, reason: `planned_gaps_unresolved:${unresolved.join(',')}` };
+  // A targeted edit must not trade one trait for another: a trait the live
+  // page already satisfied may not be lost.
+  const prev = ctx.previousVersion;
+  if (prev && typeof prev.body === 'string') {
+    const prevDraft = {
+      ...draft,
+      body: prev.body,
+      title: prev.frontmatter?.title || draft.title,
+      frontmatter: prev.frontmatter || draft.frontmatter,
+    };
+    // The prior page is judged on its own (no body to compare against); the
+    // frozen frontmatter still classifies its post_type.
+    const prevCtx = prev.frontmatter ? { previousVersion: { frontmatter: prev.frontmatter } } : {};
+    const regressed = [];
+    for (const [gap, check] of Object.entries(CITABILITY_GAP_CHECKS)) {
+      if (planned.includes(gap)) continue;
+      if (CITABILITY_STRUCTURES[gap]) {
+        if (citabilityStructurePresent(gap, prev.body) && !citabilityStructurePresent(gap, draft.body)) regressed.push(gap);
+        continue;
+      }
+      if (check(prevDraft, brief, prevCtx).ok && !check(draft, brief, ctx).ok) regressed.push(gap);
+    }
+    if (regressed.length) return { ok: false, reason: `citability_traits_regressed:${regressed.join(',')}` };
+  }
+  return { ok: true };
+}
+
 // The four optional signals as retry advisories ({ code, message }), for
 // the writer's in-session emit_draft redraft, which runs before any
 // run-level evaluate() (5013 Codex r2 P2). Same checks, same codes as the
@@ -2046,7 +2325,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkMetaDescriptionComplete, checkSerpBriefAttached, checkGscSignalAttached,
-  isOperatorAuthoredBrief, isCompetitorGapBrief, isAeoQuestionGapBrief,
+  isOperatorAuthoredBrief, isCompetitorGapBrief, isAeoQuestionGapBrief, isCitabilityBackfillBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
@@ -2055,6 +2334,7 @@ module.exports._internals = {
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
+  checkCitabilityBackfillGapsCleared,
   countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,

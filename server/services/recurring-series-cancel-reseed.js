@@ -364,7 +364,7 @@ function planReductionGroups(rows) {
 // gate is live and the row is a counting plan-series visit. Deliberately
 // broader than the reseed's own decision (which also weighs the plan's
 // term and remaining visits): the Intelligence Bar refuses card-confirmed
-// cancels of any such visit (owner ruling 2026-09-28, simple visits only)
+// cancels of any such visit (owner ruling 2026-09-28, bare visits only)
 // rather than preview the reseed. `row` needs is_recurring,
 // recurring_parent_id, is_callback, followup_included and status.
 function cancelMayReseedPlan(row) {

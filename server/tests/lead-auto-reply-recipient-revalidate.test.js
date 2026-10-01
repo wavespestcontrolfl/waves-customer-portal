@@ -128,6 +128,14 @@ describe('sendLeadAutoReplyOnce({ revalidateRecipient })', () => {
     expect(mockSend.mock.calls[0][0]).not.toHaveProperty('withSmsHandoff');
     expect(mockLockCalls).toEqual([]);
   });
+
+  test('threads the rendered template key through to sendCustomerMessage metadata', async () => {
+    mockSend.mockResolvedValue({ sent: true, providerMessageId: 'SMabc' });
+
+    await sendLeadAutoReplyOnce(args);
+
+    expect(mockSend.mock.calls[0][0].metadata).toMatchObject({ templateKey: 'lead_auto_reply_biz' });
+  });
 });
 
 describe('delayedLeadReplyStillEligible', () => {

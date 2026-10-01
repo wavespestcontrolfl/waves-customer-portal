@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
@@ -114,6 +115,18 @@ function redactAccessCodes(text) {
 // route exports only its router). Modern rows trust the stored overall_score;
 // legacy rows recompute under the four-category weighting so this fact can
 // never disagree with the portal/report score.
+// The scheduled_services id of an upcoming visit, carried on the context
+// entry for the texting AI's scheduler-backed offers (GATE_SMS_OFFERS_SCHEDULER,
+// sms-shadow-drafter). NON-ENUMERABLE on purpose: this context is serialized
+// whole into LLM-visible payloads elsewhere (lead-response get_customer_context
+// tool result, the managed assistant snapshot, email reply facts), and an
+// internal row id must never ride there. A direct property read still works;
+// JSON.stringify, spread and Object.keys do not see it.
+function withScheduledServiceId(entry, id) {
+  if (id != null) Object.defineProperty(entry, 'scheduledServiceId', { value: id, enumerable: false });
+  return entry;
+}
+
 function lawnStressDamage(row = {}) {
   if (row.stress_damage != null) return row.stress_damage;
   return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
@@ -539,11 +552,14 @@ class ContextAggregator {
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
       db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
+      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.id', 'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
       // five future autopay rows empty the history.
-      db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming').orderBy('payment_date', 'desc').limit(5),
+      // A never-attempted dispute-hold deferral is not a payment the customer
+      // made: out of the recent-payments sample (SQL, so it cannot use up one
+      // of the 5 rows), consistent with failedStandalone below.
+      excludeNeverAttemptedHoldDeferrals(db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming'), 'payments').orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -646,7 +662,7 @@ class ContextAggregator {
     const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     const failedStandalone = ownPayments
-      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
+      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id && !isNeverAttemptedHoldDeferral(p))
       // Invoice-linked failures are excluded (Codex r8, billing-v2 canon) —
       // the invoice lifecycle owns that money — EXCEPT when the linked
       // invoice is still a DRAFT (Codex r9, billing-v2:605-608): the visible
@@ -767,7 +783,7 @@ class ContextAggregator {
         notes: customerSafeVisitNotes(s.technician_notes),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
       })),
-      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
+      upcomingServices: upcomingServices.map(s => withScheduledServiceId({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() }, s.id)),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable
         unavailable: billingUnavailable,
@@ -990,6 +1006,17 @@ class ContextAggregator {
     return m ? m[1] : null;
   }
 
+  // 'M/D/YYYY' label for a DATE column in the one-line summary. Built from
+  // calendarDay, never new Date(value).toLocaleDateString(..., ET): on a UTC
+  // host pg's local-midnight Date is 00:00Z, which ET renders as the day
+  // before (a Thu Oct 1 visit read "Next: ... 9/30/2026").
+  summaryDay(value) {
+    const day = this.calendarDay(value);
+    if (!day) return '';
+    const [y, m, d] = day.split('-').map(Number);
+    return `${m}/${d}/${y}`;
+  }
+
   // The arrival window lives in window_start (Postgres `time`, ET wall-clock
   // strings like '13:00:00') on nearly every row — booking and admin-schedule
   // both write it, while window_display is set by only a few legacy paths
@@ -1066,8 +1093,8 @@ class ContextAggregator {
         || (dues.basis === 'no_surcharge' ? null : 'collection state unconfirmed');
       s += ` ($${dues.base.toFixed(2)}/mo dues${why ? ` — ${why}` : ''})`;
     }
-    if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
-    if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
+    if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${this.summaryDay(lastSvc.service_date)}`;
+    if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${this.summaryDay(upcoming[0].scheduled_date)}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;
     if (flags.some(f => f.type === 'open_complaint')) s += ` | ⚠️ Open complaint`;
     if (flags.some(f => f.type === 'cancel_save_active')) s += ` | 🚨 Cancel save active`;

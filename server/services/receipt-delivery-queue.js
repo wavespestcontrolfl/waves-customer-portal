@@ -6,6 +6,10 @@ const logger = require('./logger');
 const QUEUED_STATUSES = ['queued', 'retry_scheduled'];
 const STALE_LOCK_MINUTES = 10;
 const DEFAULT_MAX_ATTEMPTS = 5;
+// The job's Text leg is not owed: the combined-visit summary text carries this receipt's
+// link (visit-completion-summary.js). Set on the still-queued job at closeout, read by the
+// worker like any other expected text skip, and kept through its retries (sms_result).
+const TEXT_CARRIED_BY_SUMMARY = 'carried_by_visit_summary';
 
 function workerId() {
   return `${os.hostname()}:${process.pid}`;
@@ -84,13 +88,17 @@ async function recoverStaleLocks({ invoiceId = null } = {}) {
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
     .where('locked_by', 'like', 'operator:%');
   const ownEmailSent = "email_result->>'operator_claim' = locked_by";
-  // 1. The claim's own email went out (recordOperatorReceiptEmail): the
-  //    invoice is stamped receipted (it may have died before its own stamp)
-  //    and the job closed — requeueing would email the receipt again.
+  const ownSmsSent = "sms_result->>'operator_claim' = locked_by";
+  // 1. Any leg the claim itself delivered (recordOperatorReceiptDelivered)
+  //    stamps the invoice receipted — it may have died before its own stamp
+  //    — so a job requeued below never texts the receipt again.
   await db('invoices')
     .whereNull('receipt_sent_at')
-    .whereIn('id', staleOperatorClaims().whereRaw(ownEmailSent).select('invoice_id'))
+    .whereIn('id', staleOperatorClaims().whereRaw(`(${ownEmailSent} OR ${ownSmsSent})`).select('invoice_id'))
     .update({ receipt_sent_at: db.fn.now() });
+  // 2. The claim's own email went out: the job is closed too — requeueing
+  //    would email the receipt again. (Text only: it falls through to the
+  //    rules below, since a queued job may still owe its email.)
   const closedDelivered = await staleOperatorClaims()
     .whereRaw(ownEmailSent)
     .update({
@@ -101,7 +109,7 @@ async function recoverStaleLocks({ invoiceId = null } = {}) {
       locked_by: null,
       updated_at: db.fn.now(),
     });
-  // 2. A row the claim itself created, which no enqueue took over: no
+  // 3. A row the claim itself created, which no enqueue took over: no
   //    automatic receipt was ever owed, so it goes away rather than becoming
   //    one (the operator's failed request is theirs to retry).
   await staleOperatorClaims().where({ source: 'operator_send' }).del();
@@ -171,7 +179,7 @@ function actionableSmsFailure(result) {
   // 'sms_suppressed' is a STOP-style opt-out (suppression row or
   // sms_enabled=false) — permanent until the customer texts START, so a
   // retry can never deliver it.
-  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed'].includes(result.reason);
+  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed', TEXT_CARRIED_BY_SUMMARY].includes(result.reason);
 }
 
 function actionableEmailFailure(result) {
@@ -212,6 +220,42 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
     });
 }
 
+// The receipt's Text leg belongs to the visit summary text, and the receipt email that backs it
+// up did not go (or the job gave up): the office is told, one alert per invoice. The wording
+// follows what the summary text actually did: receipt_sms_sent_at is stamped only when it was
+// accepted. A summary that is deferred or was suppressed delivered nothing, so neither channel has.
+// The alert is closed when the summary text is later accepted (visit-completion-summary.js).
+async function alertCarriedReceiptEmail(job, reason) {
+  try {
+    const accepted = Boolean((await db('invoices').where({ id: job.invoice_id }).first('receipt_sms_sent_at'))?.receipt_sms_sent_at);
+    await require('./admin-alert-compose').raiseAdminAlert('alert', {
+      area: 'Billing',
+      action: accepted ? 'confirm the customer got the receipt' : 'send the customer their receipt',
+      why: accepted
+        ? 'The receipt link went out by text only, and the receipt email did not go.'
+        : 'Neither the visit summary text nor the receipt email has delivered the receipt link.',
+      severity: 'needs-you',
+      link: `/admin/invoices?invoice=${job.invoice_id}`,
+      subject: { type: 'invoice', id: String(job.invoice_id) },
+      doneWhen: 'receipt_delivered',
+      who: 'person',
+    }, {
+      detail: accepted
+        ? `Invoice ${job.invoice_id}: its receipt link was sent only in the visit summary text, and the receipt email did not go (${reason}). Check that the customer has the receipt, or resend it.`
+        : `Invoice ${job.invoice_id}: the visit summary text that was to carry its receipt link has not been accepted (deferred or not sent), and the receipt email did not go (${reason}). Send the customer their receipt.`,
+      dedupeKey: `summary-carried-receipt-email:${job.invoice_id}`,
+      metadata: { invoice_id: job.invoice_id },
+    });
+    // The summary text may have been accepted between the read above and the insert: its
+    // acceptance closes the alert key, which did not exist yet. Read again now that the alert does.
+    if (!accepted && (await db('invoices').where({ id: job.invoice_id }).first('receipt_sms_sent_at'))?.receipt_sms_sent_at) {
+      await require('./admin-alert-episodes').closeAdminAlertKeys(db, [`summary-carried-receipt-email:${job.invoice_id}`], 'summary_text_accepted');
+    }
+  } catch (err) {
+    logger.warn(`[receipt-delivery-queue] carried-receipt email alert failed for invoice ${job.invoice_id}: ${err.message}`);
+  }
+}
+
 async function markJobRetry(job, err, { smsResult = null, emailResult = null } = {}) {
   // Send-window hold: not a delivery failure. Schedule the retry exactly at
   // the window open and REFUND the claimed attempt — an after-8PM payment's
@@ -239,6 +283,9 @@ async function markJobRetry(job, err, { smsResult = null, emailResult = null } =
   const attempts = Number(job.attempts || 0);
   const maxAttempts = Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS);
   const terminal = attempts >= maxAttempts;
+  if (terminal && (smsResult?.reason === TEXT_CARRIED_BY_SUMMARY || job.sms_result?.reason === TEXT_CARRIED_BY_SUMMARY)) {
+    await alertCarriedReceiptEmail(job, err?.message || 'gave up after its retries');
+  }
   const delayMinutes = Math.min(60, Math.pow(2, Math.max(0, attempts - 1)) * 5);
   await db('receipt_delivery_jobs')
     .where({ id: job.id })
@@ -277,7 +324,11 @@ async function receiptEmailOptOutState(invoice) {
 }
 
 async function processReceiptDeliveryJob(job) {
-  let smsResult = null;
+  // A Text leg the visit summary carries is decided before any fallible read,
+  // so a retry after an early failure (invoice lookup) keeps that decision.
+  let smsResult = job.sms_result?.reason === TEXT_CARRIED_BY_SUMMARY
+    ? { sent: false, reason: TEXT_CARRIED_BY_SUMMARY }
+    : null;
   let emailResult = null;
   try {
     const invoice = await db('invoices').where({ id: job.invoice_id }).first();
@@ -289,7 +340,9 @@ async function processReceiptDeliveryJob(job) {
     const InvoiceService = require('./invoice');
     const { sendReceiptEmail } = require('./invoice-email');
 
-    smsResult = await InvoiceService.sendReceipt(invoice.id, {
+    smsResult = smsResult?.reason === TEXT_CARRIED_BY_SUMMARY
+      ? smsResult
+      : await InvoiceService.sendReceipt(invoice.id, {
       hasEmailLeg: true,
       // Persisted payment provenance (see enqueueReceiptDelivery): a
       // customer-initiated payment's receipt sends at any hour; a machine
@@ -330,7 +383,10 @@ async function processReceiptDeliveryJob(job) {
     // invoice. The dropdown governs the SMS leg (via the consent gate); the
     // emailed PDF receipt is the durable payment record and always sends
     // unless the payment_receipt kill switch is off.
-    emailResult = prefsLookupFailed
+    // A job folded after a quiet-hours pass already sent its email then: it is not sent again.
+    emailResult = smsResult?.reason === TEXT_CARRIED_BY_SUMMARY && job.email_result?.ok === true
+      ? job.email_result
+      : prefsLookupFailed
       ? { ok: false, error: 'receipt prefs lookup failed' }
       : receiptKillSwitch
         ? { ok: false, error: 'receipt_opted_out' }
@@ -354,7 +410,7 @@ async function processReceiptDeliveryJob(job) {
     // customer whose payment_receipt_channel is email-only, who opted out
     // of receipt texts, or whose SMS is STOP-suppressed — the delivered
     // email receipt IS the receipt.
-    if (['payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed'].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
+    if (['payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed', TEXT_CARRIED_BY_SUMMARY].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
       await db('invoices')
         .where({ id: invoice.id })
         .whereNull('receipt_sent_at')
@@ -362,6 +418,11 @@ async function processReceiptDeliveryJob(job) {
         .catch((e) => logger.warn(`[receipt-delivery-queue] receipt_sent_at stamp failed for ${invoice.invoice_number}: ${e.message}`));
     }
 
+    // A job that completes without its email (an expected skip: no recipient, opted out, the
+    // choice no longer selecting Email) while its Text leg is carried by the summary.
+    if (smsResult?.reason === TEXT_CARRIED_BY_SUMMARY && !emailResult?.ok) {
+      await alertCarriedReceiptEmail(job, emailResult?.error || 'skipped');
+    }
     await markJobCompleted(job, { smsResult, emailResult });
     return { ok: true, sms: smsResult, email: emailResult };
   } catch (err) {
@@ -392,13 +453,13 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // an enqueue either dedupes on it or, on a row the claim created, takes that
 // row over for release to re-queue — and hands it back afterwards
 // (releaseOperatorReceiptClaim). A job the drain is delivering right now
-// refuses the operator send ({ inFlight: true }) rather than racing it, and
+// refuses the operator send ({ inFlight: true, byOperator }) rather than racing it, and
 // one whose stale claim this call finds already delivered refuses it too
 // ({ alreadySent: true }).
 // A short transaction only: never held across the sends. A process that dies
 // holding the claim is settled by recoverStaleLocks after
 // STALE_LOCK_MINUTES: closed when its own email was recorded as sent
-// (recordOperatorReceiptEmail), removed when the claim created the row, and
+// (recordOperatorReceiptDelivered), removed when the claim created the row, and
 // otherwise handed back to the drain.
 // sawUnsent: the caller read the invoice with receipt_sent_at still null.
 // If it is stamped by the time the claim runs, another path (the drain, or
@@ -421,6 +482,10 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
       // locked below): whatever delivered it had already stamped the invoice.
       const stampedSinceRead = async () => sawUnsent
         && Boolean((await trx('invoices').where({ id: invoiceId }).first('receipt_sent_at'))?.receipt_sent_at);
+      // The visit summary's receipt text started or was accepted while this request waited for
+      // the job row (the summary's handoff holds it through its send): a request that read the
+      // receipt unsent is refused as already sent, never a deliberate resend.
+      const summaryTextStarted = async () => sawUnsent && await require('./visit-completion-summary').summaryLinkTextStarted(trx, invoiceId, 'receipt');
       const inserted = await trx('receipt_delivery_jobs')
         .insert({
           invoice_id: invoiceId,
@@ -444,10 +509,13 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
       const job = await trx('receipt_delivery_jobs')
         .where({ invoice_id: invoiceId })
         .forUpdate()
-        .first('id', 'status', 'next_attempt_at');
+        .first('id', 'status', 'next_attempt_at', 'locked_by');
       if (!job) throw new Error(`receipt job for invoice ${invoiceId} vanished during the operator claim`);
-      if (job.status === 'running') return { inFlight: true };
-      if (await stampedSinceRead()) return { alreadySent: true };
+      // byOperator: another operator send holds it (not the drain) — it
+      // delivers only the legs that operator chose, so it is no promise that
+      // this caller's receipt goes out.
+      if (job.status === 'running') return { inFlight: true, byOperator: String(job.locked_by || '').startsWith('operator:') };
+      if (await stampedSinceRead() || await summaryTextStarted()) return { alreadySent: true };
       // A completed or failed job sends nothing more: no claim to hold.
       if (!QUEUED_STATUSES.includes(job.status)) return { id: null };
 
@@ -462,16 +530,21 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
   }
 }
 
-// Right after the operator's email leg delivers: claim-specific evidence on
-// the row, so a claim that is never released is closed by recoverStaleLocks
-// rather than requeued to email again. Best effort — without it the stale
-// claim is requeued (a possible repeat email, never a lost one).
-async function recordOperatorReceiptEmail(claim) {
+// Right after an operator leg delivers ('email' | 'sms'): claim-specific
+// evidence on the row, so a claim that is never released (a failed release,
+// or a process that dies before it) is settled by recoverStaleLocks without
+// repeating that leg — the invoice stamped, and on a delivered email the job
+// closed. Best effort — without it the stale claim is settled as undelivered
+// (a possible repeat, never a lost receipt).
+async function recordOperatorReceiptDelivered(claim, leg) {
   if (!claim?.id) return;
+  const evidence = leg === 'email'
+    ? { email_result: { ok: true, operator_claim: claim.token } }
+    : { sms_result: { sent: true, operator_claim: claim.token } };
   await db('receipt_delivery_jobs')
     .where({ id: claim.id, status: 'running', locked_by: claim.token })
-    .update({ email_result: { ok: true, operator_claim: claim.token }, updated_at: db.fn.now() })
-    .catch((err) => logger.warn(`[receipt-delivery-queue] operator receipt email evidence failed for job ${claim.id}: ${err.message}`));
+    .update({ ...evidence, updated_at: db.fn.now() })
+    .catch((err) => logger.warn(`[receipt-delivery-queue] operator receipt ${leg} evidence failed for job ${claim.id}: ${err.message}`));
 }
 
 // After the operator send: a delivered receipt EMAIL completes the job (the
@@ -522,6 +595,32 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
   }
 }
 
+// Set the still-queued job's Text leg as carried by the summary text. Only a
+// provably unsent Text leg folds: no recorded SMS outcome yet, already carried, or held for the
+// send window (quiet hours). A retry_scheduled job may already have texted (its email failed)
+// or hold an uncertain outcome; a job already running or finished has had its
+// text decided. Those set nothing (returns 0) and the stop is not folded.
+async function markTextCarriedBySummary(invoiceId, { database = db } = {}) {
+  return database('receipt_delivery_jobs').where({ invoice_id: invoiceId }).whereIn('status', QUEUED_STATUSES)
+    .where((q) => q.whereNull('sms_result').orWhereRaw("sms_result->>'reason' = ?", [TEXT_CARRIED_BY_SUMMARY])
+      // A receipt text the send window held (recorded by the worker: not sent, the hold's own
+      // code, no provider outcome) provably never reached the provider, so the summary may carry it.
+      .orWhereRaw("(sms_result->>'code' = 'QUIET_HOURS_HOLD' AND sms_result->>'sent' = 'false' AND NOT jsonb_exists_any(sms_result::jsonb, ARRAY['sid', 'messageId', 'providerMessageId', 'twilioSid']))"))
+    .update({ sms_result: JSON.stringify({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY }), updated_at: database.fn.now() });
+}
+
+// The combined-stop charge defers its receipt job (deferReceiptDelivery) until the closeout
+// coordinator knows whether the summary text will carry the receipt link. When it will not,
+// the job is due again now, but only while it is still queued with no outcome, and the
+// queue is drained at once.
+async function resumeDeferredReceiptDelivery(invoiceId) {
+  const resumed = await db('receipt_delivery_jobs').where({ invoice_id: invoiceId, status: 'queued', attempts: 0 })
+    .where('next_attempt_at', '>', db.fn.now())
+    .update({ next_attempt_at: db.fn.now(), updated_at: db.fn.now() });
+  if (resumed) scheduleReceiptDeliveryDrain({ delayMs: 0, limit: 5 });
+  return resumed;
+}
+
 function scheduleReceiptDeliveryDrain({ delayMs = 0, limit = 10 } = {}) {
   const run = () => {
     processDueReceiptDeliveryJobs({ limit }).catch((err) => {
@@ -542,8 +641,11 @@ module.exports = {
   processReceiptDeliveryJob,
   scheduleReceiptDeliveryDrain,
   claimReceiptJobForOperatorSend,
-  recordOperatorReceiptEmail,
+  recordOperatorReceiptDelivered,
   releaseOperatorReceiptClaim,
+  markTextCarriedBySummary,
+  resumeDeferredReceiptDelivery,
+  TEXT_CARRIED_BY_SUMMARY,
   _internals: {
     recoverStaleLocks,
     actionableSmsFailure,
