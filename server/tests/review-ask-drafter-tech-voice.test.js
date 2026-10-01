@@ -169,6 +169,19 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({ body: 'I know you had to get to work. Roaches near the spot I flagged. Google review: {review_url}' }, c)).toBeNull();
   });
 
+  test('an observation never becomes a claimed repair or result (pre-push audit P1)', () => {
+    const c = { corpus: `${corpus} Moisture under the kitchen sink; suggested raising it with the property group.` };
+    const details = [{ text: 'moisture under the kitchen sink', source_quote: 'Moisture under the kitchen sink' }];
+    const fixed = "It's Adam, I fixed the moisture under the kitchen sink. A Google review would really help: {review_url}";
+    expect(verify({ body: fixed, details }, c)).toBe('ungrounded_term');
+    const solved = "It's Adam, the moisture under the kitchen sink is solved. A Google review would really help: {review_url}";
+    expect(verify({ body: solved, details }, c)).toBe('ungrounded_term');
+    const cared = "It's Adam, I took care of the moisture under the kitchen sink. A Google review would really help: {review_url}";
+    expect(verify({ body: cared, details }, c)).toBe('result_claim');
+    // Reporting the observation itself is fine.
+    expect(verify({}, c)).toBeNull();
+  });
+
   test('stems: plural, -ing/-ed and short words', () => {
     const { ungroundedTerm, detailSupportedByQuote } = Drafter.__private;
     expect(ungroundedTerm('the lanai and pool cages', 'lanai and pool cage')).toBeNull();

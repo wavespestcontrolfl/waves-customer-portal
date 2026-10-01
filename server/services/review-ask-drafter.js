@@ -581,7 +581,9 @@ function unknownProperNoun(body, { firstName, techName, ownWords }) {
 // Pests, parts of the property, problems and repair work: a claim about any
 // of these must come from the record. A draft that says "I fixed the roof
 // leak" is rejected unless "roof" and "leak" appear in the data it was given.
-// Words used loosely in normal speech ("spot", "window", "fix") stay out.
+// Repair and result verbs ("fixed", "solved", "gone") are listed too, so an
+// observation in the report never becomes a claimed repair. Words used
+// loosely in normal speech ("spot", "window") stay out.
 // Termites have their own rule (termite visits only), so they are not listed.
 const GROUNDED_TERM_WORDS = `ant roach cockroach spider flea tick mosquito rodent rat mice mouse
   wasp bee hornet centipede millipede silverfish scorpion earwig cricket beetle moth fly gnat bedbug chinch
@@ -591,8 +593,11 @@ const GROUNDED_TERM_WORDS = `ant roach cockroach spider flea tick mosquito roden
   laundry basement crawlspace lanai pool cage deck patio porch driveway fence shed eave soffit door wall
   baseboard foundation slab gutter irrigation sprinkler tree shrub palm hedge mulch flower garden yard
   lawn turf ornamental perimeter leak moisture crack hole damage rot stain flood
-  repair replace install seal caulk kill eliminate trap bait exclusion inspect fumigate`;
+  repair replace install seal caulk kill eliminate trap bait exclusion inspect fumigate
+  fix solve resolve remove gone cure prevent`;
 const TERM_ALIAS = { roach: "cockroach" };
+// Result claims with no single word to ground: never allowed.
+const RESULT_PHRASE_RE = /\b(?:took|taken|take|takes|taking) care of\b|\bgot rid of\b|\b(?:all )?sorted (?:out)?\b|\bno more (?:ants|roaches|bugs|pests)\b/i;
 const DETAIL_STOP = new Set(`the and but for from with that this you your yours our its his her him she they them their
   was were are have has had get got just also very really some any all can could would should will about
   into over then than there here what when where which who how not too out off one two`.split(/\s+/));
@@ -675,6 +680,7 @@ function verifyTechVoiceDraft(draft, { channel, firstName, techName, termite, co
   }
   // Uncited claims: a pest, part of the property, problem or repair named
   // anywhere in the body must be in the record, cited or not.
+  if (RESULT_PHRASE_RE.test(body)) return "result_claim";
   if (ungroundedTerm(body, corpus)) return "ungrounded_term";
   if (unknownProperNoun(body, { firstName, techName, ownWords })) return "unknown_proper_noun";
   return null;
