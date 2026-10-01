@@ -153,8 +153,11 @@ function visibleText(html) {
 // branded "Page not found" served as 200 says so in its <title> or <h1>. Headings only, so
 // "404 reviews" or a 404-area-code phone in body copy is not a not-found page. Scripts,
 // styles, templates and comments never render, so an unused error template inside one is not
-// the page's heading. Entities are decoded before whitespace is collapsed (&nbsp;).
-const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
+// the page's heading. Entities are decoded before whitespace is collapsed (&nbsp;). "Not found"
+// counts only as the heading's opening words ("404 Not Found") or within a few words after a
+// page-like noun ("The page you requested was not found"),
+// so an article titled "Why Termites Were Not Found" is not an error page.
+const NOT_FOUND_HEADING_RE = /^(?:(?:oops|sorry|error|http|404)\W+)*not found\b|\b(?:page|file|url|resource|document|listing|profile|business|content)\b(?:\s+\S+){0,4}?\s+not found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
 const HEADING_TAGS = new Set(['title', 'h1']);
 const INERT_TAGS = new Set(['!--', 'script', 'style', 'template']);
 const TAG_RE = /<(\/?)(!--|[a-z][a-z0-9-]*)/y;

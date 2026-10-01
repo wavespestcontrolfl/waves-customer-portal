@@ -579,6 +579,11 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<title>Page&nbsp;Not&nbsp;Found</title>')).toBe(true);
     expect(notFoundHeading("<h1>Sorry, we couldn't find this page</h1>")).toBe(true);
     expect(notFoundHeading('<h1>Pest control in Bradenton</h1><p>404 reviews</p>')).toBe(false);
+    expect(notFoundHeading('<title>Why Termites Were Not Found During Inspection</title>')).toBe(false);
+    expect(notFoundHeading('<h1>Rodents not found after exclusion</h1>')).toBe(false);
+    for (const h of ['404 Not Found', 'Not Found', 'Oops! Not found', 'The page you requested was not found', 'Listing not found', 'Error 404']) {
+      expect(notFoundHeading(`<title>${h}</title>`)).toBe(true);
+    }
     expect(notFoundHeading('<script type="text/template"><h1>Page not found</h1></script><!-- <h1>Not found</h1> -->')).toBe(false);
   });
   test('stays linear on malformed or unclosed tags (600 KB fetch cap)', () => {

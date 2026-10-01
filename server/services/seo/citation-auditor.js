@@ -185,14 +185,23 @@ function unwrapLd(v) {
   return v;
 }
 
+// A node that only points at another ({"@id": "_:address"}), as flattened JSON-LD writes links.
+const isLdRef = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v) && typeof v['@id'] === 'string'
+  && Object.keys(v).every((k) => k === '@id' || k === '@type');
+
 // Every named/phoned/addressed schema.org node in the page's JSON-LD (arrays, @graph, mainEntity).
+// Flattened JSON-LD puts the postal address in a sibling node and links it by @id: an address
+// reference is replaced by the node it names, from any block on the page. One that names no node
+// stays a bare reference, which addressStrings reports as stated but unreadable.
 function jsonLdNodes(html) {
   const out = [];
+  const byId = new Map();
   const visit = (raw) => {
     if (!raw || typeof raw !== 'object') return;
     if (Array.isArray(raw)) return raw.forEach(visit);
     const node = unwrapLd(raw);
     if (!node || typeof node !== 'object') return; // a bare {"@value": ...} is not an entity
+    if (typeof node['@id'] === 'string' && !isLdRef(node)) byId.set(node['@id'], node);
     if (node.name || node.telephone || node.address) out.push(node);
     if (node['@graph']) visit(node['@graph']);
     if (node.mainEntity) visit(node.mainEntity);
@@ -200,7 +209,8 @@ function jsonLdNodes(html) {
   for (const m of String(html).matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
     try { visit(JSON.parse(m[1])); } catch { /* malformed block: ignore */ }
   }
-  return out;
+  const resolve = (v) => (Array.isArray(v) ? v.map(resolve) : (isLdRef(v) && byId.get(v['@id'])) || v);
+  return out.map((node) => (node.address ? { ...node, address: resolve(node.address) } : node));
 }
 
 const OFFICE_PHONE_KEYS = new Set(WAVES_LOCATIONS.map((l) => phoneKey(l.phone)));
@@ -242,6 +252,10 @@ function pickAddress(entries, candidates) {
 function addressStrings(address, candidates = []) {
   if (Array.isArray(address)) address = pickAddress(address.filter(Boolean), candidates);
   if (!address) return null;
+  if (isLdRef(address)) {
+    const none = { street: null, city: null, region: null, postal: null };
+    return { parsed: none, raw: none, display: `JSON-LD address ${address['@id']} (not on the page)`, unresolved: true };
+  }
   if (typeof address === 'string') {
     const parsed = parseAddress(address);
     return { parsed, raw: { street: address.split(/[,\n]/)[0].trim(), city: parsed.city, region: parsed.region, postal: parsed.postal }, display: address };
@@ -361,7 +375,10 @@ function judgeTextAddress(nap, office, entityAddress) {
   }
   const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text) || NUMBERED_STATE_ZIP_RE.exec(nap.text);
   const first = seen[0] ? seen[0].trim() : (zip ? nap.text.slice(Math.max(0, zip.index - 60), zip.index + zip[0].length).trim() : null);
-  return { confirmed: false, checked: false, mismatches: [], unconfirmed: first, observed: (entityAddress && entityAddress.display) || first };
+  // An entity address we could not read (a link to a node not on the page) is stated but
+  // unknown: never let it pass as "no address shown".
+  const unread = entityAddress && entityAddress.unresolved ? entityAddress.display : null;
+  return { confirmed: false, checked: false, mismatches: [], unconfirmed: first || unread, observed: (entityAddress && entityAddress.display) || first };
 }
 
 function judgeAddress(nap, office) {

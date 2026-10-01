@@ -57,6 +57,20 @@ describe('classifyListing', () => {
     expect(classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${addr}`), expected).status).toBe('mismatched');
   });
 
+  test('flattened JSON-LD: an address linked by @id is read from its node; an unknown link is not "no address"', () => {
+    const S = 'https://schema.org/';
+    const biz = { '@id': '_:biz', '@type': [`${S}LocalBusiness`], [`${S}name`]: [{ '@value': 'Waves Pest Control' }], [`${S}telephone`]: [{ '@value': BRAND.phone }], [`${S}address`]: [{ '@id': '_:address' }] };
+    const addrNode = { '@id': '_:address', '@type': [`${S}PostalAddress`], [`${S}streetAddress`]: [{ '@value': '99 Old Rd' }], [`${S}addressLocality`]: [{ '@value': 'Tampa' }] };
+    const body = `<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>`;
+    const linked = classifyListing(page(`${body}${ld([biz, addrNode])}`), expected);
+    expect(linked.status).toBe('mismatched');
+    expect(linked.detail.mismatches.map((m) => m.field)).toEqual(expect.arrayContaining(['address', 'city']));
+    expect(classifyListing(page(`${body}${ld({ '@graph': [biz] })}${ld(addrNode)}`), expected).status).toBe('mismatched'); // across blocks
+    const dangling = classifyListing(page(`${body}${ld([biz])}`), expected);
+    expect(dangling.status).toBe('unverified');
+    expect(dangling.detail.reason).toBe('address_unconfirmed');
+  });
+
   test('mismatched structured address reports the address seen', () => {
     const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa', postalCode: '33601' } })}`), expected);
     expect(r.status).toBe('mismatched');
