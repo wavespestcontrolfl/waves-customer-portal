@@ -1178,6 +1178,15 @@ describe('retired topics', () => {
     expect(empty).toEqual(['/lawn-care/get-rid-of-lawn-pest/', '/pest-control/get-rid-of-pests/', '/pest-control/pest-control-in-lakewood-ranch/']);
   });
 
+  test('"getting rid of" / "eliminating" phrasing is framing too, pre- and post-draft (local codex pass 2)', () => {
+    for (const query of ['getting rid of paper wasps', 'eliminating fire ants', 'dealing with earwigs']) {
+      expect(codes(gate.evaluate(blog({ query }), { requireCorpus: false }))).toContain(gate.CODES.RETIRED_TOPIC);
+    }
+    const r = gate.evaluateDraftTargeting({ frontmatter: { title: 'Getting Rid of Paper Wasps in Sarasota', slug: '/pest-control/getting-rid-of-paper-wasps-sarasota/', primary_keyword: 'getting rid of paper wasps' } }, { index: gate.indexCorpus(CORPUS) });
+    expect(r.ok).toBe(false);
+    expect(r.findings.map((f) => f.code)).toContain(gate.CODES.RETIRED_TOPIC);
+  });
+
   test('a different topic in the same family still passes', () => {
     for (const query of ['german cockroach identification', 'how to get rid of wasps', 'drywood termite frass', 'pest control sarasota', 'lawn treatment sarasota', 'termite cost']) {
       expect(gate.evaluate(blog({ query }), { requireCorpus: false }).findings.filter((f) => f.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);

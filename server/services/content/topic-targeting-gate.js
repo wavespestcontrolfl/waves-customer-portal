@@ -1098,7 +1098,8 @@ const RETIRED_POSTS = require('../../data/retired-blog-topics-v1.json').posts;
 // from both sides, with GENERIC_TOKENS, so "paper wasp pest control tips"
 // still reduces to the retired "paper wasp".
 const RETIRED_FILLER = new Set([
-  'rid', 'remove', 'removal', 'removing', 'kill', 'killing', 'control', 'treatment',
+  'rid', 'getting', 'remove', 'removal', 'removing', 'kill', 'killing', 'control', 'treatment',
+  'eliminate', 'eliminating', 'elimination', 'eradicate', 'eradicating', 'deal', 'dealing',
   'service', 'company', 'best', 'guide', 'near', 'lawn',
 ]);
 
