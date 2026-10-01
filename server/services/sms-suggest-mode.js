@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null, liveEtaSnapshot = null, techNames = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -687,6 +687,16 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             ...(zelleInvoiceId ? { zelle_invoice_id: zelleInvoiceId } : {}),
             // the payment-status sentences the reply copies (null = none), re-rendered and rechecked at every send seam
             ...(paymentStatusSnapshot ? { payment_status_snapshot: paymentStatusSnapshot } : {}),
+            // Independent review finding (PR #5334): the visit(s) this
+            // draft's LIVE ETA fact was drawn from, carried through so the
+            // send-time choke point (verifyAgentDecisionForSend /
+            // agent-decision-send-checks.js) can recheck a minutes-away
+            // claim is still current before the reviewer's Send goes out —
+            // never a probe, just the snapshot, exactly like open_times_snapshot.
+            ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
+            // Technician first name(s), independent of live entries (round-42 P2): read back at
+            // send time so name-subjected status wording is recognized with no live snapshot.
+            ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',

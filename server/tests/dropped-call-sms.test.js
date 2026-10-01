@@ -323,10 +323,6 @@ describe('callbackClause / window helpers', () => {
     expect(_private.callbackClause(null)).toBe('');
   });
 
-  it('window check follows ET hours', () => {
-    expect(_private.withinSendWindowET(IN_WINDOW)).toBe(true);
-    expect(_private.withinSendWindowET(OUT_OF_WINDOW)).toBe(false);
-  });
 });
 
 // Codex pre-push r1 P1 on PR #5012: callback_clause and the sms fromNumber
@@ -482,12 +478,26 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(sent.metadata.fromNumber).not.toBe('+19415993489');
   });
 
-  it('quiet hours — skips BEFORE any claim, one-shot not consumed', async () => {
+  it('evening INBOUND drop still texts, marked customerInitiated (owner ruling 2026-09-30: a reply to the caller\'s own contact goes out at any hour)', async () => {
     jest.setSystemTime(OUT_OF_WINDOW);
     const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res.sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ entryPoint: 'dropped_call_sms', customerInitiated: true }));
+  });
+
+  it('evening OUTBOUND-leg drop — quiet hours skip BEFORE any claim, one-shot not consumed (our contact, not theirs)', async () => {
+    jest.setSystemTime(OUT_OF_WINDOW);
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, direction: 'outbound-api', from_phone: '+19412166229', to_phone: PHONE } });
     expect(res).toEqual({ sent: false, skipped: 'quiet_hours' });
     expect(state.inserts).toHaveLength(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('daytime OUTBOUND-leg drop sends WITHOUT the customerInitiated marker', async () => {
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, direction: 'outbound-api', from_phone: '+19412166229', to_phone: PHONE } });
+    expect(res.sent).toBe(true);
+    expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('customerInitiated');
   });
 
   it('sms_log dedupe read failure — fails closed', async () => {

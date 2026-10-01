@@ -48,6 +48,7 @@ Check EVERY concrete detail in the draft, one by one — each:
 - location ("exterior bushes", "kitchen", "attic")
 - date, day, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "9–10am")
 - technician name, or who is coming / on the way
+- an ETA or "how many minutes away" claim about today's visit ("about 15 minutes away", "20 minutes out")
 - specific action or commitment ("we'll pick up the trap", "we'll coordinate X", "we'll be there Wednesday")
 - claim about what was found, caught, treated, or inspected
 - service cadence/frequency, or a treatment-timing rule
@@ -58,6 +59,7 @@ A detail is GROUNDED only if it appears in the FACTS, or in what the customer LI
 - The customer's message supports ONLY their literal words — never an inference. A message about "spiders" does NOT support "flying bugs"; a message that just gives a name does NOT support a "pickup" request; "the trap" does NOT support "the attic trap".
 - Warm acknowledgments, generic brand voice, and offers to confirm/follow up are fine. But a SPECIFIC commitment, date, place, or job detail is a violation unless grounded.
 - VALUE MATCHING — match the exact value, not just the category. A date, day, or time is grounded ONLY if that EXACT value is in the FACTS. A date that DIFFERS from the facts — even by one day — is a VIOLATION, never "close enough". Example: FACTS say next service 6/15, draft says "Tuesday June 16" → VIOLATION (wrong date, not the 6/15 on file). Seeing "there is a date in the facts" is NOT enough; the value must match.
+- AN ETA CLAIM ("about N minutes away", "N minutes out", "on the way, N minutes out") is grounded ONLY if the FACTS contain a "LIVE ETA" line for today's visit stating that EXACT number of minutes — a different number, a rounded-off number, or no LIVE ETA line at all, is a VIOLATION. "The tech is on the way" alone (no minutes stated) only needs a LIVE STATUS en-route line, same as before.
 - BILLING is high-stakes — any statement about billing status or resolution ("paid in full", "you're all set", "your payment went through", "that charge was an error", "it appears to be a mistake") is a VIOLATION unless that exact status is in BALANCE/FACTS. A reassurance the facts don't confirm is unsafe.
 - For every specific date, time, technician name, or commitment in the draft, you must be able to QUOTE the exact FACTS or customer text that supports it. If you can't quote a source, it is a violation.
 

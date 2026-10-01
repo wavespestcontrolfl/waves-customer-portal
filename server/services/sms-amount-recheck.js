@@ -418,6 +418,7 @@ async function outgoingAmountsStale({
   }
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {
+    // (getContextForCustomer's default skips the LIVE ETA lookup - Codex round-2 P2, PR #5334 - so this send-time read makes no GPS call)
     ctx = await loadCustomerContext(customerId, dbh);
     // A missing customer/context is a failed read, not an empty account — fail closed instead of {}.
     if (!ctx) return { stale: true, reason: 'amount_recheck_no_customer' };

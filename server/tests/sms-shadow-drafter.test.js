@@ -971,10 +971,8 @@ describe('sealed-lane dispatch budget (08-15 tuning, raised again 2026-09-26)', 
 });
 
 describe('auto-send fallback publication', () => {
-  async function runDraft(autoSendResult, { gate = false } = {}) {
+  async function runDraft(autoSendResult, draftArgs = {}) {
     jest.resetModules();
-    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
-    if (gate) process.env.GATE_SMS_REAL_ANSWERS = 'true'; else delete process.env.GATE_SMS_REAL_ANSWERS;
     process.env.SHADOW_DRAFT_VERIFY = 'false';
     process.env.SHADOW_FEWSHOT = 'false';
 
@@ -995,14 +993,15 @@ describe('auto-send fallback publication', () => {
 
     jest.doMock('../models/db', () => mockDb);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const getContextForCustomer = jest.fn(async () => ({
+      summary: 'QA customer',
+      flags: [],
+      smsHistory: [],
+      customer: { billingLane: null },
+      billing: { outstandingBalance: 0, recentPayments: [] },
+    }));
     jest.doMock('../services/context-aggregator', () => ({
-      getContextForCustomer: jest.fn(async () => ({
-        summary: 'QA customer',
-        flags: [],
-        smsHistory: [],
-        customer: { billingLane: null },
-        billing: { outstandingBalance: 0, recentPayments: [] },
-      })),
+      getContextForCustomer,
       authorizedDuesCents: jest.fn(() => []),
     }));
     jest.doMock('../services/voice-profile-distiller', () => ({
@@ -1041,9 +1040,9 @@ describe('auto-send fallback publication', () => {
       customer: { id: 'customer-1' },
       smsLogId: 'sms-1',
       intent: { intent: 'general_customer_sms_needs_review', confidence: 0.9 },
+      ...draftArgs,
     });
-    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
-    return { id, insertedRows, maybeAutoSend, publishSuggestion, supersedeStaleSuggestions, resolveDeliveryMode };
+    return { id, insertedRows, maybeAutoSend, publishSuggestion, supersedeStaleSuggestions, resolveDeliveryMode, getContextForCustomer };
   }
 
   test('provider uncertainty stays shadow; a definitive failure still publishes the human fallback', async () => {
@@ -1064,6 +1063,52 @@ describe('auto-send fallback publication', () => {
       expect(definitive.resolveDeliveryMode).toHaveBeenCalledTimes(2);
       expect(definitive.supersedeStaleSuggestions).not.toHaveBeenCalled();
     } finally {
+      if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
+      else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+      if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
+      else process.env.SHADOW_FEWSHOT = priorFewshot;
+    }
+  });
+
+  // Codex round-2 P2: getContextForCustomer defaults to skipping the LIVE
+  // ETA GPS lookup — draftShadowReply renders the fact into buildFactsBlock,
+  // so it must opt in explicitly rather than silently losing it.
+  test('opts into LIVE ETA resolution when building context for a matched customer', async () => {
+    const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+    const priorFewshot = process.env.SHADOW_FEWSHOT;
+    try {
+      // Codex round-16 P2: the opt-in also requires the release gate — gate-off
+      // is byte-identical (no live-row query).
+      const off = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
+      expect(off.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false });
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      const { getContextForCustomer } = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
+      expect(getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true });
+    } finally {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
+      else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+      if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
+      else process.env.SHADOW_FEWSHOT = priorFewshot;
+    }
+  });
+
+  // Codex round-12 P2 (PR #5334): a gratitude-only "thanks" is answered with
+  // the fixed approved reply — a LIVE ETA (GPS + paid Distance Matrix) could
+  // never affect delivery, so the lookup must not run for it.
+  test('a gratitude candidate does NOT request the LIVE ETA lookup', async () => {
+    const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+    const priorFewshot = process.env.SHADOW_FEWSHOT;
+    try {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      const { getContextForCustomer } = await runDraft(
+        { sent: false, reason: 'provider_uncertain', ambiguous: true },
+        { inboundMessage: 'Thank you!', source: 'live_webhook', customer: { id: 'customer-1', first_name: 'Test' } },
+      );
+      expect(getContextForCustomer).toHaveBeenCalledTimes(1);
+      expect(getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'customer-1' }), { includeLiveEta: false });
+    } finally {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
       else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
       if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;

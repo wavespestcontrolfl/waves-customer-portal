@@ -10,6 +10,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.fn(() => false),
   gates: {},
+  payAfterFirstVisitLive: () => false,
 }));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   getCachedLookup: jest.fn().mockResolvedValue(null),

@@ -283,7 +283,9 @@ function lawnAssessmentLine(row, prior) {
 // that must not reach a customer-facing LLM. Findings (title + severity) are
 // authored as findings and give the model enough to spot recurring pests and note
 // change across visits.
-async function loadPriorVisits({ customerId, serviceLine, serviceType, beforeDate, knex, limit = 2 }) {
+async function loadPriorVisits({
+  customerId, serviceLine, serviceType, beforeDate, knex, limit = 2, excludeAutoNoActivity = false,
+}) {
   if (!customerId) return [];
   try {
     const rows = await knex('service_records')
@@ -313,10 +315,17 @@ async function loadPriorVisits({ customerId, serviceLine, serviceType, beforeDat
     }).slice(0, limit);
     if (!visibleRows.length) return [];
     const ids = visibleRows.map((r) => r.id);
-    const findings = await knex('service_findings')
+    const loaded = await knex('service_findings')
       .whereIn('service_record_id', ids)
-      .select('service_record_id', 'severity', 'title')
+      .select('service_record_id', 'severity', 'title', ...(excludeAutoNoActivity ? ['category'] : []))
       .catch(() => []);
+    // Under GATE_REPORT_WRITER_RULES the automatic "No activity observed"
+    // row (no-activity-finding.js, stamped whenever a visit recorded no
+    // observation) stays out: it reads as a technician finding the tech
+    // never made.
+    const findings = excludeAutoNoActivity
+      ? loaded.filter((f) => f.category !== 'no_activity')
+      : loaded;
     const byRecord = findings.reduce((acc, f) => {
       const key = String(f.service_record_id);
       (acc[key] = acc[key] || []).push(f);
@@ -507,6 +516,11 @@ async function buildReportCopyContext({
   products = [],
   productNames = [],
   serviceDate,
+  // GATE_REPORT_WRITER_RULES, decided by the route for writers in scope
+  // (never lawn or tree/shrub/palm): no footage, no product-safety or
+  // household block, no automatic no-activity prior finding, and the
+  // expectation lines marked as printed on their own.
+  writerRules = false,
   knex = db,
 } = {}) {
   const line = serviceLine || detectServiceLine(serviceType) || null;
@@ -529,7 +543,9 @@ async function buildReportCopyContext({
 
   // Fan out the independent loads concurrently; each is individually fail-soft.
   const [priorVisits, productEvidence, property, conditions, weekWeather, pressureTrend, ppConfig, lawnAssessments] = await Promise.all([
-    loadPriorVisits({ customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex }),
+    loadPriorVisits({
+      customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex, excludeAutoNoActivity: writerRules,
+    }),
     loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
     (isRealTime && lat != null && lng != null)
@@ -597,7 +613,7 @@ async function buildReportCopyContext({
       application.role,
       application.method ? `selected method: ${application.method}` : null,
       application.area ? `selected area: ${application.area}` : null,
-      application.areaValue && application.areaUnit
+      !writerRules && application.areaValue && application.areaUnit
         ? `treated area entered: ${application.areaValue} ${application.areaUnit}`
         : null,
     ].filter(Boolean).join('; '));
@@ -721,11 +737,16 @@ async function buildReportCopyContext({
     const whatToExpect = buildWhatToExpect({ products: expectationProducts });
     const expectationLines = whatToExpect?.lines || [];
     if (expectationLines.length) {
-      sections.push(`EXPECTATIONS (honest, deterministic facts about this treatment — reflect these, never contradict them; never promise elimination or a guarantee):\n${expectationLines.map((l) => `- ${l}`).join('\n')}`);
+      const expectationsHeader = writerRules
+        ? 'EXPECTATIONS (the report prints these lines as their own card — never repeat them, never contradict them)'
+        : 'EXPECTATIONS (honest, deterministic facts about this treatment — reflect these, never contradict them; never promise elimination or a guarantee)';
+      sections.push(`${expectationsHeader}:\n${expectationLines.map((l) => `- ${l}`).join('\n')}`);
     }
   }
 
-  if (productSafety.length) {
+  // Product names, actives and re-entry figures only fed re-entry wording,
+  // which the report's safety section owns under the writer rules.
+  if (productSafety.length && !writerRules) {
     const lines = productSafety.map((p) => {
       const bits = [
         p.activeIngredient ? `active: ${p.activeIngredient}` : null,
@@ -740,7 +761,7 @@ async function buildReportCopyContext({
     sections.push(`PRODUCT SAFETY / RE-ENTRY (label data — use for re-entry & rainfast guidance, do not invent numbers):\n${lines.join('\n')}`);
   }
 
-  if (property) {
+  if (property && !writerRules) {
     const bits = [
       property.pets ? `pets on site: ${property.pets}` : null,
       property.chemicalSensitivity || null,

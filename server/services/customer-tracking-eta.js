@@ -91,7 +91,22 @@ async function calculateBoundedTrackingEta({
   }
 }
 
+// The cached-fix floor for a technician row (Codex round-34/35 P2): the instant
+// the technician's tracker mapping (bouncie_imei) last CHANGED —
+// technicians.bouncie_imei_changed_at, written only by the writer that changes the
+// IMEI (never technicians.updated_at, which every ordinary edit restamps). ONE
+// rule for every caller — the SMS ETA path and the public tracker — so the text
+// and the tracking page always read the same vehicle. NULL means no known remap:
+// no cutoff, the tech_status cache is trusted. A value that IS present but
+// unreadable cannot prove the device, so it fails closed to "now" (bypass the
+// cache; read the configured device directly).
+function techMappingCutoff(changedAt) {
+  if (changedAt == null || changedAt === '') return null;
+  return Number.isFinite(new Date(changedAt).getTime()) ? changedAt : new Date();
+}
+
 module.exports = {
+  techMappingCutoff,
   STALE_TECH_STATUS_MS,
   FUTURE_TIMESTAMP_TOLERANCE_MS,
   CUSTOMER_TRACKING_ETA_TIMEOUT_MS,

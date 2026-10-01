@@ -29,6 +29,14 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   openTimesStillOffered: jest.fn(async () => ({ ok: true })),
+  // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend call - "never claims an ETA" here, so it never
+  // reaches the DB/track-transitions leg (see sms-auto-send-open-times.test.js, sms-eta-freshness.test.js).
+  findEtaMinutesClaims: jest.fn(() => []),
+  bodyMentionsArrival: jest.fn(() => false),
+  bodyMentionsVisitStatus: jest.fn(() => false),
+  bodyHasTimedArrivalPhrase: jest.fn(() => false),
+  bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
+  findGroundedMinutesFigures: jest.fn(() => []),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));

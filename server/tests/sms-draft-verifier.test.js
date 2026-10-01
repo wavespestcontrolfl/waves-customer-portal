@@ -14,17 +14,17 @@ const {
 // Payment options / Recent payments facts it references don't exist in a
 // gate-off facts block at all. A prior round added it UNCONDITIONALLY,
 // changing the gate-off (v11) verifier prompt for every cohort. This hash is
-// pinned from buildVerifierSystemPrompt() as it stands on origin/main@cb60d468ec2c
-// (pre-dating this lane's own change) — the same "pinned hash, not
+// pinned from buildVerifierSystemPrompt() as it stands on origin/main (re-pinned after the
+// PR #5334 LIVE ETA verifier change; this lane's own change leaves it untouched) — the same "pinned hash, not
 // gate-unset-vs-gate-false" contract sms-shadow-drafter.test.js already
 // enforces for the drafter's own prompt/facts block.
 const crypto = require('crypto');
 describe('gate-off contract: buildVerifierSystemPrompt() with no args (or {realAnswers:false}) is byte-identical to origin/main', () => {
   test('matches the pinned pre-#5331-round-3 hash', () => {
     const p = buildVerifierSystemPrompt();
-    expect(p.length).toBe(2897);
+    expect(p.length).toBe(3395);
     expect(crypto.createHash('sha256').update(p).digest('hex'))
-      .toBe('362e4cac5fd3f73afa1208eb6bfe550ae7de823281731cefb1bcf89c1a2384e8');
+      .toBe('0d344c10327046f48e38984936097ebe867e084b14c8dc9da16db188b1ee33f3');
     // {realAnswers: false} explicitly must be the SAME byte-identical text —
     // the default parameter and an explicit false must never diverge.
     expect(buildVerifierSystemPrompt({ realAnswers: false })).toBe(p);

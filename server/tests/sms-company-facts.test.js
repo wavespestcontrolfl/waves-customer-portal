@@ -53,8 +53,10 @@ describe('gate off — byte-identical to before COMPANY FACTS', () => {
     expect(currentPromptVersion()).toBe(PROMPT_VERSION);
   });
 
-  test('verifier system prompt is untouched (byte-identical to main)', () => {
-    expect(sha(buildVerifierSystemPrompt())).toBe('362e4cac5fd3f73afa1208eb6bfe550ae7de823281731cefb1bcf89c1a2384e8');
+  // Re-pinned in the PR #5334 merge: COMPANY FACTS still leaves the verifier prompt
+  // alone; the hash moved only because #5334 adds the LIVE ETA grounding lines.
+  test('verifier system prompt is untouched by COMPANY FACTS', () => {
+    expect(sha(buildVerifierSystemPrompt())).toBe('0d344c10327046f48e38984936097ebe867e084b14c8dc9da16db188b1ee33f3');
   });
 });
 
@@ -89,7 +91,7 @@ describe('gate on', () => {
   });
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
-    // '_cf' = COMPANY FACTS, '_pf' = PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (4 was the pre-contract claim checker, never merged): one suffix token per fact section.
+    // '_cf' = COMPANY FACTS, '_pf' = PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA; 4 was the pre-contract claim checker, never merged): one suffix token per fact section.
     expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cf_pf');
     expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cf_pf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
