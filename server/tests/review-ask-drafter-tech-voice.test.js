@@ -46,6 +46,7 @@ function builder(table) {
     orWhereNotNull() { return q; },
     orderBy() { return q; },
     limit() { return q; },
+    modify(fn) { fn(q); return q; },
     async select() { return rows; },
     async first() { return rows[0]; },
   };
@@ -94,7 +95,7 @@ const approveAll = (req) => ({
   json: {
     sentences: factInput(req).sentences.map((sentence) => (/google review/i.test(sentence) && !/work|sink/i.test(sentence)
       ? { sentence, ask_only: true, off_limits: false, supported: false, quote: null }
-      : { sentence, ask_only: false, off_limits: false, supported: true, quote: 'I need to go to work' })),
+      : { sentence, ask_only: false, off_limits: false, supported: true, quote: /sink/i.test(sentence) ? 'Moisture under the kitchen sink' : 'I need to go to work' })),
   },
 });
 
@@ -409,6 +410,41 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
       { channel: 'sms', firstName: 'Marta', techName: 'Adam', termite: false, corpus: rec, ownWords: 'German cockroaches in the kitchen.' },
     );
     expect(v).toBe('ungrounded_detail');
+  });
+
+  test('#5524 r1 P1: a checker quote must share a content word with its sentence', async () => {
+    const baby = { body: "It's Adam, I know you had to get to work. So happy about your new baby! A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
+    mockDispatch.mockResolvedValue(reply(baby));
+    // The checker wrongly vouches for the invented sentence with a real but unrelated line.
+    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: true, supported: false, quote: null }]);
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence)');
+  });
+
+  test('#5524 r1: the visit bound is applied in the query, before the row limit', async () => {
+    const whereCalls = [];
+    db.mockImplementation((table) => {
+      const q = builder(table);
+      const orig = q.where;
+      q.where = jest.fn((...args) => { whereCalls.push([table, ...args]); return orig(...args); });
+      return q;
+    });
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice({ ...INPUT, serviceDate: '2026-09-15' });
+    const bound = whereCalls.find(([t, col, op]) => t === 'sms_log' && col === 'created_at' && op === '<');
+    expect(bound).toBeDefined();
+    expect(bound[3].toISOString()).toBe('2026-09-16T04:00:00.000Z'); // midnight ET starting the next day
+    expect(mockGetRecentCalls.mock.calls[0][1].before.toISOString()).toBe('2026-09-16T04:00:00.000Z');
+  });
+
+  test('#5524 r1: a satisfaction condition split from the review sentence is refused', () => {
+    const rec = 'I need to go to work.';
+    const v = Drafter.verifyTechVoiceDraft(
+      { body: 'I know you had to get to work. If you were happy with the visit. Would you leave a Google review? {review_url}', details: [{ text: 'had to get to work', source_quote: 'I need to go to work' }] },
+      { channel: 'sms', firstName: 'Marta', techName: 'Adam', termite: false, corpus: rec, ownWords: rec },
+    );
+    expect(v).toBe('satisfaction_condition');
+    expect(Drafter.verifyDraftBody('Aaron, if you were happy with the visit. Would you leave a Google review? {review_url}', { firstName: 'Aaron' })).toBe('satisfaction_condition');
   });
 
   test('a bare link after a question stays with its sentence', () => {

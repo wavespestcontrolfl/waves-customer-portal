@@ -1448,7 +1448,7 @@ class ContextAggregator {
   // sentinelOnError: return null instead of [] on a lookup failure so the
   // caller can tell an outage from a quiet phone (the pre-visit brief
   // must not hash "no calls" over a cached brief during an outage).
-  async getRecentCalls(customerId, { sentinelOnError = false } = {}) {
+  async getRecentCalls(customerId, { sentinelOnError = false, before = null } = {}) {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
@@ -1458,6 +1458,9 @@ class ContextAggregator {
         // v10: 60-day window, 4 calls — customers reference calls older than
         // a month ("when we talked last month about the ants…").
         .where('created_at', '>', new Date(Date.now() - 60 * 86400000))
+        // Optional upper bound (the review-ask writer scopes calls to a visit)
+        // applied before the limit below, so later calls can't crowd it out.
+        .modify((qb) => { if (before) qb.where('created_at', '<', before); })
         .whereNotNull('call_summary')
         .whereRaw("length(trim(call_summary)) > 0")
         // The voice webhook links customer_id by caller ID BEFORE the call is

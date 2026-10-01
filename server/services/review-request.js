@@ -4647,7 +4647,10 @@ const ReviewService = {
     // cached on the sequence can be a newer visit's technician).
     // A record technician whose name will not resolve gets NO name, never the
     // sequence's cached one (that cache can be a newer visit's technician).
-    const voiceTechName = techVoice && technicianId ? ((await technicianFirstName(technicianId)) || null) : techName;
+    // A record-scoped cadence whose visit has no technician also gets no name.
+    const voiceTechName = !techVoice ? techName
+      : technicianId ? ((await technicianFirstName(technicianId)) || null)
+        : (serviceRecordId ? null : techName);
     const smsTemplateId = canonicalTemplate
       ? null
       : day0Template

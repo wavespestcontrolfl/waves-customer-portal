@@ -153,12 +153,18 @@ function normalizeSmsPunctuation(text) {
 // Neutral wording (owner rulings 2026-09-30 / 10-01), enforced in code for
 // every auto-sent draft, the older personalized drafter included: no
 // satisfaction condition, no reply-instead-of-review steer, no office phrasing.
+// A review ask anywhere in the text plus a satisfaction condition in ANY
+// sentence: "If you were happy with the visit. Would you leave a Google
+// review?" splits them on purpose and is still conditioned.
+function satisfactionConditioned(text) {
+  if (!/review/i.test(text)) return false;
+  return String(text).split(/(?<=[.!?])\s+/).some((s) => SATISFACTION_CONDITION_RE.test(s));
+}
+
 function neutralityReject(text) {
   if (OFFICE_PHRASE_RE.test(text)) return "office_phrase";
   if (STEER_RE.test(text) || REPLY_ROUTE_RE.test(text)) return "steers_from_review";
-  const sentences = text.split(/(?<=[.!?])\s+/);
-  if (sentences.some((s) => /review/i.test(s) && SATISFACTION_CONDITION_RE.test(s))) return "satisfaction_condition";
-  return null;
+  return satisfactionConditioned(text) ? "satisfaction_condition" : null;
 }
 
 function verifyDraftBody(body, { firstName } = {}) {
@@ -209,7 +215,7 @@ function etCalendarDaysBetween(a, b) {
   return Math.max(0, Math.round((dayB - dayA) / 86400000));
 }
 
-async function recentSmsThread(customerId, limit = MAX_SMS_HISTORY) {
+async function recentSmsThread(customerId, limit = MAX_SMS_HISTORY, before = null) {
   try {
     // Hide unresolved 'sending' placeholders (review-ask / manual / auto-send
     // reservations) the same way every other sms_log reader does: an ask the
@@ -221,6 +227,9 @@ async function recentSmsThread(customerId, limit = MAX_SMS_HISTORY) {
       // Bounded grounding window (Codex P1, r1): a sparse thread must not
       // surface a years-old pest issue as "their" current concern.
       .where("created_at", ">", new Date(Date.now() - GROUNDING_WINDOW_DAYS * 86400000))
+      // Tech voice bounds history at the visit BEFORE the limit, so later
+      // conversations can't fill the window and push the visit's own out.
+      .modify((q) => { if (before) q.where("created_at", "<", before); })
       .orderBy("created_at", "desc")
       .limit(limit)
       .select("direction", "message_body", "created_at");
@@ -450,13 +459,14 @@ async function serviceReportFacts(serviceRecordId) {
 // words: quoted history and signatures are cut, and a reply's subject counts
 // only when it is new text, not the thread's subject behind "Re:" (a quoted
 // Waves message must never back a claim). Same helpers as intake.
-async function customerOwnEmails(customerId) {
+async function customerOwnEmails(customerId, before = null) {
   try {
     const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require("./email/email-strip");
     const rows = await db("emails")
       .where({ customer_id: customerId })
       .whereRaw("from_address NOT ILIKE ?", ["%wavespestcontrol%"])
       .where("received_at", ">", new Date(Date.now() - GROUNDING_WINDOW_DAYS * 86400000))
+      .modify((q) => { if (before) q.where("received_at", "<", before); })
       .orderBy("received_at", "desc")
       .limit(TECH_VOICE_MAX_EMAILS)
       .select("id", "subject", "gmail_thread_id", "received_at", "body_text", "body_html", "from_address", "authentication_results");
@@ -510,25 +520,32 @@ const TECH_VOICE_LOOKBACK_DAYS = 30;
 function visitWindow(serviceDate) {
   if (!serviceDate) return null;
   const visitDay = etCalendarDayOf(serviceDate);
-  const from = etCalendarDayOf(new Date(Date.parse(`${visitDay}T12:00:00Z`) - TECH_VOICE_LOOKBACK_DAYS * 86400000));
-  return (value) => {
+  const noon = Date.parse(`${visitDay}T12:00:00Z`);
+  const from = etCalendarDayOf(new Date(noon - TECH_VOICE_LOOKBACK_DAYS * 86400000));
+  // Exclusive upper bound for the queries: midnight ET starting the next day.
+  const nextDay = new Date(noon + 86400000).toISOString().slice(0, 10);
+  const before = require("../utils/datetime-et").parseETDateTime(`${nextDay}T00:00`);
+  const inWindow = (value) => {
     if (!value) return false;
     const day = etCalendarDayOf(value);
     return day >= from && day <= visitDay;
   };
+  return { before, inWindow };
 }
 
 async function gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep, serviceDate }) {
   const ContextAggregator = require("./context-aggregator");
+  // No visit date = no way to scope, so no history at all (the report only).
+  const window = visitWindow(serviceDate);
+  const inVisit = window ? window.inWindow : () => false;
+  const before = window ? window.before : new Date(0);
   const [report, sms, calls, emails, priorTouches] = await Promise.all([
     serviceReportFacts(serviceRecordId),
-    recentSmsThread(customer.id, TECH_VOICE_SMS_HISTORY),
-    ContextAggregator.getRecentCalls(customer.id).catch(() => []),
-    customerOwnEmails(customer.id),
+    recentSmsThread(customer.id, TECH_VOICE_SMS_HISTORY, before),
+    ContextAggregator.getRecentCalls(customer.id, { before }).catch(() => []),
+    customerOwnEmails(customer.id, before),
     priorSequenceTouches(sequenceId, sequenceStep),
   ]);
-  // No visit date = no way to scope, so no history at all (the report only).
-  const inVisit = visitWindow(serviceDate) || (() => false);
   return {
     report,
     sms: sms.filter((m) => inVisit(m.date)),
@@ -753,7 +770,7 @@ const CONTENT_CHECKS = [
   ["banned_phrase", (b) => BANNED_RE.test(b)],
   ["office_phrase", (b) => OFFICE_PHRASE_RE.test(b)],
   ["steers_from_review", (b) => STEER_RE.test(b) || REPLY_ROUTE_RE.test(b)],
-  ["satisfaction_condition", (b) => b.split(/(?<=[.!?])\s+/).some((s) => /review/i.test(s) && SATISFACTION_CONDITION_RE.test(s))],
+  ["satisfaction_condition", (b) => satisfactionConditioned(b)],
   ["termite_off_service", (b, c) => !c.termite && TERMITE_RE.test(b)],
   ["coached_review", (b) => COACHED_REVIEW_RE.test(b)],
 ];
@@ -903,6 +920,13 @@ function legCapture() {
   return { validate: (result) => { leg.result = result; return null; }, reject: (reason) => rejectCall(leg.result, reason) };
 }
 
+function quoteSharesContent(sentence, quote, names) {
+  const nameStems = new Set([...names].map(termStem).filter(Boolean));
+  const words = [...stemSet(sentence)].filter((w) => !DETAIL_STOP.has(w) && !nameStems.has(w));
+  const quoteWords = stemSet(quote);
+  return words.some((w) => quoteWords.has(w));
+}
+
 // One checker verdict against the sentence it names. Returns a reject reason
 // or null.
 function sentenceVerdictReject(j, sentence, { names, techNames }, normRecord) {
@@ -916,7 +940,10 @@ function sentenceVerdictReject(j, sentence, { names, techNames }, normRecord) {
   if (j.ask_only) return isAskOnlySentence(sentence, names) ? null : "fact_check_bad_answer";
   if (j.greeting_only) return isGreetingOnlySentence(sentence, names, techNames) ? null : "fact_check_bad_answer";
   const quote = normalizeForMatch(j.quote);
-  return j.supported && quote.length >= 3 && normRecord.includes(quote) ? null : "unsupported_sentence";
+  if (!j.supported || quote.length < 3 || !normRecord.includes(quote)) return "unsupported_sentence";
+  // The quote must actually be about the sentence: they share a content word
+  // (not "the", not a name), so a stray common word can never vouch.
+  return quoteSharesContent(sentence, j.quote, names) ? null : "unsupported_sentence";
 }
 
 // The fact check starts on the provider the writer did NOT use, so a writer
