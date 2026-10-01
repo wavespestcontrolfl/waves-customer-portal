@@ -296,6 +296,8 @@ describe('exception rules', () => {
     ['per_visit lane', { billingLane: 'per_visit' }, 'lane_cleanup'],
     ['NULL lane', { billingLane: null }, 'lane_cleanup'],
     ['two cadences open in one family', { cadenceConflict: true }, 'cadence_conflict'],
+    ['one_time lane on a recurring series', { billingLane: 'one_time' }, 'lane_cleanup'],
+    ['engine replay needs a human (manual review / heuristic turf / LOW confidence)', { listLowConfidence: true }, 'list_low_confidence'],
     ['two live prepay terms could cover the line', { prepayTermAmbiguous: true }, 'prepay_term_ambiguous'],
     ['monthly dues with no per-family attribution', { rateUnattributed: true }, 'rate_unattributed'],
     ['facts loader failed (fail closed)', { facts: null }, 'facts_unavailable'],
@@ -663,6 +665,188 @@ describe('anniversary and tenure', () => {
   });
 });
 
+// ── review window, carry-forward, replay guards ─────────────────────────
+
+describe('the review window: anniversaries 35–65 days out from the build date', () => {
+  test('crosses month and year boundaries; a Feb 1 build still leaves 30+ days before every anniversary it reviews', () => {
+    expect(P.REVIEW_WINDOW_FROM_DAYS).toBe(35);
+    expect(P.REVIEW_WINDOW_TO_DAYS).toBe(65);
+    expect(P.reviewWindowFor(new Date('2027-02-01T11:20:00Z'))).toEqual({ from: '2027-03-08', to: '2027-04-07' });
+    expect(P.reviewWindowFor(new Date('2026-11-01T11:20:00Z'))).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    // a late-evening ET build still counts from the ET calendar day
+    expect(P.reviewWindowFor(new Date('2026-12-01T03:30:00Z'))).toEqual({ from: '2027-01-04', to: '2027-02-03' }); // 2026-11-30 22:30 ET
+  });
+  test('buildBatch defaults to that window when no explicit from/to is given, and an explicit window wins', async () => {
+    const scripted = fixture.scriptedDb({ planLines: [], customers: [], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0 });
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    const out = await rateReview.buildBatch({ batchKey: '2026-11', now: NOW });
+    expect(out.window).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    expect(scripted.writes.batchUpserts[0]).toMatchObject({ window_from: '2026-12-06', window_to: '2027-01-05' });
+    const explicit = await rateReview.buildBatch({ batchKey: '2026-11', anniversaryFrom: '2026-01-01', anniversaryTo: '2026-12-31', now: NOW });
+    expect(explicit.window).toEqual({ from: '2026-01-01', to: '2026-12-31' });
+  });
+  test('impossible batch months and calendar dates are 400s in the service', async () => {
+    await expect(rateReview.buildBatch({ batchKey: '2026-13' })).rejects.toMatchObject({ status: 400 });
+    await expect(rateReview.buildBatch({ batchKey: '2026-00' })).rejects.toMatchObject({ status: 400 });
+    await expect(rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-02-31', anniversaryTo: '2026-12-31' })).rejects.toMatchObject({ status: 400 });
+    expect(P.isBatchKey('2026-12')).toBe(true);
+    expect(P.isBatchKey('2026-13')).toBe(false);
+    expect(() => P.assertYmd('2026-02-29', 'x')).toThrow(/real calendar date/);
+    expect(() => P.assertYmd('2028-02-29', 'x')).not.toThrow();
+  });
+  test('the manual-edit cutoff is calendar-exact (Mar 31 − 6 months = Sep 30, never Oct 1)', () => {
+    expect(P.monthsAgoYmd(new Date('2027-03-31T16:00:00Z'), 6)).toBe('2026-09-30');
+    expect(P.monthsAgoYmd(new Date('2026-11-01T11:20:00Z'), 12)).toBe('2025-11-01');
+    expect(P.monthsAgoYmd(new Date('2027-05-31T16:00:00Z'), 3)).toBe('2027-02-28');
+  });
+});
+
+describe('carry-forward: an exception or skipped line comes back next month', () => {
+  const entry = (overrides = {}) => ({ customer: { id: 'c1', member_since: '2024-06-15', created_at: '2024-06-15T12:00:00Z' }, familyKey: 'pest_control', first: null, acceptedAt: null, ...overrides });
+  // build 2026-11-01: window Dec 6 – Jan 5; carry floor = 2026-08-03
+  const args = { from: '2026-12-06', to: '2027-01-05', now: NOW };
+  test('a line whose latest earlier snapshot was an exception within 90 days is carried with its original review date', () => {
+    const latest = new Map([['c1|pest_control', { status: 'exception', review_date: '2026-10-15', batch_key: '2026-09', computed_at: '2026-09-01T10:00:00Z' }]]);
+    const e = entry({ customer: { id: 'c1', member_since: '2025-10-15', created_at: '2025-10-15T12:00:00Z' } }); // October anniversary, outside the window
+    const selected = P.selectReviewEntries([e], { ...args, latestByLine: latest });
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toMatchObject({ reviewDate: '2026-10-15', carriedFrom: '2026-09' });
+    expect(P.CARRY_FORWARD_STATUSES).toEqual(['exception', 'skipped']);
+    expect(P.CARRY_FORWARD_MAX_DAYS_PAST).toBe(90);
+  });
+  test('skipped carries too; green / no_change / approved do not; nothing earlier → nothing carried', () => {
+    const e = entry({ customer: { id: 'c1', member_since: '2025-10-15', created_at: '2025-10-15T12:00:00Z' } });
+    const sel = (status) => P.selectReviewEntries([e], { ...args, latestByLine: new Map([['c1|pest_control', { status, review_date: '2026-10-15', batch_key: '2026-09', computed_at: '2026-09-01T10:00:00Z' }]]) });
+    expect(sel('skipped')).toHaveLength(1);
+    expect(sel('green')).toHaveLength(0);
+    expect(sel('no_change')).toHaveLength(0);
+    expect(sel('approved')).toHaveLength(0);
+    expect(P.selectReviewEntries([e], { ...args, latestByLine: new Map() })).toHaveLength(0);
+  });
+  test('the carry stops once the review date is more than 90 days behind the build, and never pulls a date beyond the window', () => {
+    const e = entry({ customer: { id: 'c1', member_since: '2025-07-20', created_at: '2025-07-20T12:00:00Z' } });
+    const tooOld = new Map([['c1|pest_control', { status: 'exception', review_date: '2026-07-20', batch_key: '2026-06', computed_at: '2026-06-01T10:00:00Z' }]]);
+    expect(P.selectReviewEntries([e], { ...args, latestByLine: tooOld })).toHaveLength(0);
+    const justInside = new Map([['c1|pest_control', { status: 'exception', review_date: '2026-08-03', batch_key: '2026-07', computed_at: '2026-07-01T10:00:00Z' }]]);
+    expect(P.selectReviewEntries([e], { ...args, latestByLine: justInside })).toHaveLength(1);
+    const beyond = new Map([['c1|pest_control', { status: 'exception', review_date: '2027-02-10', batch_key: '2026-10', computed_at: '2026-10-01T10:00:00Z' }]]);
+    expect(P.selectReviewEntries([e], { ...args, latestByLine: beyond })).toHaveLength(0);
+    // a row with no review date anchors on when it was computed
+    const noDate = new Map([['c1|pest_control', { status: 'skipped', review_date: null, batch_key: '2026-10', computed_at: '2026-10-01T10:00:00Z' }]]);
+    expect(P.selectReviewEntries([e], { ...args, latestByLine: noDate })[0]).toMatchObject({ reviewDate: '2026-10-01', carriedFrom: '2026-10' });
+  });
+  test('an in-window anniversary is never a carry (its own review date wins)', () => {
+    const e = entry({ customer: { id: 'c1', member_since: '2025-12-20', created_at: '2025-12-20T12:00:00Z' } });
+    const latest = new Map([['c1|pest_control', { status: 'exception', review_date: '2026-10-15', batch_key: '2026-09', computed_at: '2026-09-01T10:00:00Z' }]]);
+    expect(P.selectReviewEntries([e], { ...args, latestByLine: latest })[0]).toMatchObject({ reviewDate: '2026-12-20', carriedFrom: null });
+  });
+  test('end to end: a past-due exception from the September batch is re-ranked in the November build with carried_forward and its review_date', async () => {
+    const book = fixture.decemberBook();
+    const octoberAccount = fixture.customer(15, { member_since: '2024-10-20', last_name: 'Carried' }); // October anniversary
+    const scenario = {
+      planLines: [...book.planLines, fixture.planLine(octoberAccount.id, 'pest_control', 'quarterly', 110)],
+      customers: [...book.customerRows, octoberAccount], firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms,
+      ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+      latestSnapshots: [{ customer_id: octoberAccount.id, family_key: 'pest_control', status: 'exception', review_date: '2026-10-20', batch_key: '2026-09', computed_at: '2026-09-01T10:20:00Z' }],
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    await rateReview.buildBatch({ batchKey: '2026-11', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === octoberAccount.id);
+    expect(row).toMatchObject({ review_date: '2026-10-20', anniversary_date: '2024-10-20', tenure_months: 24, list_rate_source: 'cadence_mode' });
+    expect(JSON.parse(row.flags)).toContain('carried_forward');
+    // the latest-snapshot read looked only at earlier batches
+    const latestRead = scripted.mock.results.map((r) => r.value).find((q) => q && q.calls && q.calls.some(([name, a]) => name === 'select' && a.includes('review_date')));
+    expect(latestRead.calls).toEqual(expect.arrayContaining([['where', ['batch_key', '<', '2026-11']]]));
+  });
+});
+
+describe('engine replay guards', () => {
+  const book = fixture.decemberBook();
+  function scenarioWith(engine) {
+    const scripted = fixture.scriptedDb({ planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {} });
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    return { scripted, run: () => rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: engine } }) };
+  }
+  test('syncConstantsFromDB() returning false means NO engine list — never a price off stale in-memory constants', async () => {
+    const engine = { ...fixture.fakePricingEngine(), needsSync: () => true, syncConstantsFromDB: jest.fn(async () => false) };
+    const { scripted, run } = scenarioWith(engine);
+    await run();
+    expect(engine.syncConstantsFromDB).toHaveBeenCalled();
+    expect(engine.generateEstimate).not.toHaveBeenCalled();
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === book.customers.belowList.id);
+    expect(row.list_rate_source).toBe('cadence_mode');
+    expect(JSON.parse(row.flags)).toEqual(expect.arrayContaining(['engine_sync_failed', 'list_from_cadence_mode']));
+  });
+  test('a replay that throws is engine_replay_failed, and a sync that succeeds prices normally', async () => {
+    const throwing = { ...fixture.fakePricingEngine(), needsSync: () => false, generateEstimate: jest.fn(() => { throw new Error('boom'); }) };
+    const a = scenarioWith(throwing);
+    await a.run();
+    expect(JSON.parse(a.scripted.writes.snapshotInserts.find((r) => r.customer_id === book.customers.belowList.id).flags)).toContain('engine_replay_failed');
+    const fine = { ...fixture.fakePricingEngine(), needsSync: () => true, syncConstantsFromDB: jest.fn(async () => true) };
+    const b = scenarioWith(fine);
+    await b.run();
+    expect(b.scripted.writes.snapshotInserts.find((r) => r.customer_id === book.customers.belowList.id).list_rate_source).toBe('engine');
+  });
+  test('an engine line that needs a human is held as list_low_confidence, not ranked as a list price', async () => {
+    const engine = fixture.fakePricingEngine();
+    const base = engine.generateEstimate.getMockImplementation();
+    engine.generateEstimate = jest.fn((inputs) => { const r = base(inputs); r.lineItems = r.lineItems.map((i) => ({ ...i, pricingConfidence: 'LOW' })); return r; });
+    const { scripted, run } = scenarioWith(engine);
+    await run();
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === book.customers.belowList.id);
+    expect(row.status).toBe('exception');
+    expect(row.list_rate_source).toBe('cadence_mode');
+    expect(JSON.parse(row.flags)).toContain('list_low_confidence');
+    // the canonical predicates: manual review, measurement, custom quote, heuristic turf, LOW confidence
+    expect(P.engineItemLowConfidence({ requiresManualReview: true })).toBe(true);
+    expect(P.engineItemLowConfidence({ manualReviewReasons: ['x'] })).toBe(true);
+    expect(P.engineItemLowConfidence({ turfBasis: 'lotFallback' })).toBe(true);
+    expect(P.engineItemLowConfidence({ turfConfidence: 'low' })).toBe(true);
+    expect(P.engineItemLowConfidence({ requiresMeasurement: true })).toBe(true);
+    expect(P.engineItemLowConfidence({ pricingConfidence: 'HIGH', turfBasis: 'measuredTurfSf' })).toBe(false);
+    expect(P.listRateFromEngineResult({ lineItems: [{ service: 'pest_control', annualAfterDiscount: 468, visitsPerYear: 4, requiresCustomQuote: true }], waveGuard: { tier: 'bronze' } }, 'pest_control', 'quarterly')).toMatchObject({ lowConfidence: true });
+  });
+  test('the NEWEST accepted estimate is replayed for the list; the earliest acceptance still anchors the anniversary', async () => {
+    const engine = fixture.fakePricingEngine();
+    const customer = book.customers.belowList;
+    const newer = fixture.estimate(9, customer.id, { homeSqFt: 3400, acceptedAt: '2026-08-01T16:00:00Z' });
+    const scripted = fixture.scriptedDb({
+      planLines: book.planLines.map((p) => (p.customer_id === customer.id ? { ...p, source_estimate_ids: [fixture.ESTIMATE(1), fixture.ESTIMATE(9)] } : p)),
+      customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: [...book.estimates, newer], terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    });
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: engine } });
+    const replayed = engine.generateEstimate.mock.calls.map(([inputs]) => inputs.homeSqFt);
+    expect(replayed[0]).toBe(3400); // newest first
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === customer.id);
+    expect(row.anniversary_date).toBe('2025-12-05'); // first completed visit after the EARLIEST acceptance (2025-11-28)
+  });
+  test('a family restarted on a new estimate takes the first completed visit of the current series', () => {
+    const first = { first_visit: '2024-03-10', completed_dates: ['2024-03-10', '2024-06-10', '2026-07-02', '2026-10-02'] };
+    expect(P.firstCompletedVisitFor(first, '2026-06-20T15:00:00Z')).toBe('2026-07-02');
+    expect(P.firstCompletedVisitFor(first, null)).toBe('2024-03-10');
+    expect(P.firstCompletedVisitFor({ first_visit: '2024-03-10', completed_dates: [] }, '2026-06-20T15:00:00Z')).toBe('2024-03-10');
+    expect(P.firstCompletedVisitFor({ first_visit: '2026-05-05' }, null)).toBe('2026-05-05');
+    expect(P.firstCompletedVisitFor(null, null)).toBeNull();
+    // no completion yet on the current series → the accept date anchors the anniversary
+    expect(P.resolveAnniversary({ firstCompletedVisit: P.firstCompletedVisitFor(first, '2026-11-20T15:00:00Z'), acceptedAt: '2026-11-20T15:00:00Z', memberSince: '2024-03-01' })).toMatchObject({ date: '2026-11-20', source: 'estimate_accept' });
+  });
+});
+
 // ── gate off ────────────────────────────────────────────────────────────
 
 describe('gate off is a no-op', () => {
@@ -988,12 +1172,17 @@ describe('buildBatch over the synthetic December book', () => {
     const rows = scripted.writes.snapshotInserts.map((r) => ({ ...r, flags: JSON.parse(r.flags), customer_name: `Fixture ${r.customer_id.slice(-1)}` }));
     const composed = rateReview.composeBatchEmail({ batchKey: '2026-12', rows, summary: P.summarizeRows(rows) });
     expect(composed.subject).toMatch(/^ACT: Rate review — December 2026 batch · \d+ green · \d+ exceptions? · \+\$[\d,]+\/yr$/);
+    // with the batch row the subject names the review window
+    const windowed = rateReview.composeBatchEmail({ batchKey: '2026-11', rows, summary: P.summarizeRows(rows), batch: { window_from: '2026-12-06', window_to: '2027-01-05' } });
+    expect(windowed.subject).toMatch(/^ACT: Rate review — November 2026 batch \(anniversaries Dec 6 – Jan 5\) · /);
+    // every row carries its review date at the source
+    for (const r of scripted.writes.snapshotInserts) expect(r.review_date).toMatch(/^2026-12-\d{2}$/);
     expect(composed.text).toContain('Nothing has been sent to a customer and no rate has changed');
     expect(composed.text).toContain('EXCEPTIONS — held out, your call');
     expect(composed.link).toBe('/admin/pricing-logic?area=rate-review&batch=2026-12');
     expect(composed.itemKeys).toHaveLength(rows.length);
     const quiet = rateReview.composeBatchEmail({ batchKey: '2027-01', rows: [], summary: P.summarizeRows([]) });
-    expect(quiet.subject).toMatch(/^OK: Rate review — January 2027: nothing to decide/);
+    expect(quiet.subject).toMatch(/^OK: Rate review — January 2027 batch: nothing to decide/);
   });
 });
 
@@ -1013,7 +1202,7 @@ describe('buildBatch refusals', () => {
 });
 
 describe('runMonthlyRateReview', () => {
-  test('builds the FOLLOWING month, emails once, and never re-emails the same batch', async () => {
+  test('builds the BUILD month with the 35–65 day window, emails once, and never re-emails the same batch', async () => {
     const book = fixture.decemberBook();
     const scenario = {
       planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits,
@@ -1027,17 +1216,20 @@ describe('runMonthlyRateReview', () => {
     mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
     const sendgrid = require('../services/sendgrid-mail');
 
+    // NOW = 2026-11-01 06:20 ET → window Dec 6 … Jan 5 (crossing the year end), batch_key = the build month
     const first = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
-    expect(first.batchKey).toBe('2026-12');
-    expect(first.window).toEqual({ from: '2026-12-01', to: '2026-12-31' });
+    expect(first.batchKey).toBe('2026-11');
+    expect(first.window).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    // Dec 2 and Dec 5 anniversaries belong to the October build; Dec 11/12/19/20 are in
+    expect(first.rows).toBe(4);
     expect(first.emailed).toBe(true);
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     const sent = sendgrid.sendOne.mock.calls[0][0];
     expect(sent.to).toBe('contact@wavespestcontrol.com');
-    expect(sent.subject).toMatch(/^(ACT|OK): Rate review — December 2026/);
+    expect(sent.subject).toMatch(/^(ACT|OK): Rate review — November 2026/);
     expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at instanceof Date)).toBe(true);
 
-    scenario.batchRow = { batch_key: '2026-12', email_sent_at: new Date() };
+    scenario.batchRow = { batch_key: '2026-11', email_sent_at: new Date() };
     const second = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
     expect(second.skipped).toBe('already_emailed');
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);

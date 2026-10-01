@@ -72,7 +72,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, etParts, etMonthStart, etMonthEnd } = require('../utils/datetime-et');
+const { etDateString, etMonthStart, addETDays, validCalendarDate } = require('../utils/datetime-et');
+const { addMonthsSameDay } = require('../utils/date-only');
 const { rateReviewLive, isEnabled } = require('../config/feature-gates');
 const { resolveActualMinutes } = require('./pricing-reality-check');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
@@ -149,6 +150,23 @@ const MIN_LINE_RPH_SAMPLE = 4;
 // Snapshot statuses that mean "this line was reviewed" for the 12-month rule.
 const REVIEWED_STATUSES = ['green', 'approved', 'sent', 'applied'];
 const SENT_STATUSES = ['sent', 'applied'];
+// A line whose LATEST snapshot ended in one of these comes back in every
+// following batch (carried_forward) until it goes green/approved or its
+// review date is more than CARRY_FORWARD_MAX_DAYS_PAST days behind the
+// build — a past-due or recent-callback hold returns next month, not next
+// year. Product rule (owner lens default), overridable.
+const CARRY_FORWARD_STATUSES = ['exception', 'skipped'];
+const CARRY_FORWARD_MAX_DAYS_PAST = 90;
+// The review window: anniversaries 35–65 days out from the build date, so
+// the 30-day written notice always fits before the anniversary application
+// (a build on the 1st for "next month" left 28 days in February). It
+// crosses month boundaries; batch_key stays the build month.
+const REVIEW_WINDOW_FROM_DAYS = 35;
+const REVIEW_WINDOW_TO_DAYS = 65;
+// Turf bases the engine itself treats as heuristic (estimator-engine/
+// draft-builder.js HEURISTIC_TURF_BASES) — local mirror for the fallback
+// predicate only; the canonical helpers are required lazily below.
+const HEURISTIC_TURF_BASES = new Set(['lotFallback', 'plausibleMaxTurfCap', 'legacyHardscapeEstimate', 'countyPrior', 'commercialLotFallback', 'commercialDefault']);
 // Field names a completion may one day carry for conversation minutes —
 // read off service_records.structured_notes (the Fast Complete lane owns
 // the capture; see the module header). TODO(fast-complete): wire the real
@@ -284,10 +302,15 @@ function monthsBetween(fromYmd, toYmd) {
 // ET-calendar date N months before `now`, as YYYY-MM-DD (day clamped by
 // Date.UTC overflow rules — the 31st minus one month lands on the 1st of
 // the following month, which is the stricter side for a lookback).
+// ET-calendar date N months before `now`, clamped to the target month's
+// length (Mar 31 − 6 months = Sep 30, never Oct 1) — utils/date-only.js's
+// calendar-exact helper with a negative offset.
 function monthsAgoYmd(now, months) {
-  const { year, month, day } = etParts(now);
-  const d = new Date(Date.UTC(year, month - 1 - months, day));
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  return addMonthsSameDay(etDateString(now), -months);
+}
+
+function reviewWindowFor(now) {
+  return { from: etDateString(addETDays(now, REVIEW_WINDOW_FROM_DAYS)), to: etDateString(addETDays(now, REVIEW_WINDOW_TO_DAYS)) };
 }
 
 function daysAgoYmd(now, days) {
@@ -570,7 +593,7 @@ const EXCEPTION_FLAGS = Object.freeze([
   'tenure_under_lock', 'prepay_mid_term', 'prepay_term_missing', 'reviewed_within_12mo', 'manual_rate_edit_recent',
   'retention_offer_active', 'plan_hold_active', 'callback_recent', 'cancellation_case_recent', 'complaint_open',
   'past_due', 'hand_picked_tier', 'commercial', 'termite_program', 'multi_property', 'lane_cleanup', 'cadence_conflict',
-  'prepay_term_ambiguous', 'rate_unattributed', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
+  'prepay_term_ambiguous', 'rate_unattributed', 'list_low_confidence', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
 ]);
 
 function evaluateExceptions(line, config = DEFAULT_CONFIG) {
@@ -595,7 +618,10 @@ function evaluateExceptions(line, config = DEFAULT_CONFIG) {
   if (line.commercial) flags.push('commercial');
   if (line.familyKey === 'termite' || (f && f.termiteRental)) flags.push('termite_program');
   if (f && f.multiProperty) flags.push('multi_property');
-  if (line.billingLane === 'per_visit' || line.billingLane == null) flags.push('lane_cleanup');
+  // per_visit and one_time are explicit per-visit lanes (billing-lane.js); a
+  // recurring series on either, or on the legacy NULL lane, is cleanup first.
+  if (line.billingLane === 'per_visit' || line.billingLane === 'one_time' || line.billingLane == null) flags.push('lane_cleanup');
+  if (line.listLowConfidence) flags.push('list_low_confidence');
   if (!f) flags.push('facts_unavailable');
   else if (f.moneyFactsDegraded) flags.push('facts_degraded');
   return flags;
@@ -610,6 +636,8 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
   if (line.listCadenceMismatch) flags.push('list_cadence_mismatch');
   if (line.anniversaryConflict) flags.push('anniversary_predates_portal');
   if (line.stampedZeroFree) flags.push('stamped_zero_free');
+  if (line.carriedFrom) flags.push('carried_forward');
+  if (line.engineUnavailable) flags.push(line.engineUnavailable);
   if (line.rphFromNotHome) flags.push('rph_from_not_home_visits');
   if (line.unknownInteractionVisits > 0) flags.push('interaction_unknown');
   if (line.capturedConversationVisits > 0) flags.push('conversation_minutes_captured');
@@ -654,6 +682,7 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
     billing_lane: line.billingLane ?? null,
     anniversary_date: line.anniversaryDate ?? null,
     anniversary_source: line.anniversarySource ?? null,
+    review_date: line.reviewDate ?? null,
     tenure_months: line.tenureMonths ?? null,
     current_rate_cents: current,
     current_rate_source: line.currentRateSource || 'none',
@@ -719,7 +748,7 @@ function lazyTranslateV2() {
   if (translateV2CallToV1InputCached === undefined) {
     try {
       translateV2CallToV1InputCached = require('../routes/property-lookup-v2').translateV2CallToV1Input || null;
-    } catch (_) {
+    } catch {
       translateV2CallToV1InputCached = null;
     }
   }
@@ -833,6 +862,34 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFami
   return clean;
 }
 
+// The engine's own review-gating predicates (estimator-engine/draft-builder
+// lineRequiresReview + lineHasHeuristicTurf, the pair estimate-proposal-
+// generate.js's rowIsReviewGated composes), required lazily; the local
+// mirror below is the fallback if that module cannot load here.
+let reviewPredicatesCached;
+function engineReviewPredicates() {
+  if (reviewPredicatesCached === undefined) {
+    try {
+      const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine/draft-builder');
+      reviewPredicatesCached = typeof lineRequiresReview === 'function' && typeof lineHasHeuristicTurf === 'function' ? { lineRequiresReview, lineHasHeuristicTurf } : null;
+    } catch {
+      reviewPredicatesCached = null;
+    }
+  }
+  return reviewPredicatesCached || {
+    lineRequiresReview: (line = {}) => !!(line.quoteRequired || line.requiresManualReview || line.requiresMeasurement || line.customQuoteFlag || line.requiresCustomQuote
+      || (Array.isArray(line.manualReviewReasons) && line.manualReviewReasons.length)),
+    lineHasHeuristicTurf: (line = {}) => String(line.turfConfidence || '').toLowerCase() === 'low' || (line.turfBasis != null && HEURISTIC_TURF_BASES.has(line.turfBasis)),
+  };
+}
+
+// An engine line that needs a human (manual review, measurement, custom
+// quote, heuristic turf, LOW pricing confidence) is not a list price.
+function engineItemLowConfidence(item) {
+  const { lineRequiresReview, lineHasHeuristicTurf } = engineReviewPredicates();
+  return lineRequiresReview(item) || lineHasHeuristicTurf(item) || String(item.pricingConfidence || '').toUpperCase() === 'LOW';
+}
+
 // Engine items carry their annual application count as visitsPerYear
 // (pest, tree & shrub), frequency (lawn) or visits (mosquito).
 function engineItemVisits(item) {
@@ -849,7 +906,8 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   const keys = ENGINE_SERVICE_KEYS[line] || [];
   const items = result && Array.isArray(result.lineItems) ? result.lineItems : [];
   const item = items.find((i) => keys.includes(i.service));
-  if (!item || item.quoteRequired || item.requiresCustomQuote || item.requiresMeasurement) return null;
+  if (!item) return null;
+  if (engineItemLowConfidence(item)) return { lowConfidence: true, tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null };
   const annual = positive(item.annualAfterDiscount ?? item.annual);
   const visits = engineItemVisits(item);
   if (!annual || !visits) return null;
@@ -860,7 +918,7 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   const riderKeys = includeRiders
     ? (ENGINE_RIDER_KEYS[line] || []).filter((k) => !Array.isArray(riderAllow) || riderAllow.includes(k))
     : [];
-  const riders = items.filter((i) => riderKeys.includes(i.service) && !i.quoteRequired && !i.requiresCustomQuote && !i.requiresMeasurement);
+  const riders = items.filter((i) => riderKeys.includes(i.service) && !engineItemLowConfidence(i));
   const riderAnnual = riders.reduce((sum, r) => sum + (positive(r.annualAfterDiscount ?? r.annual) || 0), 0);
   return {
     perAppCents: Math.round((annual / visits) * 100),
@@ -876,13 +934,19 @@ async function replayEstimate(estimate, { familyKey, cadence, activeFamilies }, 
   if (!inputs) return null;
   const engine = deps.pricingEngine || require('./pricing-engine');
   try {
+    // syncConstantsFromDB resolves false (never rejects) when the DB read
+    // fails. Stale in-memory constants are not today's list: no replay.
     if (typeof engine.needsSync === 'function' && engine.needsSync() && typeof engine.syncConstantsFromDB === 'function') {
-      await engine.syncConstantsFromDB();
+      const synced = await engine.syncConstantsFromDB();
+      if (synced === false) {
+        logger.warn(`[rate-review] pricing constants did not sync — no engine list rate for estimate ${estimate.id}`);
+        return { unavailable: 'engine_sync_failed' };
+      }
     }
     return { inputs, result: engine.generateEstimate(listReplayInputs(inputs, { familyKey, cadence, activeFamilies })) };
   } catch (err) {
     logger.warn(`[rate-review] engine replay failed for estimate ${estimate.id}: ${err.message}`);
-    return null;
+    return { unavailable: 'engine_replay_failed' };
   }
 }
 
@@ -976,11 +1040,15 @@ async function loadCustomers(dbh, customerIds) {
   return new Map(rows.map((r) => [r.id, r]));
 }
 
-// First completed non-callback recurring visit per (customer, line).
+// Completed non-callback recurring visit dates per (customer, line), oldest
+// first (first_visit = the oldest; completed_dates = all of them, so a line
+// restarted on a new estimate after a cancellation can take the first visit
+// of the CURRENT series, not of the family's whole history).
 async function loadFirstCompletedVisits(dbh, customerIds) {
   if (!customerIds.length) return new Map();
   const { rows } = await dbh.raw(`
-    SELECT s.customer_id, ${LINE_SQL} AS line, min(s.scheduled_date) AS first_visit, count(*)::int AS completed_visits
+    SELECT s.customer_id, ${LINE_SQL} AS line, min(s.scheduled_date) AS first_visit, count(*)::int AS completed_visits,
+      array_agg(s.scheduled_date ORDER BY s.scheduled_date) AS completed_dates
     FROM scheduled_services s
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ANY(?::uuid[])
@@ -991,6 +1059,35 @@ async function loadFirstCompletedVisits(dbh, customerIds) {
   `, [customerIds]);
   const map = new Map();
   for (const row of rows) map.set(`${row.customer_id}|${row.line}`, row);
+  return map;
+}
+
+// The first completed visit of the line's CURRENT series: for a portal-sold
+// line, the first completion on or after the earliest accept date among the
+// estimates its open visits link (a cancelled-and-restarted family keeps its
+// old completions in the history); otherwise the oldest completion.
+function firstCompletedVisitFor(first, acceptedAt) {
+  if (!first) return null;
+  const dates = (Array.isArray(first.completed_dates) ? first.completed_dates : []).map(dateColumn).filter(Boolean).sort();
+  const acceptDay = etDay(acceptedAt);
+  if (acceptDay && dates.length) return dates.find((d) => d >= acceptDay) || null;
+  return dates[0] || dateColumn(first.first_visit) || null;
+}
+
+// The latest snapshot per (customer, line) from EARLIER batches — the
+// carry-forward source (see CARRY_FORWARD_STATUSES).
+async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
+  if (!customerIds.length) return new Map();
+  const rows = await dbh(SNAPSHOTS)
+    .whereIn('customer_id', customerIds)
+    .where('batch_key', '<', batchKey)
+    .orderBy([{ column: 'batch_key', order: 'desc' }, { column: 'computed_at', order: 'desc' }])
+    .select('customer_id', 'family_key', 'status', 'review_date', 'batch_key', 'computed_at');
+  const map = new Map();
+  for (const row of rows) {
+    const key = `${row.customer_id}|${row.family_key}`;
+    if (!map.has(key)) map.set(key, row);
+  }
   return map;
 }
 
@@ -1335,17 +1432,24 @@ function consolidatePlanLines(rows) {
   return lines;
 }
 
+function isBatchKey(value) {
+  const m = BATCH_KEY_RE.exec(String(value || ''));
+  if (!m) return false;
+  const month = Number(String(value).slice(5, 7));
+  return month >= 1 && month <= 12;
+}
+
 function assertBatchKey(batchKey) {
-  if (!BATCH_KEY_RE.test(String(batchKey || ''))) {
-    const err = new Error('batchKey must be YYYY-MM');
+  if (!isBatchKey(batchKey)) {
+    const err = new Error('batchKey must be YYYY-MM with a real month');
     err.status = 400;
     throw err;
   }
 }
 
 function assertYmd(value, name) {
-  if (!DATE_RE.test(String(value || ''))) {
-    const err = new Error(`${name} must be YYYY-MM-DD`);
+  if (!DATE_RE.test(String(value || '')) || !validCalendarDate(String(value))) {
+    const err = new Error(`${name} must be a real calendar date, YYYY-MM-DD`);
     err.status = 400;
     throw err;
   }
@@ -1356,23 +1460,12 @@ async function batchHasSentRows(dbh, batchKey) {
   return Number(row && row.n) > 0;
 }
 
-async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null, now = new Date(), deps = {} } = {}) {
-  if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
-  assertBatchKey(batchKey);
-  const from = anniversaryFrom || `${batchKey}-01`;
-  const to = anniversaryTo || etMonthEnd(new Date(`${batchKey}-15T12:00:00Z`), 0);
-  assertYmd(from, 'anniversaryFrom');
-  assertYmd(to, 'anniversaryTo');
-  if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
+// ── batch stages ────────────────────────────────────────────────────────
 
-  const dbh = trx || db;
-  if (await batchHasSentRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', batchKey };
-
-  const today = etDateString(now);
-  const config = await loadConfig(dbh);
+// Stage 1 — every input the book needs (parallel where independent).
+async function loadBookInputs(dbh, { today, sinceYmd }) {
   const planLines = consolidatePlanLines(await loadActivePlanLines(dbh, { today }));
   const customerIds = [...new Set(planLines.map((p) => p.customer_id))];
-  const sinceYmd = daysAgoYmd(now, LOOKBACK_DAYS);
   const [customers, firstVisits, completedRows, liveTerms, ledger] = await Promise.all([
     loadCustomers(dbh, customerIds),
     loadFirstCompletedVisits(dbh, customerIds),
@@ -1384,9 +1477,6 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
   const settledDues = await loadSettledDues(dbh, monthlyIds, { sinceYmd });
   const estimateIds = [...new Set(planLines.flatMap((p) => p.source_estimate_ids || []))];
   const estimates = await loadEstimates(dbh, estimateIds);
-
-  // Pass 1 — every line in the book: current rate, duration stats, list by
-  // engine replay where the line links an accepted estimate with a size.
   const visitsByLine = new Map();
   for (const row of completedRows) {
     const key = `${row.customer_id}|${row.line}`;
@@ -1396,11 +1486,15 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
   // Conversation allowances per line, from the whole book's completed
   // visits — stored on the batch row so every snapshot is reproducible.
   const allowances = computeLineAllowances(completedRows);
-  const replayCache = new Map();
-  const book = [];
-  for (const planLine of planLines) {
+  return { planLines, customerIds, customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances };
+}
+
+// Stage 2 — one book entry per plan line: current rate per lane, duration /
+// revenue stats, list rate by engine replay (newest estimate first).
+async function assembleBookEntry(inputs, planLine, { config, replayCache, deps }) {
+  const { customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances, planLines } = inputs;
     const customer = customers.get(planLine.customer_id);
-    if (!customer) continue;
+    if (!customer) return null;
     const familyKey = planLine.family_key;
     const cadence = planLine.cadence;
     const ledgerSlice = ledgerSliceForLine(ledger, customer.id, familyKey);
@@ -1416,22 +1510,28 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     });
     const first = firstVisits.get(`${customer.id}|${familyKey}`) || null;
 
+    // Earliest acceptance anchors the anniversary; the NEWEST applicable
+    // estimate is replayed first for today's list (updated size / inputs).
     const linkedEstimates = (planLine.source_estimate_ids || []).map((id) => estimates.get(id)).filter(Boolean)
       .sort((a, b) => new Date(a.accepted_at || 0) - new Date(b.accepted_at || 0));
     const acceptedAt = linkedEstimates.length ? linkedEstimates[0].accepted_at : null;
+    const replayCandidates = [...linkedEstimates].reverse();
 
     // Engine replay at the line's own cadence. A result whose cadence still
     // does not match the line (a family the replay cannot re-cadence) is NOT
     // a list rate — it is discarded (list_cadence_mismatch), and the row
     // falls to the cadence mode or is skipped.
     let list = { cents: null, source: 'none', cadenceMismatch: false, engineTier: null };
-    for (const estimate of linkedEstimates) {
+    let engineUnavailable = null;
+    let listLowConfidence = false;
+    for (const estimate of replayCandidates) {
       const inputs = engineInputsFromEstimate(estimate, deps);
       if (!hasSizeInput(inputs, familyKey)) continue;
       const activeFamilies = planLines.filter((p) => p.customer_id === customer.id).map((p) => p.family_key).sort();
       const cacheKey = `${estimate.id}|${familyKey}|${cadence}|${activeFamilies.join(',')}`;
       if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
       const replay = replayCache.get(cacheKey);
+      if (replay && replay.unavailable) { engineUnavailable = replay.unavailable; continue; }
       const rate = replay
         ? listRateFromEngineResult(replay.result, familyKey, cadence, {
           includeRiders: current.unit === 'month' && current.source === 'ledger_slice',
@@ -1440,6 +1540,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
         })
         : null;
       if (!rate) continue;
+      if (rate.lowConfidence) { listLowConfidence = true; continue; }
       // Hand-picked tier evidence compares the estimate's SAVED tier with a
       // replay of the mix it was sold with (no reconciliation) — a tier that
       // moved because the customer later added or dropped a program is the
@@ -1457,16 +1558,18 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       break;
     }
 
-    book.push({
+    return {
       planLine, customer, familyKey, cadence,
       visitsPerYear,
       current, stats, first, acceptedAt, list,
+      engineUnavailable, listLowConfidence,
       serviceKeys: planLine.service_keys || [],
-    });
-  }
+    };
+}
 
-  // Line-level references across the whole book: cadence-mode list rates
-  // and revenue-per-hour quartiles per family.
+// Stage 3 — references across the whole book: revenue/hour quartiles per
+// family and the cadence-mode list rate per family × cadence.
+function computeLineReferences(book) {
   const modeByGroup = new Map();
   const rphByFamily = new Map();
   for (const entry of book) {
@@ -1486,37 +1589,60 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     const mode = values.length >= MIN_MODE_SAMPLE ? modeCents(values) : null;
     if (mode) cadenceModes.set(key, mode.value);
   }
+  const lineRphJson = Object.fromEntries([...lineRphStats].map(([family, q]) => [family, q]));
+  return { lineRphStats, cadenceModes, lineRphJson };
+}
 
-  // Pass 2 — only lines whose anniversary falls in the window get the
-  // (expensive) per-customer facts and a snapshot row.
-  const inWindow = [];
+// Stage 4 — which entries this batch reviews: an anniversary occurrence in
+// the window (the review date), or a carry-forward — the line's latest
+// snapshot from an earlier batch ended exception/skipped and its review
+// date is at most CARRY_FORWARD_MAX_DAYS_PAST days behind the build and not
+// beyond the window. A line with no anniversary at all is listed (flag
+// no_anniversary).
+function selectReviewEntries(book, { from, to, now, latestByLine }) {
+  const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
+  const selected = [];
   for (const entry of book) {
     const anniversary = resolveAnniversary({
-      firstCompletedVisit: entry.first && entry.first.first_visit,
+      firstCompletedVisit: firstCompletedVisitFor(entry.first, entry.acceptedAt),
       acceptedAt: entry.acceptedAt,
       // member_since is a DATE; the created_at fallback is an instant.
       memberSince: dateColumn(entry.customer.member_since) || etDay(entry.customer.created_at),
     });
     entry.anniversary = anniversary;
-    // The review date = this line's anniversary occurrence in the window; a
-    // line with no anniversary at all is listed (flag no_anniversary).
     entry.reviewDate = anniversary.date ? anniversaryInWindow(anniversary.date, from, to) : null;
-    if (!anniversary.date || entry.reviewDate) inWindow.push(entry);
+    entry.carriedFrom = null;
+    if (!anniversary.date || entry.reviewDate) { selected.push(entry); continue; }
+    const latest = latestByLine.get(`${entry.customer.id}|${entry.familyKey}`);
+    if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status)) continue;
+    const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
+    if (!anchor || anchor < carryFloor || anchor > to) continue;
+    entry.reviewDate = anchor;
+    entry.carriedFrom = latest.batch_key;
+    selected.push(entry);
   }
-  const windowCustomerIds = [...new Set(inWindow.map((e) => e.customer.id))];
+  return selected;
+}
+
+// Stage 5 — per-customer facts for the selected entries only (facts.js
+// fans out ~24 queries per customer; sequential on purpose).
+async function loadReviewFacts(dbh, selected, { now, config, batchKey }) {
+  const windowCustomerIds = [...new Set(selected.map((e) => e.customer.id))];
   const priorReviews = await loadPriorReviews(dbh, windowCustomerIds, { batchKey });
   const factsByCustomer = new Map();
   const signalsByCustomer = new Map();
   for (const customerId of windowCustomerIds) {
-    // Sequential on purpose: facts.js fans out ~24 queries per customer.
     factsByCustomer.set(customerId, await loadFacts(dbh, customerId, { now }));
     signalsByCustomer.set(customerId, await loadExceptionSignals(dbh, customerId, { now, config }));
   }
+  return { priorReviews, factsByCustomer, signalsByCustomer };
+}
 
-  const manualEditCutoff = monthsAgoYmd(now, config.exception_manual_edit_months);
-  const rows = [];
-  for (const entry of inWindow) {
+// Stage 6 — the snapshot row for one selected entry.
+function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }) {
     const { customer, familyKey, cadence, current, stats, list } = entry;
+    const { priorReviews, factsByCustomer, signalsByCustomer } = reviewFacts;
+    const { cadenceModes, lineRphStats } = refs;
     const facts = factsByCustomer.get(customer.id) || null;
     const signals = signalsByCustomer.get(customer.id) || null;
     // No replayable estimate → the book's per-application mode for this
@@ -1557,6 +1683,10 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       anniversaryDate: entry.anniversary.date,
       anniversarySource: entry.anniversary.source,
       anniversaryConflict: entry.anniversary.conflict,
+      reviewDate: entry.reviewDate,
+      carriedFrom: entry.carriedFrom,
+      engineUnavailable: entry.engineUnavailable,
+      listLowConfidence: entry.listLowConfidence,
       tenureMonths: entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null,
       currentRateCents: current.cents,
       currentRateSource: current.source,
@@ -1591,8 +1721,41 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       commercial: isCommercialCustomer(customer, entry.serviceKeys),
       facts,
     };
-    rows.push(computeSnapshot(line, config));
+    return computeSnapshot(line, config);
+}
+
+async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null, now = new Date(), deps = {} } = {}) {
+  if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
+  assertBatchKey(batchKey);
+  // No explicit window → the standing review window relative to the build
+  // date (35–65 days out), the same one the monthly job uses.
+  const defaults = reviewWindowFor(now);
+  const from = anniversaryFrom || defaults.from;
+  const to = anniversaryTo || defaults.to;
+  assertYmd(from, 'anniversaryFrom');
+  assertYmd(to, 'anniversaryTo');
+  if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
+
+  const dbh = trx || db;
+  if (await batchHasSentRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', batchKey };
+
+  const today = etDateString(now);
+  const config = await loadConfig(dbh);
+  const inputs = await loadBookInputs(dbh, { today, sinceYmd: daysAgoYmd(now, LOOKBACK_DAYS) });
+  const { planLines, allowances } = inputs;
+  const replayCache = new Map();
+  const book = [];
+  for (const planLine of planLines) {
+    const entry = await assembleBookEntry(inputs, planLine, { config, replayCache, deps });
+    if (entry) book.push(entry);
   }
+  const refs = computeLineReferences(book);
+  const { lineRphStats } = refs;
+  const latestByLine = await loadLatestSnapshots(dbh, inputs.customerIds, { batchKey });
+  const selected = selectReviewEntries(book, { from, to, now, latestByLine });
+  const reviewFacts = await loadReviewFacts(dbh, selected, { now, config, batchKey });
+  const manualEditCutoff = monthsAgoYmd(now, config.exception_manual_edit_months);
+  const rows = selected.map((entry) => rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }));
 
   const computedAt = now;
   const lineRphJson = Object.fromEntries([...lineRphStats].map(([family, q]) => [family, q]));
@@ -1703,12 +1866,21 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 // One email per batch. Names are fine here (owner's inbox); ids never
 // leave the row. ACT: when there is anything to decide (green or
 // exception), OK: when the batch holds nothing to act on.
-function composeBatchEmail({ batchKey, rows, summary }) {
-  const label = monthLabel(batchKey);
+function windowLabel(batch) {
+  const from = batch && dateColumn(batch.window_from);
+  const to = batch && dateColumn(batch.window_to);
+  if (!from || !to) return null;
+  const fmt = (ymd) => { const { m, d } = ymdParts(ymd); return `${MONTH_NAMES[m - 1].slice(0, 3)} ${d}`; };
+  return `anniversaries ${fmt(from)} – ${fmt(to)}`;
+}
+
+function composeBatchEmail({ batchKey, rows, summary, batch = null }) {
+  const window = windowLabel(batch);
+  const label = window ? `${monthLabel(batchKey)} batch (${window})` : `${monthLabel(batchKey)} batch`;
   const decide = summary.green + summary.exception;
   const greenDollars = dollars(summary.green_annual_delta_cents);
   const subject = decide > 0
-    ? `ACT: Rate review — ${label} batch · ${summary.green} green · ${summary.exception} exception${summary.exception === 1 ? '' : 's'} · +${greenDollars}/yr`
+    ? `ACT: Rate review — ${label} · ${summary.green} green · ${summary.exception} exception${summary.exception === 1 ? '' : 's'} · +${greenDollars}/yr`
     : `OK: Rate review — ${label}: nothing to decide (${summary.no_change} no-change, ${summary.skipped} skipped)`;
   const link = `${adminPortalUrl()}/admin/pricing-logic?area=rate-review&batch=${batchKey}`;
   const unitFor = (row) => (row.rate_unit === 'month' ? '/mo' : '/application');
@@ -1729,7 +1901,8 @@ function composeBatchEmail({ batchKey, rows, summary }) {
   const exceptions = rows.filter((r) => r.status === 'exception');
   const noChange = rows.filter((r) => r.status === 'no_change');
   const skipped = rows.filter((r) => r.status === 'skipped');
-  const intro = `Rate review batch ${label}: ${summary.rows} plan line${summary.rows === 1 ? '' : 's'} with an anniversary in the window — ${summary.green} green (+${greenDollars}/yr if all approved), ${summary.exception} held out as exceptions, ${summary.no_change} no change, ${summary.skipped} skipped. Nothing has been sent to a customer and no rate has changed; this is the ranking only.`;
+  const carried = rows.filter((r) => Array.isArray(r.flags) && r.flags.includes('carried_forward')).length;
+  const intro = `Rate review ${label}: ${summary.rows} plan line${summary.rows === 1 ? '' : 's'} with an anniversary in the window${carried ? ` (${carried} carried forward from an earlier batch)` : ''} — ${summary.green} green (+${greenDollars}/yr if all approved), ${summary.exception} held out as exceptions, ${summary.no_change} no change, ${summary.skipped} skipped. Nothing has been sent to a customer and no rate has changed; this is the ranking only.`;
   const text = [intro, '', ...section('GREEN — proposed increases', green), ...section('EXCEPTIONS — held out, your call', exceptions), ...section('NO CHANGE', noChange), ...section('SKIPPED — could not be priced', skipped), `Review: ${link}`].join('\n');
   const htmlSection = (title, list) => (list.length
     ? `<p><strong>${esc(title)} (${list.length})</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${list.map((r) => `<li style="margin:0 0 6px 0;">${esc(describe(r))}</li>`).join('')}</ul>`
@@ -1742,7 +1915,7 @@ function composeBatchEmail({ batchKey, rows, summary }) {
     htmlSection('SKIPPED — could not be priced', skipped),
     `<p><a href="${esc(link)}">Open the rate review batch</a></p>`,
   ].join('\n');
-  const headline = decide > 0 ? `Rate review — ${label}: ${summary.green} green, ${summary.exception} exceptions` : `Rate review — ${label}: nothing to decide`;
+  const headline = decide > 0 ? `Rate review — ${monthLabel(batchKey)}: ${summary.green} green, ${summary.exception} exceptions` : `Rate review — ${monthLabel(batchKey)}: nothing to decide`;
   const summaryLine = decide > 0 ? `+${greenDollars}/yr proposed across ${summary.green} accounts; ${summary.exception} need a look.` : `${summary.rows} lines ranked, none need a decision.`;
   const itemKeys = rows.map((r) => `${r.customer_id}:${r.family_key}:${r.status}`);
   return { subject, text, html, headline, summary: summaryLine, link: `/admin/pricing-logic?area=rate-review&batch=${batchKey}`, itemKeys, decide };
@@ -1804,9 +1977,10 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
 // before any query. A batch with sent rows is never rebuilt.
 async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null, deps = {} } = {}) {
   if (!rateReviewLive()) return { skipped: 'gate_off' };
-  const from = etMonthStart(now, 1);
-  const to = etMonthEnd(now, 1);
-  const batchKey = from.slice(0, 7);
+  // batch_key = the BUILD month; the window = anniversaries 35–65 days out
+  // (reviewWindowFor), crossing month boundaries.
+  const { from, to } = reviewWindowFor(now);
+  const batchKey = etMonthStart(now, 0).slice(0, 7);
   const built = await buildBatch({ batchKey, anniversaryFrom: from, anniversaryTo: to, now, deps });
   if (!built.ok) {
     logger.warn(`[rate-review] monthly build skipped for ${batchKey}: ${built.reason}`);
@@ -1835,7 +2009,9 @@ module.exports = {
   sendBatchEmail,
   composeBatchEmail,
   _private: {
-    trimmedMedian, median, quartiles, modeCents, monthsBetween, monthKeyMinus, anniversaryInWindow, dateColumn, etDay,
+    trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
+    isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel,
+    CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
     gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,

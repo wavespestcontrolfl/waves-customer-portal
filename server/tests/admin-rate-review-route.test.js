@@ -125,7 +125,7 @@ describe('POST /batches/:key/build', () => {
       expect(mockBuildBatch).toHaveBeenCalledWith({ batchKey: '2026-12', anniversaryFrom: '2026-01-01', anniversaryTo: '2026-12-31' });
     });
   });
-  test('defaults the window to the batch month', async () => {
+  test('with no explicit window it hands null/null to the service, whose default is the standing 35–65 day window', async () => {
     await withServer(async (base) => {
       await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
       expect(mockBuildBatch).toHaveBeenCalledWith({ batchKey: '2026-12', anniversaryFrom: null, anniversaryTo: null });
@@ -142,6 +142,10 @@ describe('POST /batches/:key/build', () => {
   test('bad dates and service 400s are 400', async () => {
     await withServer(async (base) => {
       expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build', { body: { anniversaryFrom: '12/01/2026' } })).status).toBe(400);
+      // shape is not enough: an impossible calendar date and an impossible month are refused before the service
+      expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build', { body: { anniversaryFrom: '2026-02-31', anniversaryTo: '2026-12-31' } })).status).toBe(400);
+      expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-13/build')).status).toBe(400);
+      expect((await call(base, 'GET', '/api/admin/rate-review/batches/2026-00')).status).toBe(400);
       expect(mockBuildBatch).not.toHaveBeenCalled();
       const err = new Error('anniversaryFrom must not be after anniversaryTo');
       err.status = 400;
