@@ -1736,7 +1736,7 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
       return true;
     });
   } catch (err) {
-    logger.warn(`[call-proc] form-address lookup skipped for new lead ${knownCaller?.id}: ${err.message}`);
+    logger.warn(`[call-proc] form-address lookup skipped for new lead ${knownCaller?.id}: ${err.code || err.name || 'error'}`);
     return false;
   }
 }
@@ -1955,7 +1955,7 @@ async function isStreetLevelHoldRow(conn, row) {
     const card = await findStreetLevelHoldCard(conn, { callLogId: row.source_call_log_id, visitId: row.id });
     return !!card;
   } catch (err) {
-    logger.warn(`[call-proc] street-level hold lookup failed for ${row?.id}: ${err.message}`);
+    logger.warn(`[call-proc] street-level hold lookup failed for ${row?.id}: ${err.code || err.name || 'error'}`);
     return true;
   }
 }

@@ -949,7 +949,7 @@ async function transitionJobStatus({
       // Gated on the card signal inside the helper; a no-op for every other visit.
       if (['cancelled', 'skipped'].includes(String(toStatus))) {
         void require('./street-level-hold').closeHoldCardForEndedVisit(jobId, toStatus).catch((e) => {
-          logger.warn(`[job-status] street-level hold close failed for ${jobId}: ${e.message}`);
+          logger.warn(`[job-status] street-level hold close failed for ${jobId}: ${e.code || e.name || 'error'}`);
         });
       }
       // Invoice void + inspection-credit reversal seam for every non-live
@@ -989,7 +989,7 @@ async function transitionJobStatus({
       // Gated on the card signal inside the helper; a no-op for every other visit.
       if (['cancelled', 'skipped'].includes(String(fromStatus || ''))) {
         void require('./street-level-hold').reopenHoldCardForRestoredVisit(jobId).catch((e) => {
-          logger.warn(`[job-status] street-level hold reopen failed for ${jobId}: ${e.message}`);
+          logger.warn(`[job-status] street-level hold reopen failed for ${jobId}: ${e.code || e.name || 'error'}`);
         });
       }
       // Visit-group seam, reverse direction (codex #3590 r6, narrowed

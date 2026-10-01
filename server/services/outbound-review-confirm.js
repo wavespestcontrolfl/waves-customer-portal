@@ -770,7 +770,7 @@ async function reconcileStreetLevelHoldAfterStamp(dbh, svc) {
     });
     return true;
   } catch (e) {
-    logger.warn(`[street-level-hold] post-stamp reconcile failed for ${svc?.id}: ${e.message}`);
+    logger.warn(`[street-level-hold] post-stamp reconcile failed for ${svc?.id}: ${e.code || e.name || 'error'}`);
     return false;
   }
 }

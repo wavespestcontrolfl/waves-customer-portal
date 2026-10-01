@@ -104,7 +104,8 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
       const e = new Error('Review state changed');
       e.code = 'REVIEW_STATE_CHANGED';
       throw e;
-    }    // A street-level address hold is NOT confirmable by a field tap: Google matched only the
+    }
+    // A street-level address hold is NOT confirmable by a field tap: Google matched only the
     // street, so the office must confirm the address with the customer first. Refused (not
     // allowed-without-confirming): nothing is confirmed, no review card is resolved, and no
     // tracking text goes to an unverified address. Fails closed on a lookup error.

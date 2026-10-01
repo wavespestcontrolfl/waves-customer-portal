@@ -97,7 +97,7 @@ async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db) {
       return resolved > 0;
     });
   } catch (err) {
-    logger.warn(`[street-level-hold] closing the hold card for ${visitId} failed: ${err.message}`);
+    logger.warn(`[street-level-hold] closing the hold card for ${visitId} failed: ${err.code || err.name || 'error'}`);
     return false;
   }
 }
