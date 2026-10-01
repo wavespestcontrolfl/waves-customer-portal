@@ -992,13 +992,28 @@ async function seriesCandidateDateClashes(conn, template, date) {
     date,
     windowStart: block.start,
     windowEnd: block.end,
-    // The customer's own other visit at this stop is a grouping partner (a
-    // pest visit on its own lawn day), never a clash. Customer-NULL hold
-    // rows still count.
-    excludeCustomerId: template.customer_id,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
-  return clash.length > 0;
+  if (!clash.length) return false;
+  // The customer's own other visit at the SAME property is a grouping partner
+  // (a pest visit on its own lawn day), never a clash. Anything else — another
+  // customer, a hold, or this customer's visit at a different property —
+  // still counts.
+  const own = clash.filter((row) => template.customer_id && String(row.customer_id) === String(template.customer_id));
+  if (own.length < clash.length) return true;
+  return !(await sameStopPartners(conn, template, own.map((row) => row.id)));
+}
+
+// True when every row is at the template's property: equal property_id, or
+// neither side stamped and the customer has at most one property on file
+// (an unstamped multi-property pair is unknown, so it stays a clash).
+async function sameStopPartners(conn, template, rowIds) {
+  const rows = await conn('scheduled_services').whereIn('id', rowIds).select('id', 'property_id');
+  const want = template.property_id ? String(template.property_id) : null;
+  if (rows.every((row) => want && row.property_id && String(row.property_id) === want)) return true;
+  if (want || rows.some((row) => row.property_id)) return false;
+  const [{ n }] = await conn('customer_properties').where({ customer_id: template.customer_id, active: true }).count('* as n');
+  return Number(n) <= 1;
 }
 
 // In-trx half of the plan: a destination the pre-trx peek did not predict
@@ -18990,9 +19005,16 @@ async function riderExtensionDates(conn, parent, cols, latestStr, { skipWeekends
         || !riderPairingEnabled(host, riderFamilyOf(parent), parent.recurring_pattern)) return [];
       return liveHostRows(sp, host, cols, etDateString());
     });
-    if (!hostRows.length) return null;
+    // A lawn date that has since become a closed day (blackout added after
+    // seeding) or a weekend the customer opted out of is not a ride date; the
+    // rule then takes the next lawn date or its own nudged +84 fallback.
+    const { isBlackedOut } = require('../services/scheduling/blackout-nudge');
+    const hostDates = hostRows.map((r) => dateOnly(r.scheduled_date)).filter((d) => d
+      && !isBlackedOut(d, blackoutDates)
+      && !(skipWeekends && [0, 6].includes(etParts(parseETDateTime(`${d}T12:00`)).dayOfWeek)));
+    if (!hostDates.length) return null;
     const dates = planRiderDates({
-      hostDates: hostRows.map((r) => r.scheduled_date),
+      hostDates,
       lastRiderDate: latestStr,
       horizonDate: etDateString(addETDays(parseETDateTime(`${latestStr}T12:00`), 1300)),
       skipWeekends,

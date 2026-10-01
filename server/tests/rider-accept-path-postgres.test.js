@@ -342,6 +342,22 @@ postgres('pest rides the lawn from accept', () => {
       } finally { await trx.rollback(); }
     });
 
+    test('gate on: a lawn date that became a blackout day is not a ride date', async () => {
+      process.env[GATE] = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const f = await seriesPair(trx);
+        const closed = addDays(f.first, 84);
+        await trx('schedule_blackout_dates').insert({ date: closed, reason: 'synthetic closure' });
+        const child = await extendPest(trx, f.pestParent);
+        // The next lawn date (+126) is past the 105-day wait, so the rule takes
+        // its own +84 fallback, nudged off the closure.
+        const landed = dateOf(child.scheduled_date);
+        expect(landed).not.toBe(closed);
+        expect(landed > closed && landed < addDays(f.first, 126)).toBe(true);
+      } finally { await trx.rollback(); }
+    });
+
     test('a host that is not a lawn series it may ride is ignored (cadence walk)', async () => {
       process.env[GATE] = 'true';
       const trx = await mockPg.transaction();
@@ -375,6 +391,28 @@ postgres('pest rides the lawn from accept', () => {
         const other = await customerFixture(trx);
         await trx('scheduled_services').insert({
           customer_id: other.customerId, property_id: other.propertyId, service_type: 'Lawn Care', status: 'pending',
+          scheduled_date: target, ...WINDOW, estimated_duration_minutes: 60,
+        });
+        const skipped = await extendPest(trx, f.pestParent);
+        expect(dateOf(skipped.scheduled_date)).not.toBe(target);
+      } finally { await trx.rollback(); }
+    });
+
+    test('clash probe: the same customer\'s visit at a DIFFERENT property still pushes the date away', async () => {
+      delete process.env[GATE];
+      const trx = await mockPg.transaction();
+      try {
+        const f = await seriesPair(trx, { rides: false });
+        const probe = await extendPest(trx, f.pestParent);
+        const target = dateOf(probe.scheduled_date);
+        await trx('scheduled_services').where({ id: probe.id }).del();
+        const otherPropertyId = randomUUID();
+        await trx('customer_properties').insert({
+          id: otherPropertyId, customer_id: f.customerId, is_primary: false, active: true,
+          address_line1: '400 Example Court', city: 'Parrish', state: 'FL', zip: '34219', source: 'estimate_accept',
+        });
+        await trx('scheduled_services').insert({
+          customer_id: f.customerId, property_id: otherPropertyId, service_type: 'Lawn Care', status: 'pending',
           scheduled_date: target, ...WINDOW, estimated_duration_minutes: 60,
         });
         const skipped = await extendPest(trx, f.pestParent);
