@@ -215,7 +215,9 @@ const FACTS = [
   },
   // Knowledge-gap fill, 2026-10-01: questions the knowledge base could not
   // answer in September (knowledge_queries), each quoted from a page opened
-  // and checked word for word that day.
+  // and checked word for word that day. Mechanism and biology only: no
+  // efficacy comparisons, no fumigation, no termite treatment comparisons
+  // (waves-content rules; termite comparisons need product-label sources).
   {
     slug: 'fact-lawn-watering-when-and-how-much',
     title: 'Florida lawns: water when the grass shows drought stress, ½ to ¾ inch at a time',
@@ -257,8 +259,8 @@ const FACTS = [
     title: 'Take-all root rot: when it appears and what it looks like',
     tags: ['lawn', 'turf-disease', 'st-augustinegrass'],
     sourceUrls: ['https://edis.ifas.ufl.edu/publication/LH079'],
-    quote: '"Turfgrasses Affected: All warm-season turfgrasses" "High rainfall and stressed turfgrass trigger the disease." "It is observed during the summer and early fall months when Florida receives the majority of its rainfall." "Initial symptoms aboveground are irregular, yellow (chlorotic) or light green patches ranging in diameter from a few inches to a few feet." "Eventually, roots become very short, black, and rotted." "By the time the leaf symptoms appear, the pathogen has been active on the roots for at least two to three weeks—probably longer." "Therefore, measures that prevent or alleviate stress are the best methods for controlling the disease or, at least, decreasing the potential damage."',
-    content: 'Take-all root rot affects all warm-season turfgrasses and is triggered by high rainfall on stressed grass; UF/IFAS observes it in summer and early fall, when Florida gets most of its rain. It first shows as irregular yellow or light-green patches from a few inches to a few feet across, and the roots end up very short, black and rotted. By the time leaves show symptoms the fungus has been active on the roots for at least two to three weeks. Reducing stress on the lawn is the best way to control it or limit the damage.',
+    quote: '"Turfgrasses Affected: All warm-season turfgrasses" "High rainfall and stressed turfgrass trigger the disease." "It is observed during the summer and early fall months when Florida receives the majority of its rainfall." "Initial symptoms aboveground are irregular, yellow (chlorotic) or light green patches ranging in diameter from a few inches to a few feet." "Eventually, roots become very short, black, and rotted." "By the time the leaf symptoms appear, the pathogen has been active on the roots for at least two to three weeks—probably longer."',
+    content: 'Take-all root rot affects all warm-season turfgrasses and is triggered by high rainfall on stressed grass; UF/IFAS observes it in summer and early fall, when Florida gets most of its rain. It first shows as irregular yellow or light-green patches from a few inches to a few feet across, and the roots end up very short, black and rotted. By the time leaves show symptoms the fungus has been active on the roots for at least two to three weeks.',
     verifiedOn: '2026-10-01',
   },
   {
@@ -272,11 +274,11 @@ const FACTS = [
   },
   {
     slug: 'fact-fire-ant-baits-how-they-work',
-    title: 'Fire ant baits: slower, but the workers feed them to the queen and brood',
+    title: 'Fire ant baits: foraging workers carry the bait back to the queen and brood',
     tags: ['ants', 'fire-ants', 'baits'],
     sourceUrls: ['https://edis.ifas.ufl.edu/publication/IN352'],
-    quote: '"A small amount of the bait is sprinkled around the mound and the ants then forage and bring the bait back to the colony to feed on." "This method is slower acting, but more effective then drenching, dusting, or fumigating a mound because the workers will feed the bait to the queen and brood, thus gaining effective control of the colony." "Reinfestation of any treated area, whether by broadcast treatment or individual mound treatment may occur."',
-    content: 'With a fire ant bait, foraging workers carry the bait back to the colony and feed it to the queen and brood, so it acts more slowly than drenching or dusting a mound but controls the colony more effectively. UF/IFAS notes that a treated area can be reinfested whether it was broadcast-treated or mound-treated. The source gives no number of days for a bait to work.',
+    quote: '"A small amount of the bait is sprinkled around the mound and the ants then forage and bring the bait back to the colony to feed on." "the workers will feed the bait to the queen and brood" "Reinfestation of any treated area, whether by broadcast treatment or individual mound treatment may occur."',
+    content: 'With a fire ant bait, foraging workers pick up the bait around the mound and carry it back to the colony, where they feed it to the queen and brood. UF/IFAS notes that a treated area can be reinfested whether it was broadcast-treated or mound-treated. The source gives no number of days for a bait to act, and this entry makes no claim about how well any treatment works.',
     verifiedOn: '2026-10-01',
   },
   {
@@ -304,24 +306,6 @@ const FACTS = [
     sourceUrls: ['https://edis.ifas.ufl.edu/publication/IN1277'],
     quote: '"It is important to differentiate correctly between termites and ants and between different groups (Figure 6)." "Most people can see the waist on an ant." "Alates with wings are about ¼ to 3/8 of an inch long and are the most helpful form for termite identification, followed by soldiers, then workers."',
     content: 'UF/IFAS stresses telling termites from ants correctly. A visible narrow waist marks an ant. Winged termite swarmers (alates), about ¼ to 3/8 of an inch long, are the most useful form for identifying termites, followed by soldiers, then workers. This entry does not describe the antenna or wing differences, and it makes no claim about when swarmers appear.',
-    verifiedOn: '2026-10-01',
-  },
-  {
-    slug: 'fact-subterranean-termite-soil-vs-baits',
-    title: 'Subterranean termites: liquid soil treatment vs baits',
-    tags: ['termites', 'subterranean-termites', 'treatment-methods'],
-    sourceUrls: ['https://edis.ifas.ufl.edu/publication/IN1277'],
-    quote: '"How soil termiticides work: Termites can die either by contacting the soil termiticide or by ingesting treated soil during tunneling." "Soil termiticides do not generally kill entire colonies as can occur with some termite baits but can provide structural protection when applied properly and maintained." "Termite colonies can be eliminated with baits." "If the treated soil around your home is disturbed, for instance, by excavations for construction, digging by pets or wildlife, or a washing rain such as may be experienced during a hurricane, be aware that those areas may require another treatment."',
-    content: 'Per UF/IFAS, a liquid soil termiticide kills termites that touch or tunnel through the treated soil and protects the structure as a barrier, but generally does not kill the whole colony; termite baits can eliminate colonies. Treated soil that is disturbed, by construction digging, pets or wildlife, or a washing rain such as a hurricane can bring, may need another treatment. This entry gives no protection period in years.',
-    verifiedOn: '2026-10-01',
-  },
-  {
-    slug: 'fact-drywood-termite-spot-vs-fumigation',
-    title: 'Drywood termites: spot treatment vs whole-structure fumigation',
-    tags: ['termites', 'drywood-termites', 'treatment-methods'],
-    sourceUrls: ['https://edis.ifas.ufl.edu/publication/IN1277'],
-    quote: '"Infestations are usually localized and in sound wood." "Requires thorough inspection to find drywood termites for spot treatments to be successful." "Fumigation is highly effective against drywood termites." "Fumigation is heavily regulated."',
-    content: 'UF/IFAS describes drywood termite infestations as usually localized and in sound wood. Spot treatment works only if a thorough inspection finds the termites. Fumigation of the whole structure is highly effective against drywood termites and is heavily regulated.',
     verifiedOn: '2026-10-01',
   },
   {
@@ -374,8 +358,8 @@ const FACTS = [
     title: 'Cutting mosquito breeding around the home: containers, pools, tires, birdbaths, gutters',
     tags: ['mosquitoes', 'prevention', 'container-mosquitoes'],
     sourceUrls: ['https://edis.ifas.ufl.edu/publication/IN792'],
-    quote: '"Because Aedes aegypti are container-inhabiting mosquitoes, one of the most successful and cost-effective methods to reducing populations is by preventing containers around the home from collecting water." "By turning over empty flowerpots, properly maintaining swimming pools, and removing unused tires, you can greatly reduce the number of places mosquitoes have to lay eggs." "Aerate birdbaths and make sure gutters are free of blockages."',
-    content: 'For container-breeding mosquitoes such as the yellow fever mosquito, UF/IFAS calls keeping containers around the home from collecting water one of the most successful and cost-effective controls: turn empty flowerpots over, maintain swimming pools, remove unused tires, aerate birdbaths and keep gutters clear. The source does not give a how-often schedule for emptying water.',
+    quote: '"Because Aedes aegypti are container-inhabiting mosquitoes" "By turning over empty flowerpots, properly maintaining swimming pools, and removing unused tires, you can greatly reduce the number of places mosquitoes have to lay eggs." "Aerate birdbaths and make sure gutters are free of blockages."',
+    content: 'The yellow fever mosquito breeds in containers, so UF/IFAS advises cutting the places around a home where water collects: turn empty flowerpots over, maintain swimming pools, remove unused tires, aerate birdbaths and keep gutters clear. This reduces the places mosquitoes have to lay eggs. The source does not give a how-often schedule for emptying water.',
     verifiedOn: '2026-10-01',
   },
   {
