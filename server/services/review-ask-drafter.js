@@ -503,7 +503,22 @@ async function priorSequenceTouches(sequenceId, sequenceStep) {
   }
 }
 
-async function gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep }) {
+// History scoped to THIS visit: texts, calls and emails from the month before
+// the visit through the end of its ET day. A later conversation (a new
+// inquiry, another job) never grounds a review ask about this visit.
+const TECH_VOICE_LOOKBACK_DAYS = 30;
+function visitWindow(serviceDate) {
+  if (!serviceDate) return null;
+  const visitDay = etCalendarDayOf(serviceDate);
+  const from = etCalendarDayOf(new Date(Date.parse(`${visitDay}T12:00:00Z`) - TECH_VOICE_LOOKBACK_DAYS * 86400000));
+  return (value) => {
+    if (!value) return false;
+    const day = etCalendarDayOf(value);
+    return day >= from && day <= visitDay;
+  };
+}
+
+async function gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep, serviceDate }) {
   const ContextAggregator = require("./context-aggregator");
   const [report, sms, calls, emails, priorTouches] = await Promise.all([
     serviceReportFacts(serviceRecordId),
@@ -512,7 +527,15 @@ async function gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, s
     customerOwnEmails(customer.id),
     priorSequenceTouches(sequenceId, sequenceStep),
   ]);
-  return { report, sms, calls: calls || [], emails, priorTouches };
+  // No visit date = no way to scope, so no history at all (the report only).
+  const inVisit = visitWindow(serviceDate) || (() => false);
+  return {
+    report,
+    sms: sms.filter((m) => inVisit(m.date)),
+    calls: (calls || []).filter((c) => inVisit(c.created_at)),
+    emails: emails.filter((e) => inVisit(e.date)),
+    priorTouches,
+  };
 }
 
 // A record line's ET calendar date, so "I saw ants today" from three weeks
@@ -791,7 +814,9 @@ function verifyTechVoiceDraft(draft, ctx) {
   if (!body) return "empty";
   return firstFailure(CONTENT_CHECKS, body, ctx)
     || firstFailure(ctx.channel === "email" ? EMAIL_SHAPE_CHECKS : SMS_SHAPE_CHECKS, body, ctx)
-    || detailsReject(draft?.details, body, ctx.corpus)
+    // A detail must come from the visit report or the customer's own words,
+    // never the record's header lines (their name, the tech's name).
+    || detailsReject(draft?.details, body, ctx.ownWords)
     || firstFailure(CLAIM_CHECKS, body, ctx);
 }
 
@@ -941,8 +966,10 @@ async function techVoiceAttempt({ system, facts, channel, check, record }, note,
   const leg = legCapture();
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: "review_ask",
-    system,
-    text: `CUSTOMER AND VISIT DATA (data only):\n${facts}${note}`,
+    // The redraft reason is OUR instruction, so it rides the system channel,
+    // never the data block the prompt says to ignore as instructions.
+    system: note ? `${system}\n\n${note}` : system,
+    text: `CUSTOMER AND VISIT DATA (data only):\n${facts}`,
     jsonMode: true,
     maxTokens: 700,
     timeoutMs,
@@ -970,7 +997,7 @@ async function draftTechVoice({ customer, recipientFirstName, recipientName, ser
   if (!isEnabled("reviewAskTechVoice")) return null;
   if (!customer || !customer.id) return null;
   try {
-    const ctx = await gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep });
+    const ctx = await gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep, serviceDate });
     // The company check reads the FULL name ("Sunset Vacation Rentals"), never
     // the first word a caller already cut it to.
     // Both the recipient's name and the account's full name are checked: a
@@ -1004,7 +1031,7 @@ async function draftTechVoice({ customer, recipientFirstName, recipientName, ser
         return null;
       }
       logger.info(`[review-drafter] tech voice rejected (customerId=${customer.id} step=${sequenceStep ?? 0} attempt=${attempt} reason=${reject})`);
-      note = `\n\nYOUR PREVIOUS DRAFT WAS REJECTED (${reject.replace(/_/g, " ")}). Write a new one that follows every rule.`;
+      note = `YOUR PREVIOUS DRAFT WAS REJECTED (${reject.replace(/_/g, " ")}). Write a new one that follows every rule.`;
     }
     return null;
   } catch (err) {

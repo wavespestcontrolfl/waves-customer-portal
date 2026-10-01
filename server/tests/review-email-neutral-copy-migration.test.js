@@ -5,7 +5,11 @@
  * 10-01). Pins: exact-match rewrite, operator edits untouched, idempotent,
  * down() restores only this migration's copy.
  */
+const mockRecordAuditEvent = jest.fn(async () => {});
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockRecordAuditEvent(...a) }));
 const migration = require('../models/migrations/20261001120000_review_email_neutral_copy');
+
+beforeEach(() => mockRecordAuditEvent.mockClear());
 
 const OLD_CLOSING = "It genuinely makes our day — and helps other local families decide who to trust with their home. If anything fell short, just reply to this email and we'll make it right.";
 
@@ -55,6 +59,13 @@ test('up() neutralizes the preview, closing and button, and keeps the intro vari
   expect(rows.template.default_cta_label).toBe('Leave a Google review');
   const text = `${rows.version.preview_text} ${rows.version.blocks}`;
   expect(text).not.toMatch(/earned it|fell short|just reply|mean the world/i);
+  // One audit event per changed row, with before/after, tagged with the migration.
+  expect(mockRecordAuditEvent).toHaveBeenCalledTimes(2);
+  const [tplEvent, versionEvent] = mockRecordAuditEvent.mock.calls.map((c) => c[0]);
+  expect(tplEvent).toMatchObject({ actor_type: 'system', resource_type: 'email_templates', resource_id: 't1' });
+  expect(tplEvent.metadata).toMatchObject({ migration: '20261001120000_review_email_neutral_copy', before: { default_cta_label: 'Leave a quick review' } });
+  expect(versionEvent).toMatchObject({ resource_type: 'email_template_versions', resource_id: 'v1' });
+  expect(versionEvent.metadata.before.preview_text).toMatch(/If we earned it/);
 });
 
 test('an operator-edited field is left untouched', async () => {
@@ -75,6 +86,8 @@ test('idempotent, and down() is a no-op (it cannot tell its own copy from an ope
   const once = JSON.stringify(rows);
   await migration.up(createKnex(rows));
   expect(JSON.stringify(rows)).toBe(once);
+  // A second run changes nothing, so it audits nothing.
+  expect(mockRecordAuditEvent).toHaveBeenCalledTimes(2);
   await migration.down(createKnex(rows));
   expect(JSON.stringify(rows)).toBe(once);
 });

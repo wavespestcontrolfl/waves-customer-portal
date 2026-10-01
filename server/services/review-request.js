@@ -4645,7 +4645,9 @@ const ReviewService = {
     // The tech-voice writer speaks AS the technician, so it gets the one the
     // RECORD resolves to (same rule as the {tech} sign-off below: the name
     // cached on the sequence can be a newer visit's technician).
-    const voiceTechName = techVoice && technicianId ? ((await technicianFirstName(technicianId)) || techName) : techName;
+    // A record technician whose name will not resolve gets NO name, never the
+    // sequence's cached one (that cache can be a newer visit's technician).
+    const voiceTechName = techVoice && technicianId ? ((await technicianFirstName(technicianId)) || null) : techName;
     const smsTemplateId = canonicalTemplate
       ? null
       : day0Template

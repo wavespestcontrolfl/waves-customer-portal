@@ -125,7 +125,7 @@ describe('draftTechVoice', () => {
     const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
     mockDispatch.mockResolvedValueOnce(reply(ungrounded)).mockResolvedValueOnce(reply(GOOD));
     expect(await Drafter.draftTechVoice(INPUT)).toBe(GOOD.body);
-    expect(mockDispatch.mock.calls[1][1].text).toContain('REJECTED (ungrounded detail)');
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (ungrounded detail)');
 
     mockDispatch.mockReset().mockResolvedValue(reply(ungrounded));
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
@@ -197,7 +197,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: false, quote: null }, { ask_only: true, supported: false, quote: null }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
     expect(mockDispatch).toHaveBeenCalledTimes(2);
-    expect(mockDispatch.mock.calls[1][1].text).toContain('REJECTED (unsupported sentence)');
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence)');
   });
 
   test('the checker cannot vouch with a quote that is not in the record', async () => {
@@ -235,7 +235,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     mockDispatch.mockResolvedValue(reply(GOOD));
     judge([{ ask_only: false, off_limits: true, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: true, quote: 'Moisture under the kitchen sink' }, { ask_only: true, supported: false, quote: null }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
-    expect(mockDispatch.mock.calls[1][1].text).toContain('REJECTED (off limits topic)');
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (off limits topic)');
     // A missing off_limits verdict counts as off limits (fail closed).
     mockDispatch.mockReset().mockResolvedValue(reply(GOOD));
     mockFactCheck.mockReset().mockImplementation(async (_p, req) => ({ ok: true, json: { sentences: approveAll(req).json.sentences.map(({ off_limits: _o, ...rest }) => rest) } }));
@@ -286,7 +286,8 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
   test('terminal pass 5: every record line carries its date, and today is stated', async () => {
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     mockTables.sms_log = [{ direction: 'inbound', message_body: 'I saw ants today', created_at: new Date('2026-09-10T15:00:00Z') }];
-    await Drafter.draftTechVoice(INPUT);
+    // A fixed visit date: the message must sit inside the visit window whatever day the suite runs.
+    await Drafter.draftTechVoice({ ...INPUT, serviceDate: '2026-09-15' });
     const text = mockDispatch.mock.calls[0][1].text;
     expect(text).toContain('[customer, 2026-09-10] I saw ants today');
     expect(text).toMatch(/Today: \d{4}-\d{2}-\d{2}/);
@@ -377,6 +378,37 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const text = mockDispatch.mock.calls[0][1].text;
     expect(text).toContain('Authentic note about the garage door.');
     expect(text).not.toContain('Spoofed');
+  });
+
+  test('GitHub r5: the redraft reason rides the system channel, never the data block', async () => {
+    const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
+    mockDispatch.mockResolvedValueOnce(reply(ungrounded)).mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (ungrounded detail)');
+    expect(mockDispatch.mock.calls[1][1].text).not.toContain('REJECTED');
+  });
+
+  test('GitHub r5: history is scoped to the visit (a month before through the visit day)', async () => {
+    mockTables.sms_log = [
+      { direction: 'inbound', message_body: 'Ants by the back door again', created_at: new Date('2026-09-20T15:00:00Z') },
+      { direction: 'inbound', message_body: 'Can you quote rodent work next month', created_at: new Date('2026-09-29T15:00:00Z') },
+      { direction: 'inbound', message_body: 'Old roof rat question', created_at: new Date('2026-07-01T15:00:00Z') },
+    ];
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice({ ...INPUT, serviceDate: '2026-09-25' });
+    const text = mockDispatch.mock.calls[0][1].text;
+    expect(text).toContain('Ants by the back door again');
+    expect(text).not.toContain('rodent work');
+    expect(text).not.toContain('roof rat');
+  });
+
+  test('GitHub r5: a detail cited only from the record header (a name) is not a visit detail', () => {
+    const rec = 'Customer first name: Marta\nTechnician (you): Adam';
+    const v = Drafter.verifyTechVoiceDraft(
+      { body: "Hi Marta! It's Adam. A Google review would really help: {review_url}", details: [{ text: 'Marta', source_quote: 'Customer first name: Marta' }] },
+      { channel: 'sms', firstName: 'Marta', techName: 'Adam', termite: false, corpus: rec, ownWords: 'German cockroaches in the kitchen.' },
+    );
+    expect(v).toBe('ungrounded_detail');
   });
 
   test('a bare link after a question stays with its sentence', () => {

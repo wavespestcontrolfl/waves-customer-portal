@@ -5231,6 +5231,25 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockDraftTechVoice.mock.calls[0][0].techName).toBe('Older');
     });
 
+    test('GitHub r5: a record technician whose name will not resolve drafts with NO name, never the cached one', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'd0-12', first_name: 'Uma', last_name: 'P', phone: '+19410000097', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d12', customer_id: 'd0-12', technician_id: 'tech-gone', service_type: 'pest control', service_date: '2026-09-01' }],
+        technicians: [{ id: 'tech-b', name: 'Newer Tech' }],
+        review_sequences: [{
+          id: 'seq-d12', customer_id: 'd0-12', status: 'active', current_step: 0, touches_sent: 0,
+          tech_name: 'Newer Tech', service_record_id: 'sr-d12',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBeNull();
+    });
+
     test('a drawer send with no techName resolves the technician from the latest completed visit (codex #4139 r1)', async () => {
       const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
       const mock = makeMock({
