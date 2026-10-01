@@ -81,6 +81,15 @@ describe('listFacts', () => {
     expect(q.where).toHaveBeenCalledWith({ source: SOURCE, active: true, status: 'active' });
   });
 
+  test('a knowledge-base-only fact (newsletter: false) never reaches the newsletter writer', async () => {
+    const kbOnly = FACTS.find((f) => f.newsletter === false);
+    expect(kbOnly).toBeDefined();
+    db.mockImplementation(() => chain([...ROWS, rowFor(kbOnly)]));
+    const facts = await listFacts({ now: NOW });
+    expect(facts.map((r) => r.slug)).not.toContain(kbOnly.slug);
+    expect(facts).toHaveLength(ROWS.length);
+  });
+
   test('filters to facts carrying ANY of the given tags', async () => {
     const facts = await listFacts({ tags: ['swarm-season', 'fire-ants'], now: NOW });
     expect(facts.map((f) => f.slug).sort()).toEqual([FIRE_ANT.slug, TERMITE.slug].sort());

@@ -31,6 +31,11 @@
  *               an end date). Optional.
  * - `verifiedOn` — ISO date the source was opened and quoted, when it is not
  *               the register's default VERIFIED_ON. Optional.
+ * - `newsletter` — false keeps a fact out of the newsletter writer's prompt
+ *               (factsPromptBlock): it still syncs into the knowledge base
+ *               for WikiQA. The events newsletter allows no efficacy
+ *               statements at all, which how-it-works facts can carry.
+ *               Optional; default is in the newsletter.
  *
  * No retailer page is a source: retailer copy carries efficacy timelines the
  * labels do not.
@@ -215,9 +220,10 @@ const FACTS = [
   },
   // Knowledge-gap fill, 2026-10-01: questions the knowledge base could not
   // answer in September (knowledge_queries), each quoted from a page opened
-  // and checked word for word that day. Mechanism and biology only: no
-  // efficacy comparisons, no fumigation, no termite treatment comparisons
-  // (waves-content rules; termite comparisons need product-label sources).
+  // and checked word for word that day. Written for the knowledge base
+  // (WikiQA: blog writer, lead agent, staff Q&A), not the events newsletter,
+  // so newsletter: false. Mechanism and biology only: no fumigation and no
+  // termite treatment comparisons (waves-content rules).
   {
     slug: 'fact-lawn-watering-when-and-how-much',
     title: 'Florida lawns: water when the grass shows drought stress, ½ to ¾ inch at a time',
@@ -226,6 +232,7 @@ const FACTS = [
     quote: '"A simple watering schedule would apply ½ to ¾ inch of water when the turfgrass begins to show the drought stress symptoms discussed in the previous section." "Leaf blades are folded in half lengthwise in an attempt to conserve water" "The grass takes on a blue-gray tint rather than maintaining a green color." "Footprints or tire tracks remain visible on the grass long after they are made." "Light, frequent watering is inefficient and encourages shallow root systems." "The best time for lawn irrigation is in the early morning hours."',
     content: 'UF/IFAS advises watering an established Florida lawn when it shows drought stress, applying ½ to ¾ inch of water each time. The signs are leaf blades folded in half lengthwise, a blue-gray tint instead of green, and footprints or tire tracks that stay visible long after they are made. Light, frequent watering is inefficient and encourages shallow roots, and the best time to water is the early morning. This entry gives no fixed number of days between waterings, and local watering-day rules still apply.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-lawn-overwatering-effects',
@@ -235,6 +242,7 @@ const FACTS = [
     quote: '"Often, homeowners are unaware that an irrigation system should be adjusted seasonally, and failure to adjust for seasonal changes will usually lead to overwatering." "Overwatering will harm long-term turf health because it greatly increases disease susceptibility and thatch buildup and leads to a shorter root system, which reduces the turf\'s overall stress tolerance and ability to survive with less water." "Additionally, overwatering promotes the growth of certain weed species such as dollarweed and sedges." "Watering in late afternoon or late morning may be detrimental if it extends the time the lawn is naturally wet from dew."',
     content: 'Per UF/IFAS, an irrigation system that is not adjusted for the season usually overwaters. Overwatering greatly increases disease susceptibility and thatch buildup, shortens the root system so the lawn tolerates stress and dry spells less well, and favors weeds such as dollarweed and sedges. Watering in late morning or late afternoon can also lengthen the time the grass stays wet from dew. The source does not name one specific disease as caused by overwatering.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-lawn-catch-can-test',
@@ -244,6 +252,7 @@ const FACTS = [
     quote: '"An easy way to check the uniformity of your irrigation system is to place small, straight-sided cans in a straight line from your sprinkler to the edge of the watering pattern." "Measure the amount of water in the cans after running the system for 15 minutes." "While checking uniformity with the catch can method, you can also easily determine how long it takes your system to apply ½ to ¾ inch of water."',
     content: 'UF/IFAS describes a catch-can check: set small, straight-sided cans in a straight line from a sprinkler to the edge of its spray, run the system for 15 minutes, and measure the water in each can. Uneven amounts show uneven coverage, and the same test shows how long the system takes to put down ½ to ¾ inch of water.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-turf-disease-nitrogen-balance',
@@ -253,6 +262,7 @@ const FACTS = [
     quote: '"Both excessively high and excessively low nitrogen fertility contribute to turfgrass diseases." "For example, excessive nitrogen applications encourage brown patch and gray leaf spot diseases, while very low nitrogen levels are conducive for the development of dollar spot disease."',
     content: 'UF/IFAS says both too much and too little nitrogen contribute to lawn diseases: excessive nitrogen encourages brown patch and gray leaf spot, while very low nitrogen favors dollar spot. The source gives no fertilizer rate here.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-take-all-root-rot',
@@ -262,6 +272,7 @@ const FACTS = [
     quote: '"Turfgrasses Affected: All warm-season turfgrasses" "High rainfall and stressed turfgrass trigger the disease." "It is observed during the summer and early fall months when Florida receives the majority of its rainfall." "Initial symptoms aboveground are irregular, yellow (chlorotic) or light green patches ranging in diameter from a few inches to a few feet." "Eventually, roots become very short, black, and rotted." "By the time the leaf symptoms appear, the pathogen has been active on the roots for at least two to three weeks—probably longer."',
     content: 'Take-all root rot affects all warm-season turfgrasses and is triggered by high rainfall on stressed grass; UF/IFAS observes it in summer and early fall, when Florida gets most of its rain. It first shows as irregular yellow or light-green patches from a few inches to a few feet across, and the roots end up very short, black and rotted. By the time leaves show symptoms the fungus has been active on the roots for at least two to three weeks.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-ficus-whitefly',
@@ -271,6 +282,7 @@ const FACTS = [
     quote: '"In Florida, Ficus benjamina appears to be the preferred host of ficus whitefly." "If no control applications are applied, the ficus whitefly can cause severe defoliation." "Numerous natural enemies including parasitoids, have been reported attacking ficus whitefly populations, but none are sufficient to stop or mitigate severe damage."',
     content: 'In Florida the ficus whitefly prefers weeping fig (Ficus benjamina), the common hedge ficus. Left untreated, it can cause severe leaf drop. Natural enemies, parasitoids among them, attack it, but UF/IFAS reports none is enough on its own to stop severe damage.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-fire-ant-baits-how-they-work',
@@ -280,6 +292,7 @@ const FACTS = [
     quote: '"A small amount of the bait is sprinkled around the mound and the ants then forage and bring the bait back to the colony to feed on." "the workers will feed the bait to the queen and brood" "Reinfestation of any treated area, whether by broadcast treatment or individual mound treatment may occur."',
     content: 'With a fire ant bait, foraging workers pick up the bait around the mound and carry it back to the colony, where they feed it to the queen and brood. UF/IFAS notes that a treated area can be reinfested whether it was broadcast-treated or mound-treated. The source gives no number of days for a bait to act, and this entry makes no claim about how well any treatment works.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-fire-ant-two-step',
@@ -289,6 +302,7 @@ const FACTS = [
     quote: '"Conventional recommended treatments involve a “two step” process of broadcast bait treatments and individual mound treatments." "But, broadcast baiting may be counterproductive because it can also decrease native ant populations that slow fire ant spread." "If there are native ants in your treatment area, try using only individual mound treatments to prevent affecting non-target ant populations."',
     content: 'UF/IFAS describes the conventional fire ant approach as two steps: a broadcast bait treatment and individual mound treatments. It cautions that broadcast baiting can also reduce native ants, which slow the spread of fire ants, so where native ants are present it suggests treating individual mounds only.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-termite-mud-tubes-inspection-gap',
@@ -298,6 +312,7 @@ const FACTS = [
     quote: '"Mud tubes consist of soil, subterranean termite feces, and partially digested wood." "Keep an inspection space that is at least 6 inches from the soil line to any exterior wall covering." "Inspection spaces allow termite tubes to be detected (Figure 11)." "When inspection spaces are obscured by mulch or other landscape plants, subterranean termites can access structures." "Place landscape plants at least 2 feet away from exterior walls (Figure 14)."',
     content: 'Subterranean termite mud tubes are made of soil, termite feces and partly digested wood. UF/IFAS advises keeping an inspection space of at least 6 inches between the soil line and any exterior wall covering, because that bare strip lets termite tubes be seen; mulch or plants covering it give termites hidden access. It also advises placing landscape plants at least 2 feet from exterior walls.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-termite-swarmers-vs-ants',
@@ -307,6 +322,7 @@ const FACTS = [
     quote: '"It is important to differentiate correctly between termites and ants and between different groups (Figure 6)." "Most people can see the waist on an ant." "Alates with wings are about ¼ to 3/8 of an inch long and are the most helpful form for termite identification, followed by soldiers, then workers."',
     content: 'UF/IFAS stresses telling termites from ants correctly. A visible narrow waist marks an ant. Winged termite swarmers (alates), about ¼ to 3/8 of an inch long, are the most useful form for identifying termites, followed by soldiers, then workers. This entry does not describe the antenna or wing differences, and it makes no claim about when swarmers appear.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-bed-bug-diy-limits',
@@ -316,6 +332,7 @@ const FACTS = [
     quote: '"Do-it-yourself heat treatments might not work." "Do not try to kill bed bugs by increasing your indoor temperature with a thermostat, propane space heater, or fireplace - this does not work and is dangerous." "Many home refrigerator freezers are not cold enough to kill bed bugs." "Foggers should not be your only method of bed bug control." "Rubbing alcohol, kerosene and gasoline could harm you and your family and can easily ignite with a spark or cigarette."',
     content: 'EPA says do-it-yourself heat treatments might not work, and that raising the indoor temperature with a thermostat, propane space heater or fireplace does not work and is dangerous. Many home freezers are not cold enough to kill bed bugs, and foggers should not be the only method used. Rubbing alcohol, kerosene and gasoline can harm people and catch fire. The EPA page does not mention bleach, so no claim about bleach should be made from this entry.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-brown-dog-tick-indoors',
@@ -325,6 +342,7 @@ const FACTS = [
     quote: '"The brown dog tick is unusual among ticks, in that it can complete its entire life cycle both indoors and outdoors." "Ticks are notoriously long-lived and can survive as long as three to five months in each stage without feeding." "Infestations in residences and kennels usually start with few ticks that are brought inside with a dog, that has been away from home." "The first indication the dog owner has that there is a problem is when they start noticing ticks crawling up the walls or on curtains."',
     content: 'Unlike most ticks, the brown dog tick can complete its whole life cycle indoors as well as outdoors, and UF/IFAS says each stage can survive three to five months without feeding. Home and kennel infestations usually start with a few ticks brought in on a dog that has been away, and owners often first notice ticks crawling up walls or on curtains.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-cockroach-exclusion-sealing',
@@ -334,15 +352,17 @@ const FACTS = [
     quote: '"Seal gaps between door frames and doors with weather stripping." "Caulk or otherwise seal cracks and gaps around frames of doors and windows and around plumbing and electrical to help prevent cockroaches from entering your home." "Use tightly packed steel wool as a temporary filler until openings can be sealed properly." "Check attic vents and make sure that large openings around outside drainage lines and sewer vents are screened or sealed." "Keep window and soffit screens in good repair to prevent cockroaches from entering your home."',
     content: 'UF/IFAS advises sealing gaps between doors and their frames with weatherstripping, caulking cracks and gaps around door and window frames and where plumbing and electrical lines enter, and using tightly packed steel wool only as a temporary filler until an opening is sealed properly. Attic vents and large openings around outside drain lines and sewer vents should be screened or sealed, and window and soffit screens kept in good repair. The source does not compare copper mesh with steel wool.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-rodent-diseases-how-spread',
     title: 'How rodents spread disease to people (Florida Department of Health)',
     tags: ['rodents', 'rats', 'health'],
     sourceUrls: ['https://monroe.floridahealth.gov/programs-and-services/environmental-public-health/rodents/'],
-    quote: '"Rodents can cause illness in people and pets through bites and direct contact with urine, droppings and water contaminated with rodent urine." "In addition, rodents can cause disease by contaminating food, drink and eating utensils with urine or droppings." "Inhaling dust from dried rodent urine, feces and nesting material can also result in illness." "Hantavirus is present in rodents throughout the U.S., and has been identified in cotton rats in Florida." "People can become infected through contact with water, food, or soil containing urine from an infected animal."',
-    content: 'The Florida Department of Health says rodents make people and pets sick through bites, through contact with their urine and droppings or water contaminated with their urine, through food, drink and utensils they contaminate, and through dust from dried urine, droppings and nesting material that is breathed in. Hantavirus has been found in cotton rats in Florida, and leptospirosis spreads through water, food or soil holding an infected animal\'s urine.',
+    quote: '"Rodents can cause illness in people and pets through bites and direct contact with urine, droppings and water contaminated with rodent urine." "In addition, rodents can cause disease by contaminating food, drink and eating utensils with urine or droppings." "Inhaling dust from dried rodent urine, feces and nesting material can also result in illness." "Hantavirus is present in rodents throughout the U.S., and has been identified in cotton rats in Florida." "Leptospirosis is caused by Leptospira bacteria carried by many different kinds of animals, including cattle, pigs, horses, dogs, rodents, raccoons and other wild animals." "People can become infected through contact with water, food, or soil containing urine from an infected animal."',
+    content: 'The Florida Department of Health says rodents make people and pets sick through bites, through contact with their urine and droppings or water contaminated with their urine, through food, drink and utensils they contaminate, and through dust from dried urine, droppings and nesting material that is breathed in. Hantavirus has been found in cotton rats in Florida, and leptospirosis, caused by Leptospira bacteria that rodents and many other animals carry, infects people through water, food or soil holding an infected animal\'s urine.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-rodents-rabies-rare',
@@ -350,8 +370,10 @@ const FACTS = [
     tags: ['rodents', 'rats', 'health', 'myths'],
     sourceUrls: ['https://monroe.floridahealth.gov/programs-and-services/environmental-public-health/rodents/'],
     quote: '"Rabies is extremely uncommon in small rodents such as mice, rats and squirrels." "In the last 20 years, the only rodent found to be positive for rabies in Florida was a beaver." "There have been no documented cases of rabies in humans associated with exposure to rabid rodents in the U.S. or elsewhere, although you should still seek medical attention if bitten by a rodent."',
-    content: 'Per the Florida Department of Health, rabies is extremely uncommon in mice, rats and squirrels; in the last 20 years the only rodent in Florida found positive for rabies was a beaver, and no human rabies case has been documented from a rodent exposure. Someone bitten by a rodent should still seek medical attention.',
+    content: 'Per the Florida Department of Health (page checked 2026-10-01), rabies is extremely uncommon in mice, rats and squirrels; the page says that in the last 20 years the only rodent in Florida found positive for rabies was a beaver, and that no human rabies case has been documented from a rodent exposure. Someone bitten by a rodent should still seek medical attention. The 20-year window is the page\'s own as of that check; it is not a running count.',
     verifiedOn: '2026-10-01',
+    expiresOn: '2027-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-mosquito-source-reduction-home',
@@ -361,6 +383,7 @@ const FACTS = [
     quote: '"Because Aedes aegypti are container-inhabiting mosquitoes" "By turning over empty flowerpots, properly maintaining swimming pools, and removing unused tires, you can greatly reduce the number of places mosquitoes have to lay eggs." "Aerate birdbaths and make sure gutters are free of blockages."',
     content: 'The yellow fever mosquito breeds in containers, so UF/IFAS advises cutting the places around a home where water collects: turn empty flowerpots over, maintain swimming pools, remove unused tires, aerate birdbaths and keep gutters clear. This reduces the places mosquitoes have to lay eggs. The source does not give a how-often schedule for emptying water.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
   {
     slug: 'fact-giant-salamanders-florida',
@@ -370,6 +393,7 @@ const FACTS = [
     quote: '"Two-toed amphiumas and Greater sirens occur along the Southeastern coastal plain from Alabama to Virginia, and throughout Florida." "They use a wide array of habitats including lowland swamps, lakes, rivers, ditches, etc." "They are frequently found in or near mucky and/or heavily vegetated areas." "These salamanders spend much of their time buried in muck or in underground burrows near water."',
     content: 'UF/IFAS describes two large aquatic salamanders, the two-toed amphiuma and the greater siren, found throughout Florida. They live in lowland swamps, lakes, rivers and ditches, usually in or near mucky or heavily vegetated spots, and spend much of their time buried in muck or in burrows near water. This entry does not cover Florida\'s smaller salamanders.',
     verifiedOn: '2026-10-01',
+    newsletter: false,
   },
 ];
 

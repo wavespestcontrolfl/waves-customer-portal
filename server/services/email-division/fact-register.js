@@ -516,7 +516,8 @@ async function listFacts({ tags, limit = 50, now = new Date() } = {}) {
     .orderBy('title', 'asc');
 
   const today = etDateString(now);
-  const usable = rows.filter((row) => hasProvenance(row, today));
+  // newsletter: false facts are knowledge-base only (see fact-register-data.js).
+  const usable = rows.filter((row) => hasProvenance(row, today) && FACT_BY_SLUG.get(row.slug).newsletter !== false);
   const wanted = Array.isArray(tags) ? tags : (tags ? [tags] : null);
   const filtered = (wanted && wanted.length)
     ? usable.filter((r) => {
