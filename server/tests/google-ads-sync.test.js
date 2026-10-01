@@ -1,6 +1,6 @@
 const mockQueryFirst = jest.fn();
 const mockInsertReturning = jest.fn();
-const mockInsert = jest.fn(() => ({ returning: mockInsertReturning }));
+const mockInsert = jest.fn(() => ({ returning: mockInsertReturning, onConflict: () => ({ merge: () => Promise.resolve() }) }));
 const mockUpdate = jest.fn();
 // syncCampaigns' removed-campaign reconcile is where(platform).whereNotIn(ids)
 // .whereNot(status).where(updated_at < fence).update(...) — kept on its own
@@ -21,6 +21,8 @@ const mockWhere = jest.fn(() => {
 const mockDb = jest.fn(() => ({ where: mockWhere, insert: mockInsert }));
 // syncCampaigns upserts inside a row-locked transaction now.
 mockDb.transaction = (cb) => cb(mockDb);
+const mockRaw = jest.fn(() => Promise.resolve());
+mockDb.raw = mockRaw;
 mockDb.fn = { now: () => 'NOW()' };
 
 jest.mock('../models/db', () => mockDb);
@@ -305,6 +307,66 @@ describe('Google Ads campaign sync', () => {
     const gaql = mockCustomerQuery.mock.calls[0][0];
     expect(gaql).toMatch(/segments\.date BETWEEN '\d{4}-\d{2}-\d{2}' AND '\d{4}-\d{2}-\d{2}'/);
     expect(gaql).not.toMatch(/segments\.date >=/);
+  });
+});
+
+describe('syncSearchTerms retires terms missing from the latest snapshot (Codex r8 on #5486)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = {
+      ...process.env,
+      GOOGLE_ADS_DEVELOPER_TOKEN: 'developer-token',
+      GOOGLE_ADS_CLIENT_ID: 'client-id',
+      GOOGLE_ADS_CLIENT_SECRET: 'client-secret',
+      GOOGLE_ADS_REFRESH_TOKEN: 'refresh-token',
+      GOOGLE_ADS_CUSTOMER_ID: '3393936713',
+    };
+  });
+
+  test('rows not rewritten by this run are zeroed and stamped with the run time', async () => {
+    mockCustomerQuery.mockResolvedValue([]);
+    await GoogleAds.syncSearchTerms(30, { throwOnError: true });
+    const retire = mockWhere.mock.calls.find((c) => c[0] === 'updated_at' && c[1] === '<');
+    expect(retire).toBeTruthy();
+    const runAt = retire[2];
+    expect(runAt).toBeInstanceOf(Date);
+    expect(mockUpdate).toHaveBeenCalledWith({
+      impressions: 0, clicks: 0, cost: 0, conversions: 0, conversion_value: 0, updated_at: runAt,
+    });
+  });
+
+  test('rows for a campaign missing locally: the run throws inside the transaction (rolled back), so no retirement and no success record (Codex r12)', async () => {
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: 999 }, search_term_view: { search_term: 'synthetic orphan term', status: 'NONE' },
+      metrics: { impressions: 3, clicks: 1, cost_micros: 2_000_000, conversions: 0, conversions_value: 0 },
+    }]);
+    mockQueryFirst.mockResolvedValue(null); // no local ad_campaigns row
+    await expect(GoogleAds.syncSearchTerms(30, { throwOnError: true })).rejects.toMatchObject({ code: 'search_terms_incomplete' });
+    expect(mockWhere.mock.calls.find((c) => c[0] === 'updated_at' && c[1] === '<')).toBeUndefined();
+    expect(mockInsert.mock.calls.find((c) => c[0]?.key === GoogleAds.SEARCH_TERMS_SYNCED_KEY)).toBeUndefined();
+  });
+
+  test('runs serialize on an advisory lock, and a run older than the committed snapshot writes nothing (Codex r13)', async () => {
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: 1 }, search_term_view: { search_term: 'synthetic term', status: 'NONE' },
+      metrics: { impressions: 3, clicks: 1, cost_micros: 2_000_000, conversions: 0, conversions_value: 0 },
+    }]);
+    // The committed snapshot was fetched after this run's fetch.
+    mockQueryFirst.mockResolvedValueOnce({ key: GoogleAds.SEARCH_TERMS_SYNCED_KEY, value: new Date(Date.now() + 60000).toISOString() });
+    const out = await GoogleAds.syncSearchTerms(30, { throwOnError: true });
+    expect(out).toEqual([]);
+    expect(mockRaw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), [GoogleAds.SEARCH_TERMS_SYNCED_KEY]);
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  test('records a run-level success, even for an empty snapshot (Codex r9)', async () => {
+    mockCustomerQuery.mockResolvedValue([]);
+    await GoogleAds.syncSearchTerms(30, { throwOnError: true });
+    expect(GoogleAds.SEARCH_TERMS_SYNCED_KEY).toBe('ads.search_terms.last_synced_at');
+    const mark = mockInsert.mock.calls.find((c) => c[0]?.key === GoogleAds.SEARCH_TERMS_SYNCED_KEY);
+    expect(mark).toBeTruthy();
+    expect(new Date(mark[0].value).toString()).not.toBe('Invalid Date');
   });
 });
 
