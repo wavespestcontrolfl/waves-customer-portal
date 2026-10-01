@@ -374,6 +374,11 @@ describe('freshness: never yesterday\'s instruction', () => {
     expect(lawnWateringSmsPlan(planArgs({ instruction, completedAt: FROZEN, nowMs: at('2026-09-30T22:00:00Z') }))).toEqual({ send: false, reason: 'stale' });
     expect(lawnWateringSmsPlan(planArgs({ instruction, completedAt: FROZEN, nowMs: at('2026-09-30T21:59:00Z') })).send).toBe(true);
   });
+  test('a drying hold then water-in (expiresAt null) is stale at the water-in deadline', () => {
+    const instruction = { ...HOLD, state: 'hold_then_water_in', expiresAt: null, waterInBy: '2026-09-30T20:00:00.000Z' };
+    expect(lawnWateringSmsPlan(planArgs({ instruction, completedAt: FROZEN, nowMs: at('2026-09-30T19:59:00Z') })).send).toBe(true);
+    expect(lawnWateringSmsPlan(planArgs({ instruction, completedAt: FROZEN, nowMs: at('2026-09-30T20:00:00Z') }))).toEqual({ send: false, reason: 'stale' });
+  });
   test('an unknown completion time fails closed', () => {
     expect(lawnWateringSmsPlan(planArgs({ completedAt: null }))).toEqual({ send: false, reason: 'stale' });
   });

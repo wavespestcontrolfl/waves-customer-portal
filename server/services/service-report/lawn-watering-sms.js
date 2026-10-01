@@ -106,6 +106,10 @@ function lawnWateringSmsPlan({
   if (etDateString(new Date(nowMs)) !== etDateString(new Date(completedMs))) return { send: false, reason: 'stale' };
   const expiresMs = instruction.expiresAt ? Date.parse(instruction.expiresAt) : NaN;
   if (Number.isFinite(expiresMs) && nowMs >= expiresMs) return { send: false, reason: 'stale' };
+  // A drying hold leaves expiresAt null while the text still names a water-in
+  // deadline ("by 4 PM"): never send it at or after that deadline either.
+  const waterInMs = instruction.waterInBy ? Date.parse(instruction.waterInBy) : NaN;
+  if (Number.isFinite(waterInMs) && nowMs >= waterInMs) return { send: false, reason: 'stale' };
   return { send: true, vars: { watering_lines: lines.join(' ') } };
 }
 
