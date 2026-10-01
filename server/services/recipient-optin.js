@@ -50,13 +50,18 @@ function prefsOf(customer) {
   return (typeof raw === 'string' ? JSON.parse(raw || '{}') : raw) || {};
 }
 // A root handle opens its own transaction (so the row lock holds and the steps
-// commit together); a transaction handle nests a savepoint. Best-effort: a
-// failure here must never block or fail an opt-in transition.
+// commit together); a transaction handle nests a savepoint. On the webhook's
+// transactional handle a failure is RETHROWN: the YES must not commit while
+// its consent hold stays in place (the phone would stay held forever), so the
+// transition fails and the webhook's fail-loud fallback retries it — the same
+// rule markRecipientOptin applies to its own reads. A fire-and-forget caller
+// keeps the best-effort null.
 async function withSavepoint(dbh, fn) {
   try {
     if (dbh && typeof dbh.transaction === 'function') return await dbh.transaction(fn);
     return await fn(dbh);
   } catch (err) {
+    if (dbh && dbh.isTransaction) throw err;
     logger.warn(`[recipient-optin] confirm/decline follow-up failed (${err.code || err.name || 'error'})`);
     return null;
   }

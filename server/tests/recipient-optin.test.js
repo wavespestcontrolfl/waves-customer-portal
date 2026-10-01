@@ -228,6 +228,18 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     expect(state.cards[0].payload.consent_stamp).toBe('held:phone_not_in_a_slot');
   });
 
+  test('a failed follow-up on the webhook\'s transactional handle is rethrown (the YES must not commit with the hold still in place); fire-and-forget stays best-effort', async () => {
+    const { dbh } = fakeDb({ customer: spouseRow({ service_preferences: { unconsented_slot_phone_keys: [KEY] } }), optinRows: confirmed() });
+    const inner = dbh.getMockImplementation();
+    dbh.mockImplementation((table) => {
+      if (table === 'customers') throw new Error('row lock failed');
+      return inner(table);
+    });
+    await expect(onRecipientConfirmed(KEY, { dbh })).resolves.toBeUndefined();
+    dbh.isTransaction = true;
+    await expect(onRecipientConfirmed(KEY, { dbh })).rejects.toThrow('row lock failed');
+  });
+
   test('NO / STOP records declined on the card', async () => {
     const { dbh, state } = fakeDb({ customer: spouseRow(), optinRows: [{ phone_key: KEY, customer_id: 'c1', status: 'declined' }] });
     await onRecipientDeclined(KEY, { dbh });
