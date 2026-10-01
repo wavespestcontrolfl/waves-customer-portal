@@ -3669,11 +3669,16 @@ async function raiseStrandedHoldClaimAlerts() {
     const rows = await strandedHoldClaimCandidate(db("invoices").where({ status: "sending" })
       .where("updated_at", "<", db.raw(STALE_SENDING_SQL)))
       .whereNotExists(standingStrandedAlert)
-      .select("id", "customer_id");
+      .select("id", "customer_id", "send_claim_token");
     for (const row of rows) {
       try {
         await raiseHoldClaimStrandedAlert(row.id, row.customer_id);
-        await db("invoices").where({ id: row.id, status: "sending" }).update(stalePark());
+        // Park only the claim this sweep read, and only while it is still stale: during the alert await
+        // another sweep may park it and an operator may start a fresh send, whose live claim must survive.
+        await db("invoices").where({ id: row.id, status: "sending" })
+          .where((t) => (row.send_claim_token == null ? t.whereNull("send_claim_token") : t.where("send_claim_token", row.send_claim_token)))
+          .where("updated_at", "<", db.raw(STALE_SENDING_SQL))
+          .update(stalePark());
       } catch (err) {
         logger.error(`[invoice] stranded hold-claim alert for ${row.id} failed - leaving it in 'sending' for the next sweep: ${err.message}`);
       }

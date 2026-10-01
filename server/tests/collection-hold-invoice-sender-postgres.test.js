@@ -597,6 +597,28 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
             } finally { notify.mockRestore(); }
           });
 
+          test('a fresh claim taken while the sweep awaits the alert is never parked by that sweep (pre-push audit P1)', async () => {
+            const fresh = randomUUID();
+            let inv;
+            const notify = jest.spyOn(notifications(), 'notifyAdmin').mockImplementation(async () => {
+              // While the alert is in flight an operator starts a fresh send: new token, fresh updated_at.
+              await db('invoices').where({ id: inv }).update({ send_claim_token: fresh, updated_at: new Date() });
+              return { id: 'synthetic' };
+            });
+            try {
+              const c = await newCustomer();
+              await placeHold(c);
+              inv = await newInvoice(c, { status: 'sending', send_claim_token: randomUUID(), scheduled_send_error: 'HOLD_CLAIM_STRANDED' });
+              await makeStale(inv);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(1);
+              expect(await invoice(inv)).toMatchObject({ status: 'sending', send_claim_token: fresh });
+            } finally {
+              notify.mockRestore();
+              await db('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'hold-claim-stranded:%'").del();
+            }
+          });
+
           test('an alert that already LANDED (the standing notification for the key) is not raised again by the sweep', async () => {
             const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
             try {
