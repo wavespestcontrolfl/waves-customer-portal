@@ -1389,6 +1389,9 @@ async function sendCustomerMessageCore(input) {
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
+    // The audited body after every transform above (withheld-link rewrite,
+    // GATE_SMS_LINK_WRAP short links): what the provider was handed.
+    sentBody: sendInput.body,
     ...((withheldLinksRewritten || providerOutcome.withheldLinksRewritten)
       ? { withheldLinksRewritten: withheldLinksRewritten || providerOutcome.withheldLinksRewritten }
       : {}),

@@ -10095,7 +10095,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // operator-reachable "today's visit" text days after the fact — so this
     // rail is gated like the other customer-contact rails. Recap delivery also
     // refuses the structured_notes.backfill marker as defense in depth.
-    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
+    // The fixed re-service text is the visit's ONE customer text: no video
+    // recap is queued behind it (an approved recap would text a second,
+    // differently worded completion message). recap-delivery.js also refuses
+    // the completionSmsRecapMode marker, for a row queued before completion.
+    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id && !reserviceFixedRecap) {
       if (isBackfillCompletion) {
         logger.info(`[dispatch] backfill completion: pest recap render NOT enqueued for visit ${svc.id} — quiet closeout, nothing to approve or send`);
       } else {
@@ -13109,6 +13113,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ? await require('./review-ask-dispatch').withBundledAskGate(svc.customer_id, bundledReviewRequestId, sendCompletionSms)
             : await sendCompletionSms(null);
           completionSmsProviderAccepted = smsResult.sent === true;
+          // GATE_SMS_LINK_WRAP can swap the report link for a fresh /l/ short
+          // link inside sendCustomerMessage. The fixed text stores (and shows
+          // the tech) the body the provider was actually handed.
+          if (reserviceFixedBody && smsResult.sent === true
+            && typeof smsResult.sentBody === 'string' && smsResult.sentBody) {
+            sentSmsBody = smsResult.sentBody;
+            smsNotesDelta.completionSmsBody = sentSmsBody;
+            sendingNotes.completionSmsBody = sentSmsBody;
+            completionSmsAcceptedSnapshot.body = sentSmsBody;
+          }
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued

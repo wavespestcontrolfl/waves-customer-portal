@@ -340,3 +340,23 @@ describe('review fixes (#5363 r1, second set)', () => {
     });
   });
 });
+
+describe('review fixes (#5363 r2)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+
+  test('the stored and shown body is the one the provider was handed (link wrap included)', () => {
+    const at = src.indexOf('completionSmsProviderAccepted = smsResult.sent === true;');
+    expect(at).toBeGreaterThan(0);
+    const block = src.slice(at, at + 900);
+    expect(block).toMatch(/if \(reserviceFixedBody && smsResult\.sent === true\s*&& typeof smsResult\.sentBody === 'string' && smsResult\.sentBody\) \{/);
+    expect(block).toContain('smsNotesDelta.completionSmsBody = sentSmsBody;');
+    expect(block).toContain('completionSmsAcceptedSnapshot.body = sentSmsBody;');
+  });
+
+  test('no video recap is queued behind the fixed text', () => {
+    expect(src).toMatch(/process\.env\.PEST_RECAP === 'true'[^\n]*record\.scheduled_service_id && !reserviceFixedRecap\) \{/);
+    const delivery = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'recap-delivery.js'), 'utf8');
+    expect(delivery).toContain("reason: 'reservice_fixed_text'");
+    expect(MODE).toBe('reservice_fixed');
+  });
+});

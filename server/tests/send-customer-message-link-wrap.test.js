@@ -146,6 +146,12 @@ test('gate on: the provider body, the audit body and the segment count all descr
   }));
 });
 
+test('an accepted send returns the body the provider was handed (sentBody), wrapped link included', async () => {
+  const result = await sendCustomerMessage(BASE_INPUT);
+  expect(result.sentBody).toBe(WRAPPED_BODY);
+  expect(result.sentBody).toBe(providerInput().body);
+});
+
 test('an accepted send stamps the minted code with the sms_log row (after the send, off the send path)', async () => {
   await sendCustomerMessage(BASE_INPUT);
   await flush();
