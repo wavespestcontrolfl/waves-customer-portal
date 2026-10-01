@@ -1,9 +1,11 @@
 /**
  * GrowthBook tools — unit tests with a mocked GrowthBook API.
- * Verifies the read-only contract: benign shape when unconfigured (must not
+ * Verifies the read contract: benign shape when unconfigured (must not
  * trip the shared admin breaker), experiment/feature mapping, and { error }
- * on auth failure. There is deliberately no mutation surface to test —
- * GrowthBook changes happen only in its UI by the operator.
+ * on auth failure. set_growthbook_feature_environment (owner ruling 2026-09-28, Decision 5)
+ * is preview-only here and has its own suite
+ * (intelligence-bar-set-growthbook-feature.test.js): nothing in this module
+ * writes to GrowthBook.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

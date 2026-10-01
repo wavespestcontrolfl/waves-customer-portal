@@ -6,7 +6,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { runKnowledgeGapsWeekly, _private } = require('../services/knowledge/knowledge-gaps-weekly');
+const { runKnowledgeGapsWeekly, withoutSavedGaps, _private } = require('../services/knowledge/knowledge-gaps-weekly');
 
 const { composeGapsEmail, reportWindow, questionKey } = _private;
 const NOW = new Date('2026-10-05T13:00:00Z'); // Monday 9:00 ET, after the 8:43 tick
@@ -28,6 +28,21 @@ describe('composeGapsEmail', () => {
     expect(text).toContain('2. "dollar spot on St. Augustine"');
     expect(text).toContain('not answered · blog writer');
     expect(text).toMatch(/Asked by: lead agent 2, blog writer 1, tech Q&A 1\./);
+  });
+
+  test('gaps the operator added from the Intelligence Bar are labeled as such', () => {
+    const { text } = composeGapsEmail({ rows: [row('chinch bugs on zoysia', 'intelligence_bar')] }, NOW);
+    expect(text).toContain('not answered · Intelligence Bar');
+    expect(text).toMatch(/Asked by: Intelligence Bar 1\./);
+  });
+
+  test('questions in other scripts are listed, punctuation-only ones are not', () => {
+    expect(questionKey('¿Cómo controlo las hormigas?')).toBe('cómo controlo las hormigas');
+    expect(questionKey('Как избавиться от муравьёв')).toBe('как избавиться от муравьёв');
+    expect(questionKey('???')).toBe('');
+    const { text, gaps } = composeGapsEmail({ rows: [row('Как избавиться от муравьёв', 'intelligence_bar')] }, NOW);
+    expect(gaps).toBe(1);
+    expect(text).toContain('"Как избавиться от муравьёв"');
   });
 
   test('caps the list at 10 and says how many more', () => {
@@ -130,5 +145,13 @@ describe('runKnowledgeGapsWeekly', () => {
   test('a failed query sends nothing', async () => {
     expect(await run({ loadWeek: async () => { throw new Error('db down'); } })).toEqual({ skipped: 'query_failed' });
     expect(mailer.sendOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('withoutSavedGaps', () => {
+  test('recent Q&A lists leave out Intelligence Bar gaps but keep rows with no source', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const sql = withoutSavedGaps(knex('knowledge_queries')).limit(30).toString();
+    expect(sql).toBe('select * from "knowledge_queries" where ("asked_by" is null or not "asked_by" = \'intelligence_bar\') limit 30');
   });
 });

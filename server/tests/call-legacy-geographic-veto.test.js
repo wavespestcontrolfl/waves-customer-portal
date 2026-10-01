@@ -215,7 +215,8 @@ describe('legacy booking branch wiring', () => {
   test('the fenced booking transaction re-runs the veto on the locked customer row (Codex r6 P2)', () => {
     const fenceAt = source.indexOf('const freshCallCustomer = await trx(\'customers\').where({ id: customer.id }).first();');
     expect(fenceAt).toBeGreaterThan(-1);
-    const after = source.slice(fenceAt, fenceAt + 2500);
+    // Window covers the fenced block, including the street-level proof recheck that runs under the same fence.
+    const after = source.slice(fenceAt, fenceAt + 4000);
     expect(after).toContain('const fencedGeoVeto = legacyGeographicVeto({');
     expect(after).toContain('onFile: freshCallCustomer');
     expect(after).toMatch(/if \(fencedGeoVeto\) \{\s*const geoErr = new Error\([^;]*;\s*geoErr\.fencedGeoVeto = fencedGeoVeto;\s*throw geoErr;/);

@@ -30,6 +30,7 @@ import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
 import { retainTaskReceipt } from "../../utils/ibTaskReceipts";
 import ToolActivityList from "./ToolActivityList";
+import KnowledgeGapPrompt, { useKnowledgeGaps } from "./KnowledgeGapPrompt";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
@@ -339,6 +340,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const submittingRef = useRef(false);
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
+  // Knowledge searches that came back empty (payload knowledgeMisses):
+  // offered as "add to knowledge gaps", saved only on the operator's tap.
+  // Held here, not in the prompt, so closing the palette keeps each box's
+  // request key and locked text.
+  const knowledgeGaps = useKnowledgeGaps();
   const [conversationHistory, setConversationHistory] = useState([]);
   // Server-persisted thread id (GATE_IB_THREADS). Null = ephemeral/new chat;
   // the id is set from query responses and from resume-on-open.
@@ -482,6 +488,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     if (!threadsAvailableRef.current) setPendingActions([]);
     else setPendingActions(previous => previous.filter(action => !action.taskId));
     setToolActivity([]);
+    // The gap prompts belong to the response: kept while a thread keeps it,
+    // cleared below with it otherwise.
     if (!threadsAvailableRef.current) {
       // Unlike New chat/submit (deliberate detach — no re-resume), a
       // context-driven invalidation should let the next palette open retry
@@ -492,6 +500,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setResponse(null);
       setPendingActions([]);
       setToolActivity([]);
+      knowledgeGaps.reset();
       // Detach any persisted thread too — /query evaluates the gate at call
       // time, so a threadId can exist even after the availability probe
       // failed; appending a fresh conversation to it would corrupt the
@@ -515,6 +524,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
     setPendingActions([]);
     setToolActivity([]);
+    knowledgeGaps.reset();
     // A thread from History is not the open task: its card (and Confirm
     // controls) must not stay attached above another conversation.
     setActiveTask(null);
@@ -601,6 +611,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setLoading(true);
       setResponse(null);
       setToolActivity([]);
+      knowledgeGaps.reset();
       saveRecent(q);
       setRecents(loadRecents());
 
@@ -638,6 +649,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, taskId: data.taskId || null, receivedAt: Date.now() }))]);
           setActiveTask(data.taskId ? data : null);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
+          knowledgeGaps.load(data.knowledgeMisses, data.taskId || null);
           setConversationHistory(data.conversationHistory || []);
           if (data.threadId) {
             setThreadId(data.threadId);
@@ -704,6 +716,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
       setPendingActions((data.pendingActions || []).map(action => ({ ...action, taskId: data.taskId })));
       setToolActivity(data.toolActivity || []);
+      knowledgeGaps.load(data.knowledgeMisses, data.taskId || id);
       setShowThreads(false);
     } catch (err) {
       if (threadEpochRef.current === epoch) setResponse(`Status unavailable: ${err.message}`);
@@ -712,8 +725,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     }
   };
 
+  const saveKnowledgeGap = (question, requestKey) => adminFetch("/admin/intelligence-bar/knowledge-gap", {
+    method: "POST",
+    body: JSON.stringify({ question, request_key: requestKey }),
+  });
+
   const actionEpoch = threadEpochRef.current;
-  const onActionResolved = (action, decision, body) => {
+  const onActionResolved =(action, decision, body) => {
     if (body?.success && body?.result?.verification?.persisted) {
       notifyMutation?.({ id: action.id, customer_id: body.result.customer_id,
         product_id: body.result.verification.product_id, estimate_id: body.result.estimate_id,
@@ -798,6 +816,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setResponse(null);
     setPendingActions([]);
     setToolActivity([]);
+    knowledgeGaps.reset();
     setPrompt("");
     setThreadId(null);
     threadSeqRef.current = null;
@@ -859,6 +878,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         onActionResolved={onActionResolved}
         taskHistory={taskHistory}
         toolActivity={toolActivity}
+        knowledgeGaps={knowledgeGaps}
+        saveKnowledgeGap={saveKnowledgeGap}
         recents={recents}
         quickActions={quickActions}
         contextLabel={contextLabel}
@@ -1152,6 +1173,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             {" "}
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" />
             {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
+            <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="dark" />
           </div>
         )}
         {(response || pendingActions.length > 0) && !loading && !showThreads && (
@@ -1295,6 +1317,8 @@ function MobileSheet({
   onActionResolved,
   taskHistory,
   toolActivity,
+  knowledgeGaps,
+  saveKnowledgeGap,
   recents,
   quickActions,
   contextLabel,
@@ -1565,6 +1589,9 @@ function MobileSheet({
           )}
           {response && !loading && !showThreads && (
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="light" />
+          )}
+          {response && !loading && !showThreads && (
+            <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="light" />
           )}
           {pendingActions.length > 0 && !loading && !showThreads && !activeTask && (
             <PendingActionsCard actions={pendingActions} variant="light" onResolved={onActionResolved} />
