@@ -135,6 +135,7 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     expect(out).toEqual({ status: 'sent' });
     expect(h.sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(h.sendCustomerMessage.mock.calls[0][0]).toEqual({
+      preSendCheck: expect.any(Function),
       to: '+19415550100',
       body: "Watering after today's visit: Skip watering until 8:00 PM tonight. Water normally after that.",
       channel: 'sms',
@@ -270,6 +271,27 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     h.mergeNotes.mockRejectedValueOnce(new Error('db down'));
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skip_claim_failed' });
     expect(h.sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a retryable block (lookup failed) lifts the fence and stays retryable', async () => {
+    const h = harness({ sendResult: { sent: false, blocked: true, retryable: true, deferred: true, code: 'CONSENT_LOOKUP_FAILED' } });
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'failed' });
+    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'failed', lawnWateringSmsError: 'CONSENT_LOOKUP_FAILED', lawnWateringSmsDeliveryUnverifiedAt: null });
+    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(false);
+  });
+
+  test('the handoff recheck passes a fresh instruction and refuses a stale one; a stale refusal is final', async () => {
+    const h = harness();
+    await sendLawnWateringSms(h.state, h.deps);
+    const { preSendCheck } = h.sendCustomerMessage.mock.calls[0][0];
+    expect(await preSendCheck({ channel: 'sms' })).toEqual({ ok: true });
+    h.state.notes.lawnWateringFreeze.wateringInstruction.waterInBy = new Date(Date.now() - 1000).toISOString();
+    expect(await preSendCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'LAWN_WATERING_STALE', retryable: false });
+
+    const s = harness({ sendResult: { sent: false, blocked: true, code: 'LAWN_WATERING_STALE' } });
+    expect(await sendLawnWateringSms(s.state, s.deps)).toEqual({ status: 'skipped_stale' });
+    expect(s.state.notes).toMatchObject({ lawnWateringSmsStatus: 'skipped_stale', lawnWateringSmsDeliveryUnverifiedAt: null });
+    expect(lawnWateringSmsAlreadyHandled(s.state.notes)).toBe(true);
   });
 
   test('a policy block is final: skipped_blocked, never retried', async () => {

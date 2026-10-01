@@ -34,6 +34,7 @@ const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']
 // provider rejection) is deliberately NOT here: it is known not delivered, so a
 // resumed completion may try again. 'sending' is covered by the uncertainty
 // fence below, which is written in the same claim.
+const STALE_CODE = 'LAWN_WATERING_STALE';
 const TERMINAL_STATUSES = Object.freeze(['sent', 'skipped_blocked', 'skipped_quiet_hours']);
 
 function parseNotes(value) {
@@ -66,6 +67,25 @@ function lawnWateringSmsAlreadyHandled(notes) {
 
 // Pure send decision. Returns { send: false, reason } or
 // { send: true, vars: { watering_lines } }.
+// Fresh only: the lines say "today" / "tonight" and name clock times on the
+// visit's own day, so a completion resumed on a later ET day, or after the
+// instruction's deadline, never sends them. Judged against the completion
+// instant the lines were built from (never the freeze time, which a later
+// resume can mint); an instruction without it fails closed. Checked at plan
+// time and again at the provider handoff.
+function wateringInstructionFresh(instruction, completedAt, nowMs) {
+  const completedMs = completedAt ? Date.parse(completedAt) : NaN;
+  if (!Number.isFinite(completedMs)) return false;
+  if (etDateString(new Date(nowMs)) !== etDateString(new Date(completedMs))) return false;
+  const expiresMs = instruction?.expiresAt ? Date.parse(instruction.expiresAt) : NaN;
+  if (Number.isFinite(expiresMs) && nowMs >= expiresMs) return false;
+  // A drying hold leaves expiresAt null while the text still names a water-in
+  // deadline ("by 4 PM"): never send it at or after that deadline either.
+  const waterInMs = instruction?.waterInBy ? Date.parse(instruction.waterInBy) : NaN;
+  if (Number.isFinite(waterInMs) && nowMs >= waterInMs) return false;
+  return true;
+}
+
 function lawnWateringSmsPlan({
   instruction = null,
   isBackfill = false,
@@ -96,20 +116,7 @@ function lawnWateringSmsPlan({
   }
   const lines = wateringLinesOf(instruction);
   if (!lines.length) return { send: false, reason: 'no_lines' };
-  // Fresh only: the lines say "today" / "tonight" and name clock times on the
-  // visit's own day, so a completion resumed on a later ET day, or after the
-  // instruction's deadline, never sends them. Judged against the completion
-  // instant the lines were built from (never the freeze time, which a later
-  // resume can mint); an instruction without it fails closed.
-  const completedMs = completedAt ? Date.parse(completedAt) : NaN;
-  if (!Number.isFinite(completedMs)) return { send: false, reason: 'stale' };
-  if (etDateString(new Date(nowMs)) !== etDateString(new Date(completedMs))) return { send: false, reason: 'stale' };
-  const expiresMs = instruction.expiresAt ? Date.parse(instruction.expiresAt) : NaN;
-  if (Number.isFinite(expiresMs) && nowMs >= expiresMs) return { send: false, reason: 'stale' };
-  // A drying hold leaves expiresAt null while the text still names a water-in
-  // deadline ("by 4 PM"): never send it at or after that deadline either.
-  const waterInMs = instruction.waterInBy ? Date.parse(instruction.waterInBy) : NaN;
-  if (Number.isFinite(waterInMs) && nowMs >= waterInMs) return { send: false, reason: 'stale' };
+  if (!wateringInstructionFresh(instruction, completedAt, nowMs)) return { send: false, reason: 'stale' };
   return { send: true, vars: { watering_lines: lines.join(' ') } };
 }
 
@@ -134,8 +141,10 @@ async function sendLawnWateringSms(args, deps) {
     if (!gateOn || !ruleGateOn) return { status: 'gate_off' };
 
     const { record, svc, notes } = args;
+    const instruction = notes?.lawnWateringFreeze?.wateringInstruction || null;
+    const completedAt = instruction?.completedAt || null;
     const plan = lawnWateringSmsPlan({
-      instruction: notes?.lawnWateringFreeze?.wateringInstruction || null,
+      instruction,
       isBackfill: args.isBackfill === true,
       deliveryMode: args.deliveryMode,
       phone: svc?.cust_phone,
@@ -143,7 +152,7 @@ async function sendLawnWateringSms(args, deps) {
       alreadySent: lawnWateringSmsAlreadyHandled(notes),
       gateOn,
       ruleGateOn,
-      completedAt: notes?.lawnWateringFreeze?.wateringInstruction?.completedAt || null,
+      completedAt,
       completionTextRequested: args.completionTextRequested === true,
       nowMs: Date.now(),
     });
@@ -183,6 +192,11 @@ async function sendLawnWateringSms(args, deps) {
     }
 
     const sendInput = {
+      // The template read, claim write and policy lookups can cross ET
+      // midnight or the instruction's deadline: recheck at the handoff.
+      preSendCheck: async () => (wateringInstructionFresh(instruction, completedAt, Date.now())
+        ? { ok: true }
+        : { ok: false, code: STALE_CODE, reason: 'watering instruction went stale before handoff', retryable: false }),
       to: svc.cust_phone,
       body,
       channel: 'sms',
@@ -247,6 +261,30 @@ async function sendLawnWateringSms(args, deps) {
         lawnWateringSmsDeliveryUnverifiedAt: null,
       }).catch((e) => logger.warn(`[lawn-watering-sms] quiet-hours status write failed for service_record ${record.id}: ${e.message}`));
       return { status: 'skipped_quiet_hours' };
+    }
+
+    // Went stale between the plan and the handoff: final, never resent.
+    if (result && result.code === STALE_CODE) {
+      await stamp({
+        lawnWateringSmsStatus: 'skipped_stale',
+        lawnWateringSmsDeliveryUnverifiedAt: null,
+      }).catch((e) => logger.warn(`[lawn-watering-sms] stale-status write failed for service_record ${record.id}: ${e.message}`));
+      return { status: 'skipped_stale' };
+    }
+
+    // A retryable block (consent / suppression lookup failed, a liftable
+    // hold) is known not sent but not a decision: lift the fence and leave
+    // the status retryable so a resumed completion tries again (freshness
+    // still bounds it).
+    if (result && result.blocked && result.retryable === true) {
+      await stamp({
+        lawnWateringSmsStatus: 'failed',
+        lawnWateringSmsError: String(result.code || 'blocked_retryable').slice(0, 64),
+        lawnWateringSmsFailedAt: new Date().toISOString(),
+        lawnWateringSmsDeliveryUnverifiedAt: null,
+      }).catch((e) => logger.warn(`[lawn-watering-sms] retryable-block status write failed for service_record ${record.id}: ${e.message}`));
+      logger.warn(`[lawn-watering-sms] retryable messaging block for service_record ${record.id}: ${result.code || 'unknown'}`);
+      return { status: 'failed' };
     }
 
     // Policy block (consent, STOP, suppression): intentional and final.
