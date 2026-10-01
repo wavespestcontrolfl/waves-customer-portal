@@ -15,6 +15,7 @@
 import { useState, useEffect, useId, useRef } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
+import ReportText from '../ReportSections';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -102,7 +103,7 @@ function TrendArrow({ trend }) {
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
-export function MosquitoStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', pressureTrendSlot = null }) {
+export function MosquitoStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', pressureTrendSlot = null, reportSections = null, nextVisitLabel = null }) {
   // The rating POST returns a recalculated pestPressure (possibly turning an
   // insufficient reading into a real score) — hold the displayed metric in
   // state so a successful submit can refresh it without a full reload
@@ -162,7 +163,13 @@ export function MosquitoStatusHero({ status, statusSummary, supportingMetric, ai
         onSettled={() => setTrendStale(true)}
       />
       {aiSummary?.body ? (
-        <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
+        <ReportText
+          text={aiSummary.body}
+          sections={reportSections}
+          nextVisitLabel={nextVisitLabel}
+          style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}
+          titleStyle={{ color: TEXT }}
+        />
       ) : null}
     </section>
   );
