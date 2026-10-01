@@ -17,9 +17,11 @@ const path = require('path');
 const DEFAULT_STATUSES = ['confirmed_error', 'confirmed_correct'];
 const ALL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
 const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
-// Rows the package-hash correction migration (20261001100000) stamped because
-// they were written without provenance; they are never evidence.
-const UNKNOWN_HASH_PREFIX = 'unknown-';
+// The same integrity contract migration 20261001130000 enforces in the schema,
+// repeated here so the export stays honest against rows older than the CHECKs:
+// a real sha256 hex hash, and for confirmed rows a JSON-object label with a
+// non-blank reviewer and a timestamp.
+const EVIDENCE_PREDICATE = "package_hash ~ '^[0-9a-f]{64}$' AND NOT (label_status IN ('confirmed_error','confirmed_correct') AND (label IS NULL OR jsonb_typeof(label) <> 'object' OR labeled_by IS NULL OR btrim(labeled_by) = '' OR labeled_at IS NULL))";
 
 // One decision_reviews row -> one fixture case. Picks only the allowed fields,
 // so a column added to the table later can never leak into a fixture.
@@ -57,11 +59,7 @@ async function exportCases({ db, capability, statuses = DEFAULT_STATUSES, now = 
   const rows = await db('decision_reviews')
     .where({ capability })
     .whereIn('label_status', statuses)
-    .whereNot('package_hash', 'like', `${UNKNOWN_HASH_PREFIX}%`)
-    // A confirmed case must carry its answer and its reviewer provenance (CHECK
-    // 20261001120000 enforces it in the schema; this keeps the export honest
-    // against older rows too).
-    .whereRaw("NOT (label_status IN ('confirmed_error','confirmed_correct') AND (label IS NULL OR labeled_by IS NULL OR labeled_at IS NULL))")
+    .whereRaw(EVIDENCE_PREDICATE)
     .select(COLUMNS)
     .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }]);
   return { capability, exported_at: now().toISOString(), cases: rows.map(rowToCase) };
@@ -88,4 +86,5 @@ if (require.main === module) {
   });
 }
 
-module.exports = { rowToCase, parseArgs, exportCases, DEFAULT_STATUSES, COLUMNS };
+module.exports = {
+  EVIDENCE_PREDICATE, rowToCase, parseArgs, exportCases, DEFAULT_STATUSES, COLUMNS };

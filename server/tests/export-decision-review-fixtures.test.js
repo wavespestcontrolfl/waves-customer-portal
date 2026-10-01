@@ -63,14 +63,13 @@ describe('exportCases (stubbed db)', () => {
     const query = {
       where: jest.fn((w) => { calls.where = w; return query; }),
       whereIn: jest.fn((c, v) => { calls.whereIn = [c, v]; return query; }),
-      whereNot: jest.fn((c, op, v) => { calls.whereNot = [c, op, v]; return query; }),
       whereRaw: jest.fn((sql) => { calls.whereRaw = sql; return query; }),
       select: jest.fn((cols) => { calls.select = cols; return query; }),
       orderBy: jest.fn(async () => [ROW]),
     };
     const db = jest.fn((table) => { calls.table = table; return query; });
     const result = await exportCases({ db, capability: 'call_judge', now: () => new Date('2026-10-01T00:00:00Z') });
-    expect(calls).toMatchObject({ table: 'decision_reviews', where: { capability: 'call_judge' }, whereIn: ['label_status', ['confirmed_error', 'confirmed_correct']], whereNot: ['package_hash', 'like', 'unknown-%'], whereRaw: expect.stringMatching(/label IS NULL OR labeled_by IS NULL OR labeled_at IS NULL/), select: COLUMNS });
+    expect(calls).toMatchObject({ table: 'decision_reviews', where: { capability: 'call_judge' }, whereIn: ['label_status', ['confirmed_error', 'confirmed_correct']], whereRaw: expect.stringMatching(/package_hash ~ '\^\[0-9a-f\]\{64\}\$'.*jsonb_typeof\(label\) <> 'object'.*btrim\(labeled_by\) = ''/), select: COLUMNS });
     expect(rowToCase(ROW).package_hash).toBe('h');
     expect(result).toEqual({ capability: 'call_judge', exported_at: '2026-10-01T00:00:00.000Z', cases: [rowToCase(ROW)] });
   });
