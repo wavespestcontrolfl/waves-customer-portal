@@ -191,6 +191,21 @@ async function officeParkedSetupFeeSeries(conn, seriesIds) {
   return !!parked;
 }
 
+// Cents an invoice's line items bill for a one-time setup fee (the line the
+// completion mint and the office write, "… one-time setup fee"). Unreadable
+// lines count as nothing, so an unclear invoice never retires a fee.
+function setupLineCents(lineItems) {
+  let lines = lineItems;
+  if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = []; } }
+  return rows(lines)
+    .filter((li) => /one-time setup fee/i.test(String(li?.description || '')))
+    .reduce((sum, li) => {
+      const qty = Number(li?.quantity ?? 1);
+      const value = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * (Number.isFinite(qty) ? qty : 1);
+      return sum + (Number.isFinite(value) && value > 0 ? Math.round(value * 100) : 0);
+    }, 0);
+}
+
 // The series an estimate's setup fee can live on: its own roots, plus the
 // series PARENT of any appointment the accept adopted (source_estimate_id
 // stays on that CHILD while the fee is stamped on its parent, which may belong
@@ -330,13 +345,17 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
   // claim against it and retire the stamp (exact value), never ask the office
   // to bill it again — the same healing the completion mint applies to an
   // orphaned claim.
-  const billedByHand = await trx('invoices')
+  // Only a setup line that actually bills the whole fee counts (pre-push audit
+  // P0): a $0 or partial setup line is not the fee billed — the office gets it.
+  const feeCents = Math.round(amount * 100);
+  const candidates = await trx('invoices')
     .whereIn('scheduled_service_id', trx('scheduled_services').select('id').where(function series() {
       this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
     }))
     .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
     .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
-    .first('id');
+    .select('id', 'line_items');
+  const billedByHand = rows(candidates).find((inv) => setupLineCents(inv.line_items) >= feeCents) || null;
   if (billedByHand) {
     const retired = await trx('scheduled_services')
       .where({ id: parentId, pending_setup_fee: rawAmount })

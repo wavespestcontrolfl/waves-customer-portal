@@ -422,6 +422,29 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // Pre-push audit P0: a setup line that does not bill the whole fee ($0 or
+  // partial) is not the fee billed — the fee goes to the office, no claim.
+  test.each([0, 40])('a series invoice whose setup line bills $%s (not the whole fee) does not retire it: parked for the office, no claim', async (lineAmount) => {
+    const f = await seed();
+    const Obligation = require('../services/setup-fee-obligation');
+    try {
+      const partial = await require('../services/invoice').create({
+        customerId: f.customerId, scheduledServiceId: f.parentId, title: 'Office bill',
+        lineItems: [
+          { description: 'Visit', quantity: 1, unit_price: VISIT_PRICE },
+          { description: 'One-time setup fee', quantity: 1, unit_price: lineAmount },
+        ],
+      });
+      const visit = await mockPg('scheduled_services').where({ id: f.parentId }).first();
+      const parked = await mockPg.transaction((trx) => Obligation.parkSetupFeeStampForOffice(trx, {
+        parentId: f.parentId, rawAmount: SETUP_FEE, customerId: f.customerId, estimateId: f.estimateId, origin: 'test', visit,
+      }));
+      expect(parked).toMatchObject({ parentId: f.parentId, amount: SETUP_FEE });
+      expect(await officeFeeAlerts(f)).toHaveLength(1);
+      expect(await mockPg('setup_fee_claims').where({ invoice_id: partial.id })).toHaveLength(0);
+    } finally { await cleanup(f); }
+  });
+
   test('a VOIDED first-visit invoice (never collected) puts the setup fee back; the next visit bills it (a refund would not)', async () => {
     const f = await seed();
     try {
