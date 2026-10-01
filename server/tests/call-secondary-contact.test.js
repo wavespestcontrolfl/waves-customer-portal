@@ -492,7 +492,7 @@ describe('persistCallSecondaryContact', () => {
     }]);
   });
 
-  test('unconsented phone added to a STAMPED row clears the stamp (codex r5 P1)', async () => {
+  test('unconsented phone never joins a STAMPED row — phone withheld, stamp kept (#5467; supersedes codex r5 on #2948)', async () => {
     const writes = makeDb({
       customer: {
         ...bareCustomer,
@@ -504,15 +504,20 @@ describe('persistCallSecondaryContact', () => {
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
     expect(writes.updates).toEqual([{
       service_contact2_name: 'Joseph Haught',
-      service_contact2_phone: '+19542901693',
+      // The stamp describes only consented phones, so this one stays OFF
+      // the slot (review card keeps it); the stamp is not touched.
+      service_contact2_phone: null,
       service_contact2_email: 'joseph.haught89431@gmail.com',
       service_contact2_role: 'home_buyer',
-      // The old stamp never described the new phone — cleared, so the
-      // fanout gate holds the whole list until re-attestation.
-      service_contacts_consent_at: null,
-      service_contacts_consent_source: null,
-      service_contacts_consent_text_version: null,
     }]);
+  });
+
+  test('unconsented phone-only contact on a STAMPED row is skipped outright', async () => {
+    const writes = makeDb({
+      customer: { ...bareCustomer, service_contact_phone: '+19415557777', service_contacts_consent_at: '2026-07-22T00:00:00Z' },
+    });
+    expect(await persistCallSecondaryContact('cust-1', { phone: '+15550100444', wants_notifications: true, role: 'lender' })).toBe('skipped_phone_withheld_unconsented');
+    expect(writes.updates).toEqual([]);
   });
 
   test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
@@ -983,12 +988,12 @@ describe('mixed per-contact consent on one call never clears the on-site stamp (
   test('consented entries are persisted before unconsented ones', () => {
     expect(loopAt).toBeGreaterThan(-1);
     expect(loop).toContain('Number(resolveSecondaryConsent(b, v2SmsConsentExplicit).smsConsentExplicit)');
-    expect(loop).toContain('for (const rawEntry of orderedEntries)');
+    expect(loop).toContain('for (const secondaryEntry of orderedEntries)');
   });
 
-  test('an unconsented phone after a consented write is withheld from the slot, and the review card keeps the raw entry', () => {
-    expect(loop).toContain("(!entryConsent && rawEntry?.phone && consentedPhoneWritten)\n          ? { ...rawEntry, phone: null }");
-    expect(loop).toContain("if (result === 'written' && entryConsent && secondaryEntry?.phone) consentedPhoneWritten = true;");
-    expect(loop).toContain('extraPayload: { secondary_contact: rawEntry }');
+  test('the loop no longer clears or withholds itself — persistCallSecondaryContact owns the stamped-row rule', () => {
+    expect(loop).toContain('for (const secondaryEntry of orderedEntries)');
+    expect(loop).not.toContain('consentedPhoneWritten');
+    expect(src).not.toContain('service_contacts_consent_at: null,');
   });
 });
