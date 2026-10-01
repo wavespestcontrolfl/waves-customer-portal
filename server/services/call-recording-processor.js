@@ -3307,7 +3307,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp } = {}) {
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
@@ -3479,8 +3479,9 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // resolver (customer-contact) whatever the opt-in gate does, until that
     // person's own YES (recipient-optin) takes it off.
     // Whether or not the row was stamped before (this same write may stamp
-    // it for the caller's explicit consent), the inferred phone is held.
-    ...((contact.phone && keepConsentStamp) ? {
+    // it for the caller's explicit consent), the inferred phone is held —
+    // unless it already confirmed its own opt-in on this account (holdPhone).
+    ...((contact.phone && holdPhone) ? {
       service_preferences: db.raw(
         "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text))",
         [last10(contact.phone)],
@@ -13743,6 +13744,7 @@ const CallRecordingProcessor = {
         // Pre-persist: only entries that could be asked need the slot-phone read.
         const onSitePreAsk = onSiteOptinAskTrigger(secondaryEntry) && !v2DoNotContact && optinRailLive;
         let onSiteBlockedBeforeWrite = false;
+        let onSiteAlreadyConfirmed = false;
         if (onSitePreAsk) {
           const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
           const before = await db('customers').where({ id: customerId }).first();
@@ -13763,6 +13765,10 @@ const CallRecordingProcessor = {
               requested_at: new Date(),
             }).onConflict(['customer_id', 'phone_key']).ignore();
             onSiteBlockedBeforeWrite = true;
+            // A phone that already said YES on this account (removed, now
+            // re-added) keeps its consent: no hold, and no new ask goes out.
+            const existing = await db('recipient_optin').where({ customer_id: customerId, phone_key: newKey }).first('status');
+            onSiteAlreadyConfirmed = existing?.status === 'confirmed';
           }
         }
         const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
@@ -13771,6 +13777,7 @@ const CallRecordingProcessor = {
           // Model-inferred on-site contact behind a blocking opt-in row: the
           // account's existing consent (other people's) is not cleared.
           keepConsentStamp: onSiteBlockedBeforeWrite,
+          holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,
         });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         // Recipient double opt-in parity with the portal flow (#2956): a

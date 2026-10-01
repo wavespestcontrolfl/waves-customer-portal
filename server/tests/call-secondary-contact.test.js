@@ -543,6 +543,15 @@ describe('persistCallSecondaryContact', () => {
     expect(writes.updates[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
   });
 
+  test('a re-added phone that already confirmed its own opt-in keeps its consent: the stamp stays and it is NOT held', async () => {
+    const writes = makeDb({
+      customer: { ...bareCustomer, service_contact_name: 'Property Manager', service_contact_phone: '+19415557777', service_contacts_consent_at: '2026-07-22T00:00:00Z' },
+    });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', on_site: true }, { onSiteAskEligible: true, keepConsentStamp: true, holdPhone: false })).toBe('written');
+    expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_at');
+    expect(writes.updates[0]).not.toHaveProperty('service_preferences');
+  });
+
   test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
     const writes = makeDb({ customer: bareCustomer });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');
@@ -855,6 +864,8 @@ describe('on-site contact opt-in ask', () => {
     // phone already on record is left alone.
     expect(src).toContain('if (newKey && !knownKeys.includes(newKey)) {');
     expect(src).toContain('keepConsentStamp: onSiteBlockedBeforeWrite,');
+    // A phone that already confirmed on this account is not held again.
+    expect(src).toContain('holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,');
     const block = src.indexOf('if (newKey && !knownKeys.includes(newKey)) {');
     expect(block).toBeLessThan(src.indexOf('const result = await persistCallSecondaryContact(customerId, secondaryEntry, {', block));
     // The same-call fan-out gate is the original one.

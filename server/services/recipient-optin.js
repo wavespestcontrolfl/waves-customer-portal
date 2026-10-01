@@ -313,7 +313,12 @@ async function filterRecipientsByOptin(contacts = [], customerId = null) {
 // the claims for phase 2; template dark → no claims, nothing pends.
 // visitId (optional): the booked visit an on-site ask is about (#5467). It
 // rides the claim into a send-window-deferred ask, whose replay recheck sends
-// it only while that visit is still confirmed and ahead.
+// it only while that visit is still confirmed and ahead. The row records only
+// that it is an on-site visit ask (requested_by ON_SITE_VISIT_ASK): the
+// undispatched-ask recovery sweep cannot re-check a visit it never stored, so
+// it releases such a row to ask_failed instead of re-sending it blind (the
+// next booking re-asks with a fresh visit check).
+const ON_SITE_VISIT_ASK = 'call_onsite_visit';
 async function claimRecipientOptins({ customer, contacts = [], priorPhones = [], propertyAddress = '', trx = null, visitId = null }) {
   if (!isDoubleOptinEnabled()) return [];
   const dbc = trx || db;
@@ -357,7 +362,10 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
                 .where('requested_at', '<', new Date(Date.now() - 10 * 60 * 1000));
             });
         })
-        .update({ status: 'pending', requested_at: new Date(), dispatched_at: null, provider_sid: null, updated_at: new Date() });
+        .update({
+          status: 'pending', requested_at: new Date(), dispatched_at: null, provider_sid: null, updated_at: new Date(),
+          ...(visitId ? { requested_by: ON_SITE_VISIT_ASK } : {}),
+        });
       const retryClaim = reclaimed > 0;
       if (templateDark) continue;
       if (!retryClaim && priorKeys.has(key)) continue;
@@ -375,7 +383,7 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
           phone_e164: String(contact.phone || '').trim(),
           status: 'pending',
           customer_id: customer?.id || null,
-          requested_by: 'portal_contact_save',
+          requested_by: visitId ? ON_SITE_VISIT_ASK : 'portal_contact_save',
           template_version: OPTIN_TEMPLATE_VERSION,
           requested_at: new Date(),
         }).onConflict(['customer_id', 'phone_key']).ignore().returning('phone_key');
@@ -535,7 +543,9 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       // Contact removed/replaced since the claim: they are no longer an
       // appointment recipient for this property — release to ask_failed
       // (re-adding them re-claims and asks) instead of texting a stranger.
-      if (idx < 0) {
+      // An on-site visit ask whose dispatch died: its visit is not stored, so
+      // it is never re-sent blind (released the same way).
+      if (idx < 0 || row.requested_by === ON_SITE_VISIT_ASK) {
         await db('recipient_optin')
           .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
           .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});

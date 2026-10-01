@@ -240,6 +240,11 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     expect(src).toContain("else if (status === 'declined') await onRecipientDeclined(key, { dbh });");
     // The booked visit rides a send-window-deferred ask (re-checked before it goes out).
     expect(src).toContain('optin_visit_id: claim.visitId || null,');
+    // An on-site visit ask is tagged on the row, and the undispatched-ask
+    // recovery sweep releases it instead of re-sending it without its visit.
+    expect(src).toContain("requested_by: visitId ? ON_SITE_VISIT_ASK : 'portal_contact_save',");
+    expect(src).toContain('...(visitId ? { requested_by: ON_SITE_VISIT_ASK } : {}),');
+    expect(src).toContain('if (idx < 0 || row.requested_by === ON_SITE_VISIT_ASK) {');
   });
 });
 
