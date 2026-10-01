@@ -117,6 +117,8 @@ const {
   replaceRecurringCardIntent,
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
+  payAfterFirstVisitCardRail,
+  payAfterFirstVisitInvoiceRail,
   _private: { recurringCardIntentMatchesEstimate, classifyDeliveryOutcome },
 } = require('../services/recurring-card-on-file');
 
@@ -140,7 +142,10 @@ beforeEach(() => {
   mockFindConsentedChargeableCard.mockResolvedValue(null);
   mockMatchAcceptCustomerByPhone.mockResolvedValue({ match: null });
 });
-afterAll(() => { delete process.env.RECURRING_CARD_ON_FILE; });
+afterAll(() => {
+  delete process.env.RECURRING_CARD_ON_FILE;
+  delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+});
 
 describe('feature flag', () => {
   it('is off unless RECURRING_CARD_ON_FILE is truthy', () => {
@@ -152,6 +157,126 @@ describe('feature flag', () => {
     }
     process.env.RECURRING_CARD_ON_FILE = 'false';
     expect(isRecurringCardOnFileEnabled()).toBe(false);
+  });
+});
+
+// GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): the pay-after-first-
+// visit wording is for customers on the card rail only. Every exempt customer
+// keeps today's wording because their accept follows today's billing path.
+describe('GATE_PAY_AFTER_FIRST_VISIT (payAfterFirstVisitCardRail)', () => {
+  const featureGates = require('../config/feature-gates');
+  afterEach(() => { delete process.env.GATE_PAY_AFTER_FIRST_VISIT; });
+
+  it('is dark unless the env is exactly "true"', () => {
+    delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+    expect(featureGates.payAfterFirstVisitLive()).toBe(false);
+    for (const v of ['1', 'on', 'TRUE', 'false', '']) {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = v;
+      expect(featureGates.payAfterFirstVisitLive()).toBe(false);
+    }
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    expect(featureGates.payAfterFirstVisitLive()).toBe(true);
+  });
+
+  it('gate off: nobody is on the card-rail wording, whatever the policy', () => {
+    for (const policy of [
+      { enforced: true, required: true, exemptReason: null },
+      { enforced: true, required: false, exemptReason: 'saved_method_consented' },
+      { enforced: true, required: false, exemptReason: 'autopay_already_active' },
+    ]) {
+      expect(payAfterFirstVisitCardRail(policy)).toBe(false);
+    }
+  });
+
+  it('gate on: a required capture and the already-enrolled customers are on the rail', () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    expect(payAfterFirstVisitCardRail({ enforced: true, required: true, exemptReason: null })).toBe(true);
+    expect(payAfterFirstVisitCardRail({ enforced: true, required: false, exemptReason: 'saved_method_consented' })).toBe(true);
+    expect(payAfterFirstVisitCardRail({ enforced: true, required: false, exemptReason: 'autopay_already_active' })).toBe(true);
+  });
+
+  it('gate on: every exemption keeps today\'s wording', () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    for (const exemptReason of [
+      'one_time_card_hold_lane', 'invoice_mode', 'prepay_annual', 'commercial_manual_billing',
+      'payer_billed', 'payer_check_uncertain', 'autopay_paused', 'existing_plan_customer',
+    ]) {
+      expect(payAfterFirstVisitCardRail({ enforced: true, required: false, exemptReason })).toBe(false);
+    }
+    expect(payAfterFirstVisitCardRail(null)).toBe(false);
+  });
+
+  it('gate on but the recurring card lane is off: no card is ever saved, so no card-rail wording', () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    delete process.env.RECURRING_CARD_ON_FILE;
+    expect(payAfterFirstVisitCardRail({ enforced: false, required: false, exemptReason: 'feature_disabled' })).toBe(false);
+    expect(payAfterFirstVisitCardRail({ enforced: true, required: true, exemptReason: null })).toBe(false);
+  });
+
+  it('end to end through the resolver: new customer on the rail; existing plan customer and payer-billed are not', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    const fresh = await resolveRecurringCardPolicyForEstimate({ estimate: { id: 'est-9', customer_id: null } });
+    expect(payAfterFirstVisitCardRail(fresh)).toBe(true);
+    const member = await resolveRecurringCardPolicyForEstimate({
+      estimate: EST, membership: { isExistingCustomer: true },
+    });
+    expect(member.exemptReason).toBe('existing_plan_customer');
+    expect(payAfterFirstVisitCardRail(member)).toBe(false);
+    mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+    const payer = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+    expect(payer.exemptReason).toBe('payer_billed');
+    expect(payAfterFirstVisitCardRail(payer)).toBe(false);
+  });
+});
+
+// payAfterFirstVisitInvoiceRail: the ONE "this accept's invoice rides the card
+// lane" predicate shared by estimate-public.js's three consumers. PR-A: it is
+// exactly the inline predicate they used before (no gate, no flag, no
+// `enforced` read), so it must not move with GATE_PAY_AFTER_FIRST_VISIT.
+describe('payAfterFirstVisitInvoiceRail (shared lane predicate)', () => {
+  afterEach(() => { delete process.env.GATE_PAY_AFTER_FIRST_VISIT; });
+
+  const CASES = [
+    [{ required: true, exemptReason: null }, true],
+    [{ required: false, exemptReason: 'saved_method_consented' }, true],
+    [{ required: false, exemptReason: 'autopay_already_active' }, true],
+    [{ required: false, exemptReason: 'existing_plan_customer' }, false],
+    [{ required: false, exemptReason: 'autopay_paused' }, false],
+    [{ required: false, exemptReason: 'payer_billed' }, false],
+    [{ required: false, exemptReason: 'payer_check_uncertain' }, false],
+    [{ required: false, exemptReason: 'commercial_manual_billing' }, false],
+    [{ required: false, exemptReason: 'prepay_annual' }, false],
+    [{ required: false, exemptReason: 'feature_disabled' }, false],
+    [{ required: false, exemptReason: null }, false],
+    [null, false],
+    [undefined, false],
+  ];
+
+  it('matches the pre-existing inline predicate for every policy shape', () => {
+    const inline = (policy) => policy.required
+      || ['saved_method_consented', 'autopay_already_active'].includes(policy.exemptReason || '');
+    for (const [policy, expected] of CASES) {
+      expect(payAfterFirstVisitInvoiceRail(policy)).toBe(expected);
+      if (policy) expect(!!inline(policy)).toBe(expected);
+    }
+  });
+
+  it('does not move with the master gate (gate on or off, same answer)', () => {
+    for (const gate of [undefined, 'true']) {
+      if (gate) process.env.GATE_PAY_AFTER_FIRST_VISIT = gate; else delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+      for (const [policy, expected] of CASES) {
+        expect(payAfterFirstVisitInvoiceRail(policy)).toBe(expected);
+      }
+    }
+  });
+
+  it('payAfterFirstVisitCardRail is this predicate plus the gate, the card lane, and an enforced policy', () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    for (const [policy, expected] of CASES) {
+      const enforced = policy ? { ...policy, enforced: true } : policy;
+      expect(payAfterFirstVisitCardRail(enforced)).toBe(expected);
+    }
+    expect(payAfterFirstVisitCardRail({ required: true, exemptReason: null, enforced: false })).toBe(false);
   });
 });
 
