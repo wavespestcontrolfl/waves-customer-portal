@@ -242,6 +242,32 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('past the ring budget, problems wait on one standing overflow bell and never age out of it', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    const overflowRows = () => trx('notifications').where({ recipient_type: 'admin', category: 'alert' })
+      .whereRaw("metadata->>'dedupeKey' = 'combined-booking-check:overflow'");
+    try {
+      const all = [];
+      for (let i = 0; i < 3; i += 1) all.push(await acceptedEstimate(trx, lines));
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 1 })).toMatchObject({ problems: 1, overflow: 2 });
+      const [overflow] = await overflowRows();
+      expect(overflow.title).toBe('Schedule — fix 2 more combined bookings');
+      const owed = overflow.metadata.itemKeys;
+      expect(owed).toHaveLength(2);
+      // The owed bookings age past the 72h lookback: still judged, and with budget they get their own bells.
+      await trx('estimates').whereIn('id', owed).update({ accepted_at: new Date(Date.now() - 100 * 3600 * 1000) });
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 3, overflow: 0 });
+      for (const id of owed) expect(await alertsOf(trx, id)).toHaveLength(1);
+      expect((await trx('notifications').whereRaw("metadata->>'resolvedBy' = 'combined-booking-check'")
+        .whereRaw("metadata->'subject'->>'type' = 'check'")).length).toBe(1);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a voided combined invoice replaced on its anchor governs the members, never reads as a split', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

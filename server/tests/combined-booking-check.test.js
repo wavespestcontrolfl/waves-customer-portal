@@ -499,10 +499,15 @@ describe('postAlert', () => {
     expect(opts.metadata).toMatchObject({ estimateId: 'estimate-1', problemCodes: ['price_missing'] });
   });
 
-  test('a standing problem row re-rings only for a problem it did not carry', () => {
-    const meta = { problemCodes: ['price_missing'] };
-    expect(ringOnNewProblem(['price_missing', 'missing_time_tech'])({}, meta)).toBe(true); // a new code appeared
-    expect(ringOnNewProblem(['price_missing'])({}, meta)).toBe(false); // same problem, refreshed quietly
+  test('a standing problem row re-rings only for a problem identity it did not carry', () => {
+    const { problemKeys } = check;
+    const lawnOff = { code: 'price_mismatch', families: ['lawn_care'], text: 'lawn $90.00 vs $100.00 on 5 visits' };
+    const pestOff = { code: 'price_mismatch', families: ['pest_control'], text: 'pest $140.00 vs $150.00 on 3 visits' };
+    const meta = { itemKeys: problemKeys(lawnOff) };
+    expect(ringOnNewProblem(problemKeys(lawnOff))({}, meta)).toBe(false); // same problem, refreshed quietly
+    // Same code, a different family: the lawn mismatch was fixed and a pest one appeared.
+    expect(ringOnNewProblem(problemKeys(pestOff))({}, meta)).toBe(true);
+    expect(problemKeys({ code: 'first_invoice_mismatch', text: 'x' })).toEqual(['first_invoice_mismatch']);
   });
 });
 
@@ -517,7 +522,7 @@ describe('outcomeOf', () => {
     // A schedule-gap deferral looks at every price: a standing price finding it no longer sees is fixed.
     expect(outcomeOf({ ...hidden, pricesHidden: false }, [mismatch]).outcome).toBe('deferred');
     expect(outcomeOf(hidden, [{ code: 'missing_time_tech', text: 'x' }]).outcome).toBe('deferred');
-    expect(outcomeOf(hidden, [mismatch])).toEqual({ outcome: 'problems', problems: [{ ...mismatch, held: true }] });
+    expect(outcomeOf(hidden, [mismatch])).toEqual({ outcome: 'problems', problems: [{ ...mismatch, families: [], held: true }] });
   });
 
   test('a held finding is carried, visibly, while another problem refreshes the bell', async () => {
@@ -529,7 +534,7 @@ describe('outcomeOf', () => {
     await postAlert({ id: 'estimate-1', customer_id: 'customer-1' }, { ...verdict, problems }, { customerName: 'J. Sample' }, { raise });
     const [, spec, opts] = raise.mock.calls[0];
     expect(opts.metadata.problemCodes).toEqual(['missing_time_tech', 'first_invoice_mismatch']);
-    expect(opts.metadata.problems).toEqual([{ code: 'missing_time_tech', text: '3 lawn visits missing time/tech' }, mismatch]);
+    expect(opts.metadata.problems).toEqual([{ code: 'missing_time_tech', text: '3 lawn visits missing time/tech', families: [] }, { ...mismatch, families: [] }]);
     expect(spec.why).toBe('3 lawn visits missing time/tech; first invoice $250.00 \u2260 $150.00 (not yet re-checked).');
     expect(opts.detail).toContain('not yet re-checked');
   });

@@ -649,7 +649,9 @@ describe('accepted-plan schedule detection', () => {
     });
     makeDbMock();
     const result = await runInner({ now: NOW });
-    expect(runCombinedBookingCheck).toHaveBeenCalledWith({ now: NOW });
+    // It rings within what is left of the run's shared budget.
+    expect(runCombinedBookingCheck).toHaveBeenCalledWith({ now: NOW, ringBudget: expect.any(Number) });
+    expect(runCombinedBookingCheck.mock.calls[0][0].ringBudget).toBeLessThanOrEqual(10);
     expect(result).toMatchObject({ combinedBooking: { checked: 2, problems: 1 }, combinedBookingCheckFailed: false, alerted: 1 });
   });
 
