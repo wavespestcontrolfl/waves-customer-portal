@@ -75,7 +75,7 @@ import {
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import { productDimension } from "../../lib/fast-complete-products";
-import { DOSE_UNITS, doseOverLabel, doseText, injectionDoseText, injectionLabelRate, injectionLabelText, parseDose, trunkInchesText } from "../../lib/injection-dose";
+import { DOSE_UNITS, doseOverLabel, doseText, injectionBand, injectionDoseText, injectionLabelRate, injectionLabelText, parseDose, quantityOf, trunkInchesText } from "../../lib/injection-dose";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -10845,7 +10845,16 @@ function treeShrubText(...values) {
   return values.filter(Boolean).join(" ").toLowerCase();
 }
 
-function treeShrubProductFlagsClient(selectedProducts = []) {
+// A catalog row labelled as a trunk injection, whatever its name says:
+// application method trunk_injection, or a rate per inch of trunk or per
+// palm. Mirrors isInjectionProduct in server/services/tree-shrub-closeout.js.
+function isInjectionCatalogRow(row) {
+  if (!row) return false;
+  if ((row.application_method ?? row.applicationMethod) === "trunk_injection") return true;
+  return /^\s*(ml|g)\s*\/\s*(inch|in\b|palm)/i.test(String(row.default_unit ?? row.defaultUnit ?? ""));
+}
+
+function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
   const productsText = (product) =>
     treeShrubText(
       product.name,
@@ -10880,7 +10889,9 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     return /\b(fertiliz|fertiliser|fertilizer|fert\b|palm\s*fert|alfalfa|13\s*-\s*0\s*-\s*13|8\s*-\s*2\s*-\s*12)\b/.test(textValue);
   });
   const injectionRows = selectedProducts.filter((product) =>
-    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)),
+    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)) ||
+    isInjectionCatalogRow(product) ||
+    isInjectionCatalogRow((catalog || []).find((row) => String(row.id) === String(product.productId))),
   );
   const hasInjectionProduct = injectionRows.length > 0;
   const missingActuals = selectedProducts.filter((product) => {
@@ -11029,15 +11040,34 @@ export function TreeShrubCloseoutBlock({
   const record = value.injectionRecord || {};
   const [otherProduct, setOtherProduct] = useState(false);
   const [doseUnitPick, setDoseUnitPick] = useState("fl_oz");
+  // The label band the tech picks (target pest, season, palm size), kept for
+  // the product it was picked for; trunk size settles a size-banded label.
+  const [bandPick, setBandPick] = useState({ product: "", key: "" });
+  // What the tech is typing in the dose and trunk fields: the record keeps
+  // only a number it can read ("1 1/2" reads 1.5), never digits run together.
+  const [doseDraft, setDoseDraft] = useState(null);
+  const [trunkDraft, setTrunkDraft] = useState(null);
   const chosenInjection = injectionProducts.find((product) => product.name === record.product) || null;
   const labelRate = chosenInjection?.rate || null;
+  const pickKey = bandPick.product === record.product ? bandPick.key : "";
   const trunkInches = trunkInchesText(record.sizeClassOrDbh);
-  const doseRange = labelRate ? injectionDoseText(labelRate, trunkInches) : null;
+  // A saved size that is not a number of inches ("30 cm DBH"): shown, to
+  // enter again in inches, never read as inches.
+  const unreadableTrunk =
+    labelRate?.basis === "inch" && String(record.sizeClassOrDbh || "").trim() && !trunkInches
+      ? String(record.sizeClassOrDbh).trim()
+      : "";
+  const band = labelRate ? injectionBand(labelRate, trunkInches, pickKey) : null;
+  const doseRange = labelRate ? injectionDoseText(labelRate, trunkInches, pickKey) : null;
   const dose = parseDose(record.dose);
   // A saved dose the form cannot read as tsp or fl oz: shown, to enter again.
   const unreadableDose = String(record.dose || "").trim() && !dose.amount ? String(record.dose).trim() : "";
   const doseUnit = dose.unit || doseUnitPick;
-  const overLabel = Boolean(labelRate) && doseOverLabel(labelRate, trunkInches, dose.amount, doseUnit);
+  const overLabel = Boolean(labelRate) && doseOverLabel(labelRate, trunkInches, dose.amount, doseUnit, pickKey);
+  const doseTyping = doseDraft ?? dose.amount;
+  const doseTypingUnreadable = Boolean(doseDraft?.trim()) && !quantityOf(doseDraft);
+  const trunkTyping = trunkDraft ?? trunkInches;
+  const trunkTypingUnreadable = Boolean(trunkDraft?.trim()) && !quantityOf(trunkDraft);
   // One injection product on this visit: the record names it, until the tech
   // chooses or types a product of their own (then it is never put back).
   const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
@@ -11045,7 +11075,9 @@ export function TreeShrubCloseoutBlock({
   useEffect(() => {
     if (injectionVisible && onlyInjection && !record.product && !productTouched.current) setInjectionField("product", onlyInjection);
   }, [injectionVisible, onlyInjection, record.product]);
-  const caption = { display: "grid", gap: 4, fontSize: 13, color: colors.muted };
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const hint = { fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
   return (
     <div style={{ display: "grid", gap: 8 }}>
       {blocks.length > 0 && (
@@ -11220,18 +11252,42 @@ export function TreeShrubCloseoutBlock({
             />
           )}
           {labelRate && (
-            <div style={{ fontSize: 13, color: colors.muted }}>
-              Label: <strong style={{ color: colors.text }}>{injectionLabelText(labelRate)}</strong>
+            <div style={hint}>
+              Label: <strong style={{ color: colors.text }}>{injectionLabelText(labelRate, band)}</strong>
+              {band && labelRate.bands.length > 1 ? ` (${band.label.toLowerCase()})` : ""}
             </div>
+          )}
+          {labelRate && !labelRate.bands && (
+            <div style={hint}>No dose is worked out for this product: its label rate depends on the tree. Dose from the label.</div>
+          )}
+          {labelRate?.pick && (
+            <label style={caption}>
+              {labelRate.pick}
+              <select
+                aria-label={labelRate.pick}
+                value={pickKey}
+                onChange={(e) => setBandPick({ product: record.product, key: e.target.value })}
+                style={select}
+              >
+                <option value="" disabled>{`Pick the ${labelRate.pick.toLowerCase()}`}</option>
+                {labelRate.bands.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {`${option.label}: ${injectionLabelText(labelRate, option)}`}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
           {labelRate?.basis === "inch" ? (
             <label style={caption}>
               Trunk (inches across, chest high)
               <input
                 inputMode="decimal"
-                value={trunkInches}
+                value={trunkTyping}
                 onChange={(e) => {
-                  const inches = e.target.value.replace(/[^\d.]/g, "");
+                  const typed = e.target.value;
+                  setTrunkDraft(typed);
+                  const inches = quantityOf(typed);
                   setInjectionField("sizeClassOrDbh", inches ? `${inches} in DBH` : "");
                 }}
                 placeholder="Inches"
@@ -11246,11 +11302,17 @@ export function TreeShrubCloseoutBlock({
               style={input}
             />
           )}
+          {labelRate?.basis === "inch" && trunkTypingUnreadable && (
+            <div style={problem}>Enter the trunk as a number of inches, like 10 or 10.5.</div>
+          )}
+          {unreadableTrunk && !trunkDraft && (
+            <div style={problem}>{`The saved size "${unreadableTrunk}" is not in inches. Enter the trunk in inches.`}</div>
+          )}
           {doseRange && (
             <div style={{ border: `1px solid ${colors.border}`, borderRadius: 10, padding: "10px 12px", background: colors.card }}>
-              <div style={{ fontSize: 13, color: colors.muted }}>{labelRate.basis === "palm" ? "Dose per palm" : "Dose for this tree"}</div>
+              <div style={hint}>{labelRate.basis === "palm" ? "Dose per palm" : "Dose for this tree"}</div>
               <div style={{ fontSize: 22, fontWeight: 700, color: colors.text }}>{doseRange}</div>
-              <div style={{ fontSize: 12, color: colors.muted }}>
+              <div style={hint}>
                 {labelRate.basis === "palm" ? "Rounded inside the label." : `Rounded inside the label for a ${trunkInches}-inch trunk.`}
               </div>
             </div>
@@ -11261,8 +11323,12 @@ export function TreeShrubCloseoutBlock({
               <input
                 inputMode="decimal"
                 aria-label="Dose amount"
-                value={dose.amount}
-                onChange={(e) => setInjectionField("dose", doseText(e.target.value.replace(/[^\d.]/g, ""), doseUnit))}
+                value={doseTyping}
+                onChange={(e) => {
+                  const typed = e.target.value;
+                  setDoseDraft(typed);
+                  setInjectionField("dose", doseText(quantityOf(typed), doseUnit));
+                }}
                 placeholder="Dose"
                 style={input}
               />
@@ -11281,14 +11347,15 @@ export function TreeShrubCloseoutBlock({
               </select>
             </div>
           </div>
-          {unreadableDose && (
-            <div style={{ fontSize: 13, color: colors.error }}>
+          {doseTypingUnreadable && <div style={problem}>Enter the dose as a number, like 1.5 or 1 1/2.</div>}
+          {unreadableDose && !doseDraft && (
+            <div style={problem}>
               {`The saved dose "${unreadableDose}" is not a number of tsp or fl oz. Enter it again.`}
             </div>
           )}
           {overLabel && (
-            <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 13, lineHeight: 1.4 }}>
-              {`${doseText(dose.amount, doseUnit)} is more than the label allows ${labelRate.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`} (${doseRange}). Check the label before you inject.`}
+            <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
+              {`${doseText(dose.amount, doseUnit)} is more than the label allows ${labelRate.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`}${doseRange ? ` (${doseRange})` : ""}. Check the label before you inject.`}
             </div>
           )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -14674,14 +14741,13 @@ export function CompletionPanel({
     (calibrationRequired || (completionImprovements && isLawn)) &&
     !isIncompleteVisit &&
     (treatmentPlanLoading || (isLawn && protocolActionsLoading));
-  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
+  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts, products);
   // The injection record's product list: this visit's rows the closeout flags
-  // as injections, and any row whose catalog label is an injection rate in mL
-  // (per inch of trunk or per palm), with that rate for the dose helper.
-  const injectionProducts = selectedProducts.flatMap((row) => {
+  // as injections (by name or by the catalog's injection label), each with its
+  // label rate in mL per inch of trunk or per palm for the dose helper.
+  const injectionProducts = treeShrubProductFlags.injectionRows.map((row) => {
     const catalogRow = (products || []).find((p) => String(p.id) === String(row.productId));
-    const rate = injectionLabelRate(catalogRow || {});
-    return rate || treeShrubProductFlags.injectionRows.includes(row) ? [{ name: row.name, rate }] : [];
+    return { name: row.name, rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }) };
   });
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({

@@ -163,9 +163,71 @@ describe('Tree/Shrub closeout validation', () => {
     for (const dose of ['20 mL', '20ml', '5 cc', '2 milliliters', '10 mL per inch DBH']) {
       expect(codes(dose)).toContain('tree_shrub_injection_dose_ml');
     }
-    for (const dose of ['½ fl oz', '4 tsp', '1.5 oz', 'accurate to the label']) {
+    for (const dose of ['½ fl oz', '4 tsp', '1.5 oz']) {
       expect(codes(dose)).not.toContain('tree_shrub_injection_dose_ml');
       expect(codes(dose)).not.toContain('tree_shrub_injection_dose_required');
+    }
+  });
+
+  test('server enforces a readable tsp or fl oz dose, mirroring the client parser', () => {
+    // A stale native client or direct API call can submit any text; the dose
+    // must still read as a positive number of tsp or fl oz.
+    const blocksFor = (dose) => validate({
+      completion: {
+        injectionPerformed: true,
+        injectionRecord: {
+          plantSpecies: 'Sabal palm',
+          sizeClassOrDbh: '12 in DBH',
+          product: 'Palm-Jet Mg',
+          dose,
+          numberOfPorts: 4,
+          targetIssue: 'Magnesium deficiency',
+          followUpDate: '2026-10-15',
+        },
+      },
+    }).blocks;
+
+    for (const dose of ['1 fl oz', '1.5 tsp', '½ fl oz', '1½ tsp', '1 1/2 tsp', '1/2 tsp', '2 teaspoons', '2 oz', '.5 tsp', '1 fluid ounce', '2 fl. oz.', '2floz']) {
+      expect(blocksFor(dose)).toEqual([]);
+    }
+    for (const dose of ['a squirt', '2 gallons', '0 tsp', '. tsp', '1/0 tsp', '0/2 tsp', '2', 'tsp', '1 tbsp']) {
+      const blocks = blocksFor(dose);
+      expect(blocks.map((block) => block.code)).toEqual(['tree_shrub_injection_dose_unreadable']);
+      expect(blocks[0]).toMatchObject({
+        message: 'Enter the injection dose as a number of tsp or fl oz.',
+        field: 'injectionRecord.dose',
+      });
+    }
+    // mL keeps its own code and takes precedence over the unreadable block.
+    expect(blocksFor('20 mL').map((block) => block.code)).toEqual(['tree_shrub_injection_dose_ml']);
+    expect(blocksFor('').map((block) => block.code)).toEqual(['tree_shrub_injection_dose_required']);
+  });
+
+  test('a catalog row injection method or label unit requires the injection record', () => {
+    // "Arborjet PHOSPHO-Jet Systemic Fungicide" names no injection word; only
+    // the catalog's application_method / default_unit (seeded by the per-basis
+    // rate migration) marks it.
+    const codesFor = (row) => validate({
+      products: [{ productId: 'pj-1', name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', totalAmount: 2, amountUnit: 'tsp' }],
+      productRows: [{ id: 'pj-1', name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', category: 'fungicide', ...row }],
+    }).blocks.map((block) => block.code);
+
+    expect(codesFor({})).not.toContain('tree_shrub_injection_species_required');
+    for (const row of [
+      { default_unit: 'ml/inch dbh' },
+      { default_unit: 'ml/palm' },
+      { default_unit: 'g/inch dbh' },
+      { default_unit: 'mL / in DBH' },
+      { application_method: 'trunk_injection' },
+    ]) {
+      expect(codesFor(row)).toEqual(expect.arrayContaining([
+        'tree_shrub_injection_species_required',
+        'tree_shrub_injection_dose_required',
+      ]));
+    }
+    // Other label units and methods stay out.
+    for (const row of [{ default_unit: 'oz/1000 sq ft' }, { default_unit: 'ml/gal' }, { application_method: 'foliar_spray' }]) {
+      expect(codesFor(row)).not.toContain('tree_shrub_injection_species_required');
     }
   });
 

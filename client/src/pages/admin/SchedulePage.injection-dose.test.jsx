@@ -23,7 +23,12 @@ const PALM_JET = {
   id: 'palm-jet', name: 'Arborjet Palm-Jet Palm Nutrition', category: 'fertilizer',
   default_rate: '5-30', default_unit: 'ml/palm', application_method: 'trunk_injection',
 };
+const PHOSPHO_JET = {
+  id: 'phospho-jet', name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', category: 'fungicide',
+  default_rate: '3.5-7', default_unit: 'ml/inch dbh', application_method: 'trunk_injection',
+};
 const IMA_RATE = injectionLabelRate(IMA_JET);
+const PHOSPHO_RATE = injectionLabelRate(PHOSPHO_JET);
 const PALM_RATE = injectionLabelRate(PALM_JET);
 const COLORS = { card: '#fff', border: '#ddd', text: '#111', muted: '#666', error: '#c00', warn: '#e60' };
 
@@ -65,13 +70,17 @@ describe('the injection record', () => {
     await waitFor(() => expect(record().product).toBe(IMA_JET.name));
     fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
     expect(record().sizeClassOrDbh).toBe('10 in DBH');
+    // The label splits its rate: no dose until the tech picks the band.
+    expect(screen.queryByText('Dose for this tree')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Label rate'), { target: { value: 'low' } });
     expect(screen.getByText('Dose for this tree')).toBeTruthy();
-    expect(screen.getByText(injectionDoseText(IMA_RATE, 10))).toBeTruthy();
+    expect(screen.getByText(injectionDoseText(IMA_RATE, 10, 'low'))).toBeTruthy();
+    expect(screen.getByText('¼ tsp per inch of trunk')).toBeTruthy();
 
-    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1' } });
-    expect(record().dose).toBe('1 fl oz');
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '3' } });
+    expect(record().dose).toBe('3 fl oz');
     fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'tsp' } });
-    expect(record().dose).toBe('1 tsp');
+    expect(record().dose).toBe('3 tsp');
     expect([...screen.getByLabelText('Dose unit').options].map((option) => option.value)).toEqual(['tsp', 'fl_oz']);
     expect(screen.queryByRole('note')).toBeNull();
     expect(document.body.textContent).not.toMatch(/\bml\b/i);
@@ -89,6 +98,55 @@ describe('the injection record', () => {
     // 2 fl oz is 59 mL, inside the label's 60 mL for a 10-inch trunk.
     fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '2' } });
     expect(screen.queryByRole('note')).toBeNull();
+    // On the low rate the same tree is allowed 20 mL: 2 fl oz is over it.
+    fireEvent.change(screen.getByLabelText('Label rate'), { target: { value: 'low' } });
+    expect(screen.getByRole('note').textContent).toMatch(/^2 fl oz is more than the label allows for a 10-inch trunk \(2¼ – 4 tsp\)/);
+  });
+
+  it('settles a size-banded label by the trunk, with nothing to pick', async () => {
+    render(<Block injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(PHOSPHO_JET.name));
+    expect(screen.queryByLabelText('Label rate')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
+    expect(screen.getByText(injectionDoseText(PHOSPHO_RATE, 10, ''))).toBeTruthy();
+  });
+
+  it('works out no dose for an injectable with no band table', async () => {
+    const rate = injectionLabelRate({ name: 'Some Injectable', default_rate: '1-6', default_unit: 'ml/inch dbh' });
+    render(<Block injectionProducts={[{ name: 'Some Injectable', rate }]} />);
+    await waitFor(() => expect(record().product).toBe('Some Injectable'));
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
+    expect(screen.queryByText('Dose for this tree')).toBeNull();
+    expect(screen.getByText(/No dose is worked out for this product/)).toBeTruthy();
+  });
+
+  it('reads a typed fraction, and never runs its digits together', () => {
+    render(<Block injectionProducts={[]} initial={{ injectionRecord: { product: 'Tree-age' } }} />);
+    const amount = screen.getByLabelText('Dose amount');
+    fireEvent.change(amount, { target: { value: '1/2' } });
+    expect(record().dose).toBe('0.5 fl oz');
+    fireEvent.change(amount, { target: { value: '1 1/' } });
+    expect(record().dose).toBe('');
+    expect(amount.value).toBe('1 1/');
+    expect(screen.getByText('Enter the dose as a number, like 1.5 or 1 1/2.')).toBeTruthy();
+    fireEvent.change(amount, { target: { value: '1 1/2' } });
+    expect(record().dose).toBe('1.5 fl oz');
+    expect(screen.queryByText(/Enter the dose as a number/)).toBeNull();
+  });
+
+  it('never reads a saved trunk size in another unit as inches', () => {
+    render(
+      <Block
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '30 cm DBH' } }}
+      />,
+    );
+    expect(screen.getByLabelText('Trunk (inches across, chest high)').value).toBe('');
+    expect(screen.getByText('The saved size "30 cm DBH" is not in inches. Enter the trunk in inches.')).toBeTruthy();
+    expect(screen.queryByText('Dose for this tree')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '12' } });
+    expect(record().sizeClassOrDbh).toBe('12 in DBH');
+    expect(screen.getByText('Dose for this tree')).toBeTruthy();
   });
 
   it('doses a palm per palm, with no trunk size', async () => {
@@ -96,9 +154,11 @@ describe('the injection record', () => {
     await waitFor(() => expect(record().product).toBe(PALM_JET.name));
     expect(screen.queryByLabelText('Trunk (inches across, chest high)')).toBeNull();
     expect(screen.getByPlaceholderText('DBH / palm size')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Palm size'), { target: { value: 'medium' } });
     expect(screen.getByText('Dose per palm')).toBeTruthy();
+    expect(screen.getByText(injectionDoseText(PALM_RATE, '', 'medium'))).toBeTruthy();
     expect(screen.getByText('Dose you put in, per palm')).toBeTruthy();
-    expect(screen.getByText(injectionLabelText(PALM_RATE))).toBeTruthy();
+    expect(screen.getByText(injectionLabelText(PALM_RATE, PALM_RATE.bands[1]))).toBeTruthy();
   });
 
   it('keeps an explicit other product, never putting the one injection product back', async () => {
@@ -187,6 +247,17 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     await waitFor(() => expect(screen.getByLabelText('Injection product').value).toBe(IMA_JET.name));
     expect(screen.getByText('¼ – 1 tsp per inch of trunk')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
-    expect(screen.getByText(injectionDoseText(IMA_RATE, 10))).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Label rate'), { target: { value: 'low' } });
+    expect(screen.getByText(injectionDoseText(IMA_RATE, 10, 'low'))).toBeTruthy();
+  });
+
+  it('asks for the injection record for an injectable named only by its catalog label', async () => {
+    await act(async () => {
+      render(<CompletionPanel service={SHRUB_VISIT} products={[PHOSPHO_JET]} onClose={() => {}} onSubmit={vi.fn()} />);
+    });
+    const search = screen.getByPlaceholderText(width < 640 ? 'Search products…' : 'Search products...');
+    fireEvent.change(search, { target: { value: PHOSPHO_JET.name } });
+    fireEvent.click(await screen.findByText(PHOSPHO_JET.name));
+    await waitFor(() => expect(screen.getByLabelText('Injection product').value).toBe(PHOSPHO_JET.name));
   });
 });
