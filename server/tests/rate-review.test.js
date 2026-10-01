@@ -644,6 +644,12 @@ describe('anniversary and tenure', () => {
     expect(P.monthsBetween('2025-12-05', '2026-12-05')).toBe(12);
     expect(P.monthsBetween('2025-12-05', '2026-12-04')).toBe(11);
     expect(P.monthsBetween('2027-01-01', '2026-12-01')).toBe(0);
+    // a Feb 29 start observed on Feb 28 (common year) is a full year; Jan 31 → Feb 28 is one month
+    expect(P.monthsBetween('2028-02-29', '2029-02-28')).toBe(12);
+    expect(P.monthsBetween('2028-02-29', P.anniversaryInWindow('2028-02-29', '2029-02-01', '2029-02-28'))).toBe(12);
+    expect(P.monthsBetween('2026-01-31', '2026-02-28')).toBe(1);
+    expect(P.monthsBetween('2026-01-31', '2026-02-27')).toBe(0);
+    expect(P.monthsBetween('2026-01-30', '2026-03-29')).toBe(1);
   });
   test('the review date is the anniversary\'s occurrence inside the window; a year-long window holds everyone', () => {
     expect(P.anniversaryInWindow('2024-12-11', '2026-12-01', '2026-12-31')).toBe('2026-12-11');

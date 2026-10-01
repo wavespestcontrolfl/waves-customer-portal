@@ -268,11 +268,16 @@ function ymdToUtcMs(ymd) {
   return Date.UTC(y, m - 1, d);
 }
 
+// Whole calendar months from `from` to `to`. The start day is clamped to the
+// target month's length, so a line started Feb 29 is 12 months old on the
+// Feb 28 it is observed (anniversaryInWindow) in a common year, and Jan 31
+// → Feb 28 is one month.
 function monthsBetween(fromYmd, toYmd) {
   const a = ymdParts(fromYmd);
   const b = ymdParts(toYmd);
   let months = (b.y - a.y) * 12 + (b.m - a.m);
-  if (b.d < a.d) months -= 1;
+  const lastDayOfTargetMonth = new Date(Date.UTC(b.y, b.m, 0)).getUTCDate();
+  if (b.d < Math.min(a.d, lastDayOfTargetMonth)) months -= 1;
   return Math.max(0, months);
 }
 
