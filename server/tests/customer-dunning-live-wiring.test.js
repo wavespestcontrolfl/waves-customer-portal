@@ -302,13 +302,84 @@ describe('sendNextTouchNow (the invoice follow-up send-now)', () => {
 
   test('not owned: re-armed under the shared key, then the per-invoice touch (undefined result, as before)', async () => {
     const spy = jest.spyOn(Wiring, 'sendNowForSchedule');
-    mockDb.firsts['invoice_followup_sequences as s'] = undefined; // nothing to fire in this fake
+    // fireStep's locked re-read finds no due time in this fake, so it returns without a claim
+    mockDb.firsts['invoice_followup_sequences as s'] = { id: 'seq-1', invoice_id: 'inv-1', customer_id: CUST, step_index: 2 };
     await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true })).resolves.toBeUndefined();
     expect(spy).not.toHaveBeenCalled();
     const rearm = writes().find((w) => w.table === 'invoice_followup_sequences');
     expect(rearm.args[0]).toMatchObject({ status: 'active', next_touch_at: expect.any(Date) });
     const lockAt = mockDb.log.findIndex((e) => e.raw && /pg_advisory_xact_lock_shared/.test(e.raw));
     expect(lockAt).toBeLessThan(mockDb.log.indexOf(rearm));
+  });
+
+  // Codex local review P2: the displayed invoice was paid (or its row finished) before the operator confirmed the
+  // COMBINED step. The early exits used to answer undefined -> 200 {ok:true} -> "Done", with nothing sent.
+  describe('a combined confirmation is judged before this invoice\'s own exits', () => {
+    const owned = () => { mockDb.raw = async (sql) => ({ rows: /customer_dunning_schedules/.test(sql) ? [{ id: 'sched-1' }] : [] }); };
+    const confirmed = { scheduleId: 'sched-1', stepIndex: 4 };
+
+    test.each([
+      ['the invoice was paid', () => { mockDb.firsts.invoices = { id: 'inv-1', customer_id: CUST, status: 'paid' }; }],
+      ['its sequence completed', () => { mockDb.firsts.invoice_followup_sequences.status = 'completed'; }],
+      ['its sequence was stopped', () => { mockDb.firsts.invoice_followup_sequences.status = 'stopped'; }],
+    ])('%s, the schedule still open: the confirmed combined step goes out through the schedule', async (_label, arrange) => {
+      mockGates.live = true;
+      owned();
+      arrange();
+      const routed = { routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'advanced' };
+      const spy = jest.spyOn(Admin, 'sendNow').mockResolvedValue(routed);
+      await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true, combined: confirmed })).resolves.toEqual(routed);
+      expect(spy).toHaveBeenCalledWith('sched-1', { now: expect.any(Date), expectedStepIndex: 4 });
+      expect(writes()).toEqual([]);
+      const raws = mockDb.log.filter((e) => e.raw);
+      expect(raws[0].raw).toMatch(/pg_advisory_xact_lock_shared/);
+      expect(raws[0].bindings).toEqual([lockKey(CUST)]);
+      expect(raws[1].raw).toMatch(/customer_dunning_schedules/);
+    });
+
+    test('the invoice was paid and the schedule closed: COMBINED_SCHEDULE_CLOSED (a refusal), never a silent success', async () => {
+      mockDb.firsts.invoices = { id: 'inv-1', customer_id: CUST, status: 'paid' };
+      const spy = jest.spyOn(Admin, 'sendNow');
+      await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true, combined: confirmed }))
+        .resolves.toMatchObject({ ok: false, reason: 'combined_schedule_closed', scheduleId: 'sched-1' });
+      expect(spy).not.toHaveBeenCalled();
+      expect(writes()).toEqual([]);
+    });
+
+    test('no sequence row: the customer comes from the invoice, and the schedule still answers the confirmation', async () => {
+      mockGates.live = true;
+      owned();
+      mockDb.firsts.invoice_followup_sequences = undefined;
+      const routed = { routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'advanced' };
+      jest.spyOn(Admin, 'sendNow').mockResolvedValue(routed);
+      await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true, combined: confirmed })).resolves.toEqual(routed);
+      mockDb.firsts.invoices = undefined; // nor an invoice: nothing to route, a refusal
+      await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true, combined: confirmed }))
+        .resolves.toMatchObject({ ok: false, reason: 'combined_schedule_closed' });
+    });
+  });
+
+  describe('a per-invoice send-now with nothing to send is an explicit refusal, never undefined (the route\'s 200)', () => {
+    const FINISHED = { ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice is paid or its reminders are finished.' };
+    test.each([
+      ['paid', () => { mockDb.firsts.invoices = { id: 'inv-1', customer_id: CUST, status: 'paid' }; }, FINISHED],
+      ['void', () => { mockDb.firsts.invoices = { id: 'inv-1', customer_id: CUST, status: 'void' }; }, FINISHED],
+      ['invoice missing', () => { mockDb.firsts.invoices = undefined; }, FINISHED],
+      ['sequence completed', () => { mockDb.firsts.invoice_followup_sequences.status = 'completed'; }, FINISHED],
+      ['sequence stopped', () => { mockDb.firsts.invoice_followup_sequences.status = 'stopped'; }, FINISHED],
+      ['no sequence', () => { mockDb.firsts.invoice_followup_sequences = undefined; },
+        { ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice has no follow-up reminders.' }],
+    ])('%s: refused, nothing re-armed, no key taken', async (_label, arrange, expected) => {
+      arrange();
+      await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true })).resolves.toEqual(expected);
+      expect(writes()).toEqual([]);
+      expect(db.raw).not.toHaveBeenCalled();
+    });
+
+    test('the row vanished between the re-arm and the fire: refused, not a silent success', async () => {
+      mockDb.firsts['invoice_followup_sequences as s'] = undefined;
+      await expect(Followups.sendNextTouchNow('inv-1', { operatorInitiated: true })).resolves.toEqual(FINISHED);
+    });
   });
 
   test('promoted between the re-arm and the fire: fireStep refuses under the key and the click goes to the schedule', async () => {

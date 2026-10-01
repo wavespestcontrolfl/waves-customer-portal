@@ -2850,48 +2850,80 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
   });
 }
 
+// An operator send-now with nothing to send never answers as a success (the panel would toast "Done" over
+// a click that sent nothing): the route turns these into a 409 with this copy.
+const SEND_NOW_FINISHED = Object.freeze({
+  ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice is paid or its reminders are finished.',
+});
+const SEND_NOW_NO_SEQUENCE = Object.freeze({
+  ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice has no follow-up reminders.',
+});
+
 /**
  * Send the next touch right now, even if it's not due yet. Virginia uses this
  * when a customer is dodging (e.g. "push them to day-14 language today").
  *
- * Returns undefined for a per-invoice send. For a customer on an open
- * customer-level schedule it returns the schedule's send-now result
- * ({ routedTo: 'customer_schedule', scheduleId, ... }, customer-dunning/wiring.js).
- * The combined step goes out only when `combined` ({ scheduleId, stepIndex },
- * the step the operator was shown and confirmed) names that schedule at its
- * current step; otherwise nothing is sent (COMBINED_CONFIRM_REQUIRED, or
- * SCHEDULE_CHANGED for a step that moved on). A `combined` confirmation for a
- * customer no longer on a schedule sends nothing either: the invoice's own
- * step is not the message the operator confirmed (COMBINED_SCHEDULE_CLOSED).
+ * Returns undefined for a per-invoice send that went to fireStep, and
+ * { ok: false, reason: 'nothing_to_send', message } when there is nothing to
+ * send (no sequence, a stopped / completed one, a paid or void invoice). For a
+ * customer on an open customer-level schedule it returns the schedule's
+ * send-now result ({ routedTo: 'customer_schedule', scheduleId, ... },
+ * customer-dunning/wiring.js). The combined step goes out only when `combined`
+ * ({ scheduleId, stepIndex }, the step the operator was shown and confirmed)
+ * names that schedule at its current step; otherwise nothing is sent
+ * (COMBINED_CONFIRM_REQUIRED, or SCHEDULE_CHANGED for a step that moved on). A
+ * `combined` confirmation for a customer no longer on a schedule sends nothing
+ * either: the invoice's own step is not the message the operator confirmed
+ * (COMBINED_SCHEDULE_CLOSED).
+ *
+ * A `combined` confirmation is judged BEFORE this invoice's own exits: the
+ * operator confirmed the schedule's step, not this invoice's, so this invoice
+ * having been paid (or its row finished) since the panel loaded does not end
+ * the click while the schedule still covers the customer's other invoices.
  */
 async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined = null } = {}) {
+  const Wiring = () => require('./customer-dunning/wiring');
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
-  if (!seq || seq.status === 'stopped' || seq.status === 'completed') return;
+
+  if (combined) {
+    const customerId = seq?.customer_id
+      ?? (await db('invoices').where({ id: invoiceId }).first('customer_id'))?.customer_id ?? null;
+    if (!customerId) return Wiring().combinedScheduleClosed(combined.scheduleId);
+    // Read under the customer's dunning key (SHARED), as every per-invoice path reads ownership.
+    let owner = null;
+    await db.transaction(async (trx) => {
+      await lockCustomerDunningShared(trx, customerId);
+      owner = await openCustomerScheduleId(trx, customerId);
+    });
+    return owner
+      ? Wiring().sendNowForInvoiceOnSchedule(owner, customerId, combined)
+      : Wiring().combinedScheduleClosed(combined.scheduleId);
+  }
+
+  if (!seq) return SEND_NOW_NO_SEQUENCE;
+  if (seq.status === 'stopped' || seq.status === 'completed') return SEND_NOW_FINISHED;
 
   const invoice = await db('invoices').where({ id: invoiceId }).first();
-  if (!invoice || isTerminalInvoice(invoice)) return;
+  if (!invoice || isTerminalInvoice(invoice)) return SEND_NOW_FINISHED;
 
   // Temporarily set next_touch_at in the past + status active, then fire —
-  // unless the customer is on a customer-level schedule: then the click sends
-  // the schedule's CURRENT step instead, and this row (membership state) is
-  // left exactly as it is. Checked and written under the customer's dunning
-  // key (SHARED), so a promotion cannot commit between the check and the write.
+  // unless the customer is on a customer-level schedule: then the click needs
+  // the operator's confirmation of the schedule's CURRENT step (refused here,
+  // nothing sent), and this row (membership state) is left exactly as it is.
+  // Checked and written under the customer's dunning key (SHARED), so a
+  // promotion cannot commit between the check and the write.
   let ownedBy = null;
-  let confirmedCombinedGone = false;
   await db.transaction(async (trx) => {
     await lockCustomerDunningShared(trx, seq.customer_id);
     ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
     if (ownedBy) return;
-    if (combined) { confirmedCombinedGone = true; return; }
     await trx('invoice_followup_sequences').where({ id: seq.id }).update({
       updated_at: trx.fn.now(),
       status: 'active',
       next_touch_at: new Date(Date.now() - 1000),
     });
   });
-  const Wiring = () => require('./customer-dunning/wiring');
-  if (ownedBy) return Wiring().sendNowForInvoiceOnSchedule(ownedBy, seq.customer_id, combined);
-  if (confirmedCombinedGone) return Wiring().combinedScheduleClosed(combined.scheduleId);
+  if (ownedBy) return Wiring().sendNowForInvoiceOnSchedule(ownedBy, seq.customer_id, null);
 
   const row = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
@@ -2903,11 +2935,13 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
       'i.service_date', 'i.due_date', 'i.invoice_number',
     )
     .first();
+  if (!row) return SEND_NOW_FINISHED;
 
   // A promotion that committed after the re-arm above: fireStep refused under
-  // the key (nothing was claimed or sent), so the click goes to the schedule.
-  const fired = row ? await fireStep(row, { operatorInitiated }) : undefined;
-  if (fired?.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(fired.ownedBy, seq.customer_id, combined);
+  // the key (nothing was claimed or sent), so the click needs the schedule's
+  // step confirmed.
+  const fired = await fireStep(row, { operatorInitiated });
+  if (fired?.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(fired.ownedBy, seq.customer_id, null);
   return undefined;
 }
 

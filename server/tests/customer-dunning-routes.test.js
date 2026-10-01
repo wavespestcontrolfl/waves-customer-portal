@@ -160,6 +160,21 @@ describe('POST /api/admin/invoices/:id/followup/send-now', () => {
     });
   });
 
+  // Codex local review P2: an early exit (paid invoice, finished reminders) answered 200 { ok: true } and the
+  // panel toasted "Done" over a click that sent nothing.
+  test('nothing to send (a paid invoice, finished reminders, no sequence): 409 NOT_SENT with the plain copy, never 200', async () => {
+    await withServer(async (base) => {
+      mockSendNextTouchNow.mockResolvedValueOnce({ ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice is paid or its reminders are finished.' });
+      const finished = await post(base, '/api/admin/invoices/inv-1/followup/send-now');
+      expect(finished.status).toBe(409);
+      expect(await finished.json()).toEqual({ error: 'Not sent: this invoice is paid or its reminders are finished.', code: 'NOT_SENT' });
+      mockSendNextTouchNow.mockResolvedValueOnce({ ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice has no follow-up reminders.' });
+      const none = await post(base, '/api/admin/invoices/inv-1/followup/send-now');
+      expect(none.status).toBe(409);
+      expect((await none.json()).error).toBe('Not sent: this invoice has no follow-up reminders.');
+    });
+  });
+
   test('a customer on a schedule: the schedule\'s result as JSON (200 sent, 409 in flight with the copy, 409 dark)', async () => {
     await withServer(async (base) => {
       mockSendNextTouchNow.mockResolvedValueOnce({ routedTo: 'customer_schedule', scheduleId: 'sched-1', outcome: 'advanced' });

@@ -3718,6 +3718,9 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
       ? { scheduleId: typeof body.scheduleId === 'string' ? body.scheduleId : null, stepIndex: Number.isInteger(body.stepIndex) ? body.stepIndex : null }
       : null;
     const routed = await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true, combined });
+    // Nothing to send (no sequence, a finished one, a paid or void invoice): never a 200 the panel
+    // would read as "Done".
+    if (routed?.reason === 'nothing_to_send') return res.status(409).json({ error: routed.message, code: 'NOT_SENT' });
     // A customer on a customer-level reminder schedule: the click sent (or
     // refused to send) the schedule's current step (dunning consolidation §8).
     if (routed?.routedTo === 'customer_schedule') {
