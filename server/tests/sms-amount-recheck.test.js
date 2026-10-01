@@ -951,3 +951,10 @@ describe('elliptical Zelle denials', () => {
     expect(zelleClauseTexts(b).denialText).toBe('');
   });
 });
+
+// Codex round-56 P2: an inline "except" / "excluding" starts a denial clause
+test.each(['We accept Zelle except for invoice #0002.', 'We accept Zelle excluding invoice WPC-2026-0002.'])('inline exception is a denial: %s', (b) => {
+  const { hasNegativeZelleAvailabilityClaim: neg, zelleClauseTexts } = require('../services/sms-amount-recheck');
+  expect(neg(b)).toBe(true);
+  expect(zelleClauseTexts(b)).toEqual({ offerText: 'We accept Zelle', denialText: expect.stringMatching(/^(?:except|excluding)/) });
+});

@@ -638,3 +638,11 @@ test('a positive balance is not stated when the invoice history is cut / unmodel
   expect(kinds(billing({ outstandingBalance: 95 }))).toContain('balance');
   expect(kinds(billing({ outstandingBalance: 95, hasUnmodeledInvoice: true }))).not.toContain('balance');
 });
+
+// Codex round-56 P2: every tender subject in a state is a receipt claim
+test.each(['Your Zelle is here.', 'Your ACH is here.', 'The Zelle came in.'])('held: %s', (b) => {
+  expect(c.assertsPaymentStatus(b, { inboundText: 'Did you get my Zelle?' })).toBe(true);
+});
+test.each(['Your Zelle payment works fine for this invoice.', 'You can send your Zelle to pay@example.com.'])('how-to-pay, not a status: %s', (b) => {
+  expect(c.assertsPaymentStatus(b, { inboundText: 'Can I pay by Zelle?' })).toBe(false);
+});

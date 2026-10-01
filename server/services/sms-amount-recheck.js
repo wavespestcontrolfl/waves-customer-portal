@@ -84,7 +84,8 @@ const ZELLE_NEGATION_RE = new RegExp(
 );
 // Clause boundaries: sentence ends, commas, "and"/"but", dashes.
 // Round-12 P1: an UNSPACED em/en dash ends a clause too ("processing—does that answer…").
-const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s?[—–]\s?|\s-\s/;
+// Codex round-56 P2: an inline "except" / "excluding" starts a clause too ("We accept Zelle except for invoice #0002" - the exception is a denial)
+const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s(?=(?:except|excluding)\b)|\s?[—–]\s?|\s-\s/;
 
 // Codex round-53 P2: a negator governing a payment-METHOD LIST carries to Zelle at its end ("We don't take cards and Zelle", "We
 // don't accept checks, cards, or Zelle") - splitting on the commas / "and" first would leave a bare "Zelle." that reads as an offer.
