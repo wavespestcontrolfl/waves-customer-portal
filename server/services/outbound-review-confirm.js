@@ -811,7 +811,11 @@ async function releaseStreetLevelHoldForCompletion(svc, actor = {}, routeTag = '
     if (!svc?.id || svc.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || svc.customer_confirmed === true) return false;
     const dbh = require('../models/db');
     if (!(await isStreetLevelHoldVisit(svc.id, dbh))) return false;
-    if (String(svc.status) === 'pending') {
+    // Read the CURRENT row: completion may already have moved the visit to 'completed'.
+    let row = await dbh('scheduled_services').where({ id: svc.id }).first(
+      'id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'source_call_log_id', 'is_callback', 'estimated_price', 'status',
+    );
+    if (row && String(row.status) === 'pending') {
       const { transitionJobStatus } = require('./job-status');
       await transitionJobStatus({
         jobId: svc.id,
@@ -821,16 +825,13 @@ async function releaseStreetLevelHoldForCompletion(svc, actor = {}, routeTag = '
         notes: 'Confirmed by completing the visit (the address was confirmed on site)',
         legacyOutboundActivation: 'caller',
       });
+      row = { ...row, status: 'confirmed' };
     }
-    const row = await dbh('scheduled_services').where({ id: svc.id }).first(
-      'id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'source_call_log_id', 'is_callback', 'estimated_price', 'status',
-    );
     if (!row) return false;
     const released = await runOfficeConfirmActivation(dbh, row, routeTag, { skipCardRequest: true });
     if (released) {
       // The caller's snapshot reflects the confirmed state from here on.
       svc.customer_confirmed = true;
-      if (String(svc.status) === 'pending') svc.status = 'confirmed';
     }
     return released;
   } catch (e) {
@@ -878,7 +879,11 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // hold are refused). A hold the office confirmed whose hook then
     // failed before the stamp stays on the retry rail. Fails closed.
     if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db)) {
-      const approved = row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId);
+      // A hold the office confirmed (recorded transition) OR one that was COMPLETED (completion is
+      // field confirmation — only the completion engine completes a hold; the status routes refuse
+      // it) may retry its activation; a merely moved hold may not.
+      const approved = row.status === 'completed'
+        || (row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId));
       if (!approved) {
         logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
         return false;

@@ -267,10 +267,15 @@ describe('owner ruling 2026-10-01: completing the visit confirms the address (sh
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(releaseStreetLevelHoldForCompletion(baseVisit(), actor)).resolves.toBe(false);
     const s = fs.readFileSync(require.resolve('../services/complete-scheduled-service.js'), 'utf8');
-    const claimAt = s.indexOf('completionAttempt = claim.attempt;');
-    const rel = s.indexOf('releaseStreetLevelHoldForCompletion(svc, completionInput.actor)', claimAt);
-    expect(rel).toBeGreaterThan(claimAt);
-    expect(rel - claimAt).toBeLessThan(800);
+    // Only after the completion is DURABLY committed (fresh path and the resume path), never at the
+    // claim: a later rejected caption / tip / ownership conflict must not approve the address.
+    const calls = [];
+    let from = 0;
+    for (;;) { const i = s.indexOf('releaseStreetLevelHoldForCompletion(svc, completionInput.actor)', from); if (i === -1) break; calls.push(i); from = i + 1; }
+    expect(calls).toHaveLength(2);
+    for (const i of calls) expect(s.slice(i - 900, i)).toContain('durableCompletionCommitted = true;');
+    expect(s.indexOf('completionAttempt = claim.attempt;')).toBeLessThan(calls[0]);
+    expect(s.slice(s.indexOf('completionAttempt = claim.attempt;'), s.indexOf('completionAttempt = claim.attempt;') + 900)).not.toContain('releaseStreetLevelHoldForCompletion');
     // Every completer goes through completeScheduledService (the route, the packets, the issued-invoice closeout).
     for (const f of ['../routes/admin-dispatch.js', '../services/visit-completion-packets.js', '../services/invoice-issued-closeout.js']) {
       expect(fs.readFileSync(require.resolve(f), 'utf8')).toContain('completeScheduledService(');
@@ -287,5 +292,19 @@ describe('the technician hears about a moved hold the office approves', () => {
       expect(act).toBeGreaterThan(0);
       expect(notify).toBeGreaterThan(act);
     }
+  });
+});
+
+describe('a completed hold (completion recorded the approval) may retry its failed activation', () => {
+  test('status completed passes the guard without a recorded transition; a merely moved hold still does not', async () => {
+    const calls = { hold: 0, updates: [] };
+    const completed = makeHandle({ visit: baseVisit({ status: 'completed' }), held: true, calls });
+    await activateLegacyOutboundReviewRowIfNeeded(completed, 'v1', 'legacy-activation-sweep').catch(() => {});
+    expect(calls.history || 0).toBe(0);                         // no transition lookup needed
+    expect(calls.updates.length + calls.hold).toBeGreaterThan(0); // proceeded past the guard
+    const moved = { hold: 0, updates: [] };
+    const h = makeHandle({ visit: baseVisit({ status: 'confirmed' }), held: true, history: false, calls: moved });
+    expect(await activateLegacyOutboundReviewRowIfNeeded(h, 'v1', 'rebooker-reschedule')).toBe(false);
+    expect(moved.updates).toHaveLength(0);
   });
 });

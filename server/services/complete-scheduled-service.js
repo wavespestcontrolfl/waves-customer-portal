@@ -3927,11 +3927,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       return ({ status: 200, body: claim.payload });
     }
     completionAttempt = claim.attempt;
-    // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as
-    // confirming its address — release the hold (office-confirm activation, attributed to the
-    // completing user) before completion proceeds, so its recap is no longer a held message.
-    // A no-op for every other visit.
-    await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor);
     const resumingCommittedCompletion = claim.action === 'resume';
     // The prior run released the attempt itself (the SMS / token-mint /
     // mint-failure 503s) rather than dying mid-flight: none of its lanes is
@@ -5075,6 +5070,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         ? resumedStructuredNotes.customerRequestedReview
         : null;
       durableCompletionCommitted = true;
+      // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
+      // its address — released only now that the completion is durably committed (a rejected
+      // completion never approves the address) and before any customer delivery below, so the
+      // recap is no longer a held message. A no-op for every other visit; best-effort.
+      await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor);
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
@@ -7417,6 +7417,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return { status: 202, body: { serviceRecordId: record.id } };
         }
         durableCompletionCommitted = true;
+        // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
+        // its address — released only now that the completion is durably committed (a rejected
+        // completion never approves the address) and before any customer delivery below, so the
+        // recap is no longer a held message. A no-op for every other visit; best-effort.
+        await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor);
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
