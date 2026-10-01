@@ -340,9 +340,10 @@ describe('the amounts the facts publish are the amounts the guards authorize', (
     // guard directly, and the fire-time revalidation through the shared
     // send-time recheck the scheduler calls.
     expect(drafter).toContain("require('./context-aggregator').authorizedDuesCents(context)");
-    expect(drafter).toContain('billingAmountCents(context, { settledOnly: realAnswers })');
+    // PR #5331: the real-answers remainder guard and the send-time recheck both ask it plan-aware.
+    expect(drafter).toContain('billingAmountCents(context, { planAware: true })');
     expect(scheduler).toContain("require('./sms-amount-recheck')");
-    expect(amountRecheck).toContain('drafter.billingAmountCents(ctx)');
+    expect(amountRecheck).toContain('drafter.billingAmountCents(ctx, { planAware: strict })');
   });
 
   test('the published dues come from the priced fact, never the raw rate', () => {

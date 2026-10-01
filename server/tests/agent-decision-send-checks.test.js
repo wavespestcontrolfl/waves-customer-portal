@@ -67,7 +67,7 @@ test('parseInputSnapshot: string, object, malformed, absent', () => {
 test('everything passes → null; the recheck carries the snapshot lookup including serviceType', async () => {
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ city: 'Venice', customerId: 'c1', serviceType: 'Lawn Care' }));
-  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers', zelleInvoiceId: null, inboundMessage: null, paymentStatusSnapshot: null, trustOwedAmounts: false });
+  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers', zelleInvoiceId: null, inboundMessage: null, paymentStatusSnapshot: null, humanEditedBody: false, trustOwedAmounts: false });
 });
 
 // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
@@ -274,7 +274,7 @@ describe('customerless decisions (round 28)', () => {
     'Your payment was received.', "Zelle isn't available right now.", 'You can use Zelle.', 'You owe $95.', 'Your balance is zero.', 'Your payment settled.',
     'Your invoice is settled.', 'Your card was declined.',
   ])('v12 blocked: %s', async (body) => {
-    await expect(agentDecisionSendBlockReason({ decision: v12(), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    await expect(agentDecisionSendBlockReason({ decision: v12({ suggested_message: body }), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
     expect(outgoingAmountsStale).not.toHaveBeenCalled();
   });
   test.each([
@@ -294,7 +294,7 @@ describe('customerless decisions carry their inbound into the detector', () => {
     input_snapshot: JSON.stringify({ sms: { body: inbound } }), prompt_version: 'house_voice_v12_real_answers5_cf_pf', customer_id: null, ...over,
   });
   test.each(['It settled.', 'It failed.', 'That cleared out.', "They're sorted."])('%s after a payment question is blocked (cannot verify, no customer)', async (body) => {
-    await expect(agentDecisionSendBlockReason({ decision: withInbound('Did my payment go through?'), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    await expect(agentDecisionSendBlockReason({ decision: withInbound('Did my payment go through?', { suggested_message: body }), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
   });
   test('...but "It settled." after an unrelated inbound is not a payment status', async () => {
     await expect(agentDecisionSendBlockReason({ decision: withInbound('What time is my visit Tuesday?'), outgoingBody: 'It settled.' })).resolves.toBeNull();
@@ -591,5 +591,38 @@ describe('provider-boundary ETA predicates use the handoff connection (dbi)', ()
     await composed({ dbi: trx });
     expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
     expect(lane).toHaveBeenCalledWith({ dbi: trx });
+  });
+});
+
+
+// Owner ruling 2026-10-01: STAFF EDITS. A body that differs from the AI draft stored on the decision is the staff member's own wording; the
+// payment-status contract does not judge it. Unedited AI bodies keep the full contract; Zelle and amount rules apply to both.
+describe('staff-edited bodies (owner ruling 2026-10-01)', () => {
+  const { bodyIsStaffEdited } = require('../services/agent-decision-send-checks');
+  const AI = 'Your account has no balance due.';
+  const v12 = (over = {}) => decision({ prompt_version: 'house_voice_v12_real_answers5_cf_pf', suggested_message: AI, input_snapshot: JSON.stringify({ payment_status_snapshot: { customer_id: 'c1', sentences: [AI] } }), ...over });
+
+  test('bodyIsStaffEdited: whitespace-normalized compare; a missing stored draft is NOT an edit (strict)', () => {
+    expect(bodyIsStaffEdited(AI, `  ${AI.replace(' ', '   ')}\n`)).toBe(false);
+    expect(bodyIsStaffEdited(AI, 'We got your payment, thanks!')).toBe(true);
+    expect(bodyIsStaffEdited(null, 'We got your payment, thanks!')).toBe(false);
+    expect(bodyIsStaffEdited('', 'We got your payment, thanks!')).toBe(false);
+    expect(bodyIsStaffEdited(undefined, AI)).toBe(false);
+  });
+  test('an edited v12 body tells the recheck it is a staff edit; an unedited one does not', async () => {
+    await agentDecisionSendBlockReason({ decision: v12(), outgoingBody: 'Yes - we got your payment, thanks Dana!' });
+    expect(outgoingAmountsStale).toHaveBeenLastCalledWith(expect.objectContaining({ humanEditedBody: true }));
+    await agentDecisionSendBlockReason({ decision: v12(), outgoingBody: `  ${AI} ` });
+    expect(outgoingAmountsStale).toHaveBeenLastCalledWith(expect.objectContaining({ humanEditedBody: false }));
+    await agentDecisionSendBlockReason({ decision: v12({ suggested_message: null }), outgoingBody: 'Yes - we got your payment, thanks Dana!' });
+    expect(outgoingAmountsStale).toHaveBeenLastCalledWith(expect.objectContaining({ humanEditedBody: false })); // no stored draft => strict
+  });
+  test('a customerless v12 decision: an edited status body is not blocked for lack of billing; the unedited one still is', async () => {
+    const noCust = (over = {}) => v12({ customer_id: null, input_snapshot: JSON.stringify({}), ...over });
+    await expect(agentDecisionSendBlockReason({ decision: noCust(), outgoingBody: 'Yes - we got your payment, thanks Dana!' })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: noCust(), outgoingBody: AI })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    // ...but an edited body with a Zelle claim or a figure still needs the customer (main's rules are not loosened)
+    await expect(agentDecisionSendBlockReason({ decision: noCust(), outgoingBody: 'You can use Zelle.' })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    await expect(agentDecisionSendBlockReason({ decision: noCust(), outgoingBody: 'You owe $95.' })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
   });
 });

@@ -209,3 +209,48 @@ describe('draftShadowReply persists the payment_status_snapshot where every send
     expect(out.insertedRows[0]).toEqual(expect.objectContaining({ status: 'shadow' }));
   });
 });
+
+// Codex round-45 P1: while a payment plan is active the invoice total / balance is not what is due now. It must reach neither the prompt
+// (Balance line, Open invoice line, summary, flags) nor the owed-figure allowlist.
+describe('an active payment plan withholds every invoice total from the prompt and the owed-figure allowlist', () => {
+  const planContext = (over = {}) => ({
+    ...contextWith(),
+    summary: 'Dana Test | Pest | ⚠️ $300.00 overdue | Next: Pest Sep 30',
+    flags: [{ type: 'overdue_balance', severity: 'high', detail: '$300.00 outstanding' }],
+    billing: {
+      ...contextWith().billing, outstandingBalance: 300, hasActivePaymentPlan: true,
+      openInvoice: { id: 'i1', status: 'sent', title: 'Quarterly pest', amountDue: 300, dueDate: '2026-10-05' },
+      ...over,
+    },
+  });
+  test('facts block: no $300 anywhere, a plain explanation instead', () => {
+    const { drafter } = load([COPY]);
+    const block = drafter.buildFactsBlock(planContext());
+    expect(block).not.toMatch(/\$300|300\.00/);
+    expect(block).toContain('- Balance: on an ACTIVE PAYMENT PLAN');
+    expect(block).toContain('- Open invoice: status sent, "Quarterly pest", on an active payment plan');
+    expect(block).toContain('on an active payment plan');
+  });
+  test('the same account without a plan still shows the figures (the suppression is the plan, nothing else)', () => {
+    const { drafter } = load([COPY]);
+    const block = drafter.buildFactsBlock(planContext({ hasActivePaymentPlan: false }));
+    expect(block).toContain('- Balance: $300.00 outstanding');
+    expect(block).toContain('$300.00 due (net of any applied credit)');
+  });
+  test('gate off: the facts block is main\'s even for a plan customer', () => {
+    delete process.env[GATE];
+    const { drafter } = load([COPY]);
+    expect(drafter.buildFactsBlock(planContext())).toContain('- Balance: $300.00 outstanding');
+  });
+  test('"The total is $300.00" is authorized without a plan and UNGROUNDED on one (draft time)', () => {
+    const { drafter } = load([COPY]);
+    const reply = 'The total is $300.00.';
+    expect(drafter.replyQuotesUngroundedAmount(reply, planContext({ hasActivePaymentPlan: false }), { inboundMessage: 'How much do I owe?' })).toBe(false);
+    expect(drafter.replyQuotesUngroundedAmount(reply, planContext(), { inboundMessage: 'How much do I owe?' })).toBe(true);
+  });
+  test('the pooled gate-off rule still authorizes the figure (billingAmountCents without planAware is main\'s)', () => {
+    const { drafter } = load([COPY]);
+    expect(drafter.billingAmountCents(planContext()).owed.has(30000)).toBe(true);
+    expect(drafter.billingAmountCents(planContext(), { planAware: true }).owed.has(30000)).toBe(false);
+  });
+});

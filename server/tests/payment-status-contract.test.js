@@ -496,3 +496,61 @@ describe('only rows that are money received render a receipt (prepaid applicatio
     expect(texts(billing({ recentPayments: [row()] }))).toContain("We don't see a payment on your account since Sep 12, 2026.");
   });
 });
+
+// ---- Codex round 45: triage of the older unresolved threads (the free-text binders they cite are gone; the CLASS must still be closed) ----
+describe('older Codex threads: the class cannot happen under the contract', () => {
+  const S_PAID = 'We received your $120.00 card payment on Sep 12, 2026.';
+  const rich = billing({
+    outstandingBalance: 95, openInvoice: { amountDue: 95 },
+    recentPayments: [row(), row({ id: 'p2', amount: 100, status: 'refunded', refund_status: 'full', refund_amount: 100, payment_date: '2026-09-03' }), row({ id: 'p3', amount: 100, status: 'pending', payment_date: '2026-09-02' })],
+    invoiceStatuses: [{ invoiceNumber: 'A-1', status: 'paid', total: 100, amountDue: 0 }, { invoiceNumber: 'A-2', status: 'sent', total: 95, amountDue: 95, dueDate: '2026-10-05' }],
+  });
+  const ss = texts(rich);
+  const verdict = (reply, inboundText = 'Did my payment go through?') => c.checkPaymentStatusReply({ reply, sentences: ss, inboundText });
+
+  test.each([
+    ['generic refund reply (refund pending, bound to no payment)', 'Your refund is pending.'],
+    ['amount identity over a truncated invoice list', 'Your $100 invoice is paid.'],
+    ['tail reference across invoices with the same tail', 'Invoice #0123 is paid.'],
+    ['"transaction" as a payment subject', 'Your transaction cleared.'],
+    ['"transaction" with an unlisted verb', 'Your transaction is in the books.'],
+    ['amount/date pairings across payments', 'Your payments of $100 from Sep 1 plus $100 from Sep 2 are pending.'],
+    ['card funding the records do not carry', 'We received your $120.00 debit card payment on Sep 12, 2026.'],
+    ['card funding, credit', 'We received your $120.00 credit-card payment on Sep 12, 2026.'],
+    ['a relative date for the asked-about payment', 'Your payment from yesterday failed.'],
+    ['a bare status for "yesterday\'s payment"', 'Your payment failed.'],
+    ['polite wording: "Please note"', 'Please note your payment settled.'],
+    ['polite wording: "You can rest assured"', 'You can rest assured your payment settled.'],
+    ['polite wording around an unlisted verb', 'Please note your transaction was banked.'],
+    ['polite wording after a copy', `${S_PAID} You can rest assured the other one settled too.`],
+  ])('held: %s', (_n, reply) => {
+    expect(verdict(reply, 'Did yesterday\'s payment fail?').ok).toBe(false);
+  });
+
+  test('what the contract DOES allow is only a whole rendered sentence, with its own exact amount, date and tender', () => {
+    for (const t of ss) expect({ t, ok: verdict(t).ok }).toEqual({ t, ok: true });
+    expect(ss).toEqual(expect.arrayContaining([S_PAID, 'Invoice A-1 for $100.00 is paid.', 'Invoice A-2 has $95.00 due by Oct 5, 2026.']));
+    expect(ss.some((t) => /debit|credit|yesterday|today/.test(t))).toBe(false); // the renderer never states a funding or a relative date
+  });
+
+  test('the renderer states a tender only when the Stripe columns prove it (a manual tender is never named)', () => {
+    const out = texts(billing({ recentPayments: [row({ payment_method_type: null, metadata: { method: 'zelle' } }), row({ id: 'p9', amount: 40, payment_method_type: 'us_bank_account', payment_date: '2026-09-01' })] }));
+    expect(out).toContain('We received your $120.00 payment on Sep 12, 2026.');
+    expect(out).toContain('We received your $40.00 ACH payment on Sep 1, 2026.');
+    expect(out.join(' ')).not.toMatch(/Zelle|cash|check/i);
+  });
+
+  test('a never-attempted deferral (lock contention / dispute hold) is no payment attempt, even if it reaches the renderer', () => {
+    const lock = row({ id: 'lk', amount: 55, status: 'failed', payment_date: '2026-09-20', stripe_payment_intent_id: null, metadata: { deferred_reason: 'lock_contention' } });
+    expect(texts(billing({ recentPayments: [lock] })).filter((t) => /did not go through/.test(t))).toEqual([]);
+    const attempted = row({ id: 'at', amount: 55, status: 'failed', payment_date: '2026-09-20', stripe_payment_intent_id: 'pi_1', metadata: { deferred_reason: 'lock_contention' } });
+    expect(texts(billing({ recentPayments: [attempted] }))).toContain('A $55.00 card payment attempt on Sep 20, 2026 did not go through.');
+  });
+
+  test('a partially_paid invoice is not collectible/counted (the portal\'s rule): no balance sentence from it, and none for it at all', () => {
+    const out = texts(billing({ hasUncountedPartialDue: true, invoiceStatuses: [{ invoiceNumber: 'P-1', status: 'partially_paid', total: 100, amountDue: 40 }] }));
+    expect(out.filter((t) => /balance|P-1/.test(t))).toEqual([]);
+    const h = require('../services/invoice-helpers');
+    expect(h.OWN_COLLECTIBLE_INVOICE_STATUSES).toEqual(['sent', 'viewed', 'overdue']); // billing route and SMS facts share ONE collectible set
+  });
+});

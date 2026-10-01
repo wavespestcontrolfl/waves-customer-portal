@@ -488,6 +488,29 @@ describe('negative Zelle availability claims are revalidated before sending', ()
   const dbh = dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-1', customer_id: 'c1', status: 'open' } });
   const DENIALS = ["Zelle isn't available right now.", "We don't take Zelle.", 'Zelle is not available for this account right now, so use your pay link.'];
 
+  // Codex round-45 P2: ordinary off-state wording is a denial too, not an affirmative offer
+  test.each([
+    'Zelle is disabled for your account.', 'Zelle is currently turned off.', "Zelle isn't set up for this account.", 'Zelle is not set up right now.',
+    'Zelle has been deactivated.', "Zelle's unavailable for your account.", 'Zelle payments are paused.', 'Zelle is currently unavailable for invoice WPC-2026-0002.',
+    'Zelle is switched off for now.', 'Zelle is no longer an option.',
+  ])('off-state wording is a DENIAL, never an offer: %s', (d) => {
+    const { zelleClauseTexts, classifyZelleClause: classify } = require('../services/sms-amount-recheck');
+    expect({ d, offer: classify(d), neg: hasNegativeZelleAvailabilityClaim(d), aff: hasAffirmativeZelleMention(d) }).toEqual({ d, offer: null, neg: true, aff: false });
+    expect(zelleClauseTexts(d).offerText).toBe('');
+  });
+  test.each(['You can use Zelle.', 'Zelle is available for your account.', 'Yes, Zelle is on for this invoice.', 'Zelle is accepted here: pay@example.com'])('and affirmative wording stays an offer: %s', (d) => {
+    expect(hasAffirmativeZelleMention(d)).toBe(true);
+  });
+  test('a disabled-Zelle denial is stale when Zelle is in fact available now, and stands when it is not', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    const body = 'Zelle is disabled for this account right now.';
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+  });
+
   test('detected as denials (not offers); the scheduler prescreen sends them to the recheck', () => {
     for (const d of DENIALS) {
       expect({ d, neg: hasNegativeZelleAvailabilityClaim(d), aff: hasAffirmativeZelleMention(d), screen: bodyNeedsPaymentRecheck(d) }).toEqual({ d, neg: true, aff: false, screen: true });
@@ -817,3 +840,60 @@ describe('bodyNeedsPaymentRecheck - the read-free pre-screen', () => {
   });
 });
 
+
+// Codex round-45 P1: send time uses the same plan-aware owed figures as the draft.
+describe('send-time: an active payment plan does not authorize the invoice total', () => {
+  const { outgoingAmountsStale: stale } = require('../services/sms-amount-recheck');
+  const dbh = dbWithTables({ customers: { id: 'c1' } });
+  const planBilling = (over = {}) => ({ outstandingBalance: 300, openInvoice: { id: 'i1', amountDue: 300 }, hasActivePaymentPlan: true, ...over });
+  test('v12: "The total is $300.00." is stale on a plan and authorized off one', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const spy = jest.spyOn(drafter, 'remainderAmountsUngrounded');
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: planBilling() });
+    // the real drafter is mocked away in this file only for the owed rule: use its billingAmountCents seam directly
+    expect(drafter.billingAmountCents({ billing: planBilling() }, { planAware: true }).owed.has(30000)).toBe(false);
+    expect(drafter.billingAmountCents({ billing: planBilling({ hasActivePaymentPlan: false }) }, { planAware: true }).owed.has(30000)).toBe(true);
+    spy.mockRestore();
+    await expect(stale({ customerId: 'c1', body: 'The total is $300.00.', promptVersion: V12, dbh, inboundMessage: 'How much?' })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+});
+
+// Owner ruling 2026-10-01: a STAFF-EDITED body is the staff member's own wording - the payment-status contract does not judge it.
+describe('outgoingAmountsStale humanEditedBody (staff edits)', () => {
+  const dbh = dbWithTables({ customers: { id: 'c1' } });
+  const AI = 'Your account has no balance due.';
+  const SNAP = { customer_id: 'c1', sentences: [AI] };
+  const base = { customerId: 'c1', promptVersion: V12, paymentStatusSnapshot: SNAP, inboundMessage: 'Did my payment go through?', dbh };
+  beforeEach(() => { ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [] } }); });
+  test('an UNEDITED paraphrase is still held; the same words as a staff edit are not', async () => {
+    const body = "Yes, we got your payment - you're all set!";
+    await expect(outgoingAmountsStale({ ...base, body })).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+    await expect(outgoingAmountsStale({ ...base, body, humanEditedBody: true })).resolves.toEqual({ stale: false });
+  });
+  test('an edited body is not rechecked against stale sentences either (no billing read for the status half)', async () => {
+    ContextAggregator.getContextForCustomer.mockClear();
+    await expect(outgoingAmountsStale({ ...base, body: `Hi Dana! ${AI} Thanks!`, humanEditedBody: true })).resolves.toEqual({ stale: false });
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+  test('an UNEDITED copy keeps the stale-sentence recheck', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 50, hasProcessingPayment: false, recentPayments: [] } });
+    await expect(outgoingAmountsStale({ ...base, body: AI })).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
+    await expect(outgoingAmountsStale({ ...base, body: AI, humanEditedBody: true })).resolves.toEqual({ stale: false });
+  });
+  test('only the string true counts: a truthy non-boolean is not an edit', async () => {
+    await expect(outgoingAmountsStale({ ...base, body: "You're all paid up!", humanEditedBody: 'yes' })).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+  });
+  test('Zelle rules are NOT loosened for an edit: a Zelle offer to the wrong recipient is still stale', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    try {
+      await expect(outgoingAmountsStale({ ...base, body: 'Yes, send it by Zelle to someone-else@example.com', humanEditedBody: true })).resolves.toMatchObject({ stale: true });
+    } finally { delete process.env.ZELLE_RECIPIENT; }
+  });
+  test('the pre-screen: a staff-edited status-only body selects nothing; a figure still selects', () => {
+    realAnswersGateOn.mockReturnValue(true);
+    expect(bodyNeedsPaymentRecheck("You're all paid up!", { promptVersion: V12, statusVocabulary: false })).toBe(false);
+    expect(bodyNeedsPaymentRecheck("You're all paid up!", { promptVersion: V12 })).toBe(true);
+    expect(bodyNeedsPaymentRecheck('You owe $5.', { promptVersion: V12, statusVocabulary: false })).toBe(true);
+    expect(bodyNeedsPaymentRecheck('You can Zelle us.', { promptVersion: V12, statusVocabulary: false })).toBe(true);
+  });
+});

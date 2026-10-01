@@ -18,6 +18,15 @@ function parseInputSnapshot(inputSnapshot) {
   }
 }
 
+// Owner ruling 2026-10-01: a STAFF EDIT is the staff member's own wording, so the payment-status contract does not judge it. Edited =
+// the outgoing body differs (whitespace-normalized) from the AI draft stored on the decision. No stored draft => the body is treated as
+// the AI's: STRICT. Auto-send never carries an edit and never passes this.
+const normalizeBody = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+function bodyIsStaffEdited(storedDraft, outgoingBody) {
+  const stored = normalizeBody(storedDraft);
+  return !!stored && normalizeBody(outgoingBody) !== stored;
+}
+
 // The customer's own inbound wording for this decision - what scopes the
 // payment-status detector and names the invoice a Zelle offer is about.
 // `decision.inbound_message` is the linked
@@ -100,10 +109,12 @@ async function amountsBlock({ decision, outgoingBody }) {
   // run the whole recheck.
   const zelleClaim = hasAffirmativeZelleMention(outgoingBody) || hasNegativeZelleAvailabilityClaim(outgoingBody);
   if (!realAnswers && !zelleClaim) return null;
+  // A staff edit's free-text status is theirs: it neither needs the contract's reads nor can the contract fail it. Zelle and amount rules stay.
+  const staffEdited = realAnswers && bodyIsStaffEdited(decision.suggested_message, outgoingBody);
   if (!decision.customer_id) {
     // With no customer to re-read billing for, ANY body the recheck would judge (an amount, a Zelle claim, a payment-status
     // assertion, price grammar) cannot be verified - fail closed. Benign copy ("Your invoice is attached") needs no billing.
-    return (zelleClaim || bodyNeedsPaymentRecheck(outgoingBody, { inboundMessage: resolveInboundMessage(decision), promptVersion: decision.prompt_version })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
+    return (zelleClaim || bodyNeedsPaymentRecheck(outgoingBody, { inboundMessage: resolveInboundMessage(decision), promptVersion: decision.prompt_version, statusVocabulary: !staffEdited })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
   }
   // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
   // built for, so a body carrying a Zelle contact is rechecked against that
@@ -116,6 +127,7 @@ async function amountsBlock({ decision, outgoingBody }) {
     zelleInvoiceId: snapshot?.zelle_invoice_id || null,
     inboundMessage: resolveInboundMessage(decision),
     paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    humanEditedBody: staffEdited,
     // A pre-v12 decision reaches here ONLY for its Zelle claim (above): its amount rules stay untouched.
     trustOwedAmounts: !realAnswers,
   });
@@ -334,4 +346,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };

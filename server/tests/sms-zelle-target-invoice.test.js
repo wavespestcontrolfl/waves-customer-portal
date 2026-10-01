@@ -425,3 +425,16 @@ describe('round 44 P2: a partially paid invoice (amount due unknowable) is never
     expect(resolveZelleTargetInvoice({ openInvoices: [sent] }, 'Can I pay by Zelle?').invoiceId).toBe('a'); // unchanged without a partial
   });
 });
+
+describe('round 45 (older thread): two full references with the same tail are never collapsed by a bare tail', () => {
+  const both = { openInvoices: [{ id: 'a', invoiceNumber: 'WPC-2025-0123', amountDue: 50 }, { id: 'b', invoiceNumber: 'WPC-2026-0123', amountDue: 60 }] };
+  test('both open: the two full numbers name different invoices => conflict, whatever the tail says', () => {
+    expect(resolveZelleTargetInvoice(both, 'Zelle WPC-2025-0123 and WPC-2026-0123 (#0123)?')).toEqual({ invoiceId: null, reason: 'reference_conflict' });
+  });
+  test('a bare tail that matches two open invoices is ambiguous, never the first', () => {
+    expect(resolveZelleTargetInvoice(both, 'Zelle invoice #0123?')).toEqual({ invoiceId: null, reason: 'ambiguous_invoice_number' });
+  });
+  test('one of the two is open: the other full reference is "not open" (never silently dropped)', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: [both.openInvoices[1]] }, 'Zelle WPC-2025-0123 and WPC-2026-0123?')).toEqual({ invoiceId: null, reason: 'named_invoice_not_open' });
+  });
+});

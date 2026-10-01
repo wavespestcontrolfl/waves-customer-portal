@@ -76,6 +76,8 @@ const ZELLE_NEGATION_RE = new RegExp(
   + '(?:(?:take|taking|accept|accepting|offer|offering|support|supporting|use|using|do|have|allow|allowing|process|processing|set\\s+up\\s+for|set\\s+up\\s+to\\s+(?:take|accept))\\s+)?'
   + '(?:(?:any|payments?|transfers?|us|our|the|a)\\s+)*(?:(?:via|by|through|with|using)\\s+)?zelle\\b'
   + "|\\bzelle\\b\\s+(?:(?:payments?|transfers?)\\s+)?(?:isn'?t|is\\s+not|aren'?t|are\\s+not|is\\s+unavailable|is\\s+no\\s+longer|not\\s+available|unavailable|not\\s+currently|no\\s+longer|not\\s+right\\s+now|not\\s+accepted|not\\s+supported|won'?t\\s+work|doesn'?t\\s+work)\\b"
+  // Codex round-45 P2: OFF-STATE predicates - "Zelle is disabled / turned off / not set up / currently unavailable for your account"
+  + "|\\bzelle(?:'s)?\\b\\s+(?:(?:payments?|transfers?)\\s+)?(?:(?:is|are|was|were|has\\s+been|have\\s+been|got|gets|seems|appears|remains|stays)\\s+)?(?:(?:currently|right\\s+now|now|temporarily|presently)\\s+)*(?:disabled|turned\\s+off|switched\\s+off|shut\\s+off|deactivated|inactive|offline|off|paused|suspended|blocked|removed|discontinued|retired|unavailable|not\\s+set\\s+up|not\\s+enabled|not\\s+active|not\\s+an?\\s+option|not\\s+possible|out\\s+of\\s+service|no\\s+longer\\s+(?:available|offered|accepted|an?\\s+option))\\b"
   // Codex round-30 P2: SUBJECT-FIRST modal denials — "Zelle cannot be used", "Zelle won't be available", "Zelle could not be offered"
   + "|\\bzelle\\b\\s+(?:(?:payments?|transfers?)\\s+)?(?:can'?t|cannot|can\\s+not|couldn'?t|could\\s+not|won'?t|will\\s+not|wouldn'?t|would\\s+not|shouldn'?t|should\\s+not|may\\s+not|might\\s+not)\\s+(?:be\\s+)?(?:used|offered|accepted|available|supported|taken|processed|possible|an?\\s+option)\\b",
   'i',
@@ -235,12 +237,17 @@ function strictForVersion(promptVersion) {
 //
 // The status-vocabulary trigger exists only for real-answers (v12) drafts: `promptVersion` names the decision's own version, else the
 // live gate decides. Gate off (and no v12 decision) the pre-screen is main's, byte for byte - no extra read, no new way to block.
-function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = null } = {}) {
+// Does the body carry payment-status vocabulary at all (customer's message unknown => payment-scoped)? Used by the scheduler to decide
+// whether a DECISION-LINKED row needs its decision read to learn its prompt version.
+function bodyHasPaymentStatusVocabulary(body) {
+  return paymentStatus.assertsPaymentStatus(String(body || ''), { inboundText: null });
+}
+function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = null, statusVocabulary = true } = {}) {
   const text = String(body || '');
   if (!text) return false;
   if (bodyAmountCents(text).length) return true;
   if (hasAffirmativeZelleMention(text) || hasNegativeZelleAvailabilityClaim(text)) return true;
-  if (strictForVersion(promptVersion)
+  if (statusVocabulary && strictForVersion(promptVersion)
       && paymentStatus.assertsPaymentStatus(text, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
@@ -351,6 +358,9 @@ async function outgoingAmountsStale({
   inboundMessage = null,
   // input_snapshot.payment_status_snapshot of the decision (null = the draft copied no sentence)
   paymentStatusSnapshot = null,
+  // Owner ruling 2026-10-01: the body is a STAFF EDIT of the AI draft (callers compare it with the stored draft; auto-send never sets this).
+  // The payment-status contract does not judge a person's own wording; Zelle and the amount rules below are unchanged.
+  humanEditedBody = false,
 } = {}) {
   const text = String(body || '');
   // Independent-review P1 (finding 4): checked unconditionally, ahead of
@@ -414,8 +424,10 @@ async function outgoingAmountsStale({
   let checked = text;
   if (strict) {
     // PAYMENT STATUS: only a verbatim copy of a snapshotted sentence that is still rendered may state one (owner ruling 2026-10-01).
-    const statusReason = await paymentStatusSendBlockReason({ customerId, body: text, snapshot: paymentStatusSnapshot, inboundMessage, dbh });
-    if (statusReason) return { stale: true, reason: statusReason };
+    if (humanEditedBody !== true) {
+      const statusReason = await paymentStatusSendBlockReason({ customerId, body: text, snapshot: paymentStatusSnapshot, inboundMessage, dbh });
+      if (statusReason) return { stale: true, reason: statusReason };
+    }
     // ...and the figures judged below are the ones OUTSIDE the copied sentences (those were just re-verified live).
     checked = paymentStatus.withoutCopies(text, paymentStatus.copiedSentences(text, paymentStatusSnapshot?.sentences));
   }
@@ -438,7 +450,7 @@ async function outgoingAmountsStale({
     // payment's own figure is stated only inside a copied sentence. Otherwise main's pooled rule over the same shared figures:
     // what is still owed, plus payment history only when the body reads as an acknowledgement (masked first, audit P1 - the
     // ack grammar stops at a period, and "$95.50" must not end the clause).
-    const { owed, paid } = drafter.billingAmountCents(ctx);
+    const { owed, paid } = drafter.billingAmountCents(ctx, { planAware: strict });
     const ack = PAYMENT_ACK_RE.test(text.replace(AMOUNT_FORMS_RE, ' AMT '));
     const stale = strict
       ? drafter.remainderAmountsUngrounded(checked, ctx)
@@ -453,5 +465,5 @@ async function outgoingAmountsStale({
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
   hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, hasUnscopedZelleDenial, zelleClauseTexts, zelleDenialStale, classifyZelleClause,
-  paymentStatusSendBlockReason, bodyNeedsPaymentRecheck,
+  paymentStatusSendBlockReason, bodyNeedsPaymentRecheck, bodyHasPaymentStatusVocabulary,
 };

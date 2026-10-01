@@ -177,3 +177,13 @@ describe('a payment-scoped reply that is not copy-only never auto-sends', () => 
     await expect(paymentStatusSendBlockReason({ customerId: 'c', body: 'Sounds good, see you Tuesday!', snapshot: { sentences: [], scoped: true }, inboundMessage: 'ok thanks' })).resolves.toBeNull();
   });
 });
+
+// Owner ruling 2026-10-01 (staff edits): auto-send never carries an edit, so it never asks the contract to stand down.
+test('auto-send is always strict: the dispatch recheck never passes humanEditedBody, and a paraphrase never goes out', async () => {
+  const src = require('fs').readFileSync(require.resolve('../services/sms-auto-send'), 'utf8');
+  expect(src).not.toMatch(/humanEditedBody/);
+  const { paymentStatusSendBlockReason } = require('../services/sms-amount-recheck');
+  await expect(paymentStatusSendBlockReason({ customerId: 'c', body: "Yes, we got your payment - you're all set!", snapshot: null, inboundMessage: 'Did I pay?', autoSend: true })).resolves.not.toBeNull();
+  await expect(attempt({ reply: "Yes, we got your payment - you're all set!", paymentStatusSnapshot: null })).resolves.toMatchObject({ sent: false });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+});

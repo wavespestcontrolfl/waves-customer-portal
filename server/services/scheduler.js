@@ -36,10 +36,33 @@ const AMOUNT_BLOCK_NOTES = {
 // SPECIFIC outgoingAmountsStale reason. Fails closed on any read error.
 async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
   const recheck = require('./sms-amount-recheck');
-  if (!recheck.bodyNeedsPaymentRecheck(msg.message_body)) return { stale: false, reason: null };
-  const { parseInputSnapshot } = require('./agent-decision-send-checks');
+  const { parseInputSnapshot, bodyIsStaffEdited } = require('./agent-decision-send-checks');
+  const loadDecision = () => db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id', 'suggested_message');
+  let decision;
+  let decisionLoaded = false;
+  // Main's read-free pre-screen: amounts, Zelle claims, price grammar - plus status vocabulary while real answers is live.
+  // Owner ruling 2026-10-01: a staff-edited body (human_authored AND different from the decision's stored AI draft) is the staff member's own
+  // wording: the payment-status contract does not judge it. Amounts and Zelle are rechecked as before. Unknown => strict.
+  let staffEdited = false;
+  let needs = recheck.bodyNeedsPaymentRecheck(msg.message_body);
+  if (!needs && claimMeta.agent_decision_id && recheck.bodyHasPaymentStatusVocabulary(msg.message_body)) {
+    // A DECISION-LINKED row whose body reads as a payment status: the decision's own prompt version decides (one indexed read), whatever
+    // the live gate says - a v12 reply queued before GATE_SMS_REAL_ANSWERS was rolled back is still rechecked as one. An unreadable
+    // decision fails closed. (Gate off, this is the only divergence from main: decision-linked rows with status vocabulary.)
+    try {
+      decision = await loadDecision();
+      decisionLoaded = true;
+    } catch (err) {
+      logger.warn(`[scheduler] decision read failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+      return { stale: true, reason: 'amount_recheck_failed' };
+    }
+    staffEdited = claimMeta.human_authored === true && bodyIsStaffEdited(decision?.suggested_message, msg.message_body);
+    needs = !staffEdited && recheck.bodyNeedsPaymentRecheck(msg.message_body, { promptVersion: decision?.prompt_version ?? null });
+  }
+  if (!needs) return { stale: false, reason: null };
   try {
-    const decision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id');
+    if (!decisionLoaded) decision = await loadDecision();
+    if (!staffEdited) staffEdited = claimMeta.human_authored === true && bodyIsStaffEdited(decision?.suggested_message, msg.message_body);
     const snapshot = parseInputSnapshot(decision?.input_snapshot);
     // Codex round-11 P1: a scheduled row with no customer_id (shared phone) must
     // not skip the recheck — fall back to the linked decision's customer. With none
@@ -59,6 +82,7 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
       paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
       // A human edit trusts only the OWED-amount half, never a Zelle offer or a payment status (round-4 finding 3).
       trustOwedAmounts: claimMeta.human_authored === true,
+      humanEditedBody: staffEdited,
     });
     return { stale: !!verdict.stale, reason: verdict.stale ? (verdict.reason || 'amount_recheck_failed') : null };
   } catch (err) {

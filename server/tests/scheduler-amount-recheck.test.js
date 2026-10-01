@@ -33,10 +33,10 @@ describe('recheckScheduledSmsAmounts', () => {
 
   // independent review P2-4: with the gate off the pre-screen is main's, so a status-vocabulary body costs no agent_decisions read and a
   // read failure cannot block the row; amounts and Zelle claims are still rechecked
-  test('gate off: a status-only body does no reads at all (== main); a dollar figure is still rechecked', async () => {
+  test('gate off: a status-only body with NO linked decision does no reads at all (== main); a dollar figure is still rechecked', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
     for (const body of ["You're paid up!", "Your payment isn't showing yet.", 'Your invoice is overdue.']) {
-      await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: body }, claimMeta })).resolves.toEqual({ stale: false, reason: null });
+      await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: body }, claimMeta: { human_authored: true } })).resolves.toEqual({ stale: false, reason: null });
     }
     expect(db).not.toHaveBeenCalled();
     expect(recheck.outgoingAmountsStale).not.toHaveBeenCalled();
@@ -44,6 +44,82 @@ describe('recheckScheduledSmsAmounts', () => {
     recheck.outgoingAmountsStale.mockResolvedValue({ stale: false });
     await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your balance is $95.' }, claimMeta });
     expect(recheck.outgoingAmountsStale).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex round-45 P1: the pre-screen cannot see a v12 decision queued BEFORE GATE_SMS_REAL_ANSWERS was rolled back. A decision-linked row
+  // whose body carries status vocabulary reads the decision (one indexed read), whatever the live gate says.
+  test('ROLLBACK: gate off, v12 decision, status-only body => the decision is read and the strict recheck runs', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const q = dbReturning({ prompt_version: 'house_voice_v12_real_answers5_cf_pf', input_snapshot: JSON.stringify({ sms: { body: 'Do I owe anything?' }, payment_status_snapshot: { customer_id: 'c1', sentences: ['Your account has no balance due.'] } }) });
+    recheck.outgoingAmountsStale.mockResolvedValue({ stale: true, reason: 'payment_status_changed' });
+    const out = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your account has no balance due.' }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
+    expect(out).toEqual({ stale: true, reason: 'payment_status_changed' });
+    expect(q.first).toHaveBeenCalledTimes(1); // ONE read, reused by the recheck
+    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ promptVersion: 'house_voice_v12_real_answers5_cf_pf', inboundMessage: 'Do I owe anything?' }));
+  });
+  test('gate off, v11 (or version-less) decision, status-only body => one decision read, then no recheck (main\'s verdict)', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    for (const prompt_version of ['house_voice_v11', null]) {
+      recheck.outgoingAmountsStale.mockClear();
+      const q = dbReturning({ prompt_version, input_snapshot: null });
+      await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: "You're paid up!" }, claimMeta })).resolves.toEqual({ stale: false, reason: null });
+      expect(q.first).toHaveBeenCalledTimes(1);
+      expect(recheck.outgoingAmountsStale).not.toHaveBeenCalled();
+    }
+  });
+  test('the decision read FAILS => the row is blocked (fail closed), gate on or off', async () => {
+    for (const gate of [undefined, 'true']) {
+      if (gate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = gate;
+      const q = { where: jest.fn(() => q), first: jest.fn(async () => { throw new Error('pg down'); }) };
+      db.mockImplementation(() => q);
+      recheck.outgoingAmountsStale.mockClear();
+      await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: "You're paid up!" }, claimMeta })).resolves.toEqual({ stale: true, reason: 'amount_recheck_failed' });
+      expect(recheck.outgoingAmountsStale).not.toHaveBeenCalled();
+    }
+  });
+  test('a decision-linked row with NO status vocabulary keeps main\'s no-read path', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Sounds good, see you Tuesday!' }, claimMeta })).resolves.toEqual({ stale: false, reason: null });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  // Owner ruling 2026-10-01: staff edits. human_authored AND different from the decision's stored AI draft => the contract does not judge it.
+  describe('staff edits (owner ruling 2026-10-01)', () => {
+    const AI = 'Your account has no balance due.';
+    const decisionRow = (over = {}) => ({ prompt_version: 'house_voice_v12_real_answers5_cf_pf', suggested_message: AI, input_snapshot: JSON.stringify({ sms: { body: 'Did I pay?' }, payment_status_snapshot: { customer_id: 'c1', sentences: [AI] } }), ...over });
+    const fire = (body, meta) => recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: body }, claimMeta: { agent_decision_id: 'd1', ...meta } });
+    test('an edited body with free-text status is never blocked by the contract, gate on or off (the recheck is told it is a staff edit)', async () => {
+      for (const gate of ['true', undefined]) {
+        if (gate) process.env.GATE_SMS_REAL_ANSWERS = gate; else delete process.env.GATE_SMS_REAL_ANSWERS;
+        dbReturning(decisionRow());
+        recheck.outgoingAmountsStale.mockReset().mockResolvedValue({ stale: false });
+        await expect(fire("Yes, we got your payment - you're all set!", { human_authored: true })).resolves.toEqual({ stale: false, reason: null });
+        // gate on the pre-screen selects the body (status vocabulary) and the recheck stands the contract down; gate off nothing is selected
+        if (gate) expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ humanEditedBody: true }));
+        else expect(recheck.outgoingAmountsStale).not.toHaveBeenCalled();
+      }
+    });
+    test('an edited body that still carries a figure or Zelle IS rechecked, flagged as a staff edit (amount/Zelle rules unchanged)', async () => {
+      dbReturning(decisionRow());
+      recheck.outgoingAmountsStale.mockResolvedValue({ stale: false });
+      await fire('Yes we got it. You owe $95.', { human_authored: true });
+      expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ humanEditedBody: true, trustOwedAmounts: true }));
+    });
+    test('human_authored but IDENTICAL to the stored AI draft, or no stored draft: STRICT', async () => {
+      for (const row of [decisionRow(), decisionRow({ suggested_message: null })]) {
+        dbReturning(row);
+        recheck.outgoingAmountsStale.mockClear().mockResolvedValue({ stale: true, reason: 'payment_status_unauthorized' });
+        const out = await fire(row.suggested_message ? AI : "Yes, we got your payment - you're all set!", { human_authored: true });
+        expect(out).toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+        expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ humanEditedBody: false }));
+      }
+    });
+    test('NOT human_authored (an unedited AI body): strict even when the text differs from the stored draft', async () => {
+      dbReturning(decisionRow());
+      recheck.outgoingAmountsStale.mockResolvedValue({ stale: true, reason: 'payment_status_unauthorized' });
+      await expect(fire("Yes, we got your payment - you're all set!", { human_authored: false })).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+      expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ humanEditedBody: false }));
+    });
   });
 
   test('(a) a human-edited Zelle offer IS rechecked, with trustOwedAmounts, and the specific reason comes back', async () => {

@@ -129,6 +129,7 @@ function isReceiptRow(p) {
     && !NON_RECEIPT_PURPOSES.has(String(meta.purpose || '').toLowerCase())
     && String(meta.combined_payment ?? '').toLowerCase() !== 'true'
     && !meta.pending_refund_key
+    && !(meta.deferred_reason && !p?.stripe_payment_intent_id) // a never-attempted deferral (lock contention, dispute hold) is no payment attempt
     && !meta.payer_id && !p?.payer_id;
 }
 
