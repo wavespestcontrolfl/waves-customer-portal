@@ -162,6 +162,23 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
             if (ctx.nullCols.includes('service_contacts_consent_at') && state.customer.service_contacts_consent_at) return 0;
             if (payload.service_contacts_consent_at) { Object.assign(state.customer, payload); return 1; }
             const raw = payload.service_preferences;
+            const prefs = state.customer.service_preferences;
+            if (raw.sql.includes('jsonb_set')) {
+              // demoted_at stamp: binds [path, iso]
+              const [path, iso] = raw.binds;
+              let node = prefs;
+              for (const k of path.slice(0, -1)) node = node[k];
+              node[path[path.length - 1]] = iso;
+              return 1;
+            }
+            if (raw.sql.includes('#- ?::text[]')) {
+              // path delete: binds [path]
+              const path = raw.binds[0];
+              let node = prefs;
+              for (const k of path.slice(0, -1)) { node = node && node[k]; }
+              if (node) delete node[path[path.length - 1]];
+              return 1;
+            }
             // jsonb_exists guard: the entry must exist for the whereRaw'd form.
             if (ctx.raw && !(ctx.raw[0] in markers())) return 0;
             delete markers()[raw.binds[0]];
@@ -178,7 +195,8 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     return { dbh, state };
   }
   const confirmed = (extra = []) => [{ phone_key: KEY, customer_id: 'c1', status: 'confirmed' }, ...extra];
-  const marker = (extra = {}) => ({ demote_primary_on_optin: { [KEY]: { scheduled_service_id: 's1', set_at: 'x' }, ...extra } });
+  const marker = (extra = {}) => ({ demote_primary_on_optin: { [KEY]: { s1: { demote: true, set_at: 'x' } }, ...extra } });
+  const entryOf = (state, key, visit) => (state.customer.service_preferences.demote_primary_on_optin[key] || {})[visit];
   const spouseRow = (extra = {}) => ({
     service_contact_name: 'Sample Spouse', service_contact_phone: '+19415550123', service_contact_email: null, service_contact_role: 'spouse_partner',
     service_contact2_phone: null, service_contact3_phone: null, ...extra,
@@ -190,7 +208,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
     expect(state.prefs).toEqual([]);
     expect(replays).toEqual([]);
-    expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
+    expect(entryOf(state, KEY, 's1')).toBeUndefined();
   });
 
   test('a late YES from a phone no longer in any slot on a stamped row: caller NOT demoted, entry dropped', async () => {
@@ -206,12 +224,13 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
 
   test('the YES that completes consent also applies the OTHER confirmed phone\'s held entry', async () => {
     const { dbh, state } = fakeDb({
-      customer: spouseRow({ service_contact2_phone: '+19415550444', service_contact2_name: 'Sample Tenant', service_preferences: marker({ [OTHER]: { scheduled_service_id: 's9', set_at: 'y' } }) }),
+      customer: spouseRow({ service_contact2_phone: '+19415550444', service_contact2_name: 'Sample Tenant', service_preferences: marker({ [OTHER]: { s9: { demote: true, set_at: 'y' } } }) }),
       optinRows: confirmed([{ phone_key: OTHER, customer_id: 'c1', status: 'confirmed' }]),
     });
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
     expect(state.customer.service_contacts_consent_source).toBe('recipient_optin_confirmed');
-    expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
+    expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
+    expect(entryOf(state, OTHER, 's9').demoted_at).toBeDefined();
     expect(replays.map((r) => r.scheduledServiceId).sort()).toEqual(['s1', 's9']);
   });
 
@@ -227,11 +246,12 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
   });
 
   test('a demote:false entry (another slot phone already texted) replays the confirmation but keeps the caller', async () => {
-    const { dbh, state } = fakeDb({ customer: spouseRow({ service_contacts_consent_at: new Date(), service_preferences: { demote_primary_on_optin: { [KEY]: { scheduled_service_id: 's1', demote: false } } } }), optinRows: confirmed() });
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_contacts_consent_at: new Date(), service_preferences: { demote_primary_on_optin: { [KEY]: { s1: { demote: false } } } } }), optinRows: confirmed() });
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
     expect(state.prefs).toEqual([]);
     expect(replays.map((r) => r.scheduledServiceId)).toEqual(['s1']);
-    expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
+    // The entry stays (the replay clears it once final), never stamped demoted.
+    expect(entryOf(state, KEY, 's1')).toEqual({ demote: false });
   });
 
   describe('reconcileDemoteMarker: the opt-in already settled when the booking wrote the marker', () => {
@@ -239,7 +259,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
       const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: confirmed() });
       expect(await reconcileDemoteMarker('c1', KEY, { dbh })).toBe('applied');
       expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
-      expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
+      expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
     });
 
     test.each(['declined', 'ask_failed'])('%s: drops the marker; the caller stays the recipient', async (status) => {
@@ -262,10 +282,33 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(state.customer).toMatchObject({ service_contacts_consent_source: 'recipient_optin_confirmed', service_contacts_consent_text_version: 'portal-2026-07-23' });
     expect(state.customer.service_contacts_consent_at).toBeInstanceOf(Date);
     expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
-    expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
+    // The entry is kept (demoted_at stamped) until its replay is final.
+    expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
     expect(state.customer.service_preferences.other).toBe(1);
     expect(state.cards[0].payload).toEqual({ optin_result: 'confirmed' });
-    expect(replays).toEqual([{ customerId: 'c1', scheduledServiceId: 's1', contact: { name: 'Sample Spouse', phone: '+19415550123', role: 'spouse_partner' } }]);
+    expect(replays).toEqual([{ customerId: 'c1', scheduledServiceId: 's1', phoneKey: KEY, contact: { name: 'Sample Spouse', phone: '+19415550123', role: 'spouse_partner' } }]);
+  });
+
+  test('a second YES pass (retry / sweep) never re-demotes an entry already applied, but re-queues its replay', async () => {
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_contacts_consent_at: new Date(), service_preferences: { demote_primary_on_optin: { [KEY]: { s1: { demote: true, set_at: 'x', demoted_at: 'z' } } } } }), optinRows: confirmed() });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.prefs).toEqual([]);
+    expect(replays.map((r) => r.scheduledServiceId)).toEqual(['s1']);
+  });
+
+  test('two bookings for the same recipient before the reply: BOTH visits replay', async () => {
+    const { dbh } = fakeDb({ customer: spouseRow({ service_preferences: { demote_primary_on_optin: { [KEY]: { s1: { demote: true, set_at: 'x' }, s2: { demote: true, set_at: 'x' } } } } }), optinRows: confirmed() });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(replays.map((r) => r.scheduledServiceId)).toEqual(['s1', 's2']);
+  });
+
+  test('an entry past the 14-day cap is dropped, not applied', async () => {
+    const old = new Date(Date.now() - 15 * 24 * 3600000).toISOString();
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: { demote_primary_on_optin: { [KEY]: { s1: { demote: true, set_at: old } } } } }), optinRows: confirmed() });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(replays).toEqual([]);
+    expect(state.prefs).toEqual([]);
+    expect(entryOf(state, KEY, 's1')).toBeUndefined();
   });
 
   test('YES with ANOTHER unconfirmed slot phone: no stamp, no demotion, no replay; the card says why', async () => {
@@ -295,16 +338,17 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
 
   test('MULTIPLE markers on an already-consented row: a YES applies and clears only its own entry; another contact\'s entry survives', async () => {
     const { dbh, state } = fakeDb({
-      customer: spouseRow({ service_contact2_phone: '+19415550444', service_contacts_consent_at: new Date(), service_preferences: marker({ [OTHER]: { scheduled_service_id: 's9', set_at: 'y' } }) }),
+      customer: spouseRow({ service_contact2_phone: '+19415550444', service_contacts_consent_at: new Date(), service_preferences: marker({ [OTHER]: { s9: { demote: true, set_at: 'y' } } }) }),
       optinRows: confirmed([{ phone_key: OTHER, customer_id: 'c1', status: 'confirmed' }]),
     });
     await applyDemoteMarkersOnConfirm(KEY, { dbh });
-    expect(Object.keys(state.customer.service_preferences.demote_primary_on_optin)).toEqual([OTHER]);
+    expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
+    expect(entryOf(state, OTHER, 's9')).toEqual({ demote: true, set_at: 'y' });
     expect(state.prefs).toHaveLength(1);
   });
 
   test('YES for a phone with NO marker entry leaves the pref alone (stamp still happens), and queues no replay', async () => {
-    const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: { demote_primary_on_optin: { [OTHER]: { scheduled_service_id: 's9' } } } }), optinRows: confirmed() });
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: { demote_primary_on_optin: { [OTHER]: { s9: {} } } } }), optinRows: confirmed() });
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
     expect(state.prefs).toEqual([]);
     expect(replays).toEqual([]);
@@ -319,7 +363,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
   });
 
   test('NO / STOP clears every marker entry for that phone only (caller stays the recipient); the card says declined', async () => {
-    const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker({ [OTHER]: { scheduled_service_id: 's9' } }) }), optinRows: [{ phone_key: KEY, customer_id: 'c1', status: 'declined' }] });
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker({ [OTHER]: { s9: {} } }) }), optinRows: [{ phone_key: KEY, customer_id: 'c1', status: 'declined' }] });
     await clearDemoteMarkersForPhone(KEY, { dbh });
     expect(Object.keys(state.customer.service_preferences.demote_primary_on_optin)).toEqual([OTHER]);
     expect(state.prefs).toEqual([]);
@@ -327,10 +371,10 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
   });
 
   test('a failed ask drops only the entry naming this phone', async () => {
-    const a = fakeDb({ customer: spouseRow({ service_preferences: marker({ [OTHER]: { scheduled_service_id: 's9' } }) }), optinRows: [] });
+    const a = fakeDb({ customer: spouseRow({ service_preferences: marker({ [OTHER]: { s9: {} } }) }), optinRows: [] });
     await clearDemoteMarker('c1', KEY, { dbh: a.dbh });
     expect(Object.keys(a.state.customer.service_preferences.demote_primary_on_optin)).toEqual([OTHER]);
-    const b = fakeDb({ customer: spouseRow({ service_preferences: { demote_primary_on_optin: { [OTHER]: { scheduled_service_id: 's9' } } } }), optinRows: [] });
+    const b = fakeDb({ customer: spouseRow({ service_preferences: { demote_primary_on_optin: { [OTHER]: { s9: {} } } } }), optinRows: [] });
     await clearDemoteMarker('c1', KEY, { dbh: b.dbh });
     expect(Object.keys(b.state.customer.service_preferences.demote_primary_on_optin)).toEqual([OTHER]);
   });
@@ -360,6 +404,25 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     rollback(new Error('rolled back'));
     await new Promise((resolve) => setImmediate(resolve));
     expect(sendConfirmationToServiceContact).not.toHaveBeenCalled();
+    jest.dontMock('../services/appointment-reminders');
+  });
+
+  test('confirmation replay clears its visit entry only when final; a retryable miss keeps it for the sweep', async () => {
+    const dbMod = require('../models/db');
+    const updates = [];
+    dbMod.mockImplementation(() => ({ where: () => ({ update: async (p) => { updates.push(p.service_preferences.binds[0]); return 1; } }) }));
+    dbMod.raw = jest.fn((sql, binds) => ({ sql, binds }));
+    const outcomes = [{ sent: true }, { sent: false, reason: 'visit_not_future' }, { sent: false, reason: 'blocked' }, { sent: false, reason: 'error' }];
+    const sendConfirmationToServiceContact = jest.fn(async () => outcomes.shift());
+    // An earlier test cached its own appointment-reminders mock: drop it so the
+    // lazy require inside the runner picks up this one.
+    jest.resetModules();
+    jest.doMock('../services/appointment-reminders', () => ({ sendConfirmationToServiceContact }));
+    const mk = (v) => ({ customerId: 'c1', scheduledServiceId: v, phoneKey: KEY, contact: { name: 'Sample Spouse', phone: '+19415550123', role: 'spouse_partner' } });
+    runConfirmationReplays([mk('s1'), mk('s2'), mk('s3'), mk('s4')], null);
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(sendConfirmationToServiceContact).toHaveBeenCalledTimes(4);
+    expect(updates).toEqual([['demote_primary_on_optin', KEY, 's1'], ['demote_primary_on_optin', KEY, 's2']]);
     jest.dontMock('../services/appointment-reminders');
   });
 
@@ -399,3 +462,35 @@ describe('isOptinRailLive: the on-site opt-in ask needs a live rail', () => {
   });
 });
 
+
+describe('sweepPendingConfirmationReplays: retries unfinished booking-confirmation replays', () => {
+  test('gate off: no-op; gate on: reconciles each live phone, drops empty / fully expired phones', async () => {
+    jest.resetModules();
+    const dbMock = jest.fn();
+    dbMock.raw = jest.fn((sql, binds) => ({ sql, binds }));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => globalThis.__optinGate) }));
+    const optin = require('../services/recipient-optin');
+    globalThis.__optinGate = false;
+    expect(await optin.sweepPendingConfirmationReplays()).toBe(0);
+    globalThis.__optinGate = true;
+    const old = new Date(Date.now() - 15 * 24 * 3600000).toISOString();
+    const fresh = new Date().toISOString();
+    const statusReads = [];
+    dbMock.mockImplementation((table) => {
+      const q = {};
+      ['whereRaw', 'limit', 'where', 'whereNotNull', 'whereIn', 'forUpdate'].forEach((m) => { q[m] = jest.fn((f) => { if (table === 'recipient_optin' && f && f.phone_key) statusReads.push(f.phone_key); return q; }); });
+      q.select = jest.fn(async () => (table === 'customers'
+        ? [{ id: 'c1', service_preferences: { demote_primary_on_optin: { 1111111111: { s1: { set_at: fresh } }, 2222222222: { s2: { set_at: old } }, 3333333333: {} } } }]
+        : []));
+      q.first = jest.fn(async () => (table === 'recipient_optin' ? { status: 'pending' } : null));
+      q.update = jest.fn(async () => 1);
+      return q;
+    });
+    expect(await optin.sweepPendingConfirmationReplays()).toBe(1);
+    // Only the live phone was reconciled (read its opt-in row).
+    expect(statusReads).toEqual(['1111111111']);
+    delete globalThis.__optinGate;
+  });
+});

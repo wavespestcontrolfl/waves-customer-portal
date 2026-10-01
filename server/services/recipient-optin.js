@@ -48,16 +48,25 @@ async function isOptinRailLive() {
 // the customer row (customers.service_preferences jsonb) by the call pipeline
 // at booking time (owner 2026-09-30: the account holder who booked for an
 // on-site person stops getting appointment texts, but only once that person
-// has actually said YES). The marker is an OBJECT KEYED BY RECIPIENT PHONE —
-// service_preferences.demote_primary_on_optin = { "<last10>": { scheduled_
-// service_id, set_at } } — so several on-site contacts on one account each
-// keep their own entry and another contact's YES / NO never touches it. Every
+// has actually said YES). The marker is keyed by RECIPIENT PHONE, then by
+// VISIT — service_preferences.demote_primary_on_optin =
+// { "<last10>": { "<scheduled_service_id>": { demote, set_at, demoted_at? } } }
+// — so several on-site contacts each keep their own entries, a second booking
+// before the reply adds its own, and another contact's YES / NO never touches
+// them. A visit entry is the durable obligation to send that booking's
+// confirmation: it is cleared only once the send lands or is terminally
+// refused (or the entry goes stale), and a sweep retries the rest. Every
 // helper is best-effort and savepointed: a marker problem must never block or
 // fail an opt-in transition.
 const DEMOTE_MARKER_KEY = 'demote_primary_on_optin';
 // A marker whose booked visit reached one of these is stale: the caller is not
 // demoted for it.
 const DEMOTE_STALE_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show']);
+// Replay outcomes that end the obligation (anything else is retried by the sweep).
+const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'template_unavailable']);
+// Unanswered or undeliverable entries stop being retried after this.
+const MARKER_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const markerPath = (phoneKey, visitId) => (visitId ? ['demote_primary_on_optin', phoneKey, String(visitId)] : ['demote_primary_on_optin', phoneKey]);
 async function withSavepoint(dbh, fn) {
   try {
     // A root handle opens its own transaction (so the row lock holds and the
@@ -117,9 +126,12 @@ async function stampConsentOnConfirm(h, customerId, phoneKey, customer) {
 
 // Breadcrumb on the open secondary_contact_captured review card for this
 // recipient (matched by the contact phone in its payload): optin_result
-// confirmed|declined, plus consent_stamp when the stamp was held.
-async function updateCaptureCard(h, phoneKey, patch) {
-  await h('triage_items')
+// confirmed|declined, plus consent_stamp when the stamp was held. With a
+// customerId, only that customer's calls' cards (each account's own outcome).
+async function updateCaptureCard(h, phoneKey, patch, customerId = null) {
+  let q = h('triage_items');
+  if (customerId) q = q.whereIn('call_log_id', h('call_log').where({ customer_id: customerId }).select('id'));
+  await q
     .where({ reason_code: 'secondary_contact_captured' })
     .whereIn('status', ['open', 'in_progress'])
     .whereRaw("right(regexp_replace(coalesce(payload #>> '{secondary_contact,phone}', ''), '\\D', '', 'g'), 10) = ?", [phoneKey])
@@ -132,49 +144,57 @@ async function updateCaptureCard(h, phoneKey, patch) {
 // A YES confirmed this phone. For each customer with a confirmed row for it:
 // stamp the consent artifact (when the whole row is covered); and — only if the
 // row now has consent, so somebody can actually be texted — act on THIS phone's
-// demote marker entry: turn the caller's appointment texts OFF, queue the
-// booking confirmation for this recipient, and clear the entry. Updates the
-// review card. Returns { replays } — confirmation texts to send AFTER the
-// caller's transaction commits (runConfirmationReplays).
-// Apply ONE confirmed phone's marker entry on a consented row. Revalidates
+// visit entries (applyMarkerEntry). Updates each customer's review card.
+// Returns { replays } — confirmation texts to send AFTER the caller's
+// transaction commits (runConfirmationReplays clears each entry once final).
+//
+// Apply ONE confirmed phone's visit entries on a consented row. Revalidates
 // before silencing the caller: the phone must STILL sit in a slot (a replaced
-// contact's late YES demotes nobody) and the booked visit must still be live.
-// A stale entry is dropped, never applied. Queues the confirmation replay.
-async function applyMarkerEntry(h, customer, phoneKey, marker, replays) {
-  if (!marker) return;
+// contact's late YES demotes nobody) and each booked visit must still be live;
+// a stale entry is dropped, never applied. demote entries switch the caller's
+// appointment texts off once (demoted_at); every live entry queues the replay
+// and stays until that replay is final.
+async function applyMarkerEntry(h, customer, phoneKey, visits, replays) {
+  if (!visits || typeof visits !== 'object') return;
   const customerId = customer.id;
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
   const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === phoneKey);
-  const visit = slot && marker.scheduled_service_id
-    ? await h('scheduled_services').where({ id: marker.scheduled_service_id, customer_id: customerId }).first('status')
-    : null;
-  const clearEntry = () => h('customers').where({ id: customerId })
-    .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) #- ARRAY['demote_primary_on_optin', ?]::text[]", [phoneKey]) });
-  if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase())) {
-    await clearEntry();
+  const dropPath = (path) => h('customers').where({ id: customerId })
+    .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) #- ?::text[]", [path]) });
+  if (!slot) {
+    await dropPath(markerPath(phoneKey));
     return;
   }
-  // demote:false = another slot phone already gets the texts: replay only.
-  // An entry written before the field existed is a demote entry.
-  if (marker.demote !== false) {
-    await h('notification_prefs')
-      .insert({ customer_id: customerId, appointment_notify_primary: false })
-      .onConflict('customer_id')
-      .merge({ appointment_notify_primary: false });
+  for (const [visitId, entry] of Object.entries(visits)) {
+    const visit = await h('scheduled_services').where({ id: visitId, customer_id: customerId }).first('status');
+    const setAt = entry && entry.set_at ? Date.parse(entry.set_at) : NaN;
+    const expired = Number.isFinite(setAt) && Date.now() - setAt > MARKER_MAX_AGE_MS;
+    if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()) || expired) {
+      await dropPath(markerPath(phoneKey, visitId));
+      continue;
+    }
+    // demote:false = another slot phone already gets the texts: replay only.
+    if (entry && entry.demote !== false && !entry.demoted_at) {
+      await h('notification_prefs')
+        .insert({ customer_id: customerId, appointment_notify_primary: false })
+        .onConflict('customer_id')
+        .merge({ appointment_notify_primary: false });
+      await h('customers').where({ id: customerId })
+        .update({ service_preferences: h.raw("jsonb_set(service_preferences, ?::text[], to_jsonb(?::text))", [[...markerPath(phoneKey, visitId), 'demoted_at'], new Date().toISOString()]) });
+    }
+    replays.push({
+      customerId,
+      scheduledServiceId: visitId,
+      phoneKey,
+      contact: { name: customer[slot.name] || '', phone: customer[slot.phone], role: customer[slot.roleCol] || null },
+    });
   }
-  await clearEntry();
-  replays.push({
-    customerId,
-    scheduledServiceId: marker.scheduled_service_id,
-    contact: { name: customer[slot.name] || '', phone: customer[slot.phone], role: customer[slot.roleCol] || null },
-  });
 }
 
 async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
   const replays = [];
   const committed = await withSavepoint(dbh, async (h) => {
     const rows = await h('recipient_optin').where({ phone_key: phoneKey, status: 'confirmed' }).whereNotNull('customer_id').select('customer_id');
-    let stampHeld = null;
     for (const { customer_id: customerId } of rows || []) {
       // Row lock: two slot recipients answering YES at once serialize here, so
       // the second reads the first's committed confirmation before deciding
@@ -183,9 +203,10 @@ async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
       if (!customer) continue;
       const stamp = await stampConsentOnConfirm(h, customerId, phoneKey, customer);
       if (!stamp.stamped) {
-        stampHeld = stamp.reason;
+        await updateCaptureCard(h, phoneKey, { optin_result: 'confirmed', consent_stamp: `held:${stamp.reason}` }, customerId);
         continue;
       }
+      await updateCaptureCard(h, phoneKey, { optin_result: 'confirmed' }, customerId);
       const prefs = typeof customer.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer.service_preferences;
       const entries = (prefs && prefs[DEMOTE_MARKER_KEY]) || {};
       await applyMarkerEntry(h, customer, phoneKey, entries[phoneKey], replays);
@@ -205,10 +226,6 @@ async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
         }
       }
     }
-    await updateCaptureCard(h, phoneKey, {
-      optin_result: 'confirmed',
-      ...(stampHeld ? { consent_stamp: `held:${stampHeld}` } : {}),
-    });
     return true;
   });
   // A rolled-back savepoint undid the stamp and the demotion: send nothing.
@@ -226,7 +243,12 @@ function runConfirmationReplays(replays, dbh) {
       try {
         const AppointmentReminders = require('./appointment-reminders');
         const result = await AppointmentReminders.sendConfirmationToServiceContact(replay);
-        logger.info(`[recipient-optin] booking confirmation replay to ***${recipientPhoneKey(replay.contact.phone).slice(-4)}: ${result.sent ? 'sent' : `not sent (${result.reason})`}`);
+        const final = result.sent || REPLAY_TERMINAL_REASONS.has(result.reason);
+        if (final && replay.phoneKey) {
+          await db('customers').where({ id: replay.customerId })
+            .update({ service_preferences: db.raw("COALESCE(service_preferences, '{}'::jsonb) #- ?::text[]", [markerPath(replay.phoneKey, replay.scheduledServiceId)]) });
+        }
+        logger.info(`[recipient-optin] booking confirmation replay to ***${recipientPhoneKey(replay.contact.phone).slice(-4)}: ${result.sent ? 'sent' : `not sent (${result.reason}${final ? '' : ', will retry'})`}`);
       } catch (err) {
         logger.warn(`[recipient-optin] confirmation replay failed (${err.code || err.name || 'error'})`);
       }
@@ -245,7 +267,7 @@ function runConfirmationReplays(replays, dbh) {
 // marker now instead of waiting for a reply that will never come. Writing the
 // marker FIRST and reading the opt-in row second leaves no gap — a YES landing
 // in between is applied by its own handler, and applying twice is idempotent
-// (the first clears the entry; the replay dedupes on sms_log).
+// (demoted_at gates the demotion; the replay dedupes on sms_log).
 async function reconcileDemoteMarker(customerId, phoneKey, { dbh = db } = {}) {
   if (!customerId || !phoneKey) return 'skipped';
   try {
@@ -263,6 +285,35 @@ async function reconcileDemoteMarker(customerId, phoneKey, { dbh = db } = {}) {
     logger.warn(`[recipient-optin] demote marker reconcile failed (${err.code || err.name || 'error'})`);
     return 'error';
   }
+}
+
+// Retry sweep for unfinished booking-confirmation replays (a send that was
+// held or failed leaves its visit entry in place): every customer still
+// carrying entries is reconciled — confirmed phones retry the replay (the
+// sms_log dedupe stops a double send), declined / failed asks drop theirs,
+// pending ones wait; entries past MARKER_MAX_AGE_MS are dropped on apply.
+async function sweepPendingConfirmationReplays({ limit = 25 } = {}) {
+  if (!(await isDoubleOptinEnabled())) return 0;
+  const rows = await db('customers')
+    .whereRaw("jsonb_exists(COALESCE(service_preferences, '{}'::jsonb), 'demote_primary_on_optin')")
+    .whereRaw("service_preferences -> 'demote_primary_on_optin' <> '{}'::jsonb")
+    .limit(limit)
+    .select('id', 'service_preferences');
+  let touched = 0;
+  for (const row of rows || []) {
+    const prefs = typeof row.service_preferences === 'string' ? JSON.parse(row.service_preferences) : row.service_preferences;
+    for (const [phoneKey, visits] of Object.entries((prefs && prefs[DEMOTE_MARKER_KEY]) || {})) {
+      const entries = Object.values(visits || {});
+      const allExpired = entries.length > 0 && entries.every((e) => e && e.set_at && Date.now() - Date.parse(e.set_at) > MARKER_MAX_AGE_MS);
+      if (!entries.length || allExpired) {
+        await clearDemoteMarker(row.id, phoneKey);
+        continue;
+      }
+      await reconcileDemoteMarker(row.id, phoneKey);
+      touched += 1;
+    }
+  }
+  return touched;
 }
 
 // A STOP declined this phone everywhere: drop every marker that names it.
@@ -756,6 +807,7 @@ module.exports = {
   applyDemoteMarkersOnConfirm,
   runConfirmationReplays,
   reconcileDemoteMarker,
+  sweepPendingConfirmationReplays,
   clearDemoteMarkersForPhone,
   OPTIN_TEMPLATE_VERSION,
   isDoubleOptinEnabled,

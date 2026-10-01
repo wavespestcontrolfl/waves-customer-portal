@@ -13149,6 +13149,10 @@ const CallRecordingProcessor = {
         const onSiteDecision = decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result });
         const askedViaOnSite = onSiteDecision.ask;
         let optinAskState = onSiteDecision.ask ? 'not_sent:no_new_ask' : `not_sent:${onSiteDecision.reason}`;
+        // The dispatch is fire-and-forget: the card says 'dispatching' until
+        // its outcome lands ('sent', or not_sent:dispatch_failed when the ask
+        // was blocked / released to ask_failed).
+        let optinDispatch = null;
         if ((result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) || (askedViaOnSite && secondaryEntry?.phone)) {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
@@ -13169,9 +13173,12 @@ const CallRecordingProcessor = {
                 propertyAddress: [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
               });
               if (claims.length) {
-                void dispatchRecipientOptins(claims, custRow)
-                  .catch((err) => logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
-                if (askedViaOnSite) optinAskState = 'sent';
+                optinDispatch = dispatchRecipientOptins(claims, custRow)
+                  .catch((err) => {
+                    logger.warn(`[call-proc] recipient opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`);
+                    return 0;
+                  });
+                if (askedViaOnSite) optinAskState = 'dispatching';
               }
               // Every asked recipient gets the booking's confirmation at their
               // YES; only the account's sole texting slot phone also makes the
@@ -13203,6 +13210,10 @@ const CallRecordingProcessor = {
           }
         }
         await markOptinAsk(secondaryEntry, optinAskState);
+        if (optinDispatch && optinAskState === 'dispatching') {
+          const dispatchedEntry = secondaryEntry;
+          void optinDispatch.then((requested) => markOptinAsk(dispatchedEntry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed'));
+        }
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
           // customer's primary phone — the office decides whether it's the
@@ -17916,15 +17927,19 @@ const CallRecordingProcessor = {
               // YES lands (a NO / failed ask clears it too).
               if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKeys.size) {
                 try {
-                  const markers = {};
+                  // One entry per phone AND visit: a second booking before the
+                  // reply adds its own entry instead of replacing the first.
                   for (const [phoneKey, demote] of deferPrimaryOptOutPhoneKeys) {
-                    markers[phoneKey] = { scheduled_service_id: svc.id, demote, set_at: new Date().toISOString() };
+                    const visitEntry = { [svc.id]: { demote, set_at: new Date().toISOString() } };
+                    await db('customers')
+                      .where({ id: deferPrimaryOptOutCustomerId })
+                      .update({
+                        service_preferences: db.raw(
+                          'jsonb_set(COALESCE(service_preferences, \'{}\'::jsonb), \'{demote_primary_on_optin}\', COALESCE(service_preferences -> \'demote_primary_on_optin\', \'{}\'::jsonb) || jsonb_build_object(?::text, COALESCE(service_preferences #> ARRAY[\'demote_primary_on_optin\', ?::text], \'{}\'::jsonb) || ?::jsonb))',
+                          [phoneKey, phoneKey, JSON.stringify(visitEntry)],
+                        ),
+                      });
                   }
-                  await db('customers')
-                    .where({ id: deferPrimaryOptOutCustomerId })
-                    .update({
-                      service_preferences: db.raw('COALESCE(service_preferences, \'{}\'::jsonb) || jsonb_build_object(\'demote_primary_on_optin\', COALESCE(service_preferences -> \'demote_primary_on_optin\', \'{}\'::jsonb) || ?::jsonb)', [JSON.stringify(markers)]),
-                    });
                   // The opt-in may already be settled (confirmed on an earlier
                   // call, or the reply beat the booking): apply / drop now.
                   const { reconcileDemoteMarker } = require('./recipient-optin');

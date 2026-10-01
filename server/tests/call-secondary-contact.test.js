@@ -801,7 +801,9 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain('decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result })');
     expect(src).toContain("(askedViaOnSite && secondaryEntry?.phone)");
     expect(src).toContain('JSON.stringify({ optin_ask: value })');
-    expect(src).toContain("optinAskState = 'sent'");
+    // 'dispatching' until the fire-and-forget dispatch's outcome lands.
+    expect(src).toContain("optinAskState = 'dispatching'");
+    expect(src).toContain("markOptinAsk(dispatchedEntry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed')");
     expect(src).toContain('`not_sent:${onSiteDecision.reason}`');
     // Explicit V2 consent keeps the original claim path (fresh slot only).
     expect(src).toContain("(result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit)");
@@ -818,11 +820,12 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain('deferPrimaryOptOutPhoneKeys.set(lastTen(secondaryEntry.phone), !otherSlotPhone);');
     expect(src).not.toContain("result === 'written' && !hadSlotPhone");
     const landed = src.indexOf('scheduledServiceId = svc.id;');
-    const marker = src.indexOf("jsonb_build_object(\\'demote_primary_on_optin\\'", landed);
+    const marker = src.indexOf("\\'{demote_primary_on_optin}\\'", landed);
     expect(marker).toBeGreaterThan(landed);
     const block = src.slice(landed, marker + 600);
     expect(block).toContain('if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKeys.size)');
-    expect(block).toContain('markers[phoneKey] = { scheduled_service_id: svc.id, demote');
+    // One entry per phone AND visit.
+    expect(block).toContain('const visitEntry = { [svc.id]: { demote, set_at: new Date().toISOString() } };');
     // The booking site writes no pref at all any more.
     expect(src).not.toContain('appointment_notify_primary: false');
   });
