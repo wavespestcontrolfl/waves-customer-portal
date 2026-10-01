@@ -1322,9 +1322,7 @@ router.post('/:id/lost', async (req, res, next) => {
     const refusal = handledStatusRefusal('lost', seen, existing.status);
     if (refusal) return res.status(refusal.code).json({ error: refusal.error });
     const marked = await leadAttribution.markLost(req.params.id, { reason, competitor, notes, notIfStatusIn: seen === 'handled' ? [] : ['handled'] });
-    if (marked === false) {
-      return res.status(409).json({ error: handledStatusRefusal('lost', seen, 'handled').error });
-    }
+    if (marked === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online, or been deleted). Reload to see it.' });
     const lead = await db('leads').where('id', req.params.id).first();
     res.json({ lead });
   } catch (err) { next(err); }

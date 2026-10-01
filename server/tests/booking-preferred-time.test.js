@@ -885,6 +885,7 @@ describe('a completed booking closes the customer\'s open preferred-time request
     });
     expect(JSON.parse(activities()[0].arg.metadata)).toEqual({
       reason: 'booking_on_preferred_request', visit_id: 'visit-7', booking_id: 'sba-1', previous_status: 'new', status: 'handled', auto: true,
+      service: 'Lawn Care', day: 'Thu, Oct 8', // the locked snapshot a retried FYI replays (codex #5477 r15)
     });
     // The status write and its audit row share one transaction, status first.
     expect(mockOrder.indexOf('update:leads')).toBeLessThan(mockOrder.indexOf('insert:lead_activities'));
@@ -921,6 +922,14 @@ describe('a completed booking closes the customer\'s open preferred-time request
     const keys = mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
     expect(keys.length).toBeGreaterThanOrEqual(1);
     expect(new Set(keys)).toEqual(new Set(['preferred-time-auto-close:lead-1:visit-7']));
+  });
+
+  test('a retried FYI replays the service and day the close recorded, not the visit as it stands later (codex #5477 r15)', async () => {
+    mockAuditRows = [{ lead_id: 'lead-9', metadata: { visit_id: 'visit-7', booking_id: 'sba-1', service: 'Pest Control', day: 'Mon, Oct 5' }, first_name: 'Pat', last_name: 'Sample' }];
+    mockOpenLeads = [];
+    await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
+    const retry = mockNotifyAdmin.mock.calls.find((c) => c[3].dedupeKey === 'preferred-time-auto-close:lead-9:visit-7');
+    expect(retry[2]).toBe('Pat Sample booked Pest Control for Mon, Oct 5; the time request closed on its own.');
   });
 
   test('a fresh close whose FYI failed is healed by the same run (codex #5477 r5): the retry is not skipped for leads this call just closed', async () => {

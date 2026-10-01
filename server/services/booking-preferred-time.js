@@ -561,17 +561,140 @@ async function resendCloseNotices(db, { booking }) {
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
       const visitId = meta && meta.visit_id;
       if (!visitId) continue;
-      const visit = await db('scheduled_services').where({ id: visitId }).first('service_type', 'scheduled_date');
-      if (!visit) continue;
+      // The close's own snapshot (codex #5477 r15); an audit written before it was
+      // recorded falls back to the visit as it stands.
+      let words = meta.service && meta.day ? { service: meta.service, day: meta.day } : null;
+      if (!words) {
+        const visit = await db('scheduled_services').where({ id: visitId }).first('service_type', 'scheduled_date');
+        if (!visit) continue;
+        words = visitWords(visit);
+      }
       await notifyRequestClosed({
         lead: { id: row.lead_id },
         customerName: [row.first_name, row.last_name].filter(Boolean).join(' '),
-        ...visitWords(visit), visitId,
+        ...words, visitId,
       });
     }
   } catch (err) {
     logger.warn(`[booking:preferred-time] close notice retry failed for booking=${booking.id}: ${err.message}`);
   }
+}
+
+/**
+ * The candidate lookup and per-request close for ONE owner of the booked visit:
+ * the requests on that customer's phone, each re-proven under its locks. Run for the
+ * visit's owner as first read, and once more when a merge has since repointed the
+ * visit to a winner whose phone (and requests) differ (codex #5477 r15).
+ */
+async function closeRequestsForOwner(db, { ownerId, customerId, visit, booking, bookedMs, convertedIds }) {
+  const customer = await db('customers').where({ id: ownerId }).first('phone', 'first_name', 'last_name', 'email');
+  const ten = tenDigitPhone(customer && customer.phone);
+  if (!ten) return 0;
+  const open = (await tenMatch(
+    db('leads')
+      .where({ lead_type: LEAD_TYPE })
+      .whereNull('deleted_at')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      // A request staff worked into an estimate is that estimate's deal, never
+      // 'handled' (codex #5477 r5/r6): it stays open, exactly as on main, and
+      // converts the way any estimate-linked lead does (the estimate's
+      // acceptance, markLinkedLeadEstimateAccepted) or by staff.
+      .whereNull('estimate_id')
+      .whereRaw(LAST_REQUESTED_SQL.replace(' > ?', ' <= ?'), [new Date(bookedMs + BOOKING_SLACK_MS)]),
+    ten,
+  ).select('id')) || [];
+  let closed = 0;
+  for (const lead of open) {
+    // Per-(lead, visit) advisory lock: the booking's own post-commit path and
+    // the submit's reconcile can both arrive for the same visit.
+    const result = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_note:${lead.id}:${visit.id}`]);
+      const seen = await trx('lead_activities')
+        .where({ lead_id: lead.id, activity_type: 'status_change' })
+        .whereRaw("metadata->>'reason' = ? AND metadata->>'visit_id' = ?", [CLOSE_REASON, String(visit.id)])
+        .first('id');
+      if (seen) return null;
+      // The visit read above is a point-in-time check (codex #5477 r5): it may
+      // have been cancelled, skipped or rescheduled since. Lock and re-read it
+      // here so a request never closes on a booking that no longer holds a
+      // live, non-callback visit.
+      // The booked customer's identity, re-read under a share lock (codex #5477 r8):
+      // staff may have corrected or reassigned their phone, email or name since the
+      // snapshot above, and the corroboration must judge the identity as it is now.
+      // Taken BEFORE the visit lock (codex #5477 r9): a customer merge locks the
+      // customer rows first and then sweeps their visits, so this order matches it.
+      // The customer is the visit's CURRENT owner (codex #5477 r12): a merge that
+      // committed since the booking repointed the visit to the winner and retired
+      // the loser's phone, so the booking's own customer id may be stale.
+      const owner = await trx('scheduled_services').where({ id: visit.id }).first('customer_id');
+      let ownerId = (owner && owner.customer_id) || customerId;
+      const readCustomer = (id) => trx('customers').where({ id }).forShare()
+        .first('phone', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'zip');
+      let liveCustomer = await readCustomer(ownerId);
+      const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate()
+        .first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id', 'service_address_line1', 'service_address_line2', 'service_address_zip');
+      if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
+      // A merge repointed the visit between the owner read and the lock (codex #5477
+      // r13): it has committed (the visit lock waited for it), so judge the request
+      // on the winner now instead of leaving it for a later closer the primary
+      // booking path may never run.
+      if (liveVisit.customer_id && String(liveVisit.customer_id) !== String(ownerId)) {
+        ownerId = liveVisit.customer_id;
+        liveCustomer = await readCustomer(ownerId);
+      }
+      // Re-read the lead under a row lock (codex #5399 r14): staff may have
+      // reassigned its phone, linked it to another customer or closed it since
+      // the open-lead query above, and the customer may have refreshed the
+      // request (a newer last_requested_at is new work, never this booking's
+      // to close). The advisory lock only orders closers, so the lead's own
+      // state, phone identity and request recency are re-proven right here.
+      const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
+        'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id', 'service_interest', 'extracted_data', 'zip',
+        trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
+      );
+      const stillOurs = current
+        && current.lead_type === LEAD_TYPE
+        && OPEN_LEAD_STATUSES.includes(current.status)
+        && !current.converted_at
+        && !current.deleted_at
+        && !current.estimate_id // staff may have attached an estimate since the query above
+        && current.requested_in_time === true
+        && requestIdentifiesCustomer(current, liveCustomer, [ownerId, customerId])
+        && bookingAnswersRequest(current.service_interest, liveVisit.service_type)
+        && sameProperty(current, liveVisit, liveCustomer);
+      if (!stillOurs) return null;
+      // Named from the visit as locked (codex #5477 r10), not the earlier read.
+      const { service, day } = visitWords(liveVisit);
+      await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
+      await trx('lead_activities').insert({
+        lead_id: lead.id,
+        activity_type: 'status_change',
+        description: `Closed automatically — customer booked ${service} for ${day} (visit ${visit.id}) on /book`,
+        performed_by: 'system',
+        metadata: JSON.stringify({
+          reason: CLOSE_REASON,
+          visit_id: String(visit.id),
+          booking_id: String(booking.id),
+          previous_status: current.status,
+          status: CLOSED_STATUS,
+          auto: true,
+          // The words the FYI names the visit by, as locked: a retried FYI replays
+          // these, so it always agrees with this audit row (codex #5477 r15).
+          service,
+          day,
+          // The genuine lead(s) this booking's own conversion converted (the funnel-row
+          // cleanup's replacement lineage when the booking records no row of its own).
+          ...(convertedIds.length ? { converted_lead_ids: convertedIds } : {}),
+        }),
+      });
+      return { name: [current.first_name, current.last_name].filter(Boolean).join(' '), service, day };
+    });
+    if (!result) continue;
+    closed += 1;
+    await notifyRequestClosed({ lead, customerName: result.name, service: result.service, day: result.day, visitId: visit.id });
+  }
+  return closed;
 }
 
 /**
@@ -606,109 +729,14 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
     const bookedMs = new Date(booking.created_at).getTime();
     const convertedIds = (Array.isArray(convertedLeadIds) ? convertedLeadIds : []).filter(Boolean).map(String);
     if (Number.isNaN(bookedMs)) return { live: true, closed: 0 };
-    // The visit's current owner (a merge since the booking repoints it; codex #5477 r12).
-    const customer = await db('customers').where({ id: visit.customer_id || customerId }).first('phone', 'first_name', 'last_name', 'email');
-    const ten = tenDigitPhone(customer && customer.phone);
-    if (!ten) return { live: true, closed: 0 };
-    const open = (await tenMatch(
-      db('leads')
-        .where({ lead_type: LEAD_TYPE })
-        .whereNull('deleted_at')
-        .whereIn('status', OPEN_LEAD_STATUSES)
-        .whereNull('converted_at')
-        // A request staff worked into an estimate is that estimate's deal, never
-        // 'handled' (codex #5477 r5/r6): it stays open, exactly as on main, and
-        // converts the way any estimate-linked lead does (the estimate's
-        // acceptance, markLinkedLeadEstimateAccepted) or by staff.
-        .whereNull('estimate_id')
-        .whereRaw(LAST_REQUESTED_SQL.replace(' > ?', ' <= ?'), [new Date(bookedMs + BOOKING_SLACK_MS)]),
-      ten,
-    ).select('id')) || [];
-    let closed = 0;
-    for (const lead of open) {
-      // Per-(lead, visit) advisory lock: the booking's own post-commit path and
-      // the submit's reconcile can both arrive for the same visit.
-      const result = await db.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_note:${lead.id}:${visit.id}`]);
-        const seen = await trx('lead_activities')
-          .where({ lead_id: lead.id, activity_type: 'status_change' })
-          .whereRaw("metadata->>'reason' = ? AND metadata->>'visit_id' = ?", [CLOSE_REASON, String(visit.id)])
-          .first('id');
-        if (seen) return null;
-        // The visit read above is a point-in-time check (codex #5477 r5): it may
-        // have been cancelled, skipped or rescheduled since. Lock and re-read it
-        // here so a request never closes on a booking that no longer holds a
-        // live, non-callback visit.
-        // The booked customer's identity, re-read under a share lock (codex #5477 r8):
-        // staff may have corrected or reassigned their phone, email or name since the
-        // snapshot above, and the corroboration must judge the identity as it is now.
-        // Taken BEFORE the visit lock (codex #5477 r9): a customer merge locks the
-        // customer rows first and then sweeps their visits, so this order matches it.
-        // The customer is the visit's CURRENT owner (codex #5477 r12): a merge that
-        // committed since the booking repointed the visit to the winner and retired
-        // the loser's phone, so the booking's own customer id may be stale.
-        const owner = await trx('scheduled_services').where({ id: visit.id }).first('customer_id');
-        let ownerId = (owner && owner.customer_id) || customerId;
-        const readCustomer = (id) => trx('customers').where({ id }).forShare()
-          .first('phone', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'zip');
-        let liveCustomer = await readCustomer(ownerId);
-        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate()
-          .first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id', 'service_address_line1', 'service_address_line2', 'service_address_zip');
-        if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
-        // A merge repointed the visit between the owner read and the lock (codex #5477
-        // r13): it has committed (the visit lock waited for it), so judge the request
-        // on the winner now instead of leaving it for a later closer the primary
-        // booking path may never run.
-        if (liveVisit.customer_id && String(liveVisit.customer_id) !== String(ownerId)) {
-          ownerId = liveVisit.customer_id;
-          liveCustomer = await readCustomer(ownerId);
-        }
-        // Re-read the lead under a row lock (codex #5399 r14): staff may have
-        // reassigned its phone, linked it to another customer or closed it since
-        // the open-lead query above, and the customer may have refreshed the
-        // request (a newer last_requested_at is new work, never this booking's
-        // to close). The advisory lock only orders closers, so the lead's own
-        // state, phone identity and request recency are re-proven right here.
-        const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
-          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id', 'service_interest', 'extracted_data', 'zip',
-          trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
-        );
-        const stillOurs = current
-          && current.lead_type === LEAD_TYPE
-          && OPEN_LEAD_STATUSES.includes(current.status)
-          && !current.converted_at
-          && !current.deleted_at
-          && !current.estimate_id // staff may have attached an estimate since the query above
-          && current.requested_in_time === true
-          && requestIdentifiesCustomer(current, liveCustomer, [ownerId, customerId])
-          && bookingAnswersRequest(current.service_interest, liveVisit.service_type)
-          && sameProperty(current, liveVisit, liveCustomer);
-        if (!stillOurs) return null;
-        // Named from the visit as locked (codex #5477 r10), not the earlier read.
-        const { service, day } = visitWords(liveVisit);
-        await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
-        await trx('lead_activities').insert({
-          lead_id: lead.id,
-          activity_type: 'status_change',
-          description: `Closed automatically — customer booked ${service} for ${day} (visit ${visit.id}) on /book`,
-          performed_by: 'system',
-          metadata: JSON.stringify({
-            reason: CLOSE_REASON,
-            visit_id: String(visit.id),
-            booking_id: String(booking.id),
-            previous_status: current.status,
-            status: CLOSED_STATUS,
-            auto: true,
-            // The genuine lead(s) this booking's own conversion converted (the funnel-row
-            // cleanup's replacement lineage when the booking records no row of its own).
-            ...(convertedIds.length ? { converted_lead_ids: convertedIds } : {}),
-          }),
-        });
-        return { name: [current.first_name, current.last_name].filter(Boolean).join(' '), service, day };
-      });
-      if (!result) continue;
-      closed += 1;
-      await notifyRequestClosed({ lead, customerName: result.name, service: result.service, day: result.day, visitId: visit.id });
+    // The visit's current owner (a merge since the booking repoints it; codex #5477 r12),
+    // and once more if a merge repointed it while this ran (codex #5477 r15).
+    const firstOwner = visit.customer_id || customerId;
+    const ctx = { customerId, visit, booking, bookedMs, convertedIds };
+    let closed = await closeRequestsForOwner(db, { ...ctx, ownerId: firstOwner });
+    const now = await db('scheduled_services').where({ id: visit.id }).first('customer_id');
+    if (now?.customer_id && String(now.customer_id) !== String(firstOwner)) {
+      closed += await closeRequestsForOwner(db, { ...ctx, ownerId: now.customer_id });
     }
     // Every request THIS booking closed (just now, or on an earlier run), including one
     // whose FYI above failed and was swallowed: the FYI is re-sent here. The persistent

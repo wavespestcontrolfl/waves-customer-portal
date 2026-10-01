@@ -689,6 +689,38 @@ jest.setTimeout(60000);
       expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
     });
 
+    test('a merge lands before the candidate lookup (codex #5477 r15): the close runs again from the winner and closes the request on the winner\'s phone', async () => {
+      const loser = randomUUID();
+      const winner = randomUUID();
+      await database('customers').insert([
+        { id: loser, phone: '+19415550177', first_name: 'Pat', last_name: 'Sample' },
+        { id: winner, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' },
+      ]);
+      const req = await recordPreferredTimeRequest(database, value(), { notify: false }); // on the winner's phone
+      const sba = await database('self_booked_appointments').insert({ customer_id: loser, created_at: new Date() }).returning(['id', 'created_at']);
+      const [{ id: visitId }] = await database('scheduled_services').insert({ self_booking_id: sba[0].id, customer_id: loser }).returning(['id']);
+      // The merge commits just as the close reads the loser's customer row: the visit moves to the
+      // winner and the loser's phone is retired, so the first pass finds no candidates at all.
+      let merged = false;
+      const racing = new Proxy(database, {
+        apply(target, thisArg, args) {
+          const q = target(...args);
+          if (args[0] === 'customers' && !merged) {
+            merged = true;
+            const first = q.first.bind(q);
+            q.first = async (...cols) => {
+              await target('scheduled_services').where({ id: visitId }).update({ customer_id: winner });
+              await target('customers').where({ id: loser }).update({ phone: null });
+              return first(...cols);
+            };
+          }
+          return q;
+        },
+      });
+      expect((await closeBookedPreferredLeads(racing, { customerId: loser, booking: sba[0] })).closed).toBe(1);
+      expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
+    });
+
     describe('a booking settles only the request for the same property (terminal Codex pass 3)', () => {
       const setupHomes = async ({ visitAddress, visitZip, visitUnit = null, requestUnit = null }) => {
         const cust = randomUUID();
