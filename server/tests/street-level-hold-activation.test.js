@@ -489,3 +489,18 @@ describe('r22: the status routes recheck the hold UNDER the visit row lock (seri
     }
   });
 });
+
+describe('r22 P0: an unsuccessful closeout of a hold earns no inspection-credit evidence', () => {
+  test('the completed transition skips the credit evidence for a hold with no field-confirmation stamp (and still writes it for every other row)', () => {
+    const s = fs.readFileSync(require.resolve('../services/job-status.js'), 'utf8');
+    expect(s).toContain("'customer_id', 'field_confirmed_at');");
+    const guard = s.indexOf('const unapprovedHold = legacyOutboundActivationNeeded && legacyRow.source_action === \'voice_agent\' && !legacyRow.field_confirmed_at');
+    const gate = s.indexOf("if (legacyOutboundActivationNeeded && !unapprovedHold && String(toStatus || '') === 'completed' && legacyRow.customer_id) {");
+    expect(guard).toBeGreaterThan(0);
+    expect(gate).toBeGreaterThan(guard);
+    expect(s.indexOf('markBookingForInspectionCredit(t, {', gate)).toBeGreaterThan(gate);
+    // The stamp is committed in the completion's own transaction before that transition.
+    const c = fs.readFileSync(require.resolve('../services/complete-scheduled-service.js'), 'utf8');
+    expect(c.indexOf('scheduledServiceUpdate.field_confirmed_at')).toBeLessThan(c.indexOf("toStatus: 'completed',", c.indexOf('scheduledServiceUpdate.field_confirmed_at')));
+  });
+});

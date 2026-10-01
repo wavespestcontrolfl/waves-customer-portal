@@ -397,7 +397,7 @@ async function transitionJobStatus({
       const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
-        .first('source_action', 'status', 'customer_confirmed', 'customer_id');
+        .first('source_action', 'status', 'customer_confirmed', 'customer_id', 'field_confirmed_at');
       legacyOutboundActivationNeeded = legacyOutboundActivation !== 'caller'
         && !!legacyRow
         && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(legacyRow.source_action)
@@ -418,7 +418,13 @@ async function transitionJobStatus({
       // same posture every at-booking redemption surface carries.
       // Best-effort: an evidence hiccup never blocks the completion; the
       // hook's own idempotent marker call is the belt.
-      if (legacyOutboundActivationNeeded && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
+      // A street-level address hold completed WITHOUT the field-confirmation stamp (an incomplete or declined
+      // closeout, which still sets status completed) earns no credit evidence: its address was never approved
+      // and no work was performed. The completion engine commits the stamp in this same transaction before
+      // this transition, for performed closeouts only.
+      const unapprovedHold = legacyOutboundActivationNeeded && legacyRow.source_action === 'voice_agent' && !legacyRow.field_confirmed_at
+        && await require('./street-level-hold').isStreetLevelHoldVisit(jobId, t);
+      if (legacyOutboundActivationNeeded && !unapprovedHold && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
         // Frozen ONCE and threaded through the post-commit retry (Codex
         // #3361 r16 P1): a failed marker queues its outbox with this same
         // instant, and the hook's belt retry passes it too, so whichever
