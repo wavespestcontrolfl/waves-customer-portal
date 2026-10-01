@@ -517,11 +517,14 @@ const EXPECTATION_TEXT = {
     + 'harborage. Activity can spike for a few days, then declines over the next couple of weeks.',
   // The closing instruction to the customer is left out of the writer's plain
   // version: the writer's rule 7 bans aftercare instructions (codex #5523 P2).
-  ant_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} along active `
-    + 'foraging trails. Foragers feed on it and share it through the colony before it takes effect. You may see more '
+  // Placement in the label's own terms (Advion ant gel: active foraging
+  // areas; roach gel: crack and crevice), never a spot the record doesn't
+  // name (codex #5523).
+  ant_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} where ants were `
+    + 'foraging. Foragers feed on it and share it through the colony before it takes effect. You may see more '
     + `ants on the placements for a few days.${aftercare ? ' Leave them alone; they\'re carrying the bait back to the nest.' : ''}`,
   roach_gel_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} as `
-    + 'crack-and-crevice placements in hinges, voids and other harborage. Roaches feed on it and carry it back into '
+    + 'crack-and-crevice placements in harborage areas. Roaches feed on it and carry it back into '
     + 'harborage, where the active ingredient eliminates them. Over the next week or two you may see roaches out in '
     + 'daylight, slowed and disoriented, as the active ingredient takes effect.'
     + `${aftercare ? ' Don\'t use over-the-counter sprays near the placements; a residual spray contaminates the bait and keeps roaches off it.' : ''}`,

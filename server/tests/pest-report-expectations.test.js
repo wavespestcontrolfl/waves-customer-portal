@@ -779,7 +779,9 @@ describe('buildWhatToExpect — owner wording rules 2026-10-01', () => {
 
   it('the roach gel line keeps the over-the-counter spray warning from the label', () => {
     const out = buildWhatToExpect({ products: [{ name: 'Advion Evolution Cockroach Gel Bait' }] });
-    expect(out.lines[0]).toMatch(/^We placed an indoxacarb gel bait as crack-and-crevice placements/);
+    expect(out.lines[0]).toMatch(/^We placed an indoxacarb gel bait as crack-and-crevice placements in harborage areas\./);
+    // No placement the record doesn't name.
+    expect(out.lines[0]).not.toMatch(/hinges|voids/);
     expect(out.lines[0]).toMatch(/a residual spray contaminates the bait/);
   });
 });
