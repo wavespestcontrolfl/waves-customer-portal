@@ -52,6 +52,7 @@ function fakeDb(tables) {
         return q;
       },
       offset(n) { rows = rows.slice(n); return q; },
+      modify(fn) { return q; },
       limit(n) { rows = rows.slice(0, n); return q; },
       select() { return q; },
       first() { return Promise.resolve(rows[0]); },

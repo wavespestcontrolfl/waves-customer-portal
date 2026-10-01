@@ -16,6 +16,7 @@
  */
 
 const { detectSmsOptCommand, detectHelp } = require('./messaging/opt-out-detector');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const SUGGESTION_WINDOW_HOURS = 72;
 // Same cap as call-recording-processor's pain_points slice and the column's
@@ -95,15 +96,14 @@ async function pickSuggestion(conn, customerId, { now = Date.now() } = {}) {
   if (!customerId) return null;
   const floor = windowFloor(now);
 
-  const newestEligible = async (table, columns, kind, textOf) => {
+  // Each source names its own table literally (the sms_log reader guard,
+  // tests/sms-log-general-reader-source-guard.test.js, scans for it).
+  const newestEligible = async (pageQuery, kind, textOf) => {
     for (let offset = 0; ; offset += SCAN_PAGE) {
-      const rows = await conn(table)
-        .where({ customer_id: customerId, direction: 'inbound' })
-        .where('created_at', '>=', floor)
+      const rows = await pageQuery()
         .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
         .offset(offset)
-        .limit(SCAN_PAGE)
-        .select(columns);
+        .limit(SCAN_PAGE);
       for (const row of rows || []) {
         const text = textOf(row);
         const at = toIso(row.created_at);
@@ -114,8 +114,15 @@ async function pickSuggestion(conn, customerId, { now = Date.now() } = {}) {
   };
 
   const candidates = [
-    await newestEligible('sms_log', ['id', 'message_body', 'created_at'], 'text', smsSuggestionText),
-    await newestEligible('call_log', CALL_COLUMNS, 'call', callSuggestionText),
+    await newestEligible(() => conn('sms_log')
+      .where({ customer_id: customerId, direction: 'inbound' })
+      .where('created_at', '>=', floor)
+      .modify(excludeUnresolvedSendReservations)
+      .select('id', 'message_body', 'created_at'), 'text', smsSuggestionText),
+    await newestEligible(() => conn('call_log')
+      .where({ customer_id: customerId, direction: 'inbound' })
+      .where('created_at', '>=', floor)
+      .select(CALL_COLUMNS), 'call', callSuggestionText),
   ].filter(Boolean);
   if (!candidates.length) return null;
   candidates.sort((a, b) => new Date(b.at) - new Date(a.at));
@@ -143,6 +150,7 @@ async function resolveCustomerRequest(conn, customerId, input, { now = Date.now(
       const row = await conn('sms_log')
         .where({ id, customer_id: customerId, direction: 'inbound' })
         .where('created_at', '>=', floor)
+        .modify(excludeUnresolvedSendReservations)
         .first('id', 'message_body', 'created_at');
       suggested = row ? smsSuggestionText(row) : null;
     } else {
