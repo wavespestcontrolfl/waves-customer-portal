@@ -143,6 +143,13 @@ function flatView(extraction) {
     relative_date_used: typeof sched.relative_date_used === 'boolean' ? sched.relative_date_used : null,
     moved_appointment_relative_date_used: typeof sched.moved_appointment_relative_date_used === 'boolean'
       ? sched.moved_appointment_relative_date_used : null,
+    // Commercial dictated booking judgements (schema 1.21.0): tri-state, null =
+    // not judged, which the path fails closed on.
+    price_offered_by_staff: typeof svc.price_offered_by_staff === 'boolean' ? svc.price_offered_by_staff : null,
+    price_accepted_by_caller: typeof svc.price_accepted_by_caller === 'boolean' ? svc.price_accepted_by_caller : null,
+    price_is_final: typeof svc.price_is_final === 'boolean' ? svc.price_is_final : null,
+    staff_accepted_proposed_slot: typeof sched.staff_accepted_proposed_slot === 'boolean' ? sched.staff_accepted_proposed_slot : null,
+    selected_day_words: typeof sched.selected_day_words === 'string' ? sched.selected_day_words : null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
     follow_up_date_time: sched.follow_up_start_at || null,
 

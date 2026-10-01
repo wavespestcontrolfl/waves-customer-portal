@@ -317,7 +317,7 @@ describe('direct creators tell the tech (source order)', () => {
   test('a phone booking announces the fresh primary and a fresh follow-up child, never a reused row', () => {
     const src = read('../services/call-recording-processor.js');
     const at = src.indexOf('scheduledServiceId = svc.id;');
-    const block = src.slice(at, at + 1500);
+    const block = src.slice(at, at + 2600);
     expect(block).toContain("...(!reusedExistingSchedule || (reuseAssignedTechId && String(svc.technician_id) === String(reuseAssignedTechId)) ? [svc] : []),");
     expect(block).toContain('...(followUpCreated && followUpCreated.id ? [followUpCreated] : [])');
     expect(block).toContain("kind: 'assigned', technicianId: row.technician_id, actorId: null,");
@@ -343,27 +343,38 @@ describe('cancel-flow plan hold (source order)', () => {
     const fs = require('fs');
     const path = require('path');
     const holds = fs.readFileSync(path.join(__dirname, '../services/cancellation-resolution/holds.js'), 'utf8');
-    expect(holds).toContain("}, 'plan_hold', 'customer', { suppressTechNotice: true });");
-    expect(holds).toContain("'plan_hold_revert', 'customer', { suppressTechNotice: true });");
+    // Forward prepaid move and its compensating move back both stay silent.
+    const forward = holds.slice(holds.indexOf("'plan_hold', 'customer', {"), holds.indexOf("'plan_hold', 'customer', {") + 120);
+    expect(forward).toContain('suppressTechNotice: true');
+    const revert = holds.slice(holds.indexOf("'plan_hold_revert', 'customer', {"), holds.indexOf("'plan_hold_revert', 'customer', {") + 120);
+    expect(revert).toContain('suppressTechNotice: true');
     // startHold never emits: the notices are built after the last
     // compensation point and handed back to the caller.
     expect(holds).not.toContain('void techNotices.notifyVisitRescheduled(');
-    const compensate = holds.indexOf("throw codedError('hold_setup_failed'");
-    const built = holds.indexOf('const techNotices = moved');
+    const compensate = holds.indexOf("throw codedError('hold_setup_failed'", holds.indexOf('async function startHold('));
+    const built = holds.indexOf('techNotices: moveTechNotices(moved, movedTechIds)');
+    expect(compensate).toBeGreaterThan(-1);
     expect(built).toBeGreaterThan(compensate);
-    expect(holds).toContain('moved: moved.length, techNotices };');
     // The recipient is the holder on the COMMITTED move (rebooker result).
     expect(holds).toContain("movedTechIds.set(String(visit.id), moveResult?.technicianId || null);");
-    // The action emits after its own compensation catch (multi-family) …
+    // The action emits only after every family stood and the accept was
+    // marked (which undoes this run's holds on failure) …
     const actions = fs.readFileSync(path.join(__dirname, '../services/cancellation-resolution/actions.js'), 'utf8');
-    const holdCatch = actions.indexOf("try { await cancelHold(done.holdId, { compensateVisits: true }); }");
-    const holdEmit = actions.indexOf('if (!deferTechNotices) emitHoldTechNotices(techNotices);');
-    expect(holdEmit).toBeGreaterThan(holdCatch);
-    // … and the away pairing defers past Away Mode's own compensation catch.
-    expect(actions).toContain('await executeHold({ ...ctx, deferTechNotices: true });');
-    const awayCatch = actions.indexOf("try { await cancelHold(holdId, { compensateVisits: true }); }");
-    const awayEmit = actions.indexOf("require('./holds').emitHoldTechNotices(techNotices);");
-    expect(awayEmit).toBeGreaterThan(awayCatch);
+    const holdCatch = actions.indexOf('await undoOwnHolds(ownHoldIds(results).reverse());');
+    const holdMark = actions.indexOf('await markAcceptedOrUndo(results.map((r) => r.holdId), ownHoldIds(results));');
+    const holdEmit = actions.indexOf('    emitHoldTechNotices(techNotices);');
+    expect(holdCatch).toBeGreaterThan(-1);
+    expect(holdMark).toBeGreaterThan(holdCatch);
+    expect(holdEmit).toBeGreaterThan(holdMark);
+    // … and the away pairing defers past Away Mode's own compensation and
+    // its marking.
+    expect(actions).toContain('await executeHold({ ...ctx, deferTechNotices: true, allowNoHold: true });');
+    const awayCatch = actions.indexOf('await undoOwnHolds(ownHolds);');
+    const awayMark = actions.indexOf('await markAcceptedOrUndo(hold.holds, ownHolds);');
+    const awayEmit = actions.indexOf('holds.emitHoldTechNotices(techNotices);');
+    expect(awayCatch).toBeGreaterThan(-1);
+    expect(awayMark).toBeGreaterThan(awayCatch);
+    expect(awayEmit).toBeGreaterThan(awayMark);
   });
 });
 
@@ -375,9 +386,12 @@ describe('Codex r9 writers (source order)', () => {
   test('both voice-confirm hooks name the holder from the COMMITTED transition payload, not the pre-transaction read', () => {
     for (const rel of ['../routes/admin-dispatch.js', '../routes/admin-schedule.js']) {
       const src = read(rel);
-      const hook = src.indexOf("const confirmedRow = transition?.adminPayload || null;");
-      expect(hook).toBeGreaterThan(-1);
-      expect(src.lastIndexOf('transition = await transitionJobStatus({', hook)).toBeGreaterThan(src.lastIndexOf('let transition = null;', hook));
+      const read0 = src.indexOf("const confirmedRow = transition?.adminPayload || null;");
+      expect(read0).toBeGreaterThan(-1);
+      expect(src.lastIndexOf('transition = await transitionJobStatus({', read0)).toBeGreaterThan(src.lastIndexOf('let transition = null;', read0));
+      // The card now follows the activation (it keys on pending -> confirmed OR a successful activation).
+      const hook = src.indexOf("if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id", read0);
+      expect(hook).toBeGreaterThan(read0);
       expect(src.slice(hook, hook + 900)).toContain('snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },');
       expect(src.slice(hook, hook + 900)).not.toContain('technicianId: svc.technician_id');
     }
@@ -421,13 +435,13 @@ describe('Codex r7 writers (source order)', () => {
 
   test('the admin-schedule status route confirms voice-agent bookings too and sends the same assigned card, post-commit', () => {
     const src = read('../routes/admin-schedule.js');
-    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id");
+    const hook = src.indexOf("if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id");
     expect(hook).toBeGreaterThan(-1);
     expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,");
-    // After the status transaction's catch block, before the activation helper.
+    // After the status transaction's catch block and (now) after the activation helper, which it keys on.
     expect(src.lastIndexOf('await transitionJobStatus({', hook)).toBeGreaterThan(-1);
     expect(src.lastIndexOf('// ===== Post-success side effects =====', hook)).toBeGreaterThan(-1);
-    expect(src.indexOf("runOfficeConfirmActivation(db, svc, 'admin-schedule'", hook)).toBeGreaterThan(hook);
+    expect(src.lastIndexOf("runOfficeConfirmActivation(db, svc, 'admin-schedule'", hook)).toBeGreaterThan(-1);
   });
 
   test('the cancellation processor names its actor (customer label or the acting staff row), never null', () => {
@@ -464,12 +478,12 @@ describe('Codex r6 writers (source order)', () => {
 
   test('office confirm of a voice-agent booking (pending → confirmed) sends the assigned card, post-commit', () => {
     const src = read('../routes/admin-dispatch.js');
-    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id");
+    const hook = src.indexOf("if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id");
     expect(hook).toBeGreaterThan(-1);
     expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,");
-    // After the status transaction's catch block, before the activation helper.
+    // After the status transaction's catch block and after the activation helper it keys on.
     expect(src.lastIndexOf('await transitionJobStatus({', hook)).toBeGreaterThan(-1);
-    expect(src.indexOf("runOfficeConfirmActivation(db, svc, 'admin-dispatch'", hook)).toBeGreaterThan(hook);
+    expect(src.lastIndexOf("runOfficeConfirmActivation(db, svc, 'admin-dispatch'", hook)).toBeGreaterThan(-1);
   });
 
   test('graduating a reserved estimate slot into a booking announces it on the accept transaction', () => {

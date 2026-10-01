@@ -11,7 +11,7 @@
  */
 
 // Outside-service writes (owner ruling 2026-09-28, IB scope expansion item 1):
-// Sentry/Cloudflare/Railway/GitHub/Search Console tools whose commit reaches
+// Sentry/Cloudflare/Railway/GitHub/Search Console/GrowthBook tools whose commit reaches
 // a THIRD-PARTY API, not the portal's own DB. They are structurally two-step
 // (folded into WRITE_TWO_STEP_TOOL_NAMES below) — a card, not the owner-only
 // /execute flow — but per the owner ruling every write tool (not just
@@ -20,10 +20,11 @@
 // the tool-list level (getToolsForContext) and at proposal/confirm time in
 // admin-intelligence-bar.js via FULL_ACCESS_TWO_STEP_TOOL_NAMES below — never
 // by inventing a new access helper (ib-access.js's ibFullAccess /
-// requireFullAccess are the only predicate). This PR ships PREVIEW ONLY: each
-// executor refuses when called with confirmed:true ("commit path ships in
-// the next PR") — no outside write actually reaches Sentry/Cloudflare/
-// Railway/GitHub/GSC yet, whoever calls it.
+// requireFullAccess are the only predicate). On confirm, each executor acts
+// ONLY on the `_verified_*` pins /confirm-action derives from the
+// fingerprint-verified live preview (outside-write-pins.js) — never on the
+// operator's raw strings — and a read-only token refuses with
+// code "write_access_required", changing nothing.
 const OUTSIDE_WRITE_TOOL_NAMES = new Set([
   'resolve_sentry_issue',
   'ignore_sentry_issue',
@@ -36,6 +37,20 @@ const OUTSIDE_WRITE_TOOL_NAMES = new Set([
   'add_github_pr_label',
   'request_codex_review',
   'submit_gsc_sitemap',
+  // Feature switches (owner ruling 2026-09-28, Decision 5): a GrowthBook flag
+  // toggle and a Railway GATE_* variable change. PREVIEW ONLY for now — both
+  // executors refuse confirmed:true until the commit-path PR.
+  'set_railway_gate',
+  'set_growthbook_feature_environment',
+]);
+
+// Proposals whose card is shown but CANNOT be confirmed yet: their executors
+// refuse confirmed:true until the commit-path PR. The contract carries
+// preview_only (the card hides Confirm) and /confirm-action refuses them
+// before dispatch. The commit-path PR removes a tool from this set.
+const PREVIEW_ONLY_WRITE_TOOL_NAMES = new Set([
+  'set_railway_gate',
+  'set_growthbook_feature_environment',
 ]);
 
 // Every outside write is full-access-only. Named separately from
@@ -119,4 +134,5 @@ module.exports = {
   CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   OUTSIDE_WRITE_TOOL_NAMES,
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
+  PREVIEW_ONLY_WRITE_TOOL_NAMES,
 };

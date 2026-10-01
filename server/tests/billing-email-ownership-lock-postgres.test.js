@@ -1,5 +1,8 @@
 // Raw SQL writer proof, using disposable schemas and a private dev/CI database.
 jest.mock('../models/db', () => jest.fn());
+// The bounce-recovery phase marker is written on the marker connection; here that is the test's own app handle.
+let mockMarkerApp;
+jest.mock('../models/marker-db', () => () => Object.assign((...args) => mockMarkerApp(...args), { raw: (...args) => mockMarkerApp.raw(...args) }));
 jest.mock('../services/visit-completion-summary', () => ({ retrySummaryThroughHandoff: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const { randomUUID } = require('node:crypto');
@@ -60,6 +63,10 @@ postgres('billing Email ownership assignments (PostgreSQL)', () => {
     await app.schema.createTable('leads', table => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.text('email'); table.text('notes');
     });
+    mockMarkerApp = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 1 } }); // its own pool: the held handoff owns app's only connection
+    await app.schema.createTable('email_bounce_recoveries', table => {
+      table.uuid('recovery_message_id'); table.jsonb('metadata'); table.timestamp('updated_at');
+    });
     await app.schema.createTable('email_messages', table => {
       table.uuid('id').primary(); table.text('status'); table.text('error_message'); table.text('provider_message_id');
       table.text('html_snapshot'); table.text('text_snapshot');
@@ -82,7 +89,7 @@ postgres('billing Email ownership assignments (PostgreSQL)', () => {
     global.fetch = previousFetch;
     if (previousApiKey === undefined) delete process.env.SENDGRID_API_KEY;
     else process.env.SENDGRID_API_KEY = previousApiKey;
-    await app?.destroy(); await writer?.destroy();
+    await app?.destroy(); await writer?.destroy(); await mockMarkerApp?.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
 

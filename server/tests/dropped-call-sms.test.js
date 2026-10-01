@@ -40,12 +40,14 @@ jest.mock('../services/messaging/validators/line-type', () => ({
   NON_SMS_LINE_TYPES: new Set(['landline', 'fixedVoip']),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/messaging/auto-text-holds', () => ({ saidNoTextsOnAnyCall: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const lineType = require('../services/messaging/validators/line-type');
+const { saidNoTextsOnAnyCall } = require('../services/messaging/auto-text-holds');
 const {
   sendDroppedCallAddressRequest,
   handleUndeliveredAddressRequest,
@@ -106,6 +108,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(IN_WINDOW);
   state = { firstResults: {}, updateResults: {}, insertResults: {}, insertError: {}, inserts: [], updates: [], deletes: [] };
+  saidNoTextsOnAnyCall.mockImplementation(async () => false);
   db.mockImplementation((table) => makeBuilder(table));
   const trx = (table) => makeBuilder(table);
   trx.raw = db.raw;
@@ -320,10 +323,6 @@ describe('callbackClause / window helpers', () => {
     expect(_private.callbackClause(null)).toBe('');
   });
 
-  it('window check follows ET hours', () => {
-    expect(_private.withinSendWindowET(IN_WINDOW)).toBe(true);
-    expect(_private.withinSendWindowET(OUT_OF_WINDOW)).toBe(false);
-  });
 });
 
 // Codex pre-push r1 P1 on PR #5012: callback_clause and the sms fromNumber
@@ -406,6 +405,23 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  it('a caller who said no to texts on a call with this number — no text, one-shot not consumed (owner 2026-09-30)', async () => {
+    saidNoTextsOnAnyCall.mockResolvedValueOnce(true);
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, id: 'call-9' } });
+    expect(res).toEqual({ sent: false, skipped: 'said_no_texts' });
+    expect(saidNoTextsOnAnyCall).toHaveBeenCalledWith(PHONE, { originCallId: 'call-9' });
+    expect(state.inserts).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('a no-texts read failure fails CLOSED before any claim', async () => {
+    saidNoTextsOnAnyCall.mockRejectedValueOnce(Object.assign(new Error('down'), { code: 'ETIMEDOUT' }));
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'said_no_texts_read_failed' });
+    expect(state.inserts).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   it('never sends from the AI toll-free line even though findByNumber matches it', async () => {
     const TN = require('../config/twilio-numbers');
     TN.tollFree = { number: '+18559260203' };
@@ -462,12 +478,26 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(sent.metadata.fromNumber).not.toBe('+19415993489');
   });
 
-  it('quiet hours — skips BEFORE any claim, one-shot not consumed', async () => {
+  it('evening INBOUND drop still texts, marked customerInitiated (owner ruling 2026-09-30: a reply to the caller\'s own contact goes out at any hour)', async () => {
     jest.setSystemTime(OUT_OF_WINDOW);
     const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res.sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ entryPoint: 'dropped_call_sms', customerInitiated: true }));
+  });
+
+  it('evening OUTBOUND-leg drop — quiet hours skip BEFORE any claim, one-shot not consumed (our contact, not theirs)', async () => {
+    jest.setSystemTime(OUT_OF_WINDOW);
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, direction: 'outbound-api', from_phone: '+19412166229', to_phone: PHONE } });
     expect(res).toEqual({ sent: false, skipped: 'quiet_hours' });
     expect(state.inserts).toHaveLength(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('daytime OUTBOUND-leg drop sends WITHOUT the customerInitiated marker', async () => {
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, direction: 'outbound-api', from_phone: '+19412166229', to_phone: PHONE } });
+    expect(res.sent).toBe(true);
+    expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('customerInitiated');
   });
 
   it('sms_log dedupe read failure — fails closed', async () => {

@@ -2388,70 +2388,41 @@ router.get('/subscribers/zone-distribution', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/newsletter/subscribers/import-customers
-// Imports all customers with email addresses as newsletter subscribers.
-// Skips duplicates (existing subscribers by email). Links customer_id.
-// Derives region_zone from customer city.
-router.post('/subscribers/import-customers', async (req, res, next) => {
+// Shared by both routes below. Default is a DRY RUN — a write needs both
+// `dryRun: false` AND `confirm: 'IMPORT'` in the body; anything else
+// (including an empty body) returns the dry-run result untouched.
+//
+// Held push-audit P1 (codex #5165): a confirmed write (dryRun:false) can hit
+// per-customer errors (each caught by reconcileCustomers' own guardedEach,
+// never aborting the batch) and still return the applied/excluded numbers
+// alongside them, silently, at HTTP 200 — nothing in the response shape
+// told a caller it was partial. A write with errors.length > 0 now answers
+// 422 with an explicit `success: false`; the result object (importable,
+// imported, excluded, byCity, projected, errors — id-only, per the module's
+// own contract) is otherwise unchanged. Dry runs are never affected.
+async function reconcileCustomersHandler(req, res, next) {
   try {
-    const { cityToZone } = require('../services/event-freshness');
-
-    // Get all live customers with emails. Archive sets only deleted_at (never
-    // active), so without this an archived customer would be (re)subscribed
-    // and emailed — mirrors whereLiveCustomer (services/customer-stages.js).
-    const customers = await db('customers')
-      .whereNull('deleted_at')
-      .whereNotNull('email')
-      .where('email', '!=', '')
-      .select('id', 'email', 'first_name', 'last_name', 'city');
-
-    let imported = 0, skipped = 0, errors = 0;
-    for (const c of customers) {
-      try {
-        // Skip subscribers who opted out OR are mid-double-opt-in — calling
-        // subscribeOrResubscribe with requireConfirmation:false would promote
-        // pending rows to active, bypassing the confirmation they started.
-        const existing = await db('newsletter_subscribers')
-          .where({ email: c.email.trim().toLowerCase() })
-          .first();
-        if (existing && (existing.status === 'unsubscribed' || existing.status === 'pending')) {
-          skipped++;
-          continue;
-        }
-
-        const result = await subscribeOrResubscribe({
-          email: c.email,
-          firstName: c.first_name || null,
-          lastName: c.last_name || null,
-          source: 'customer_import',
-          strict: false,
-          requireConfirmation: false,
-          linkCustomer: true,
-        });
-
-        if (result.action === 'created' || result.action === 'resubscribed') {
-          imported++;
-        } else {
-          skipped++;
-        }
-
-        // Always backfill region_zone if missing (covers already_active too)
-        const zone = cityToZone(c.city);
-        if (zone && result.subscriber?.id) {
-          await db('newsletter_subscribers')
-            .where({ id: result.subscriber.id })
-            .whereNull('region_zone')
-            .update({ region_zone: zone });
-        }
-      } catch (e) {
-        errors++;
-        logger.error(`[newsletter] import customer id=${c.id} failed: ${e.message}`);
-      }
+    const { reconcileCustomers } = require('../services/newsletter-list-reconcile');
+    const write = req.body?.dryRun === false && req.body?.confirm === 'IMPORT';
+    const result = await reconcileCustomers({ dryRun: !write });
+    if (write && Array.isArray(result.errors) && result.errors.length > 0) {
+      return res.status(422).json({ ...result, success: false });
     }
-
-    res.json({ success: true, imported, skipped, errors, total: customers.length });
+    res.json(result);
   } catch (err) { next(err); }
-});
+}
+
+// POST /api/admin/newsletter/subscribers/import-customers
+// SUPERSEDED (see PR body "Superseded behaviour"): used to import EVERY live
+// customer with an email — leads included, ignoring marketing_offers and
+// suppressions. Now a thin alias for reconcileCustomersHandler, kept so an
+// existing no-body caller gets a dry run, not a 404.
+router.post('/subscribers/import-customers', reconcileCustomersHandler);
+
+// POST /api/admin/newsletter/subscribers/reconcile-customers
+// Filtered customer import — see services/newsletter-list-reconcile.js for
+// the candidate/exclusion rules.
+router.post('/subscribers/reconcile-customers', reconcileCustomersHandler);
 
 // ── Editorial Calendar ──────────────────────────────────────────────
 

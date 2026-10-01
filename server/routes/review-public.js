@@ -36,24 +36,11 @@ router.get('/:token', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/review/:token — submit rating (no auth)
-router.post('/:token', async (req, res, next) => {
-  try {
-    const { rating, feedbackText } = req.body;
-    if (!rating || rating < 1 || rating > 10) {
-      return res.status(400).json({ error: 'Rating must be between 1 and 10' });
-    }
-    const result = await ReviewService.submitRating(req.params.token, { rating, feedbackText });
-    res.json(result);
-  } catch (err) {
-    if (err.message === 'Already rated') return res.status(409).json({ error: err.message });
-    // Unknown and expired tokens get the same body as a malformed one — a
-    // distinct 410 would confirm that a token once existed.
-    if (err.message === 'Review request not found' || err.message === 'Review link expired') {
-      return res.status(404).json(NOT_FOUND);
-    }
-    next(err);
-  }
-});
+// POST /api/review/:token — RETIRED (owner ruling 2026-09-29: the 1-10 rating is
+// gone). It was an unauthenticated rating write that stamped redirected_at /
+// status 'reviewed' without any Google tap, fired the referral invite, and
+// finalized the row so a later real /go tap bounced. 410 with no DB access
+// (the token-format gate still runs first).
+router.post('/:token', (req, res) => res.status(410).json({ error: 'This review flow has been retired' }));
 
 module.exports = router;

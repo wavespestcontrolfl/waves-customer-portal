@@ -2722,6 +2722,134 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
     ]);
     expect(result).toMatch(/moved 1, released 1/);
   });
+
+  // codex #5394: only a DISPUTE-reason collection_hold stops automatic card
+  // charges, so a merge that keeps the winner's fallback hold while releasing
+  // the loser's dispute hold would silently resume charging.
+  function collisionTrx({ loserRow, winnerRow, collideOnce = false }) {
+    const updates = [];
+    const firstLocks = [];
+    let collided = 0;
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('first')) { firstLocks.push(q.called('forUpdate')); return winnerRow; }
+      if (q.called('select')) return [loserRow];
+      if (q.called('update')) {
+        const where = q.args('where')[0];
+        const patch = q.args('update')[0];
+        if (where.id === loserRow.id && !patch.released_at && (!collideOnce || collided++ === 0)) { const e = new Error('duplicate key'); e.code = '23505'; throw e; }
+        updates.push({ rowId: where.id, patch });
+        return 1;
+      }
+      return [];
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
+    return { trx, updates, firstLocks };
+  }
+
+  it('reads the surviving hold under FOR UPDATE (the flag-only release route takes no merge lock)', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, firstLocks } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'wrong-party answer could not be filed', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call' },
+    });
+    await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(firstLocks).toEqual([true]);
+  });
+
+  it('the winner hold was released after the collision: the loser\'s active hold moves across, never released', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'wrong-party answer could not be filed', released_at: null },
+      winnerRow: undefined,
+      collideOnce: true,
+    });
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(updates).toEqual([{ rowId: 'L1', patch: { customer_id: 'W' } }]);
+    expect(result).toMatch(/moved 1, released 0/);
+  });
+
+  it('winner fallback hold + loser DISPUTE hold: the surviving winner row is promoted to the dispute reason', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'dispute on call: says the charge is wrong', released_at: null },
+      winnerRow: { id: 'W1', reason: 'wrong-number report could not be filed' },
+    });
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    const promote = updates.find((u) => u.rowId === 'W1');
+    expect(promote.patch.reason).toMatch(/^dispute on call: says the charge is wrong/);
+    // Same trailer placeDisputeHold writes, so releasing the dispute restores the winner's fallback.
+    expect(promote.patch.reason).toBe('dispute on call: says the charge is wrong [earlier hold: wrong-number report could not be filed]');
+    expect(require('../services/collections/collection-hold').priorHoldReasonOf(promote.patch.reason))
+      .toEqual({ prior: 'wrong-number report could not be filed' });
+    expect(updates.find((u) => u.rowId === 'L1').patch.released_at).toBe('CURRENT_TIMESTAMP');
+    expect(result).toMatch(/promoted 1/);
+  });
+
+  it('winner DISPUTE hold + loser fallback hold: the loser fallback rides in the surviving dispute\'s trailer, loser released', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { priorHoldReasonOf } = require('../services/collections/collection-hold');
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'wrong-party answer could not be filed', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call' },
+    });
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    const carry = updates.find((u) => u.rowId === 'W1');
+    expect(carry.patch.reason).toBe('dispute raised on call [earlier hold: wrong-party answer could not be filed]');
+    // releasing that dispute later restores the fallback (collection-hold-admin)
+    expect(priorHoldReasonOf(carry.patch.reason)).toEqual({ prior: 'wrong-party answer could not be filed' });
+    expect(updates.find((u) => u.rowId === 'L1').patch.released_at).toBe('CURRENT_TIMESTAMP');
+    expect(result).toMatch(/carried 1/);
+    expect(result).not.toMatch(/promoted/);
+  });
+
+  it('winner PLAIN dispute + loser dispute that had a fallback under it: the loser\'s fallback is carried too', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { priorHoldReasonOf } = require('../services/collections/collection-hold');
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'dispute on call: x [earlier hold: wrong-number report]', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call' },
+    });
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    const carry = updates.filter((u) => u.rowId === 'W1');
+    expect(carry).toHaveLength(1); // one update site, one new reason
+    expect(priorHoldReasonOf(carry[0].patch.reason)).toEqual({ prior: 'wrong-number report' });
+    expect(carry[0].patch.reason).toMatch(/^dispute raised on call \[earlier hold:/);
+    expect(result).toMatch(/carried 1/);
+  });
+
+  it('winner plain dispute + loser plain dispute: nothing to carry, winner untouched', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'dispute on call: y', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call' },
+    });
+    await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(updates.find((u) => u.rowId === 'W1')).toBeUndefined();
+  });
+
+  it('winner dispute that already has its own fallback trailer + loser fallback: winner untouched', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'wrong-party answer could not be filed', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call [earlier hold: wrong-number report]' },
+    });
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(updates.find((u) => u.rowId === 'W1')).toBeUndefined();
+    expect(result).not.toMatch(/carried \d|promoted \d/);
+  });
+
+  it('both DISPUTE holds, or a non-hold flag collision: no promotion', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    for (const { loserRow, winnerRow } of [
+      { loserRow: { id: 'L1', flag: 'collection_hold', reason: 'dispute on call: x', released_at: null }, winnerRow: { id: 'W1', reason: 'dispute on call: y' } },
+      { loserRow: { id: 'L1', flag: 'do_not_text', reason: 'dispute on call: x', released_at: null }, winnerRow: { id: 'W1', reason: 'stop' } },
+    ]) {
+      const { trx, updates } = collisionTrx({ loserRow, winnerRow });
+      await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+      expect(updates.find((u) => u.rowId === 'W1')).toBeUndefined();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2855,6 +2983,26 @@ describe('predictWinnerBackfills (pure — the executor\'s rule, disclosed by th
     // the backfill must not churn the row or the fingerprint.
     expect(dedupe.predictWinnerBackfills({ id: 'W', termite_stations_rented: true }, loser).backfills.termite_stations_rented).toBeUndefined();
     expect(dedupe.predictWinnerBackfills(winner, { id: 'L', termite_stations_rented: false }).backfills.termite_stations_rented).toBeUndefined();
+  });
+
+  it('carries the newer last_seen_at onto the winner (GREATEST) and journals the winner prior; an older or equal loser value changes nothing', () => {
+    const older = new Date('2026-09-01T12:00:00.000Z');
+    const newer = new Date('2026-09-20T12:00:00.000Z');
+    const loserNewer = dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: older }, { id: 'L', last_seen_at: newer });
+    expect(loserNewer.backfills.last_seen_at).toEqual(newer);
+    expect(loserNewer.winnerPriorValues.last_seen_at).toEqual(older);
+    // Winner never seen: the loser's value fills it; no prior to journal (undo vacates to null).
+    const winnerNever = dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: null }, { id: 'L', last_seen_at: newer });
+    expect(winnerNever.backfills.last_seen_at).toEqual(newer);
+    expect(winnerNever.winnerPriorValues.last_seen_at).toBeUndefined();
+    // Winner newer, equal, or the loser never seen: untouched.
+    const winnerNewer = dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: newer }, { id: 'L', last_seen_at: older });
+    expect(winnerNewer.backfills.last_seen_at).toBeUndefined();
+    expect(winnerNewer.winnerPriorValues.last_seen_at).toBeUndefined();
+    expect(dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: newer }, { id: 'L', last_seen_at: new Date(newer) }).backfills.last_seen_at).toBeUndefined();
+    expect(dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: older }, { id: 'L', last_seen_at: null }).backfills.last_seen_at).toBeUndefined();
+    // ISO strings (a journal round trip) compare by instant, not lexically.
+    expect(dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: '2026-09-20T08:00:00-04:00' }, { id: 'L', last_seen_at: '2026-09-20T13:00:00.000Z' }).backfills.last_seen_at).toBe('2026-09-20T13:00:00.000Z');
   });
 
   it('a street-only winner absorbing a same-street unit-bearing loser keeps the unit; loser-only billing mode + fee and payer transfer', () => {

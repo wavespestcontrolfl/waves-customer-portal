@@ -8,6 +8,8 @@ const {
 } = require('./billing-channel-email-authority');
 const { buildBillingReplayContext, isBillingReplaySource } = require('./billing-email-replay-context');
 const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
+const BillingEmailDetails = require('./billing-email-details');
+const logger = require('./logger');
 
 function clean(value) {
   return String(value || '').trim();
@@ -15,6 +17,30 @@ function clean(value) {
 
 function emailNotificationBody(value) {
   return clean(value).replace(/\s*Reply STOP to opt out\.?\s*$/i, '').trim();
+}
+
+// GATE_BILLING_EMAIL_DETAILS (dark): the routed billing.notice / billing.receipt_notice
+// emails only ever carried the SMS body. When the notice is about ONE invoice
+// the template's detail rows can now name the property, the service, the
+// service date and (receipts only) the tender behind the payment. Every value
+// is '' when the data does not exist, which the renderer drops; with the gate
+// off nothing is added.
+async function invoiceDetailPayload(context) {
+  if (!BillingEmailDetails.billingEmailDetailsLive() || !context.invoice) return {};
+  const { invoice, customer } = context;
+  const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
+  const payload = {
+    service_label: service.label,
+    service_date: service.date,
+    property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
+  };
+  if (context.category === 'payment_receipt') {
+    payload.payment_method = BillingEmailDetails.receiptTenderLabel({
+      payment: await BillingEmailDetails.paidPaymentForInvoice(invoice),
+      invoice,
+    });
+  }
+  return payload;
 }
 
 function acceptedResult(result) {
@@ -171,6 +197,14 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
   if (context.error) return context.error;
 
   const { recipientEmail } = context;
+  let detailPayload = {};
+  try {
+    detailPayload = await invoiceDetailPayload(context);
+  } catch (err) {
+    // Details are additive: a lookup that fails sends the notice without them.
+    detailPayload = {};
+    logger.warn(`[billing-channel-email] invoice detail lookup failed for invoice ${context.invoice?.id || 'unknown'}: ${err.message}`);
+  }
   const replayContext = buildBillingReplayContext(input, context, notificationEventKey);
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   try {
@@ -182,6 +216,7 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
         category_label: context.categoryLabel,
         notification_body: body,
         billing_url: `${publicPortalUrl()}/?tab=billing`,
+        ...detailPayload,
       },
       recipientType: 'customer',
       recipientId: context.customer.id,

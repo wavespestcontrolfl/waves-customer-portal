@@ -401,6 +401,7 @@ function mapPurposeToMessageType(purpose) {
     case 'tech_en_route':       return 'tech_en_route';
     case 'tech_arrived':        return 'tech_arrived';
     case 'service_completion':  return 'service_complete';
+    case 'lawn_watering_instruction': return 'lawn_watering_instruction';
     case 'billing':             return 'billing_reminder';
     case 'payment_receipt':     return 'receipt';
     case 'payment_failure':     return 'payment_failure';
@@ -426,6 +427,9 @@ module.exports = {
   // may still have reached Twilio.
   classifyProviderFailure,
   SENDER_SIDE_TERMINAL_TWILIO_CODES,
+  // Shared with the booking-link lane, which treats a recipient-side
+  // rejection as an expected refusal rather than a lane failure.
+  RECIPIENT_TERMINAL_TWILIO_CODES,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.

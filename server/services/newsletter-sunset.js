@@ -157,15 +157,20 @@ async function reactivateSunsetComebacks(now) {
   return ids.length;
 }
 
-// Phase B candidates — active, not already flagged, globally-suppressed
-// excluded, ≥MIN_DELIVERED_SENDS delivered campaigns with the earliest at
-// least INACTIVITY_DAYS old, and zero engagement inside INACTIVITY_DAYS.
-// The delivered-history gate is what makes the job inert until real send
-// history accumulates: nobody can be flagged during the first-campaign ramp.
+// Phase B candidates — active, not already flagged, globally-suppressed AND
+// explicitly-marketing-opted-out excluded (codex #5165: the sender's send-time
+// excludeMailboxNotMailable predicate — server/services/newsletter-sender.js —
+// already skips these subscribers on every campaign, so flagging one here
+// only stages a win-back they can never receive, which then keeps
+// cohortAwaitingWinback nonzero and re-triggers ensureWinbackDraft forever),
+// ≥MIN_DELIVERED_SENDS delivered campaigns with the earliest at least
+// INACTIVITY_DAYS old, and zero engagement inside INACTIVITY_DAYS. The
+// delivered-history gate is what makes the job inert until real send history
+// accumulates: nobody can be flagged during the first-campaign ramp.
 async function findFlagCandidates(now) {
-  const { excludeGloballySuppressed } = require('./newsletter-sender');
+  const { excludeGloballySuppressed, excludeMailboxNotMailable } = require('./newsletter-sender');
   const cutoff = new Date(now.getTime() - INACTIVITY_DAYS * DAY_MS);
-  const rows = await excludeGloballySuppressed(
+  const rows = await excludeMailboxNotMailable(excludeGloballySuppressed(
     db('newsletter_subscribers')
       .where({ status: 'active' })
       .whereNull('reengagement_flagged_at')
@@ -189,7 +194,7 @@ async function findFlagCandidates(now) {
           .havingRaw('COUNT(*) >= ?', [MIN_DELIVERED_SENDS])
           .havingRaw('MIN(hist.delivered_at) <= ?', [cutoff]);
       }),
-  ).select('id');
+  )).select('id');
   return rows.map((r) => r.id);
 }
 
@@ -264,19 +269,26 @@ function buildWinbackDraftRow() {
 
 // Phase C — how many flagged actives have NOT yet received a win-back sent
 // after their flag date, and stage one draft for them if none is open.
+// Codex #5165: excludeMailboxNotMailable too — an opted-out flagged
+// subscriber is never actually sent the win-back (the sender skips them at
+// send time), so without this filter they count as "awaiting" forever and
+// ensureWinbackDraft keeps parking a fresh draft that can never resolve them.
 async function cohortAwaitingWinback() {
-  const row = await db('newsletter_subscribers')
-    .where({ status: 'active' })
-    .whereNotNull('reengagement_flagged_at')
-    .whereNotExists(function () {
-      this.select(db.raw('1'))
-        .from('newsletter_send_deliveries as wd')
-        .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
-        .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
-        .where('ws.newsletter_type', REENGAGEMENT_TYPE)
-        .whereNotNull('wd.sent_at')
-        .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at');
-    })
+  const { excludeMailboxNotMailable } = require('./newsletter-sender');
+  const row = await excludeMailboxNotMailable(
+    db('newsletter_subscribers')
+      .where({ status: 'active' })
+      .whereNotNull('reengagement_flagged_at')
+      .whereNotExists(function () {
+        this.select(db.raw('1'))
+          .from('newsletter_send_deliveries as wd')
+          .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
+          .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
+          .where('ws.newsletter_type', REENGAGEMENT_TYPE)
+          .whereNotNull('wd.sent_at')
+          .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at');
+      }),
+  )
     .count('* as c')
     .first();
   return Number(row?.c || 0);
@@ -301,29 +313,35 @@ async function ensureWinbackDraft(cohort) {
 // left the subscriber stranded forever: never suppressed, never re-sent
 // (cohortAwaitingWinback keys on sent_at), alert resolved with no outcome.
 // SELECT and UPDATE are split so the safety valve can weigh this cohort
-// BEFORE any status flips.
+// BEFORE any status flips. excludeMailboxNotMailable (codex #5165) keeps this
+// read consistent with the flag/cohort/denominator reads above — an
+// opted-out subscriber can never actually match the whereExists below (the
+// sender never sent them a win-back to begin with), so this is belt-and-
+// suspenders, not a behavior change on its own.
 async function findSunsetCandidates(now) {
+  const { excludeMailboxNotMailable } = require('./newsletter-sender');
   const graceCutoff = new Date(now.getTime() - GRACE_DAYS * DAY_MS);
-  const rows = await db('newsletter_subscribers')
-    .where({ status: 'active' })
-    .whereNotNull('reengagement_flagged_at')
-    .whereExists(function () {
-      this.select(db.raw('1'))
-        .from('newsletter_send_deliveries as wd')
-        .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
-        .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
-        .where('ws.newsletter_type', REENGAGEMENT_TYPE)
-        .whereNotNull('wd.sent_at')
-        .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at')
-        .where('wd.sent_at', '<=', graceCutoff)
-        .where(function () {
-          this.whereNull('wd.delivered_at').orWhere('wd.delivered_at', '<=', graceCutoff);
-        });
-    })
-    // Only a deliberate quiz confirm exempts from suppression — see
-    // recoverEngagedFlagged (scanner opens/clicks are not a response).
-    .whereNotExists(engagementSubquery('flagged_at', { signals: 'quiz' }))
-    .select('id');
+  const rows = await excludeMailboxNotMailable(
+    db('newsletter_subscribers')
+      .where({ status: 'active' })
+      .whereNotNull('reengagement_flagged_at')
+      .whereExists(function () {
+        this.select(db.raw('1'))
+          .from('newsletter_send_deliveries as wd')
+          .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
+          .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
+          .where('ws.newsletter_type', REENGAGEMENT_TYPE)
+          .whereNotNull('wd.sent_at')
+          .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at')
+          .where('wd.sent_at', '<=', graceCutoff)
+          .where(function () {
+            this.whereNull('wd.delivered_at').orWhere('wd.delivered_at', '<=', graceCutoff);
+          });
+      })
+      // Only a deliberate quiz confirm exempts from suppression — see
+      // recoverEngagedFlagged (scanner opens/clicks are not a response).
+      .whereNotExists(engagementSubquery('flagged_at', { signals: 'quiz' })),
+  ).select('id');
   return rows.map((r) => r.id);
 }
 
@@ -420,14 +438,15 @@ async function runNewsletterSunset(now = new Date()) {
   const reactivated = await reactivateSunsetComebacks(now);
   const candidateIds = await findFlagCandidates(now);
   const sunsetIds = await findSunsetCandidates(now);
-  // Valve denominator = the SENDABLE active list (same global-suppression
-  // filter the flag candidates run through). Counting suppressed-but-active
-  // rows would understate the cohort fraction and let a tracking outage
-  // slip past the valve on a bounce-heavy list.
-  const { excludeGloballySuppressed } = require('./newsletter-sender');
-  const activeRow = await excludeGloballySuppressed(
+  // Valve denominator = the SENDABLE active list (same global-suppression +
+  // marketing-opt-out filters the flag candidates run through — codex
+  // #5165). Counting suppressed/opted-out-but-active rows would understate
+  // the cohort fraction and let a tracking outage slip past the valve on a
+  // bounce-heavy or heavily-opted-out list.
+  const { excludeGloballySuppressed, excludeMailboxNotMailable } = require('./newsletter-sender');
+  const activeRow = await excludeMailboxNotMailable(excludeGloballySuppressed(
     db('newsletter_subscribers').where({ status: 'active' }),
-  ).count('* as c').first();
+  )).count('* as c').first();
   const activeCount = Number(activeRow?.c || 0);
   // Valve over the COMBINED cohorts: a tracking outage that starts after the
   // win-back delivers shows up as sunset candidates (flag candidates may be

@@ -131,7 +131,18 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // moved_appointment_date. call-reschedule-agreement.js only verifies the
 // flags, the quotes and the resolved date's weekday; a missing flag fails
 // closed there.
-const SCHEMA_VERSION = '1.20.0';
+// 1.21.0: additive — service_request.price_offered_by_staff,
+// service_request.price_accepted_by_caller, service_request.price_is_final,
+// scheduling.staff_accepted_proposed_slot (booleans) and
+// scheduling.selected_day_words (string), each nullable and optional in both
+// schemas, never `required`. Owner direction 2026-09-30 (codex #5377 r2: hand-
+// written word grammars for "the caller accepted the price", "staff offered
+// it", "staff accepted the caller's proposal" and "the caller selected this
+// day" never converge): the extraction JUDGES that language and pins the
+// quote for each; services/call-commercial-dictated-booking.js only verifies
+// the judgements, that each quote is word for word in a turn of its required
+// speaker, and their order. A missing judgement fails closed there.
+const SCHEMA_VERSION = '1.21.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

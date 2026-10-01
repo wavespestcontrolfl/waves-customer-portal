@@ -17,6 +17,9 @@ jest.mock('../services/logger', () => ({
 
 jest.mock('../services/sms-shadow-drafter', () => ({
   generateGroundedDraft: jest.fn(),
+  buildLiveEtaSnapshot: jest.fn(() => null),
+  // Round-42: the lane also persists the draft's technician first names (none in these fixtures).
+  techNamesFromContext: jest.fn(() => []),
   PROMPT_VERSION: 'house_voice_v8',
   // Real behavior mirrored for the gate-on tests below (Codex r3): true
   // when the reply carries an amount not present in context.billing's
@@ -32,6 +35,13 @@ jest.mock('../services/sms-shadow-drafter', () => ({
     );
     return amounts.some((a) => !authorized.has(a));
   }),
+  // Codex round-3 P2: generateLlmReviewDraft re-runs validateReserviceOffer
+  // to persist the promised re-service lane(s), if any, on the review
+  // card's input_snapshot. None of this file's fixtures promise a
+  // re-service, so the stub reports no promise.
+  validateReserviceOffer: jest.fn(() => ({ ok: true, violations: [], promisedLanes: undefined })),
+  // generateLlmReviewDraft also persists the already-booked callbacks' snapshot (round-18); none here.
+  reserviceBookedSnapshot: jest.fn(() => ({})),
 }));
 
 jest.mock('../services/context-aggregator', () => ({
@@ -174,6 +184,8 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const call = generateGroundedDraft.mock.calls[0][0];
     expect(call.inboundMessage).toBe('Hello what happened this morning');
     expect(call.intent.intent).toBe('service_scheduling_window_reply');
+    // A live, sendable draft: may reach the scheduler path with no city.
+    expect(call.liveOpenTimes).toBe(true);
     // Real-answers OPEN TIMES (pre-push audit P1): without this, a matched
     // customer's known city never reaches fetchOpenTimesBlock, and the
     // gate-on prompt would ask the model to offer times it has none of.
@@ -282,6 +294,43 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(generateGroundedDraft).toHaveBeenCalledWith(expect.objectContaining({ estimateId: null }));
   });
 
+  // Codex round-2 P2: getContextForCustomer defaults to skipping the LIVE
+  // ETA GPS lookup — this Agent Review draft renders the SAME buildFactsBlock
+  // the shadow drafter does, so it must opt in explicitly rather than
+  // silently losing the fact to the new default.
+  test('opts into LIVE ETA resolution — this draft renders the facts block LIVE ETA feeds (Codex round-2 P2)', async () => {
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v8',
+    });
+
+    await _test.generateLlmReviewDraft({
+      customer: CUSTOMER,
+      body: 'Hello what happened this morning',
+      decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
+    });
+
+    // Codex round-16 P2: the opt-in also requires the release gate (gate-off is byte-identical).
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: false });
+
+    ContextAggregator.getContextForCustomer.mockClear();
+    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      await _test.generateLlmReviewDraft({
+        customer: CUSTOMER,
+        body: 'Hello what happened this morning',
+        decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
+      });
+      expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: true });
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    }
+  });
+
   test('LLM failure falls back to the deterministic template', async () => {
     seedActiveSchedulingThread();
     generateGroundedDraft.mockRejectedValue(new Error('anthropic down'));
@@ -297,8 +346,25 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
     expect(payload.prompt_version).toBeNull();
-    expect(typeof payload.suggested_message).toBe('string');
+    // The scheduling lane has no template: an empty card, never an echo.
+    expect(payload.suggested_message).toBeNull();
     expect(JSON.parse(payload.input_snapshot).review_draft).toEqual({ source: 'template' });
+  });
+
+  test('LLM failure on a scheduling text never echoes the customer back (re-service regression)', async () => {
+    generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 0, converged: false });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'We have had a few centipedes, and a few roaches get caught in our glue traps since your initial visit. I am curious if you are able to do Saturday morning before 9am for a respray?',
+      smsLogId: 'sms-in-echo',
+    });
+
+    const payload = lastDecisionInsert();
+    expect(payload.workflow).toBe('service_scheduling_sms');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('unconverged draft never replaces the template', async () => {
@@ -319,7 +385,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
-    expect(payload.suggested_message).not.toContain('2 PM sharp');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('redaction placeholder in the reply keeps the template', async () => {
@@ -340,7 +406,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
-    expect(payload.suggested_message).not.toContain('[name]');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('a priced reply keeps the template (house rule: no prices in SMS)', async () => {
@@ -361,13 +427,13 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
-    expect(payload.suggested_message).not.toContain('$415.75');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('a priced TEMPLATE echo also stores NULL — the fallback lane is guarded too (Codex P1)', async () => {
     seedActiveSchedulingThread();
-    // LLM path unavailable → deterministic template, which echoes raw
-    // inbound text — including the customer's own "$50".
+    // LLM path unavailable → no scheduling template, so nothing of the
+    // customer's own "$50" can reach the card.
     generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 0, converged: false });
 
     await processInboundSms({
@@ -582,6 +648,35 @@ describe('processInboundSms — intended actions persist on the estimate-review 
       { type: 'escalate', note: 'followup_promised' },
       { type: 'x', note: 'n'.repeat(200) },
     ]);
+  });
+
+  // Codex round-20 P2 (PR #5336): the snapshot rebuild must resolve the SAME lane the verification did — a
+  // pronoun-only pest report ("they're back") needs the customer context, or the lane is lost and the
+  // card is later rejected with "no promised re-service lane on record".
+  test('the re-service snapshot rebuild gets the same context the draft was verified with (pronoun-only report keeps its lane)', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    const ctx = { summary: 'ctx', flags: [], customer: { id: 'cust-1' }, serviceHistory: [{ type: 'General Pest Control' }] };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
+    const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+    validateReserviceOffer.mockClear();
+    validateReserviceOffer.mockImplementation(({ context }) => (context && context.serviceHistory
+      ? { ok: true, violations: [], promisedLanes: ['pest'] }
+      : { ok: false, violations: ['no lane'] }));
+    generateGroundedDraft.mockResolvedValue({
+      parsed: {
+        reply: "So sorry! I'm sending your free re-service booking link now.",
+        intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }],
+        auto_send_safe: false, missing_info: null,
+      },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers2',
+    });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: "they're back", smsLogId: 'sms-in-pronoun-1' });
+    const call = validateReserviceOffer.mock.calls[validateReserviceOffer.mock.calls.length - 1][0];
+    expect(call.context).toBe(ctx);
+    const snapshot = JSON.parse(lastDecisionInsert().input_snapshot);
+    expect(snapshot.reservice_lanes_snapshot).toEqual(['pest']);
+    validateReserviceOffer.mockImplementation(() => ({ ok: true, violations: [], promisedLanes: undefined }));
   });
 
   test('a template (non-LLM) draft carries no intended_actions key', async () => {

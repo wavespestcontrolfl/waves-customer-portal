@@ -30,6 +30,13 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderRequiredSmsTemplate: jest.fn(async () => 'receipt body'),
 }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => undefined) }));
+// B10: staff-ordered charge-now passes the operator override (exempt from the
+// collections dispute-hold guard) plus an audit trail naming the admin + route.
+const CHARGE_NOW_OVERRIDE = expect.objectContaining({
+  operatorOverride: true,
+  overrideTrail: expect.objectContaining({ actorId: 'admin-1', route: 'admin_charge_now' }),
+});
+
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     req.technicianId = 'admin-1';
@@ -164,7 +171,7 @@ describe('charge-now already-collected guard', () => {
       expect(chargeMock).toHaveBeenCalledWith('cust-1', 89, expect.any(String), expect.objectContaining({
         billed_month: expect.stringMatching(/^\d{4}-\d{2}$/),
         initiated_by: 'machine',
-      }), expect.stringMatching(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}$/));
+      }), expect.stringMatching(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}$/), CHARGE_NOW_OVERRIDE);
     });
   });
 
@@ -191,7 +198,7 @@ describe('charge-now already-collected guard', () => {
       // treats it as a brand new charge instead of rejecting a replay with
       // different parameters (manual_charge vs. the cron's monthly_autopay).
       expect(chargeMock).toHaveBeenCalledWith('cust-1', 89, expect.any(String), expect.any(Object),
-        expect.stringMatching(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r1$/));
+        expect.stringMatching(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r1$/), CHARGE_NOW_OVERRIDE);
     });
   });
 
@@ -209,7 +216,7 @@ describe('charge-now already-collected guard', () => {
       });
       expect(res.status).toBe(200);
       expect(chargeMock).toHaveBeenCalledWith('cust-1', 89, expect.any(String), expect.any(Object),
-        expect.stringMatching(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r2$/));
+        expect.stringMatching(/^autopay_monthly_cust-1_\d{4}-\d{2}-\d{2}_r2$/), CHARGE_NOW_OVERRIDE);
     });
   });
 
@@ -221,7 +228,7 @@ describe('charge-now already-collected guard', () => {
         body: JSON.stringify({ amount: 25, description: 'One-off flea add-on' }),
       });
       expect(res.status).toBe(200);
-      expect(chargeOneTimeMock).toHaveBeenCalledWith('cust-1', 25, 'One-off flea add-on', null, { initiated_by: 'machine' });
+      expect(chargeOneTimeMock).toHaveBeenCalledWith('cust-1', 25, 'One-off flea add-on', null, { initiated_by: 'machine' }, CHARGE_NOW_OVERRIDE);
     });
   });
 

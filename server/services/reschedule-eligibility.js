@@ -8,7 +8,7 @@
 // Grouped-visit membership needs a query and stays with each caller.
 
 const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-et');
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
 
 const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
 
@@ -112,9 +112,7 @@ function eligibility(svc, now = new Date()) {
   // hidden from the customer's list/confirm/reschedule, so the bearer-token
   // page must refuse it too — reminder rows now arm before office confirm,
   // and reschedule tokens never expire.
-  if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
-    && status === 'pending'
-    && !svc.customer_confirmed) {
+  if (isUnreviewedDispatchOwned(svc)) {
     return { ok: false, reason: 'not_available' };
   }
 

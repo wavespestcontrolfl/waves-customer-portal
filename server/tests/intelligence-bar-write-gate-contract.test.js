@@ -88,7 +88,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -165,6 +165,10 @@ const WRITE_TWO_STEP = [
   'add_github_pr_label',
   'request_codex_review',
   'submit_gsc_sitemap',
+  // Feature switches (owner ruling 2026-09-28, Decision 5) — full-access-only,
+  // PREVIEW ONLY: confirmed:true refuses until the commit-path PR.
+  'set_railway_gate',
+  'set_growthbook_feature_environment',
   'cancel_queued_message',
 ];
 
@@ -302,6 +306,8 @@ const READ_ONLY = [
   // gap-report-tools.js: read-only list over agent_gap_reports (rows are
   // written server-side by agent-gap-reports.js, never by a model tool).
   'list_gap_reports',
+  // needs-me-tools.js: read-only list over open admin alerts and standing conditions.
+  'needs_me',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
@@ -614,6 +620,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['cloudflare-ops-tools', 'executeCloudflareOpsTool', 'retry_cloudflare_pages_build', { project_name: 'bradenton-pest-control' }],
     ['ops-tools', 'executeOpsTool', 'redeploy_railway_service', { service_name: 'portal-server' }],
     ['ops-tools', 'executeOpsTool', 'restart_railway_service', { service_name: 'portal-server' }],
+    ['ops-tools', 'executeOpsTool', 'set_railway_gate', { gate_name: 'GATE_STAMPED_ZERO_FREE', value: 'true' }],
+    ['growthbook-tools', 'executeGrowthbookTool', 'set_growthbook_feature_environment', { feature_id: 'synthetic-flag', enabled: true }],
     ['github-ops-tools', 'executeGithubOpsTool', 'rerun_failed_github_checks', { pr_number: 5230 }],
     ['github-ops-tools', 'executeGithubOpsTool', 'add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
     ['github-ops-tools', 'executeGithubOpsTool', 'request_codex_review', { pr_number: 5230 }],
@@ -702,6 +710,30 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
             name: 'production',
             serviceInstances: { edges: [{ node: { serviceId: 'svc-1', serviceName: 'portal-server', latestDeployment: { id: 'dep-1', status: 'SUCCESS', createdAt: '2026-01-01T00:00:00Z' } } }] },
           },
+        },
+      }],
+    },
+    set_railway_gate: {
+      env: { RAILWAY_TOKEN: 'test-railway-token', RAILWAY_PROJECT_ID: 'proj-1', RAILWAY_ENVIRONMENT_ID: 'env-1', RAILWAY_SERVICE_ID: 'svc-1' },
+      responses: [
+        {
+          data: {
+            environment: {
+              name: 'production',
+              serviceInstances: { edges: [{ node: { serviceId: 'svc-1', serviceName: 'waves-customer-portal', latestDeployment: { id: 'dep-1', status: 'SUCCESS', createdAt: '2026-01-01T00:00:00Z' } } }] },
+            },
+          },
+        },
+        { data: { variables: { GATE_STAMPED_ZERO_FREE: 'false' } } },
+      ],
+    },
+    set_growthbook_feature_environment: {
+      env: { GROWTHBOOK_API_KEY: 'test-growthbook-key' },
+      responses: [{
+        feature: {
+          id: 'synthetic-flag', archived: false, valueType: 'boolean', defaultValue: 'false',
+          dateUpdated: '2026-01-01T00:00:00Z',
+          environments: { production: { enabled: false, defaultValue: 'false', rules: [] } },
         },
       }],
     },

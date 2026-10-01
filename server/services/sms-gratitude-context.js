@@ -134,6 +134,17 @@ function pendingWorkQueries(dbh, { customerId, threadKey, excludeDecisionId = nu
       }
     });
 
+  // Email asks and promises (email-operational-actions.js): an email has no
+  // thread number, so only the customer matches — the ask's own
+  // emails.customer_id, or a staff send's email_customer_id.
+  const openEmailCommitment = dbh('call_commitments as cc_email')
+    .join('emails as e_commitment', 'cc_email.email_id', 'e_commitment.id')
+    .where({ 'cc_email.status': 'open' })
+    .where(function sameCustomer() {
+      if (customerId) this.whereRaw('COALESCE(e_commitment.customer_id, cc_email.email_customer_id) = ?', [customerId]);
+      else this.whereRaw('false');
+    });
+
   const triage = dbh('triage_items as ti')
     .leftJoin('call_log as ti_call', 'ti.call_log_id', 'ti_call.id')
     .leftJoin('sms_log as ti_sms', 'ti.sms_log_id', 'ti_sms.id')
@@ -189,6 +200,7 @@ function pendingWorkQueries(dbh, { customerId, threadKey, excludeDecisionId = nu
     [openRequest, 'id'],
     [openCallCommitment, 'cc.id'],
     [openSmsCommitment, 'cc_sms.id'],
+    [openEmailCommitment, 'cc_email.id'],
     [triage, 'ti.id'],
     [operatorItem, 'oi.id'],
     [decision, 'ad.id'],

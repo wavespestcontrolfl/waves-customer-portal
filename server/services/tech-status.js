@@ -102,6 +102,9 @@ async function upsertTechStatus(payload) {
         current_job_id: upsertCols.current_job_id,
         updated_at: upsertCols.updated_at,
         location_updated_at: upsertCols.location_updated_at || db.raw('tech_status.location_updated_at'),
+        // Server-side receipt time of the stored coordinates (round-45 P2): restamped only when this
+        // write supplies new coordinates; a status-only upsert keeps the previous receipt.
+        location_received_at: payload.lat != null && payload.lng != null ? db.fn.now() : db.raw('tech_status.location_received_at'),
       })
       .returning(['id', 'tech_id', 'status', 'lat', 'lng', 'current_job_id', 'updated_at', 'location_updated_at']);
     row = committed;
@@ -220,7 +223,7 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' })
  * @param {number|null}  [args.speed_mph] optional, used for status derivation
  * @param {string|Date|null} [args.reported_at] GPS sample timestamp from provider
  */
-async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at }) {
+async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at, requireBouncieImei = null }) {
   if (!tech_id || lat == null || lng == null) {
     throw new Error('pingTechLocation: tech_id, lat, lng are required');
   }
@@ -235,10 +238,25 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
     // Single-statement upsert. Status uses CASE WHEN to preserve
     // semantic states when the row already exists with one set —
     // see header comment for why.
+    // Compare-and-write (Codex round-37 P2): a caller that fetched this point from
+    // ONE Bouncie device passes that IMEI as `requireBouncieImei`; the write then
+    // happens only while technicians.bouncie_imei STILL equals it — in the same
+    // statement, so a fetch that started before an admin remap can never write the
+    // old vehicle's point (with a provider timestamp newer than the remap) into the
+    // tech-keyed row. Without the option the statement is exactly the plain upsert.
+    // FOR SHARE (Codex round-39 P2): the mapping row is locked for this transaction, so
+    // a concurrent admin remap either commits first (the re-checked predicate then fails
+    // and nothing is written) or waits until this write commits (its remap stamp is then
+    // later than this point, so the new cutoff excludes it).
+    const guarded = requireBouncieImei != null && String(requireBouncieImei).trim() !== '';
+    const insertSource = guarded
+      ? `SELECT ?::uuid, ?::text, ?::numeric, ?::numeric, NOW(), ?::timestamptz, clock_timestamp()
+      WHERE EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ? FOR SHARE)`
+      : 'VALUES (?, ?, ?, ?, NOW(), ?, clock_timestamp())';
     const [committed] = await trx.raw(
       `
-      INSERT INTO tech_status (tech_id, status, lat, lng, updated_at, location_updated_at)
-      VALUES (?, ?, ?, ?, NOW(), ?)
+      INSERT INTO tech_status (tech_id, status, lat, lng, updated_at, location_updated_at, location_received_at)
+      ${insertSource}
       ON CONFLICT (tech_id) DO UPDATE SET
         lat = CASE
           WHEN tech_status.location_updated_at IS NULL
@@ -264,6 +282,12 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
             THEN EXCLUDED.location_updated_at
           ELSE tech_status.location_updated_at
         END,
+        location_received_at = CASE
+          WHEN tech_status.location_updated_at IS NULL
+            OR EXCLUDED.location_updated_at >= tech_status.location_updated_at
+            THEN clock_timestamp()
+          ELSE tech_status.location_received_at
+        END,
         status = CASE
           WHEN tech_status.status IN ('en_route','on_site','wrapping_up')
             THEN tech_status.status
@@ -274,11 +298,16 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
         END
       RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at, location_updated_at
       `,
-      [tech_id, derivedStatus, lat, lng, locationUpdatedAt]
+      guarded
+        ? [tech_id, derivedStatus, lat, lng, locationUpdatedAt, tech_id, String(requireBouncieImei).trim()]
+        : [tech_id, derivedStatus, lat, lng, locationUpdatedAt]
     ).then((r) => r.rows);
     row = committed;
   });
   // trx committed by here.
+  // The guarded write matched no row: the technician was remapped mid-flight, so the
+  // point is dropped (nothing to enrich or broadcast).
+  if (!row) return null;
 
   // ETA enrichment: when the tech is en_route/driving toward an
   // assigned current_job, look up the job's lat/lng (or the customer's

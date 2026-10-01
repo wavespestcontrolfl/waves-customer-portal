@@ -121,6 +121,71 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
   });
+
+  it('the watering banner renders once, directly under the visit status card', async () => {
+    const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+    const { container } = renderReport({ ...lawnReportV2, reportV2: { ...lawnReportV2.reportV2, banner } });
+    await screen.findByText('Stable — watching thin areas');
+    expect(screen.getAllByTestId('lawn-watering-banner')).toHaveLength(1);
+    const status = container.querySelector('#service-status');
+    const card = screen.getByTestId('lawn-watering-banner').closest('[data-glass="card"]');
+    expect(status.nextElementSibling).toBe(card);
+    // Same 16px rhythm as the report sections, never flush against the status card.
+    expect(card.style.marginTop).toBe('16px');
+  });
+});
+
+describe('ReportViewPage — lawn lead (GATE_LAWN_REPORT_LEAD)', () => {
+  const lead = {
+    headline: 'Stable, with thin areas to watch',
+    why: 'The score is mainly pulled down by turf coverage.',
+    progress: null,
+    applied: 'Today we applied a feeding and a broadleaf herbicide.',
+    yourPart: ['Raise the mower one setting.'],
+    next: 'We will spot-check the driveway strip.',
+  };
+  const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+  const withLead = (extra = {}) => ({ ...lawnReportV2, reportV2: { ...lawnReportV2.reportV2, lead, ...extra } });
+
+  it('renders the lead region exactly once, after the watering banner and before the lawn section', async () => {
+    const { container } = renderReport(withLead({ banner }));
+    await screen.findByText(lead.headline);
+    expect(screen.getAllByTestId('lawn-lead-region')).toHaveLength(1);
+    const region = screen.getByTestId('lawn-lead-region');
+    const bannerEl = screen.getByTestId('lawn-watering-banner');
+    const section = container.querySelector('.report-v2-embed');
+    expect(bannerEl.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(region.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The lawn section no longer carries the hero or the follow-up card.
+    expect(within(section).queryByText('Overall Lawn Status')).toBeNull();
+    expect(screen.queryByText('Follow-up already planned')).toBeNull();
+  });
+
+  it('without a banner the lead follows the status card directly', async () => {
+    const { container } = renderReport(withLead());
+    await screen.findByText(lead.headline);
+    expect(screen.getAllByTestId('lawn-lead-region')).toHaveLength(1);
+    expect(container.querySelector('#service-status').nextElementSibling).toBe(screen.getByTestId('lawn-lead-region'));
+  });
+
+  it('the status card does not repeat the snapshot headline the lead replaces', async () => {
+    const { container } = renderReport(withLead({ snapshot: { ...lawnReportV2.reportV2.snapshot, status: 'watch' }, todaysResult: null }));
+    await screen.findByText(lead.headline);
+    expect(container.querySelector('.smart-status-result').textContent).not.toContain('Stable — watching thin areas');
+  });
+
+  it('without a lead no lead region renders and the legacy hero stays', async () => {
+    renderReport(lawnReportV2);
+    await screen.findByText('Stable — watching thin areas');
+    expect(screen.queryByTestId('lawn-lead-region')).toBeNull();
+    expect(screen.getByText('Overall Lawn Status')).toBeInTheDocument();
+  });
+
+  it('a lead on a non-lawn payload is never rendered', async () => {
+    renderReport({ ...treeShrubReportV2, reportV2: { ...treeShrubReportV2.reportV2, lead } });
+    await waitFor(() => expect(document.body.textContent.length).toBeGreaterThan(100));
+    expect(screen.queryByTestId('lawn-lead-region')).toBeNull();
+  });
 });
 
 describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => {
@@ -652,6 +717,32 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
     await screen.findByText('Visit Summary');
     expect(screen.getAllByText(new RegExp(PROSE.slice(0, 40)))).toHaveLength(1); // the companion card only
     await screen.findByText('Today’s service is complete.');
+  });
+
+  it('the companion card shows the sections and opens "What’s next" with the live visit', async () => {
+    const sections = [
+      { key: 'whatWeFound', title: 'What we found', paragraphs: ['Station 7 had live termites.'] },
+      { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We replaced the bait in station 7.'] },
+      { key: 'whatToExpect', title: 'What to expect', paragraphs: ['Termite bait works slowly on purpose.'] },
+      { key: 'whatsNext', title: 'What’s next', paragraphs: ['Mud tubes on walls are worth telling us about.'] },
+    ];
+    const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+    renderReport(typedPestPayload({
+      pestReportV2: null,
+      typedReport: null,
+      activity: null,
+      summary: body,
+      summarySource: 'technician_report',
+      reportSections: sections,
+      nextSameServiceAppointment: { serviceType: 'Quarterly Pest Control', scheduledDate: '2026-12-09', windowStart: '09:00:00' },
+      companionReports: [{
+        type: 'termite_bait_station',
+        reportTypeLabel: 'Termite Bait Station Service',
+        todaysResult: { headline: 'Bait station service completed today', body, bodySource: 'technician_report' },
+      }],
+    }));
+    expect(await screen.findByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText(/^Next visit: Quarterly Pest Control · /)).toBeInTheDocument();
   });
 });
 
@@ -1427,5 +1518,114 @@ describe('ReportViewPage — Ask Waves request carries the staff JWT only for st
   it('a customer browser sends no Authorization header', async () => {
     const headers = await askAndReadHeaders();
     expect(headers).not.toHaveProperty('Authorization');
+  });
+});
+
+describe('ReportViewPage — expiring signed map links', () => {
+  const withMapUrl = (url) => ({
+    ...legacyLawnReport,
+    treatmentMap: { ...(legacyLawnReport.treatmentMap || {}), satellite: { available: true, live: { url, width: 640, height: 340 } } },
+  });
+
+  it('refetches once when the map image cannot load (expired link), swapping in the fresh link', async () => {
+    const probed = [];
+    class FakeImage {
+      set src(value) {
+        probed.push(value);
+        if (value.includes('EXPIRED')) setTimeout(() => this.onerror && this.onerror(), 0);
+      }
+    }
+    vi.stubGlobal('Image', FakeImage);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.EXPIRED.sig') })
+      .mockResolvedValue({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.FRESH.sig') });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(probed.some((u) => u.includes('FRESH'))).toBe(true));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(2);
+    // The fresh link loads, so nothing keeps refetching.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(2);
+  });
+
+  it('does not refetch when the map link is still good', async () => {
+    class OkImage { set src(_v) { /* loads fine */ } }
+    vi.stubGlobal('Image', OkImage);
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.GOOD.sig') }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await screen.findAllByText(/./);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(1);
+  });
+});
+
+describe('ReportViewPage — four-section report (writer rules)', () => {
+  const sections = [
+    { key: 'whatWeFound', title: 'What we found', paragraphs: ['Ghost ants were trailing along the slider track.'] },
+    { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We placed bait along the counter, because ants carry it back to the colony.'] },
+    { key: 'whatToExpect', title: 'What to expect', paragraphs: ['You may see a few more ants for a few days.'] },
+    { key: 'whatsNext', title: 'What’s next', paragraphs: ['Let us know if they keep trailing after about 1–2 weeks.'] },
+  ];
+  const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+  const payload = {
+    ...pestReportV2,
+    pestTraceOrNothing: false,
+    summary: body,
+    summarySource: 'technician_report',
+    reportSections: sections,
+    nextSameServiceAppointment: { serviceType: 'Quarterly Pest Control', scheduledDate: '2026-12-09', windowStart: '09:00:00' },
+    pestReportV2: {
+      ...pestReportV2.pestReportV2,
+      aiSummary: { headline: null, body },
+      expectations: { whatToExpect: { lines: ['Ants that find the bait carry it back to the colony.'] } },
+    },
+  };
+
+  it('the pest hero shows the sections, opens "What’s next" with the same-service visit, and drops the duplicate expectations card', async () => {
+    renderReport(payload);
+    expect(await screen.findByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText('We placed bait along the counter, because ants carry it back to the colony.')).toBeInTheDocument();
+    expect(screen.getByText(/^Next visit: Quarterly Pest Control · /)).toBeInTheDocument();
+    expect(screen.queryByText('Ants that find the bait carry it back to the colony.')).toBeNull();
+  });
+
+  it('a hero summary that is not the report keeps its paragraph and the expectations card', async () => {
+    renderReport({ ...payload, pestReportV2: { ...payload.pestReportV2, aiSummary: { headline: null, body: 'Exterior perimeter treated.' } } });
+    expect(await screen.findByText('Exterior perimeter treated.')).toBeInTheDocument();
+    expect(screen.queryByText('What we did and why')).toBeNull();
+    expect(screen.getByText('Ants that find the bait carry it back to the colony.')).toBeInTheDocument();
+  });
+});
+
+describe('ReportViewPage — four-section report in the termite dashboard', () => {
+  const sections = [
+    { key: 'whatWeFound', title: 'What we found', paragraphs: ['Station 7 had live termites and light feeding.'] },
+    { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We replaced the bait in station 7.'] },
+    { key: 'whatToExpect', title: 'What to expect', paragraphs: ['Termite bait works slowly on purpose.'] },
+    { key: 'whatsNext', title: 'What’s next', paragraphs: ['Mud tubes on walls are worth telling us about.'] },
+  ];
+  const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+
+  it('shows the property-scoped next visit in "What’s next" and drops the dashboard’s own label', async () => {
+    renderReport({
+      ...termiteReportV2,
+      summary: body,
+      summarySource: 'technician_report',
+      reportSections: sections,
+      nextSameServiceAppointment: { serviceType: 'Termite Bait Station Monitoring', scheduledDate: '2026-12-29', windowStart: '09:00:00' },
+      termiteReportV2: { ...termiteReportV2.termiteReportV2, aiSummary: { headline: null, body } },
+    });
+    expect(await screen.findByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText(/^Next visit: Termite Bait Station Monitoring · /)).toBeInTheDocument();
+    expect(screen.queryByText('Next monitoring visit')).toBeNull();
   });
 });

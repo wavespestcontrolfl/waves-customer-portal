@@ -16,8 +16,18 @@ const {
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
+const { bookPreferredTimeLive } = require('../config/feature-gates');
+const { noStore } = require('../middleware/no-store');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const {
+  validatePreferredTimeRequest,
+  recordPreferredTimeRequest,
+  hasRecentPreferredTimeRequest,
+  noteBookingOnPreferredLeads,
+} = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
+const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -155,7 +165,11 @@ const {
   CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
-const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive } = require('../config/feature-gates');
+const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
+const { multiTechConfirmLive } = require('../config/feature-gates');
+const {
+  bookArrivalGraceMinutes, delayWithinGrace, bookGapAdmits, bookClashesWaivable,
+} = require('../services/scheduling/book-arrival-grace');
 const { etDateString, addETDays, addETBusinessDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -164,7 +178,8 @@ const {
   mintSlotOfferField,
   verifySlotOfferField,
   isRealCalendarDate,
-  bookInsertionOfferPolicy,
+  bookOfferPolicy,
+  slotOfferFieldGrace,
   generateConfirmationCode,
 } = require('../utils/slot-offer-token');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
@@ -186,6 +201,38 @@ const {
 // the commit-time signature check below all read it.
 function bookInsertionOffersLive() {
   return bookCapacityCommitLive() && capacityEnabled();
+}
+
+// Canonical reader for whether /book offers (and their commit) run under the
+// online-booking arrival grace (owner-approved 2026-09-29,
+// GATE_BOOK_ARRIVAL_GRACE): the gate AND mid-route insertion live — grace is
+// judged by the whole-route arrival simulation and enforced at commit by
+// createSelfBooking's verifyArrivalCapacity, both of which only exist under
+// bookInsertionOffersLive(). The offer builder additionally requires its
+// caller to pass `bookArrivalGrace: true` (only the redeemable /book surfaces do
+// — never the phone agent or public reschedule) and `capacityPlacement`.
+function bookArrivalGraceOffersLive() {
+  // Insertion first: a build/commit with mid-route insertion off never reaches
+  // the gate read at all.
+  return bookInsertionOffersLive() && bookArrivalGraceLive();
+}
+
+// The signed-offer policy the /confirm verifier expects. The gate and the
+// capacity mode are read LIVE (a flip of either between mint and confirm fails
+// the HMAC, in either direction) but the grace itself is NOT: the offer's own
+// slot_sig field claims the exact grace it was minted under (`<exp>.<grace>.
+// <sig>`, or `<exp>.<sig>` for 0), and the HMAC then authenticates that claim
+// — the verifier signs over the claimed grace AND this policy tag, so a forged
+// shape fails. Re-reading the env here would invalidate every in-flight offer
+// whenever SELF_SERVE_ARRIVAL_GRACE_MINUTES crosses zero (Codex r4 P2): a
+// graced offer would fail once the value became 0 and a strict one once it
+// became positive. Grace 0 keeps the plain insertion tag and wire shape
+// (byte-identical to gate off, the round-3 invariant), so a strict offer needs
+// no grace state at all. Mirrors buildBookingAvailability's per-slot
+// offerPolicyFor.
+function bookOfferPolicyLive(slotSig) {
+  const graceLive = bookArrivalGraceOffersLive() && slotOfferFieldGrace(slotSig) > 0;
+  return bookOfferPolicy({ insertion: bookInsertionOffersLive(), graceLive });
 }
 
 function cleanBookingServiceLabel(value) {
@@ -923,6 +970,10 @@ router.get('/config', async (req, res, next) => {
       multi_service: isEnabled('multiServiceBooking'),
       // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
       van_scene: isEnabled('vanScene'),
+      // "Can't find a time?" block + preferred day/time request form
+      // (GATE_BOOK_PREFERRED_TIME) — fail-closed dark-ship flag; the POST
+      // route also answers 404 while off.
+      preferred_time: bookPreferredTimeLive(),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -1493,6 +1544,35 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
   return idle;
 }
 
+// The arrival grace (minutes) a /book slot is offered under: 0 (strict) for
+// any build without GATE_BOOK_ARRIVAL_GRACE, and for a slot that did not come
+// from find-time's arrival-window route simulation (the only generator whose
+// slots were checked against a grace at all). Returns -1 when the slot must
+// NOT be offered at all — the offer-side twin of arrival-route.js's
+// arrivalExceedsGrace (the commit's bound): a graced build never offers a
+// slot whose simulated arrival delay is past the grace it would be signed
+// under, since verifyArrivalCapacity would refuse it at confirm.
+function bookSlotGrace(graceBuild, slot) {
+  // Capacity mode (a graced build requires it) only ever produces
+  // arrival-window slots, so this depends on the DATE alone. /confirm does not
+  // re-read it: it takes the grace from the signed slot_sig field
+  // (bookOfferPolicyLive), so a later env change cannot orphan this offer.
+  if (!graceBuild) return 0;
+  const grace = bookArrivalGraceMinutes({ date: slot.date });
+  return delayWithinGrace(slot.arrival_delay_minutes, grace) ? grace : -1;
+}
+
+// /book's offer-side travel-gap mirror of the commit gate's strict probe.
+// Graced builds (GATE_BOOK_ARRIVAL_GRACE) judge it with bookGapAdmits — the
+// same rule the commit applies via bookClashesWaivable — everything else is
+// the unchanged strict violatesTravelGap.
+function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, dayOccupied }) {
+  if (!graceBuild || !(slotGrace > 0)) return violatesTravelGap(candidateEntity, dayOccupied);
+  return !bookGapAdmits(candidateEntity, dayOccupied, {
+    technicianId: slot.technician.id, grace: slotGrace, arrivalDelayMinutes: slot.arrival_delay_minutes,
+  });
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 (best-3 under the re-service profile — see rankProfile
@@ -1513,7 +1593,7 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace }) {
   config = applySchedulingPolicy(config);
   // The signed-offer policy tag for this build (minted inside addCandidate
   // below; createSelfBooking verifies with the same mapping). An offer built
@@ -1521,7 +1601,27 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // GATE_SCHEDULING_CAPACITY flip during the offer's 45-minute lifetime fails
   // the signature instead of confirming under the wrong policy (Codex round 2
   // P1 on PR #5231).
-  const offerPolicy = bookInsertionOfferPolicy(capacityPlacement);
+  //
+  // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE, owner-approved
+  // 2026-09-29): `bookArrivalGrace` is an explicit per-caller opt-in (only the
+  // REDEEMABLE /book surfaces whose own commit is createSelfBooking pass it:
+  // /availability, /find-slots, capture-intent revalidation, public
+  // re-service, inspection booking — never the phone agent, whose commit
+  // keeps end-of-day-only, nor public reschedule, whose rebooker commit still
+  // runs the strict travel probe). It takes effect only with mid-route
+  // insertion (capacityPlacement) AND the gate live. A graced build signs the
+  // BOOK_ARRIVAL_GRACE_OFFER_POLICY tag instead of the insertion tag, and
+  // each slot carries the exact grace that justified it (see addCandidate).
+  // Grace mode only when SOME date in the range has a positive grace (grace
+  // 0 everywhere — env unset/0 — is byte-identical to the gate being off:
+  // same packing, same policy tag, same token). Per-date zero grace (a
+  // same-day pick) is handled per slot below via slotGrace.
+  const graceBuild = bookArrivalGrace === true && capacityPlacement === true && bookArrivalGraceOffersLive()
+    && (bookArrivalGraceMinutes({ date: rangeFrom }) > 0 || bookArrivalGraceMinutes({ date: rangeTo }) > 0);
+  // Per-slot policy tag (see addCandidate): grace tag only where the slot's
+  // own grace is positive, else the insertion tag /confirm computes for a
+  // zero-grace date.
+  const offerPolicyFor = (slotGrace) => bookOfferPolicy({ insertion: capacityPlacement, graceLive: slotGrace > 0 });
   // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
   // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
   // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
@@ -1548,9 +1648,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     : null;
 
   const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
+  // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): a
+  // self-serve caller resolves the request's zone FROM COORDINATES (not city
+  // text — 'North Venice' / 'Northport' are not in service_zones.cities) so
+  // find-time can lift the detour cap on that zone's route day. Null (and no
+  // db call at all) with the gate off; the phone agent (selfServeNotice
+  // false) never asks.
+  const zoneSlug = selfServeNotice ? await resolveZoneRouteDaySlug({ lat, lng, conn: db }) : null;
   const result = await findAvailableSlots({
     lat,
     lng,
+    zoneSlug,
     durationMinutes: duration,
     serviceTypes: normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]),
     // This booking's own expected-minutes credit — the same number the
@@ -1578,6 +1686,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // unnumbered stop sorted after the route, not at the position it was
     // offered at — so it stays append-only and omits capacityPlacement.
     capacityPlacement,
+    // packCapacityEnds' /book mode (GATE_BOOK_ARRIVAL_GRACE): pack against
+    // BOTH route neighbours under the exact rule the mirror in addCandidate
+    // below applies, so find-time and /book agree. False (ignored) for every
+    // build without the gate/opt-in — byte-identical to before.
+    bookArrivalGrace: graceBuild,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
@@ -1663,6 +1776,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // rejected) AI request releases its slot instead of holding the day full.
       .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
       .whereBetween('scheduled_date', [rangeFrom, rangeTo])
+      // Owner ruling 2026-09-30: an unconfirmed street-level address hold takes no
+      // daily-cap capacity (same exclusion the commit-time counter uses).
+      .whereNotExists(function () { require('../services/street-level-hold').heldVisitSubquery(this, 'scheduled_services'); })
       .select('scheduled_date')
       .count('* as count')
       .groupBy('scheduled_date');
@@ -1791,6 +1907,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // without clashing). Also covers cleanBookingStart snaps that would land
     // a candidate on a window find-time validated around.
     let idleMinutes = 0;
+    // The arrival grace THIS slot is offered under (0 = strict): GATE_BOOK_
+    // ARRIVAL_GRACE builds only. The simulation's own arrival delay for the
+    // slot must be within it — createSelfBooking's verifyArrivalCapacity
+    // enforces the same bound at commit, so a slot delayed past it is never
+    // offered (offer/commit parity).
+    const slotGrace = bookSlotGrace(graceBuild, slot);
     if (occupiedByDate) {
       const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !capacityEnabled()
         || row.technician_id == null || row.technician_id === slot.technician.id);
@@ -1799,9 +1921,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // findConflictingVisits `travel` probe rejects a window that merely
       // touches a stop across a real drive; drop it here so it is never
       // offered. Same soft-degrade as the overlap mirror (no map → skip).
-      if (dayOccupied && violatesTravelGap({
+      // GATE_BOOK_ARRIVAL_GRACE builds judge it with book-arrival-grace.js's
+      // bookGapAdmits instead — the SAME rule createSelfBooking's commit
+      // probe applies (bookClashesWaivable) — which waives ONLY the buffer
+      // against the previous assigned committed stop, within grace.
+      const candidateEntity = {
         startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
-      }, dayOccupied)) return;
+      };
+      if (dayOccupied && travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, dayOccupied })) return;
       idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin, {
         lat, lng, durationMinutes: duration, expectedMinutes: candidateExpectedMinutes,
       });
@@ -1823,7 +1950,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // a live HMAC — see utils/slot-offer-token.js. The client passes it
       // through as-is; serviceKey + locationKey bind the request context the
       // slots were computed FOR, so an offer fetched for one address/service
-      // can't confirm another. `policy` (offerPolicy, computed once above)
+      // can't confirm another. `policy` (offerPolicyFor, per slot grace)
       // additionally binds THIS build's insertion policy into the HMAC —
       // Codex round 2 P1 on PR #5231.
       slot_sig: mintSlotOfferField({
@@ -1835,7 +1962,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         startMinutes: startMin,
         technicianId: slot.technician.id || null,
         durationMinutes: duration,
-        policy: offerPolicy,
+        policy: offerPolicyFor(slotGrace),
+        // The exact grace that justified this offer (0 → the unchanged
+        // `<exp>.<sig>` field; > 0 → `<exp>.<grace>.<sig>`, HMAC-bound) so the
+        // commit enforces the value the offer used, never a live re-read.
+        arrivalGrace: slotGrace,
       }),
       start_label: minToTime12(startMin),
       end_label: minToTime12(endMin),
@@ -1858,7 +1989,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     });
   };
 
-  for (const slot of (result.slots || [])) {
+  // A graced build never offers a slot whose simulated arrival delay is past
+  // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
+  // confirm. Ungraced builds pass every slot through untouched.
+  const offerSlots = graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []);
+  for (const slot of offerSlots) {
     if (fullDays.has(slot.date)) continue;
     if (capacityEnabled()) {
       // Capacity evaluates each start against the whole route and live blocks.
@@ -2000,6 +2135,71 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   };
 }
 
+// The /book funnel's default offer window — anchored to ET calendar days so it
+// doesn't shift by a day between 8 PM ET and midnight UTC — and the 90-day
+// horizon a caller-supplied range is clamped to.
+function bookingOfferWindow(config, today) {
+  return {
+    minDate: etDateString(addETDays(today, config.advance_days_min ?? 1)),
+    maxDate: etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS)),
+    defaultTo: etDateString(addETDays(today, config.advance_days_max ?? 14)),
+  };
+}
+
+// The /book funnel's offer builder — GET /availability, POST /find-slots and
+// the texting AI's OPEN TIMES (availabilityForExistingCustomer) all offer
+// through it, so an offer and its later createSelfBooking commit come from
+// one finder. Self-serve surface: the notice window is enforced (owner ruling
+// 2026-09-23). /confirm's commit for this funnel is createSelfBooking, which
+// (while bookInsertionOffersLive() is live) re-verifies with traffic and
+// persists the certified route order — see the comment on capacityPlacement
+// inside buildBookingAvailability. The minted offer carries a signed policy
+// tag either way, so a gate flip between this mint and /confirm can't be
+// redeemed under the wrong policy.
+function buildFunnelAvailability(args) {
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
+}
+
+// What the /book funnel would offer an EXISTING customer for one funnel
+// service (GET /availability with no date range: the customer's own booking
+// pin, the service's catalog duration, the default window) — null when there
+// is nothing to commit against: /book off, no funnel service (createSelfBooking
+// refuses an empty serviceKey), the customer gone, or no resolvable pin (no
+// coordinates and no geocodable address, or a staff review holding it), or
+// an inactive account.
+async function availabilityForExistingCustomer({ customerId, serviceKey }) {
+  const funnelKey = normalizeBookingServiceKey(serviceKey);
+  if (!customerId || !funnelKey) return null;
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('selfBooking')) return null;
+  // active: true — the bearer resolver's own rule (middleware/auth.js
+  // resolveBearerCustomer): an inactive/cancelled customer cannot sign in to
+  // /book, so the texting AI must not offer them times it could not commit.
+  const customer = await db('customers').where({ id: customerId, active: true }).whereNull('deleted_at')
+    .first('id', 'account_id', 'pipeline_stage', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  // createSelfBooking's own rule: under bookingCustomersOnly a row still in a
+  // pre-customer pipeline stage is not a verified customer and cannot book, so
+  // it is offered nothing either.
+  if (customer && isEnabled('bookingCustomersOnly') && PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''))) return null;
+  const location = customer ? await customerBookingLocation(customer) : null;
+  if (!location) return null;
+  const config = await loadBookingConfig();
+  const today = new Date();
+  const { minDate, defaultTo } = bookingOfferWindow(config, today);
+  return buildFunnelAvailability({
+    lat: location.lat, lng: location.lng, duration: resolveBookingDuration(null, config, funnelKey),
+    rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
+    // The /book page's own first request always sends expand=open
+    // (PublicBookingPage.jsx), so an open route day offers its full block of
+    // hourly windows there — and here.
+    expandOpenDays: true,
+    // Same online-booking arrival grace as /availability + /find-slots (a
+    // no-op while GATE_BOOK_ARRIVAL_GRACE is off): the texting AI offers
+    // exactly what /book would show this customer, graced slots included.
+    bookArrivalGrace: true,
+  });
+}
+
 // GET /api/booking/availability
 //   query: lat, lng, address, city, state, zip, unit, estimate_id,
 //          service_type, duration_minutes, date_from, date_to
@@ -2037,14 +2237,10 @@ router.get('/availability', async (req, res, next) => {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
 
-    // Default date window from config — anchored to ET calendar days so the
-    // window doesn't shift by a day between 8 PM ET and midnight UTC. A
-    // caller-supplied range is honored but clamped to the 90-day horizon so a
+    // A caller-supplied range is honored but clamped to the 90-day horizon so a
     // "Find more dates" / specific-date request can reach further out.
     const today = new Date();
-    const minDate = etDateString(addETDays(today, config.advance_days_min ?? 1));
-    const maxDate = etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS));
-    const defaultTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
+    const { minDate, maxDate, defaultTo } = bookingOfferWindow(config, today);
     const clamp = (d, fallback) => {
       if (!d) return fallback;
       if (d < minDate) return minDate;
@@ -2062,22 +2258,16 @@ router.get('/availability', async (req, res, next) => {
     const serviceKey = normalizeBookingServiceKey(service_type);
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
-    const availability = await buildBookingAvailability({
+    const availability = await buildFunnelAvailability({
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
       // "expand=open" widens otherwise-empty days into full hourly windows — used
       // when the customer browses a specific date / "Find more dates".
       expandOpenDays: req.query.expand === 'open',
       serviceKey,
-      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
-      selfServeNotice: true,
-      // /confirm's own commit for this funnel is createSelfBooking, which
-      // (while bookInsertionOffersLive() is live) re-verifies with traffic
-      // and persists the certified route order — see the comment on
-      // capacityPlacement inside buildBookingAvailability. The minted offer
-      // carries a signed policy tag either way (below), so a gate flip
-      // between this mint and /confirm can't be redeemed under the wrong
-      // policy.
-      capacityPlacement: bookInsertionOffersLive(),
+      // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
+      // the gate is off): this offer's own commit is createSelfBooking, which
+      // applies the matching waiver + grace bound.
+      bookArrivalGrace: true,
     });
 
     // Coords the caller didn't already hold (estimate_id → customer record,
@@ -2176,17 +2366,14 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const serviceKey = normalizeBookingServiceKey(service_type);
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
-    const availability = await buildBookingAvailability({
+    const availability = await buildFunnelAvailability({
       lat: resolvedLat, lng: resolvedLng, duration,
       rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
       timeOfDay: when.timeOfDay,
       expandOpenDays: true,
       serviceKey,
-      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
-      selfServeNotice: true,
-      // Same /confirm commit (createSelfBooking) as /availability — see the
-      // comment there and on capacityPlacement inside buildBookingAvailability.
-      capacityPlacement: bookInsertionOffersLive(),
+      // Same online-booking arrival grace as /availability (see there).
+      bookArrivalGrace: true,
     });
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -2894,10 +3081,22 @@ async function createSelfBooking(payload = {}) {
       startMinutes: timeToMin(slot_start),
       technicianId: technician_id || null,
       durationMinutes: duration,
-      policy: bookInsertionOfferPolicy(bookInsertionOffersLive()),
+      policy: bookOfferPolicyLive(slot_sig),
     }, slot_sig))) {
       return { ok: false, status: 409, error: 'That time slot is no longer available — please pick your time again.' };
     }
+    // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE, owner-approved
+    // 2026-09-29): the EXACT grace that justified this offer. A signed offer
+    // carries it as an HMAC-bound field (`<exp>.<grace>.<sig>`, verified just
+    // above — never a live env re-read, so a grace change between offer and
+    // confirm is inert for this one offer); an internal callback booking
+    // (re-service, inspection) has no signed field — its offer proof is a
+    // rebuild in the SAME request — so it reads the live value for this date,
+    // which that rebuild used a few lines earlier. 0 = strict: the commit is
+    // byte-identical to before this lane (no waiver, no grace bound).
+    const offerGrace = callbackVisit
+      ? (bookArrivalGraceOffersLive() ? bookArrivalGraceMinutes({ date: slotDateStr }) : 0)
+      : slotOfferFieldGrace(slot_sig);
 
     // technician_id comes straight from the client (an opaque id echoed from
     // the availability response) — verify it names a real, active technician
@@ -3996,6 +4195,21 @@ async function createSelfBooking(payload = {}) {
             .whereRaw('scheduled_services.reservation_expires_at > NOW()');
         });
       });
+      // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark):
+      // the legs above are OR'd and tech-blind past the tech's own route — a
+      // zone/city leg matches ANOTHER technician's overlapping row, and a
+      // hold leg matches a hold stamped for another technician — even though
+      // the offer (buildBookingAvailability's occupancy mirror) only counts
+      // rows that are unassigned or on the slot's own technician. AND the
+      // same predicate onto the whole probe so a slot offered on technician
+      // B's day is not refused for technician A's stop. Unassigned rows still
+      // block everyone. Off (or no technician, or capacity off): untouched.
+      if (technician_id && multiTechConfirmLive() && capacityEnabled()) {
+        conflictQuery.where((q) => {
+          q.whereNull('scheduled_services.technician_id')
+            .orWhere('scheduled_services.technician_id', technician_id);
+        });
+      }
       const conflict = await conflictQuery.first('scheduled_services.id');
       if (conflict) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
@@ -4017,12 +4231,22 @@ async function createSelfBooking(payload = {}) {
       // serializes writers; a narrow predicate stays narrow under any
       // lock. No exclusions: this path moves no existing row (the
       // double-submit replay returned above before any conflict check).
+      // GATE_BOOK_ARRIVAL_GRACE (owner-approved 2026-09-29) — how the probe
+      // below meets a graced offer: a strict travel-gap clash is tolerated ONLY
+      // when the offer was graced (offerGrace > 0), a prepared capacity proof
+      // exists to judge it (verifyArrivalCapacity below enforces the offer's
+      // grace bound on the simulation's own arrival delay), and EVERY clash is
+      // a previous-side buffer against an assigned committed stop — exactly
+      // the clashes the offer mirror (book-arrival-grace.js bookGapAdmits)
+      // waived. A real overlap, a hold, an interview, an unassigned stop or
+      // the NEXT stop's buffer still refuse.
       const globalClash = await findConflictingVisits({
         db: trx,
         includeInterviews: true,
         date: slotDateStr,
         windowStart: slot_start,
         windowEnd: endTime,
+        technicianId: technician_id || null, // tech-aware scope, gate-dark (occupancy.js header)
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the booking's own pin, resolved
         // for the offer location key above; NaN → null → buffer-only.
         travel: {
@@ -4033,7 +4257,12 @@ async function createSelfBooking(payload = {}) {
           expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
         },
       });
-      if (globalClash.length) {
+      // GATE_BOOK_ARRIVAL_GRACE: waive ONLY the graced offer's previous-side
+      // buffer clashes (see offerGrace above and book-arrival-grace.js).
+      if (globalClash.length && !(preparedCapacity && offerGrace > 0
+        && bookClashesWaivable(globalClash, {
+          technicianId: technician_id, grace: offerGrace, candidateStartMin: timeToMin(slot_start),
+        }))) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,
           isOperational: true,
@@ -4054,12 +4283,14 @@ async function createSelfBooking(payload = {}) {
           windowEnd: endTime,
           durationMinutes: duration,
           serviceTypes: capacityServiceTypes,
-          // GRACE-EXEMPT: no arrivalGraceMinutes here (owner ruling 2026-09-28, scope cut
-          // Codex r1 P1 #5314): /book runs a STRICT pre-verify travel probe
-          // (findConflictingVisits below, with `travel`) that a grace-kept
-          // slot would fail before ever reaching this check — grace is
-          // estimate-picker-only. See scheduling/policy.js and
-          // scheduling/find-time.js's packCapacityEnds header.
+          // The offer's own grace (GATE_BOOK_ARRIVAL_GRACE, owner-approved
+          // 2026-09-29; undefined = no bound beyond the 120-minute arrival
+          // promise, the pre-existing behavior). The strict pre-verify travel
+          // probe above now waives exactly the previous-side buffer clashes
+          // the graced offer waived, so a grace-kept slot reaches this check
+          // and is accepted only while its certified delay stays within the
+          // same grace the offer screened for.
+          arrivalGraceMinutes: offerGrace > 0 ? offerGrace : undefined,
         })
         : null;
 
@@ -5818,6 +6049,12 @@ async function createSelfBooking(payload = {}) {
       } catch (err) {
         logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
       }
+      // A first attempt that committed but died before its post-commit note
+      // step leaves the customer's preferred-time request without its "customer
+      // booked" note: write it (idempotent per lead + visit; never converts).
+      if (!callbackVisit) {
+        await noteBookingOnPreferredLeads(db, { customerId: custId, booking: txResult.existing });
+      }
       return { ok: true, body: {
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
@@ -6206,6 +6443,16 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
+    // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
+    // customer is moot once they have booked, but a booking never closes it
+    // (owner ruling 2026-09-30): the customer's open request(s) get one system
+    // note naming this visit, and staff close them. No lead is won, no funnel
+    // row touched. Best-effort; runs whatever the gate reads (a request already
+    // filed still gets the note). The replay branch does the same.
+    if (!callbackVisit) {
+      await noteBookingOnPreferredLeads(db, { customerId: custId, booking });
+    }
+
     // Persist an ad-tracked self-booking's click id onto a won lead so the
     // offline-conversion pipeline (data-manager qualified_lead / Meta CAPI) can
     // report it to Google/Meta by deterministic click id, not just hashed PII.
@@ -6457,6 +6704,22 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     if (phoneDigits.length < 10) return res.status(400).json({ error: 'valid phone required' });
     const ten = phoneDigits.slice(-10);
 
+    // A visitor who filed a "can't find a time" request asked the office to
+    // reach out — never stage an abandoned-booking recovery row (an automated
+    // text/email) for the same phone afterwards. Gate-off: untouched.
+    if (bookPreferredTimeLive()) {
+      try {
+        // Session too: a visitor who filed under one phone and then retyped another
+        // in the same funnel session is still the person who asked for a call back.
+        const captureSession = String(b.session_id == null ? '' : b.session_id).trim().slice(0, 80) || null;
+        if (await hasRecentPreferredTimeRequest(db, ten, { sessionId: captureSession })) return accepted('preferred_time_request');
+      } catch (ptErr) {
+        // Fail closed: a lookup error must not risk an automated send.
+        logger.warn(`[booking:capture-intent] preferred-time check failed — skipping capture: ${ptErr.message}`);
+        return accepted('lookup_failed');
+      }
+    }
+
     const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
     const sessionId = str(b.session_id, 80);
@@ -6577,23 +6840,22 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       const serviceKey = normalizeBookingServiceKey(b.service_id)
         || normalizeBookingServiceKey(b.service_type)
         || normalizeBookingServiceKey(b.quoted_service_label);
-      const avail = await buildBookingAvailability({
+      // The /book funnel's own builder (buildFunnelAvailability): a slot the
+      // notice window would now refuse must not be treated as still offered,
+      // and this re-checks a slot /availability or /find-slots already
+      // offered, so it must use the SAME capacityPlacement value those used
+      // (offer/commit parity). This route never redeems a slot_sig itself
+      // (capture-intent only stages a recovery row), so the mismatch protection
+      // here is offer/commit parity, not the signed policy tag.
+      const avail = await buildFunnelAvailability({
         lat, lng,
         duration: cfg.slot_duration_minutes || 60,
         rangeFrom: row.slot_date, rangeTo: row.slot_date,
         config: cfg, today: new Date(), expandOpenDays: true,
         serviceKey,
-        // Self-serve surface — a slot the notice window would now refuse
-        // must not be treated as still offered (offer/commit parity).
-        selfServeNotice: true,
-        // This re-checks a slot /availability or /find-slots already
-        // offered, so it must use the SAME capacityPlacement value those
-        // used, or a genuinely still-offered inserted slot would revalidate
-        // as unavailable (offer/commit parity). This route never redeems a
-        // slot_sig itself (capture-intent only stages a recovery row), so
-        // the mismatch protection here is offer/commit parity, not the
-        // signed policy tag below.
-        capacityPlacement: bookInsertionOffersLive(),
+        // Same online-booking arrival grace as /availability + /find-slots —
+        // or a genuinely still-offered graced slot would revalidate as gone.
+        bookArrivalGrace: true,
       });
       const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
       const offered = !!day && Array.isArray(day.slots)
@@ -6733,6 +6995,72 @@ router.get('/embed-snippet', (req, res) => {
   res.json({ source, url: iframeSrc, snippet });
 });
 
+// Dark gate + token-route privacy headers for POST /api/booking/preferred-time.
+// server/index.js mounts this ABOVE the global cors(), the global /api/ limiter
+// and the shared body parsers (like the other dark public routes), so while the
+// gate is off every method gets the generic unknown-route 404 — no CORS 204, no
+// limiter 429, no body parse 400/413 — and every response (404, 429, 400,
+// success) carries no-store / noindex / no-referrer. The route below re-runs it
+// as its own first layer.
+const preferredTimePreParserGuard = [
+  noStore,
+  (req, res, next) => {
+    if (!bookPreferredTimeLive()) return res.status(404).json(require('../middleware/errors').notFoundBody(req));
+    return next();
+  },
+];
+
+// Per-IP limiters for the preferred-time request (an internal lead + one
+// admin bell per new phone). Generous for a real visitor, tight against bulk
+// office-inbox spam. Same shape as capture-intent's.
+const preferredTimeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+const preferredTimeHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 15,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' },
+});
+
+// POST /api/booking/preferred-time — the /book "Can't find a time?" form
+// (GATE_BOOK_PREFERRED_TIME, dark). Files ONE internal lead the office answers
+// by hand and rings the admin bell; it sends NOTHING to the customer (no SMS,
+// no email) and retires any open abandoned-booking intent for the phone so the
+// recovery worker can't text them either. Gate off = the generic 404 before
+// the limiter. Proof-of-funnel: the same IP-bound token /availability mints
+// for capture-intent (the funnel always fetches availability first).
+router.post('/preferred-time', ...preferredTimePreParserGuard, preferredTimeLimiter, preferredTimeHourlyLimiter, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const parsed = validatePreferredTimeRequest(b);
+    // Honeypot: pretend success, store nothing.
+    if (parsed.honeypot) return res.json({ ok: true });
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
+      return res.status(400).json({ error: 'session_expired' });
+    }
+    const serviceKey = normalizeBookingServiceKey(b.service_id)
+      || normalizeBookingServiceKey(b.service_type)
+      || null;
+    const serviceLabel = canonicalBookingServiceLabel(b.service_id)
+      || canonicalBookingServiceLabel(b.service_type)
+      || null;
+    await recordPreferredTimeRequest(db, parsed.value, { serviceLabel, serviceKey });
+    return res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[booking:preferred-time] failed: ${err.message}`);
+    return res.status(500).json({ error: 'We could not save that. Please text us instead.' });
+  }
+});
+
 // GET /api/booking/sources — aggregate by source (for admin dashboard / intelligence bar)
 router.get('/sources', async (req, res, next) => {
   try {
@@ -6785,6 +7113,7 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.preferredTimePreParserGuard = preferredTimePreParserGuard;
 module.exports._internals = {
   assertContactLinkedHandoffProvisional,
   suppressRecoveryIntents,
@@ -6795,6 +7124,8 @@ module.exports._internals = {
   // (capacityPlacement) so their own createSelfBooking commits agree with
   // what they offered.
   bookInsertionOffersLive,
+  bookArrivalGraceOffersLive,
+  bookOfferPolicyLive,
   cleanBookingServiceLabel,
   canonicalBookingServiceLabel,
   BOOKING_FUNNEL_SERVICE_LABELS,
@@ -6811,6 +7142,7 @@ module.exports._internals = {
   resolveOfferCoords,
   customerBookingLocation,
   buildBookingAvailability,
+  availabilityForExistingCustomer,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,

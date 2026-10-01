@@ -16,11 +16,26 @@
  * item 1, owner ruling 2026-09-28) are the outside-write tools: structurally
  * two-step (write-gates.js OUTSIDE_WRITE_TOOL_NAMES), full-access-only
  * (ib-access.js ibFullAccess, enforced in routes/admin-intelligence-bar.js —
- * not here). THIS PR IS PREVIEW ONLY: called with confirmed:true, both
- * refuse — the commit path (an actual Railway serviceInstanceRedeploy /
- * serviceInstanceRestart mutation) ships in a follow-up PR. RAILWAY_TOKEN is
- * read-scoped today; a write needs deploy/restart added (see the IB scope
- * doc's token checklist).
+ * not here). Confirmed, each acts ONLY on the pinned identifiers
+ * /confirm-action verified against the live preview's fingerprint
+ * (`_verified_railway_service_id` / `_verified_railway_deployment_id`,
+ * threaded in by admin-intelligence-bar.js) — never a re-resolve of
+ * service_name from the confirmed call's own input. Redeploy calls Railway's
+ * `serviceInstanceRedeploy(serviceId, environmentId)` mutation; restart calls
+ * `deploymentRestart(id)` on the pinned latest-deployment id — Railway's
+ * restart mutation targets a DEPLOYMENT, not a service, so restart pins the
+ * deployment id rather than the service id (verified live against the
+ * Railway public API schema via `railway api describe`). RAILWAY_TOKEN needs
+ * write access for either mutation to succeed; a 401/403 (or a permission-
+ * shaped GraphQL error) surfaces as a plain "the token is read-only" error.
+ *
+ * set_railway_gate (owner ruling 2026-09-28, Decision 5: GATE_* changes may
+ * be made from the bar) proposes setting ONE known GATE_* variable on the
+ * portal's own production service to 'true' or 'false'. THIS PR IS PREVIEW
+ * ONLY: called with confirmed:true it refuses (code not_yet_implemented) —
+ * the variableUpsert commit path ships in a follow-up PR. The preview reads
+ * the one variable's live value and never returns, logs or pins any other
+ * variable's value.
  */
 
 const logger = require('../logger');
@@ -81,7 +96,7 @@ Use for: "is MODEL_DEEP set in prod?", "what env vars does the server have?", "i
   },
   {
     name: 'redeploy_railway_service',
-    description: `Redeploy a Railway service from its latest successful image (a fresh deploy of what is already built, not a rebuild). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Railway.
+    description: `Redeploy a Railway service from its latest successful image (a fresh deploy of what is already built, not a rebuild). Owner login only, through a confirmation card.
 Use for: "redeploy the server", "kick the portal service", "roll the deploy again"`,
     input_schema: {
       type: 'object',
@@ -92,7 +107,7 @@ Use for: "redeploy the server", "kick the portal service", "roll the deploy agai
   },
   {
     name: 'restart_railway_service',
-    description: `Restart a Railway service's running instance (no new deploy — the same build, process restarted). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Railway.
+    description: `Restart a Railway service's running instance (no new deploy — the same build, process restarted). Owner login only, through a confirmation card.
 Use for: "restart the server", "bounce the portal service", "it's hung, restart it"`,
     input_schema: {
       type: 'object',
@@ -101,9 +116,31 @@ Use for: "restart the server", "bounce the portal service", "it's hung, restart 
       },
     },
   },
+  {
+    name: 'set_railway_gate',
+    description: `Propose setting ONE known feature gate (a GATE_* variable) to the literal value 'true' or 'false' on the portal's production service in Railway. Owner login only, through a confirmation card showing the current value, the new value, what the gate controls and what the new value means. Railway redeploys the portal when a variable changes (a brief restart). Only gates the portal already knows are accepted — a made-up name is refused.
+The value is the RAW variable value, not "on/off". Some gates are inverted: a name ending in _OFF, _DISABLE, _DISABLED or _KILL_SWITCH means 'true' turns the named thing OFF (GATE_LATE_PAYMENT_CHECKER_OFF=true disables the late-payment checker). Map what the operator wants to HAPPEN through the gate's meaning; if it is unclear which value they want, ask before proposing.
+Use for: "set GATE_X to true", "turn the Y feature on" (after mapping it to the right value), "flip the gate for Z"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        gate_name: { type: 'string', description: 'The gate variable name, e.g. GATE_SOMETHING (capitals, digits and underscores)' },
+        value: { type: 'string', enum: ['true', 'false'], description: "The literal variable value to set. For an inverted gate (name ends in _OFF / _DISABLE / _DISABLED / _KILL_SWITCH) 'true' DISABLES the named thing." },
+      },
+      required: ['gate_name', 'value'],
+    },
+  },
 ];
 
-const NOT_YET_IMPLEMENTED_MESSAGE = 'Railway write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
+const NOT_YET_IMPLEMENTED_MESSAGE = 'Railway gate changes cannot be committed yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
+const GATE_NAME_RE = /^GATE_[A-Z0-9_]+$/;
+const PORTAL_SERVICE_NAME = 'waves-customer-portal';
+const MAX_GATE_SUGGESTIONS = 5;
+
+const READ_ONLY_TOKEN_MESSAGE = 'The Railway token cannot deploy or restart — it needs write access (a token with deploy/restart permission) before this action can commit.';
+// GraphQL reports an authorization failure as HTTP 200 + errors[]; match the
+// message shapes Railway uses for it.
+const RAILWAY_PERMISSION_ERROR_RE = /not authorized|unauthori[sz]ed|forbidden|permission|access denied|insufficient/i;
 
 // Discovered ids are cached for the process lifetime — a project token maps
 // to exactly one project + environment, so they cannot change under us.
@@ -123,7 +160,7 @@ function getAuthHeaders() {
   return null;
 }
 
-async function railwayGraphQL(query, variables = {}) {
+async function railwayGraphQL(query, variables = {}, { forWrite = false } = {}) {
   const authHeaders = getAuthHeaders();
   if (!authHeaders) {
     throw new Error(NOT_CONFIGURED_MESSAGE);
@@ -138,11 +175,24 @@ async function railwayGraphQL(query, variables = {}) {
       body: JSON.stringify({ query, variables }),
       signal: controller.signal,
     });
+    if (forWrite && (res.status === 401 || res.status === 403)) {
+      const err = new Error(READ_ONLY_TOKEN_MESSAGE);
+      err.status = res.status;
+      err.writeAccessRequired = true;
+      throw err;
+    }
     if (!res.ok) {
-      throw new Error(`Railway API returned HTTP ${res.status}`);
+      const err = new Error(`Railway API returned HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
     }
     const json = await res.json();
     if (json.errors && json.errors.length) {
+      if (forWrite && RAILWAY_PERMISSION_ERROR_RE.test(String(json.errors[0].message || ''))) {
+        const err = new Error(READ_ONLY_TOKEN_MESSAGE);
+        err.writeAccessRequired = true;
+        throw err;
+      }
       throw new Error(`Railway API error: ${json.errors[0].message}`);
     }
     return json.data;
@@ -383,7 +433,7 @@ async function getRailwayVariableNames(input) {
   };
 }
 
-// Shared preview/refuse-commit for redeploy/restart — the structural
+// Shared preview/commit for redeploy/restart — the structural
 // two-step gate (write-gates.js OUTSIDE_WRITE_TOOL_NAMES). Full access is
 // enforced by the route, not here (ib-access.js ibFullAccess).
 async function writeRailwayService(toolName, input) {
@@ -393,7 +443,7 @@ async function writeRailwayService(toolName, input) {
       preview: true,
       tool: toolName,
       // The pinned canonical identity (id + exact name) — never the
-      // operator's raw string — is what a future commit path must act on.
+      // operator's raw string — is what the confirmed commit acts on.
       service: {
         id: service.serviceId,
         service: service.serviceName,
@@ -411,7 +461,212 @@ async function writeRailwayService(toolName, input) {
         : `Restart "${service.serviceName}"'s running instance — no new deploy, the same build restarts.`,
     };
   }
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned service id + latest-deployment id that
+  // /confirm-action verified against the live preview above — never
+  // re-resolve service_name from this call's own input (untrusted here).
+  const pinnedServiceId = input._verified_railway_service_id;
+  const pinnedDeploymentId = input._verified_railway_deployment_id;
+  if (!pinnedServiceId) {
+    return {
+      error: 'Missing the verified service identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  // Re-read the environment and re-assert the pin under this call: the
+  // service must still exist and its latest deployment must still be the one
+  // the card showed. A deploy that landed in the gap means the card's
+  // "currently <status>" is stale — refuse rather than act on a newer build.
+  const { environmentId } = await resolveIds();
+  const { services } = await getServiceInstances();
+  const live = services.find((s) => s.serviceId === pinnedServiceId);
+  if (!live || (live.latestDeployment?.id || null) !== (pinnedDeploymentId || null)) {
+    return {
+      error: 'The Railway service changed after the card was shown (a new deployment landed or the service is gone). Ask again for a fresh confirmation card.',
+      code: 'target_changed',
+      preview_changed: true,
+    };
+  }
+  if (toolName === 'redeploy_railway_service') {
+    await railwayGraphQL(
+      `mutation serviceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
+        serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+      }`,
+      { serviceId: pinnedServiceId, environmentId },
+      { forWrite: true },
+    );
+    return { success: true, tool: toolName, service_id: pinnedServiceId, redeployed_from_deployment_id: pinnedDeploymentId || null };
+  }
+  // Restart targets a DEPLOYMENT (Railway has no service-level restart
+  // mutation), so it needs a deployment to bounce.
+  if (!pinnedDeploymentId) {
+    return {
+      error: `Service "${live.serviceName}" has no deployment to restart.`,
+      code: 'no_deployment',
+    };
+  }
+  await railwayGraphQL(
+    `mutation deploymentRestart($id: String!) { deploymentRestart(id: $id) }`,
+    { id: pinnedDeploymentId },
+    { forWrite: true },
+  );
+  return { success: true, tool: toolName, service_id: pinnedServiceId, restarted_deployment_id: pinnedDeploymentId };
+}
+
+// ── set_railway_gate (preview only) ────────────────────────────────────────
+
+// The ONLY service this tool may touch: the portal's own production service.
+// Never a caller-supplied service — the environment must be named
+// "production" and the service is the one Railway injects as
+// RAILWAY_SERVICE_ID (or, off-Railway, the one service named
+// waves-customer-portal). Anything else refuses.
+async function resolvePortalProductionTarget() {
+  const { projectId, environmentId } = await resolveIds();
+  const { environmentName, services } = await getServiceInstances();
+  if (String(environmentName || '').trim().toLowerCase() !== 'production') {
+    throw new Error('Gate changes are only available on the production environment, and this Railway token is not scoped to it.');
+  }
+  let service = process.env.RAILWAY_SERVICE_ID
+    ? services.find((s) => s.serviceId === process.env.RAILWAY_SERVICE_ID)
+    : null;
+  if (!service) {
+    const named = services.filter((s) => (s.serviceName || '').trim().toLowerCase() === PORTAL_SERVICE_NAME);
+    if (named.length === 1) [service] = named;
+  }
+  if (!service) throw new Error('Could not identify the portal service in the production environment, so no gate change was proposed.');
+  return {
+    projectId,
+    environment: { id: environmentId, name: environmentName },
+    service: { id: service.serviceId, name: service.serviceName },
+  };
+}
+
+// Reads the variables map for the portal service and extracts the ONE
+// requested key. Railway returns the whole name→value map (secrets
+// included) and has no single-variable read, so the map stays inside this
+// function: nothing but the one gate's own value leaves it, and it is never
+// logged.
+async function readOneVariable(target, name) {
+  const data = await railwayGraphQL(
+    `query variables($projectId: String!, $environmentId: String!, $serviceId: String!) {
+      variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
+    }`,
+    { projectId: target.projectId, environmentId: target.environment.id, serviceId: target.service.id },
+  );
+  const vars = data?.variables;
+  if (!vars || typeof vars !== 'object') throw new Error('Railway returned no variables for the portal service.');
+  return Object.prototype.hasOwnProperty.call(vars, name) ? vars[name] : undefined;
+}
+
+// A keyed digest, so the commit path can tell "still the same non-boolean
+// value" without the value ever being displayed, pinned or logged.
+function valueDigest(raw) {
+  return require('crypto')
+    .createHmac('sha256', process.env.JWT_SECRET || 'ib-gate-prior-value')
+    .update(String(raw)).digest('hex').slice(0, 16);
+}
+
+// How the runtime reads a set value: true (on), false (off), or null when
+// that cannot be said for sure. 'true' / 'false' read the same under every
+// reader. Any other value is judged only for a gate this portal reads solely
+// through gateEnvValue ('1' / 'true' / 'on', any case); a strict or mixed
+// gate could be read differently by another module, so it stays unknown.
+function gateReadsOn(reader, raw) {
+  if (raw === 'true' || raw === 'false') return raw === 'true';
+  if (reader === 'loose') return ['1', 'true', 'on'].includes(String(raw).toLowerCase());
+  return null;
+}
+
+function knownGateOrRefusal(rawName) {
+  const catalog = require('../../config/feature-gates').knownGateCatalog();
+  const name = typeof rawName === 'string' ? rawName.trim() : '';
+  const entry = GATE_NAME_RE.test(name) ? catalog.get(name) : null;
+  if (entry) return { entry };
+  // Never echo the operator's raw string; only names from the portal's own
+  // gate list are offered back.
+  const needle = String(rawName || '').trim().toUpperCase().replace(/^GATE_/, '');
+  const close = needle.length >= 3
+    ? [...catalog.keys()].filter((n) => n.includes(needle)).sort().slice(0, MAX_GATE_SUGGESTIONS)
+    : [];
+  return {
+    refusal: {
+      error: `That is not a feature gate this portal knows, so nothing was proposed (a new variable is never created from here).${close.length ? ` Close matches: ${close.join(', ')}.` : ''}`,
+      code: 'unknown_gate',
+    },
+  };
+}
+
+async function setRailwayGate(input) {
+  if (input.confirmed === true) {
+    return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  }
+  const known = knownGateOrRefusal(input.gate_name);
+  if (known.refusal) return known.refusal;
+  const { entry } = known;
+  if (input.value !== 'true' && input.value !== 'false') {
+    return { error: "value must be exactly 'true' or 'false'.", code: 'invalid_value' };
+  }
+  if (!entry.boolean) {
+    // Only a gate the portal's own source shows to be a plain on/off switch
+    // can be flipped here; a mode gate (shadow / auto / a timestamp) or one
+    // whose reading cannot be verified is changed in the Railway dashboard.
+    return {
+      error: entry.kind === 'mode'
+        ? `${entry.name} takes a mode or timestamp, not just on/off — change it in the Railway dashboard.`
+        : `${entry.name} is a known gate, but the portal's code does not show it is a plain on/off switch, so it cannot be flipped from here — change it in the Railway dashboard.`,
+      code: 'not_a_boolean_gate',
+    };
+  }
+
+  const target = await resolvePortalProductionTarget();
+  const raw = await readOneVariable(target, entry.name);
+  let currentKind;
+  let priorValue = null;
+  if (raw === undefined || raw === null) currentKind = 'unset';
+  else if (raw === 'true' || raw === 'false') { currentKind = 'boolean'; priorValue = raw; } else currentKind = 'non_boolean';
+
+  // Judge "already set" the way the runtime reads this gate, so '1' / 'on' /
+  // 'TRUE' under a gateEnvValue reader count as on (a no-op, not a change
+  // and a redeploy). The non-boolean value itself is never echoed.
+  const readsOn = gateReadsOn(entry.reader, raw);
+  if (currentKind !== 'unset' && readsOn !== null && String(readsOn) === input.value) {
+    return {
+      already_set: true,
+      code: 'already_set',
+      message: currentKind === 'boolean'
+        ? `${entry.name} is already set to ${priorValue} in production — nothing to change.`
+        : `${entry.name} already reads as ${input.value} in production (the portal's own parsing of its current value) — nothing to change.`,
+    };
+  }
+  const currentLabel = currentKind === 'boolean' ? priorValue
+    : currentKind === 'unset' ? 'unset' : 'set to a non-boolean value';
+  return {
+    preview: true,
+    tool: 'set_railway_gate',
+    gate: entry.name,
+    controls: entry.description || 'No description on file for this gate — only its name.',
+    current_value: currentLabel,
+    new_value: input.value,
+    change: `${entry.name}: ${currentLabel} → ${input.value}`,
+    // Only the literal variable change — never a synthesized ON/OFF claim
+    // (Codex r3 on #5489): a gate can have prerequisites or a shadow mode, so
+    // what a value does is whatever the code reading it does (see `controls`).
+    // An inverted-looking name (…_OFF) gets a caution, not a claim.
+    meaning: `Sets the Railway variable ${entry.name} to '${input.value}'. What that does is decided by the code that reads it — see "controls" above; it does not by itself mean the feature is ${input.value === 'true' ? 'on' : 'off'}.${entry.inverted ? " The name suggests 'true' turns something OFF." : ''}`,
+    inverted: entry.inverted === true,
+    redeploy_notice: 'Railway redeploys the portal when a variable changes, so the portal restarts briefly.',
+    // The pinned target and prior state (compare-and-swap inputs for the
+    // commit path, which must refuse if any of them changed).
+    target: {
+      service_id: target.service.id,
+      service: target.service.name,
+      environment_id: target.environment.id,
+      environment: target.environment.name,
+    },
+    prior_value: priorValue,
+    prior_kind: currentKind,
+    prior_value_digest: currentKind === 'non_boolean' ? valueDigest(raw) : null,
+    note: `Set ${entry.name} to ${input.value} on the portal's production service (currently ${currentLabel}). This preview cannot be confirmed yet.`,
+  };
 }
 
 async function executeOpsTool(toolName, input = {}) {
@@ -433,6 +688,7 @@ async function executeOpsTool(toolName, input = {}) {
       case 'redeploy_railway_service':
       case 'restart_railway_service':
         return await writeRailwayService(toolName, input);
+      case 'set_railway_gate': return await setRailwayGate(input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
@@ -445,7 +701,7 @@ async function executeOpsTool(toolName, input = {}) {
     } else {
       logger.error(`[intelligence-bar:ops] Tool ${toolName} failed:`, err);
     }
-    return { error: err.message };
+    return { error: err.message, ...(err.writeAccessRequired ? { code: 'write_access_required' } : {}) };
   }
 }
 

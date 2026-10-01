@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
@@ -7,13 +7,14 @@ import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
-import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
+import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
+import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication, reportHasRodenticide } from '../lib/product-application';
@@ -63,6 +64,7 @@ import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -1014,8 +1016,10 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       heading: 'your service is complete!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'neutral',
+      // A lawn report with the lead block (GATE_LAWN_REPORT_LEAD) prints the
+      // snapshot headline right below as its own heading — not here too.
       result: v2Snapshot.peaceOfMind
-        || v2Snapshot.statusHeadline
+        || (data.reportV2?.lead ? null : v2Snapshot.statusHeadline)
         || 'Service completed — we noted items to keep an eye on; details are below.',
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
       // Times live on the tech card, product count on "What Waves did today" —
@@ -3047,7 +3051,7 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
-function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null }) {
+function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null, reportSections = null, nextVisitLabel = null }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
   // The gated typed-report narrative (summarySource 'typed_narrative')
@@ -3079,7 +3083,7 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverri
       {/* Strip a trailing period — headlines aren't sentences, and snapshots
           persisted before the 2026-07-21 template fix still carry one. */}
       <h2>{String(result.headline).replace(/\.$/, '')}</h2>
-      {body && <p className="ai-summary-body">{body}</p>}
+      {body && <ReportText text={body} sections={reportSections} nextVisitLabel={nextVisitLabel} className="ai-summary-body" />}
       {/* The snapshot builder embeds nextStep in body on most paths — only
           render the bullet when it adds something the paragraph doesn't.
           This containment rule applies to the narrative override too: the
@@ -4450,7 +4454,7 @@ function ServiceCoverageMap({
       !hasRenderableCoverageGeometry(location)
       || hasRenderableCoverageGeometry(coverageImageDisplayLocation(location))
     ));
-  const activeMapBackgroundUrl = canUseImageGeometry ? mapBackgroundUrl : null;
+  const activeMapBackgroundUrl = canUseImageGeometry ? resolveApiAssetUrl(mapBackgroundUrl) : null;
   const displayLocations = useMemo(
     () => locations.map((location) => coverageDisplayLocation(location, canUseImageGeometry)),
     [locations, canUseImageGeometry],
@@ -5967,6 +5971,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       || (data.companionReports || []).some(
         (companion) => companion?.todaysResult?.bodySource === 'technician_report',
       ));
+  // Four-section report (GATE_REPORT_WRITER_RULES): its sections, shown
+  // wherever the report's text prints, and the next visit on this report's
+  // own service line for "What's next" (live view only: the server strips
+  // it from every other render).
+  const reportSections = Array.isArray(data.reportSections) ? data.reportSections : null;
+  const nextSameServiceLabel = formatNextAppointmentLabel(data.nextSameServiceAppointment);
+  // When the four-section report is what a termite or cockroach dashboard
+  // shows, its next visit is the property-scoped one opening "What's next";
+  // the dashboard's own customer-wide label stays off (Codex #5500).
+  const termiteSectionsShown = Boolean(data.termiteReportV2
+    && reportSectionsForText(reportSections, cleanVisitSummary(data.termiteReportV2.aiSummary?.body || '')));
+  const cockroachSectionsShown = Boolean(data.cockroachReportV2
+    && reportSectionsForText(reportSections, cleanVisitSummary(data.cockroachReportV2.aiSummary?.body || '')));
   // Bed bug also folds its cross-visit activity history into the Visit
   // Timeline card (one chronological story) — the standalone "Visit
   // history" card is suppressed only when the merged rows actually render.
@@ -9033,6 +9050,25 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
+        {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
+            under the visit status, ahead of everything else the customer
+            reads; the lawn section below no longer repeats it. */}
+        {isLawnReport && data.reportV2?.banner && (
+          <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+            {/* The report's 16px section rhythm (.sr-section margin-top). */}
+            <LawnWateringBanner banner={data.reportV2.banner} style={{ marginTop: 16 }} />
+          </LawnPrintContext.Provider>
+        )}
+
+        {/* The lawn lead (GATE_LAWN_REPORT_LEAD) is the report's above-the-fold
+            summary, so it sits right under the status and watering banner, not
+            down in the lawn section (which then drops its hero). */}
+        {isLawnReport && data.reportV2?.lead && (
+          <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+            <LawnLeadCard lead={data.reportV2.lead} snapshot={data.reportV2.snapshot || {}} style={{ marginTop: 16 }} />
+          </LawnPrintContext.Provider>
+        )}
+
         <PlanSummaryCard data={data} mode={mode} />
 
         <NearYouCard data={data} mode={mode} />
@@ -9054,6 +9090,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               && (data.pestReportV2 || data.mosquitoReportV2 || typedNarrativeOwnsSummary)
               ? cleanVisitSummary(data.summary)
               : null}
+            reportSections={reportSections}
+            nextVisitLabel={nextSameServiceLabel}
           />
         )}
 
@@ -9111,6 +9149,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div id="visit-summary">
             <PestReportV2Section
               data={data.pestReportV2}
+              reportSections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
               print={mode === 'pdf' || mode === 'static'}
               token={token}
               mode={mode}
@@ -9145,6 +9185,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div id="visit-summary">
             <MosquitoReportV2Section
               data={data.mosquitoReportV2}
+              reportSections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
               print={mode === 'pdf' || mode === 'static'}
               token={token}
               mode={mode}
@@ -9186,8 +9228,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               stationPins={Boolean(data.termiteStationPins)}
               /* Same-line next visit only — the builder scopes it; the
                  top-level nextAppointment may be ANY service line. */
-              nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              nextVisitLabel={termiteSectionsShown ? null : formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              reportNextVisitLabel={termiteSectionsShown ? nextSameServiceLabel : null}
               narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
+              reportSections={reportSections}
               /* Cross-visit trend from the activity gauge payload OF THE
                  REPORT ENTRY THAT OWNS THE DASHBOARD — the primary's gauge
                  for a primary dashboard, the bait companion's gauge for a
@@ -9215,8 +9259,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mode={mode}
               /* Same-line next visit only — the builder scopes it to the
                  next ROACH-FAMILY appointment (live view only). */
-              nextVisitLabel={formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              nextVisitLabel={cockroachSectionsShown ? null : formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              reportNextVisitLabel={cockroachSectionsShown ? nextSameServiceLabel : null}
               narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
+              reportSections={reportSections}
               /* the gauge trend describes the frozen select; when the status
                  was reconciled away from it the trend is stale (codex P2 #3613 r1) */
               activityTrend={data.cockroachReportV2.statusReconciled ? null : (data.activity || null)}
@@ -9264,7 +9310,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight && !routineFindings.length) && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
-            <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
+            <ReportText
+              text={visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}
+              sections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
+            />
             {recordedFindingsList}
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
@@ -9475,6 +9525,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 <TodaysResultCard
                   typedReport={companion}
                   sectionId={`companion-${companion.type}-todays-result`}
+                  reportSections={reportSections}
+                  nextVisitLabel={nextSameServiceLabel}
                 />
               )}
               <TypedFindingsCard
@@ -9665,6 +9717,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   );
 }
 
+function reportDataUrl(token, mode, pinnedAssessment) {
+  return `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
+    + (pinnedAssessment
+      ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
+        + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
+        + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
+        + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
+      : '');
+}
+
+// The report's satellite images are signed proxy links that expire (2 h). A
+// page left open (or restored from the background) past this re-requests just
+// the map fields, silently, instead of leaving a dead map behind.
+const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
+
 export default function ReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -9707,17 +9774,22 @@ export default function ReportViewPage() {
   const glassActive = mode === 'live';
   useGlassSurface(glassActive);
 
+  const mapsLoadedAt = useRef(0);
+  const mapsRefreshing = useRef(false);
+  const mapErrorRefetched = useRef(false);
+  // Identity of the report on screen: an in-flight map refresh for a report the
+  // reader has since navigated away from must not touch the new one.
+  const reportKey = `${token}|${mode}`;
+  const currentReportKey = useRef(reportKey);
+  currentReportKey.current = reportKey;
+  useEffect(() => {
+    mapErrorRefetched.current = false; // one error-retry per report, not per SPA session
+  }, [reportKey]);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(false);
-    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
-      + (pinnedAssessment
-        ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
-          + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
-          + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
-          + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
-        : '');
+    const dataUrl = reportDataUrl(token, mode, pinnedAssessment);
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only. Guarded:
@@ -9762,6 +9834,7 @@ export default function ReportViewPage() {
           if (d.staffViewer) staffViewTokens.add(token);
           else staffViewTokens.delete(token);
         }
+        mapsLoadedAt.current = Date.now();
         setData(d);
       })
       .catch(() => {
@@ -9779,6 +9852,66 @@ export default function ReportViewPage() {
     if (!data || data.error) return;
     applyReportDocumentMetadata(data);
   }, [data]);
+
+  // Silent refresh of ONLY the map fields (fresh signed links); never touches
+  // the loading state or any other part of the rendered report.
+  const dataHasMaps = Boolean(data && !data.error
+    && (data.treatmentMap?.satellite?.live?.url || data.stationMap?.image?.url));
+  const refreshReportMaps = useCallback(() => {
+    if (mode !== 'live' || mapsRefreshing.current) return;
+    mapsRefreshing.current = true;
+    const requestedFor = `${token}|${mode}`;
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
+    fetch(reportDataUrl(token, mode, pinnedAssessment), {
+      cache: 'no-store',
+      headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((fresh) => {
+        if (!fresh || fresh.error || currentReportKey.current !== requestedFor) return;
+        mapsLoadedAt.current = Date.now();
+        setData((prev) => (prev && !prev.error ? {
+          ...prev,
+          treatmentMap: prev.treatmentMap
+            ? { ...prev.treatmentMap, satellite: fresh.treatmentMap?.satellite ?? prev.treatmentMap.satellite }
+            : prev.treatmentMap,
+          stationMap: fresh.stationMap ?? prev.stationMap,
+        } : prev));
+      })
+      .catch(() => {})
+      .finally(() => { mapsRefreshing.current = false; });
+  }, [token, mode, pinnedAssessment]);
+  useEffect(() => {
+    if (mode !== 'live' || !dataHasMaps) return undefined;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - mapsLoadedAt.current > REPORT_MAP_STALE_MS) {
+        refreshReportMaps();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [mode, dataHasMaps, refreshReportMaps]);
+  // Once per page load: if the map image cannot load (an already-expired link,
+  // e.g. a restored tab), fetch fresh links a single time.
+  const mapProbeUrl = data?.treatmentMap?.satellite?.live?.url || data?.stationMap?.image?.url || null;
+  useEffect(() => {
+    if (mode !== 'live' || !mapProbeUrl || typeof Image === 'undefined') return undefined;
+    let done = false;
+    const probe = new Image();
+    probe.onerror = () => {
+      if (done || mapErrorRefetched.current) return;
+      mapErrorRefetched.current = true; // a single retry per page load, never a loop
+      refreshReportMaps();
+    };
+    probe.src = resolveApiAssetUrl(mapProbeUrl);
+    return () => { done = true; probe.onerror = null; };
+    // Only the URL identity matters: a refreshed URL re-probes exactly once.
+  }, [mode, mapProbeUrl]);
 
   // The browser resolves the URL fragment against the loading skeleton —
   // anchor targets (e.g. #visit-recap from recap SMS links) don't exist

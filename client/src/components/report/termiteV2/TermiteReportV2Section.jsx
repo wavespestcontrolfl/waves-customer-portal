@@ -33,6 +33,12 @@ export default function TermiteReportV2Section({
   // Tech-reviewed narrative, cleaned by the page (cleanVisitSummary) — the
   // dashboard is the report's one summary surface.
   narrative = null,
+  // The four-section report's sections (payload reportSections); the hero
+  // shows them when the narrative is that report, with the property-scoped
+  // next visit opening "What's next" (the page passes it, and then no
+  // nextVisitLabel of the dashboard's own).
+  reportSections = null,
+  reportNextVisitLabel = null,
   // Activity gauge payload (score / trend / isBaseline) — the hero prints
   // its cross-visit trend sentence; the reading itself is the hero status.
   activityTrend = null,
@@ -45,6 +51,8 @@ export default function TermiteReportV2Section({
         statusSummary={data.statusSummary}
         metrics={data.metrics}
         narrative={narrative}
+        reportSections={reportSections}
+        reportNextVisitLabel={reportNextVisitLabel}
         /* the gauge trend describes the frozen select; when the status was
            reconciled away from it, the trend is stale (codex P2 r22 / r25) */
         activityTrend={data.statusReconciled ? null : activityTrend}

@@ -8,6 +8,7 @@ import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
+import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -609,6 +610,10 @@ export default function ServiceReportDocument({ data, token }) {
   const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
+  // The four-section report carries its own "What to expect": the separate
+  // block below would print the same thing twice (as the live pest
+  // dashboard already suppresses it).
+  const summarySectionsShown = summaryParagraphs.some((paragraph) => reportSectionsForText(data.reportSections, paragraph));
   if (reservice) {
     // Same precedence as the web hero (smartStatusSummary): an honest
     // warning — cockroach/termite V2 status, a Pest V2 "recommended"/
@@ -774,18 +779,35 @@ export default function ServiceReportDocument({ data, token }) {
   // inspection-only lawn visit claims a treatment that didn't happen (5th
   // variant of this class: defaults read as evidence).
   if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
+  // A visit with a server watering instruction (banner: hold / water-in) prints
+  // it ONCE, through aftercare.watering above. The hero task, follow-up and
+  // insight actions restate banner lines verbatim (a hold-then-water-in hero
+  // carries both steps, and the water-in step alone once the hold ends), so
+  // every banner line is stripped from them (any other advice stays).
+  // Stripped sentence by sentence: the banner composes a plan sentence onto a
+  // frozen line (partial credit), so the frozen sentence alone must go too.
+  const bannerSentences = hasActualTreatment
+    && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
+    ? (data.reportV2.banner.lines || [])
+      .filter((line) => typeof line === 'string' && line)
+      .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])
+      .sort((a, b) => b.length - a.length) : [];
+  const pushAction = (text) => {
+    if (!bannerSentences.length) { pushRec(text); return; }
+    pushRec(bannerSentences.reduce((acc, line) => acc.split(line).join(' '), String(text || '')).replace(/\s+/g, ' '));
+  };
   pushRec(v2NextMove);
   pushRec(termiteNextMove);
   // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
   // snapshot.customerAction and per-insight customerAction; omitting it drops
   // required actions (e.g. correcting irrigation) from the artifact.
-  pushRec(v2?.snapshot?.customerAction);
-  pushRec(v2?.followUp?.customerAction);
+  pushAction(v2?.snapshot?.customerAction);
+  pushAction(v2?.followUp?.customerAction);
   // wavesNext is what WAVES will do next (future tense, never the past-tense
   // wavesAction) — a commitment, so it belongs in the permanent record.
   pushRec(v2?.snapshot?.wavesNext
     || (Array.isArray(v2?.insights) ? v2.insights : []).map((i) => i?.nextVisitPlan).find(Boolean));
-  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushRec(insight?.customerAction));
+  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushAction(insight?.customerAction));
   pushRec(v2?.mowing?.recommendation);
 
   // "(3 of 5 — baseline recorded today)" / "(3 of 5)" / " — baseline
@@ -997,8 +1019,16 @@ export default function ServiceReportDocument({ data, token }) {
         {summaryParagraphs.length > 0 && (
           <div className="doc-keep">
             <SectionHeader>Summary of today&apos;s service</SectionHeader>
+            {/* The four-section report prints with its titles; any other
+                paragraph prints as before. */}
             {summaryParagraphs.map((paragraph) => (
-              <p key={paragraph} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{paragraph}</p>
+              <ReportText
+                key={paragraph}
+                text={paragraph}
+                sections={data.reportSections}
+                style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+              />
             ))}
           </div>
         )}
@@ -1050,7 +1080,7 @@ export default function ServiceReportDocument({ data, token }) {
             )}
           </div>
         )}
-        {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && (
+        {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && !summarySectionsShown && (
           <div className="doc-keep">
             <SectionHeader>What to expect</SectionHeader>
             {pestV2.expectations.whatToExpect.lines.map((line) => (
@@ -1601,18 +1631,35 @@ export default function ServiceReportDocument({ data, token }) {
                 result prints in the Station protection row above, so the
                 frozen headline/body stay out (sole-summary rule). */}
             {!(termiteV2Companion && companion.type === 'termite_bait_station') && companion.todaysResult?.headline && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-                {String(companion.todaysResult.headline).replace(/\.$/, '')}.
-                {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
-              </p>
+              reportSectionsForText(data.reportSections, companion.todaysResult.body) ? (
+                <>
+                  <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                    {String(companion.todaysResult.headline).replace(/\.$/, '')}.
+                  </p>
+                  <ReportText
+                    text={companion.todaysResult.body}
+                    sections={data.reportSections}
+                    style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                    titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+                  />
+                </>
+              ) : (
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                  {String(companion.todaysResult.headline).replace(/\.$/, '')}.
+                  {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
+                </p>
+              )
             )}
             {/* …but the companion's ACCEPTED narrative (the dashboard's
                 aiSummary) still prints here — the suppressed body was its
                 only PDF surface (codex P2 #3600 r28). */}
             {termiteV2Companion && companion.type === 'termite_bait_station' && cleanVisitSummary(termiteV2?.aiSummary?.body || '') && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-                {cleanVisitSummary(termiteV2.aiSummary.body)}
-              </p>
+              <ReportText
+                text={cleanVisitSummary(termiteV2.aiSummary.body)}
+                sections={data.reportSections}
+                style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+              />
             )}
             {/* Same containment rule TodaysResultCard uses: the snapshot
                 builder usually folds nextStep into the body, so only print it

@@ -31,6 +31,7 @@ const { buildReportCopyContext } = require('../services/service-report/report-co
 // (keyed by the visit) rather than from the customer's primary row.
 function makeKnexStub({
   customers = [], catalogProducts = [], scheduledServices = [], serviceRecords = [],
+  serviceFindings = [], propertyPreferences = [],
 } = {}) {
   const stub = (table) => {
     const chain = { _whereIns: [], _wheres: [] };
@@ -59,6 +60,12 @@ function makeKnexStub({
       }
       if (table === 'scheduled_services as ss') return byWheres(scheduledServices);
       if (table === 'service_records') return byWheres(serviceRecords);
+      if (table === 'service_findings') {
+        return chain._whereIns.reduce((rows, [column, values]) => (
+          rows.filter((row) => values.includes(row[column]))
+        ), serviceFindings);
+      }
+      if (table === 'property_preferences') return byWheres(propertyPreferences);
       return [];
     };
     chain.first = async () => resolveRows()[0];
@@ -217,5 +224,91 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate off)', () => {
       knex,
     });
     expect(contextText).not.toMatch(/EXPECTATIONS/);
+  });
+});
+
+// GATE_REPORT_WRITER_RULES: the route passes writerRules only for writers in
+// its scope (never lawn or tree/shrub/palm).
+describe('buildReportCopyContext — writer rules', () => {
+  const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
+  afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
+
+  const knexFor = () => makeKnexStub({
+    customers: [CUSTOMER],
+    catalogProducts: [{ ...NON_REPELLENT_PRODUCT, rei_hours: 0.5 }],
+    serviceRecords: [
+      { id: 'sr-1', customer_id: 'c1', status: 'completed', service_line: 'pest', service_date: '2026-04-15', service_type: 'Pest Control Service' },
+    ],
+    serviceFindings: [
+      { service_record_id: 'sr-1', category: 'no_activity', severity: 'info', title: 'No activity observed this visit' },
+    ],
+    propertyPreferences: [{ customer_id: 'c1', pet_count: 2, chemical_sensitivities: null }],
+  });
+  const args = (knex, writerRules) => ({
+    customerId: 'c1',
+    serviceType: 'Pest Control Service',
+    serviceLine: 'pest',
+    serviceDate: '2026-07-15',
+    products: [{
+      productId: 'p1', name: 'Taurus SC', applicationMethod: 'perimeter_spray', applicationArea: 'Exterior perimeter', areaValue: '120', areaUnit: 'linear_ft',
+    }],
+    writerRules,
+    knex,
+  });
+
+  it('drops footage, product safety, household notes and the automatic no-activity finding; gives the approved wording', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const { contextText, writerAllowedPhrases } = await buildReportCopyContext(args(knexFor(), true));
+    expect(contextText).toMatch(/APPLICATION DETAILS/);
+    expect(contextText).toContain('selected area: Exterior perimeter');
+    expect(contextText).not.toContain('treated area entered');
+    expect(contextText).not.toContain('PRODUCT SAFETY');
+    expect(contextText).not.toContain('Taurus');
+    expect(contextText).not.toContain('Fipronil');
+    expect(contextText).not.toContain('HOUSEHOLD NOTES');
+    expect(contextText).not.toContain('No activity observed this visit');
+    expect(contextText).toContain('PRIOR VISITS: this is an established customer');
+    expect(contextText).toContain('EXPECTATIONS (approved wording on what the customer may see');
+    expect(contextText).toContain('dropping off over about 1–2 weeks');
+    // This fixture's EPA number matches no approved product wording, so no
+    // HOW IT WORKS line: unmatched products fail closed.
+    expect(contextText).not.toContain('HOW IT WORKS');
+    expect(writerAllowedPhrases).toEqual(expect.arrayContaining(['a few days', 'about 1–2 weeks']));
+  });
+
+  it('gives the writer the approved wording even while the expectations card is off', async () => {
+    delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    const { contextText } = await buildReportCopyContext(args(knexFor(), true));
+    expect(contextText).toContain('EXPECTATIONS (approved wording on what the customer may see');
+    expect(contextText).not.toContain('EXPECTATIONS (honest, deterministic facts');
+  });
+
+  it('keeps every block exactly as before without the rules', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const { contextText } = await buildReportCopyContext(args(knexFor(), false));
+    expect(contextText).toContain('treated area entered: 120 linear_ft');
+    expect(contextText).toContain('PRODUCT SAFETY / RE-ENTRY');
+    expect(contextText).toContain('HOUSEHOLD NOTES: pets on site: 2');
+    expect(contextText).toContain('No activity observed this visit');
+    expect(contextText).toContain('EXPECTATIONS (honest, deterministic facts');
+  });
+});
+
+describe('buildReportCopyContext — writer rules: name-only products', () => {
+  test('a name-only product beside an id-backed one still grounds the writer', async () => {
+    const knex = makeKnexStub({ customers: [CUSTOMER], catalogProducts: [NON_REPELLENT_PRODUCT, ROACH_GEL_PRODUCT] });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c1',
+      serviceType: 'Pest Control Service',
+      serviceLine: 'pest',
+      serviceDate: '2026-07-15',
+      products: [
+        { productId: 'p1', name: 'Taurus SC', applicationMethod: 'perimeter_spray', applicationArea: 'Exterior perimeter' },
+        { productId: null, name: 'Advion Cockroach Gel Bait', applicationMethod: 'bait_placement', applicationArea: 'Kitchen' },
+      ],
+      writerRules: true,
+      knex,
+    });
+    expect(contextText).toContain('With gel bait, dead roaches may show up');
   });
 });

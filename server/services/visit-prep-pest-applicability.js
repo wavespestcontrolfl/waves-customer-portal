@@ -1,5 +1,9 @@
 /**
- * Visit prep pest read — applicability only (is this stop a pest stop?).
+ * Visit prep pest read — applicability only (does this stop have a PEST
+ * part?). A pest part is a strict pest-only service, or the pest side of a
+ * combined lawn + pest service label (visit-prep-combo-types.js; owner ruling
+ * 2026-09-30). Whether the stop is ALSO a lawn / tree & shrub stop, and which
+ * read engine(s) run, is decided by visit-prep-read-key.js.
  * Kept apart from visit-prep-pest-read.js so the technician's Visit Brief
  * can ask the question without loading the vision engine, its catalog and
  * validators on the request path (Codex #5305 r13).
@@ -9,6 +13,10 @@ const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 // Strict pest identity, not the revenue classifier's Pest Control catch-all
 // (which also takes WDO inspections and assessments; Codex #5305 r10 P1).
 const { isPestOnlyServiceType } = require('./pest-production-calibration');
+const { isComboServiceType } = require('./visit-prep-combo-types');
+
+// A pest part: a pest-only service, or the pest side of a combined label.
+const hasPestPart = (serviceType) => isPestOnlyServiceType(serviceType) || isComboServiceType(serviceType);
 
 // Every LIVE (non-terminal) service_type on svc's CURRENT physical stop:
 // the same member set the technician's Visit Brief shows
@@ -38,7 +46,7 @@ async function liveStopServiceTypes(svc, conn) {
 
 async function isPestStop(svc, conn = db) {
   const types = await liveStopServiceTypes(svc, conn);
-  return types.some((t) => isPestOnlyServiceType(t));
+  return types.some(hasPestPart);
 }
 
 // Pest-ness of an ALREADY-RESOLVED member set (e.g. the tech facts read's
@@ -48,7 +56,7 @@ async function membersArePest(memberIds, conn = db) {
   const ids = [...new Set((memberIds || []).map(String))];
   if (!ids.length) return false;
   const rows = await conn('scheduled_services').whereIn('id', ids).select('service_type', 'status');
-  return rows.some((r) => !JOIN_INELIGIBLE_STATUSES.includes(r.status) && isPestOnlyServiceType(r.service_type));
+  return rows.some((r) => !JOIN_INELIGIBLE_STATUSES.includes(r.status) && hasPestPart(r.service_type));
 }
 
-module.exports = { isPestStop, liveStopServiceTypes, membersArePest };
+module.exports = { isPestStop, liveStopServiceTypes, membersArePest, hasPestPart };

@@ -1083,6 +1083,37 @@ describe('revertMerge', () => {
     expect(state.winnerPatch.termite_stations_rented).toBe(false);
   });
 
+  it("undo restores the winner's own last_seen_at while it is still the merge-written value; a null prior vacates; a value stamped since stays and reports", async () => {
+    const merged = '2026-09-20T12:00:00.000Z';
+    const prior = '2026-09-01T12:00:00.000Z';
+    const run = async ({ priors, winnerSeen }) => {
+      const journal = baseJournal();
+      journal.winner_backfills = { last_seen_at: merged };
+      journal.repointed_ids.winner_prior_values = priors;
+      const { trx, state } = buildRevertTrx({
+        journal,
+        winner: { ...baseWinner(), last_seen_at: winnerSeen },
+        loser: baseLoser(),
+        tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+      });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+      return { state, result };
+    };
+    // Still the merge-written value (Date from the driver) -> prior restored.
+    const restored = await run({ priors: { last_seen_at: prior }, winnerSeen: new Date(merged) });
+    expect(restored.state.winnerPatch.last_seen_at).toBe(prior);
+    // Winner had never been seen -> no journaled prior -> vacates to null.
+    const vacated = await run({ priors: {}, winnerSeen: new Date(merged) });
+    expect(vacated.state.winnerPatch.last_seen_at).toBe(null);
+    // A beacon stamped it since the merge -> left alone and reported.
+    const stamped = await run({ priors: { last_seen_at: prior }, winnerSeen: new Date('2026-09-25T00:00:00.000Z') });
+    expect(stamped.state.winnerPatch.last_seen_at).toBeUndefined();
+    expect(stamped.result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customers.last_seen_at', reason: 'winner_value_changed_since_merge' }),
+    ]));
+  });
+
   it('restores the irrigation weekly delivery identity (trigger_event_id) for exactly the journaled rows (hook P1 on 47b0a3146)', async () => {
     const journal = baseJournal();
     journal.repointed_ids.irrigation_trigger_ids = ['em1', 'em2'];
