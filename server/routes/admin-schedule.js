@@ -5706,6 +5706,9 @@ function recurringWithoutBillableAmount({
 // inside recurringWithoutBillableAmount.
 async function seriesExtensionUnbillable(conn, {
   parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc,
+  // The cancel-reseed's in-term placement selects add-ons by the replaced
+  // occurrence, not the visit's own day — the check reads the same set.
+  addonDate = null,
 }) {
   if (!dates.length) return null;
   const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
@@ -5727,7 +5730,7 @@ async function seriesExtensionUnbillable(conn, {
     : null;
   let floor = Infinity;
   for (const d of dates) {
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent);
     const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
     floor = Math.min(floor, price);
   }
@@ -18637,9 +18640,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // Billable-amount gate on the dates this writer will add (shared helper —
   // rationale on seriesExtensionUnbillable). Trims and unchanged counts never
   // reach here.
+  const pickedAddonDate = (pickedDate && placementAddonDate) ? placementAddonDate : null;
   const unbillableExtend = await seriesExtensionUnbillable(trx, {
     parent, dates: extendDates, cols, parentAddons, storedDiscountScope,
-    blackoutDates: extendBlackoutDates, skipParent, seriesCioc,
+    blackoutDates: extendBlackoutDates, skipParent, seriesCioc, addonDate: pickedAddonDate,
   });
   if (unbillableExtend) {
     throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
@@ -18695,8 +18699,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
-    const addonDate = (pickedDate && placementAddonDate) ? placementAddonDate : nd;
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate, extendBlackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, pickedAddonDate || nd, extendBlackoutDates, skipParent);
     assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -20178,10 +20181,16 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
     .whereRaw("metadata->>'recurring_parent_id' = ?", [String(parentId)])
     .select('metadata');
   const termOverrides = new Map();
+  // An in-term replacement sits off-cadence; the occurrence it stood in for
+  // (stamped as replaced_occurrence_date) is what a replacement of IT must
+  // carry the add-ons of, so a second cancel never drops them.
+  const replacedOccurrence = new Map();
   for (const stamp of stamps) {
     const meta = typeof stamp.metadata === 'string' ? JSON.parse(stamp.metadata) : (stamp.metadata || {});
-    if (!Number.isInteger(meta.term_index)) continue;
-    for (const id of meta.added_service_ids || []) termOverrides.set(String(id), meta.term_index);
+    for (const id of meta.added_service_ids || []) {
+      if (Number.isInteger(meta.term_index)) termOverrides.set(String(id), meta.term_index);
+      if (meta.replaced_occurrence_date) replacedOccurrence.set(String(id), String(meta.replaced_occurrence_date));
+    }
   }
   // recurring_dispatch_due_date is the cadence position of an auto-dispatched
   // row whose scheduled_date moved up to three days (Codex r8 P2) — part of
@@ -20221,7 +20230,14 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
     customerId: parent.customer_id, parentId, candidateIds: laterCancelledPlanRowIds(seriesRows, cancelled.id),
   });
   return {
-    window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds), seriesRows, todayET,
+    window,
+    counting,
+    expected,
+    upcomingPlanCount,
+    anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds),
+    seriesRows,
+    todayET,
+    replacedOccurrenceDate: replacedOccurrence.get(String(cancelled.id)) || planPositionDate(cancelled),
   };
 }
 
@@ -20254,6 +20270,7 @@ async function probeReseedOverlaps(trx, { parent, parentId, added }) {
 function stampReseed(trx, {
   parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates, placement = 'series_end',
 }) {
+  const replaced = placement === 'in_term' ? { replaced_occurrence_date: term.replacedOccurrenceDate || null } : {};
   return trx('activity_log').insert({
     customer_id: parent.customer_id,
     action: 'recurring_cancel_reseed',
@@ -20263,7 +20280,7 @@ function stampReseed(trx, {
       recurring_parent_id: String(parentId),
       added_service_ids: added.map((c) => String(c.id)),
       term_index: term.window.index, term_start: term.window.start, term_end: term.window.end,
-      counting: term.counting, expected: term.expected, overlap_dates: overlapDates, placement,
+      counting: term.counting, expected: term.expected, overlap_dates: overlapDates, placement, ...replaced,
     }),
   });
 }
@@ -20386,7 +20403,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
     upcomingPlanCount: term.upcomingPlanCount,
     anchorFloor: term.anchorFloor,
     placementPicker,
-    placementAddonDate: placementPicker ? require('../services/recurring-series-cancel-reseed').planPositionDate(cancelled) : null,
+    placementAddonDate: placementPicker ? term.replacedOccurrenceDate : null,
   });
   if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });

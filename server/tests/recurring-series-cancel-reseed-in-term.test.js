@@ -146,9 +146,20 @@ describe('wiring (source guards)', () => {
     expect(schedule).toMatch(/const extendDates = pickedDate \? \[pickedDate\] : planSeriesExtendDates\(/);
   });
 
-  test('an in-term replacement carries the add-ons of the occurrence it replaces', () => {
-    expect(schedule).toMatch(/const addonDate = \(pickedDate && placementAddonDate\) \? placementAddonDate : nd;\n\s+const dueAddons = filterAddonLinesForDate\(parentAddons, parent\.scheduled_date, addonDate,/);
-    expect(schedule).toMatch(/placementAddonDate: placementPicker \? require\('\.\.\/services\/recurring-series-cancel-reseed'\)\.planPositionDate\(cancelled\) : null,/);
+  test('an in-term replacement carries the add-ons of the occurrence it replaces — in the insert AND the billing check', () => {
+    expect(schedule).toMatch(/const pickedAddonDate = \(pickedDate && placementAddonDate\) \? placementAddonDate : null;/);
+    expect(schedule).toMatch(/blackoutDates: extendBlackoutDates, skipParent, seriesCioc, addonDate: pickedAddonDate,/);
+    expect(schedule).toMatch(/filterAddonLinesForDate\(parentAddons, parent\.scheduled_date, addonDate \|\| d, blackoutDates, skipParent\)/);
+    expect(schedule).toMatch(/const dueAddons = filterAddonLinesForDate\(parentAddons, parent\.scheduled_date, pickedAddonDate \|\| nd,/);
+    expect(schedule).toMatch(/placementAddonDate: placementPicker \? term\.replacedOccurrenceDate : null,/);
+  });
+
+  test('a replacement of a replacement still carries the ORIGINAL occurrence', () => {
+    // The stamp records the occurrence an in-term visit stood in for, and
+    // the term read maps it back when that visit is itself cancelled.
+    expect(schedule).toMatch(/const replaced = placement === 'in_term' \? \{ replaced_occurrence_date: term\.replacedOccurrenceDate \|\| null \} : \{\};/);
+    expect(schedule).toMatch(/if \(meta\.replaced_occurrence_date\) replacedOccurrence\.set\(String\(id\), String\(meta\.replaced_occurrence_date\)\);/);
+    expect(schedule).toMatch(/replacedOccurrenceDate: replacedOccurrence\.get\(String\(cancelled\.id\)\) \|\| planPositionDate\(cancelled\),/);
   });
 
   test('the stamp records where the visit went', () => {

@@ -663,7 +663,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     // the cap counts the same plan-row population (Codex r7)
     expect(t).toMatch(/const upcomingPlanCount = countUpcomingPlanRows\(seriesRows, todayET\);/);
     expect(t).toMatch(/const reductionIds = await readPlanReductionIds\(trx, \{\s*customerId: parent\.customer_id, parentId, candidateIds: laterCancelledPlanRowIds\(seriesRows, cancelled\.id\),\s*\}\);/);
-    expect(t).toMatch(/return \{\n\s+window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor\(seriesRows, cancelled\.id, reductionIds\), seriesRows, todayET,\n\s+\};/);
+    expect(t).toMatch(/return \{\s+window,\s+counting,\s+expected,\s+upcomingPlanCount,\s+anchorFloor: reseedAnchorFloor\(seriesRows, cancelled\.id, reductionIds\),\s+seriesRows,\s+todayET,/);
     const add = addFn();
     expect(add).toMatch(/if \(upcomingPlanCount >= MAX_SERIES_VISIT_COUNT\) return \{ skipped: 'at_max_visit_count' \};/);
     expect(add.indexOf('upcomingPlanCount >= MAX_SERIES_VISIT_COUNT')).toBeLessThan(add.indexOf('reconcileRecurringSeriesVisitCount(trx'));
