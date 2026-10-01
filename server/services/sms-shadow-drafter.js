@@ -1458,7 +1458,7 @@ function reserviceRefusalAffirmed(text) {
 // cancel on Friday", "I had to cancel last time") is not the customer's request or threat. The span is blanked before the hand-off read, so a
 // clause-final bare "cancel" or a "cancel on Friday" reads as intent only when its subject is the customer. Requests with the tech as the
 // ADDRESSEE ("can you cancel on Friday", "I told you to cancel") have no past / obligation lead and stay requests.
-const RESERVICE_CANCEL_DESCRIBED_RE = /\b(?:(?:(?:your|the|a|our)\s+)?(?:tech\w*|office|team|crew|company|staff|dispatcher|rep|guy|lady|girl|person|someone|somebody|they|he|she|you|u|waves)|(?:i|we)(?=\s+had\s+to\b))\s+(?:(?:had|has|called|said|told|texted|emailed|needed|decided|wanted|tried|already|just|kept|always|did|got|ended|asked|came|went)\s+(?:to\s+)?){1,3}cancel(?:l?ing)?\b/gi;
+const RESERVICE_CANCEL_DESCRIBED_RE = /\b(?:(?:(?:your|the|a|our)\s+)?(?:tech\w*|office|team|crew|company|staff|dispatcher|rep|guy|lady|girl|person|someone|somebody|they|he|she|you|u|waves)|(?:i|we)(?=\s+(?:(?:already|just)\s+)?had\s+to\b))\s+(?:(?:already|just|always|never|also|actually|then)\s+)*(?:had|has|called|said|told|texted|emailed|needed|decided|wanted|tried|did|got|ended|asked|came|went|kept)\s+(?:(?:(?:already|just|always|never|also|actually|then|had|has|called|said|told|texted|emailed|needed|decided|wanted|tried|did|got|ended|asked|came|went|kept)\s+){0,2})(?:to\s+)?cancel(?:l?ing)?\b/gi;
 function reserviceOfferSuppressed(inboundMessage) {
   const handoffRe = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS') ? RESERVICE_HANDOFF_TEXT_RE : RESERVICE_HANDOFF_WITH_ANGER_RE;
   const text = String(inboundMessage || '').replace(RESERVICE_CANCEL_DESCRIBED_RE, (m) => ' '.repeat(m.length));

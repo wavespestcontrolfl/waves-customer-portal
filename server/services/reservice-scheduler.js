@@ -687,7 +687,8 @@ function reservicePestReportFacts(text) {
   });
   segs.forEach((seg, i) => {
     const prev = segs.slice(0, i).reverse().find((x) => !x.blank);
-    if (!prev || seg.blank || prev.dropped || !reserviceClauseResolved(seg.departure ? seg.eff : seg.clause)) return;
+    // Round-2: a QUESTIONED departure ("Ants came back; are gone now?", "Did they go away?") is not a resolution and never reaches back.
+    if (!prev || seg.blank || seg.question || prev.dropped || !reserviceClauseResolved(seg.departure ? seg.eff : seg.clause)) return;
     // Codex round-44 P2: a SUBJECTLESS resolution inherits the prior clause's pest subject ("Ants came back but are gone now",
     // "Ants came back, then disappeared") exactly like a pronoun one does.
     if ((RESERVICE_PRONOUN_SUBJECT_RE.test(seg.clause) || seg.departure) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) { prev.dropped = true; prev.reachDropped = true; }

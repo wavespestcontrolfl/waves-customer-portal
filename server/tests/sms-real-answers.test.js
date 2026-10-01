@@ -3028,8 +3028,10 @@ describe('free re-service is an entitlement resolved through the existing mechan
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
         const owed = (m) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: m }).ok === false;
         for (const m of ["Cancel tomorrow's appointment; the ants are back", 'Can you cancel next week\u2019s service? The ants are back', 'ants are back, cancel on Friday', 'the ants are back, cancel next month', 'ants are back, cancel after this visit',
-          "I'll cancel if this happens again, the ants are back", "the ants are back and we'll cancel unless someone comes out", "ants are back, I'll be cancelling after this visit", 'ants are back, I will be cancelling']) expect([m, owed(m)]).toEqual([m, false]);
-        for (const m of ['Your tech had to cancel, and now the ants are back', 'You called to cancel. Anyway, the ants are back.', 'The tech had to cancel on Friday and the ants are back', 'ants are back, they decided to cancel next week', 'the ants are back, I had to cancel last time']) expect([m, owed(m)]).toEqual([m, true]);
+          "I'll cancel if this happens again, the ants are back", "the ants are back and we'll cancel unless someone comes out", "ants are back, I'll be cancelling after this visit", 'ants are back, I will be cancelling',
+          // round 2: a second-person subject with an imperative / modal frame is a REQUEST, not a description
+          'The ants are back; you just cancel my plan, please', 'ants are back, can you just cancel my service', 'ants are back, you can cancel my service', 'ants are back, you just cancel it']) expect([m, owed(m)]).toEqual([m, false]);
+        for (const m of ['Your tech had to cancel, and now the ants are back', 'You called to cancel. Anyway, the ants are back.', 'The tech had to cancel on Friday and the ants are back', 'ants are back, they decided to cancel next week', 'the ants are back, I had to cancel last time', 'the ants are back, you already called to cancel', 'the ants are back, they just decided to cancel']) expect([m, owed(m)]).toEqual([m, true]);
       });
 
       // Codex round-39 P2: an explicit, AFFIRMED refusal of a visit / callback / link suppresses the owed offer and forbids a promise.

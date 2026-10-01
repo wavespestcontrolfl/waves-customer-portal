@@ -575,6 +575,12 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['Ants came back. Stopped using the bait you left.', true, 'pest', false],
     ['Ants came back, so stopped spraying myself', true, 'pest', false],
     ['Ants came back but stopped coming', false, null, false],
+    // Codex round-2 P2: a QUESTIONED departure is not a resolution and never reaches back
+    ['Ants came back; are gone now?', true, 'pest', false],
+    ['Ants came back; stopped now?', true, 'pest', false],
+    ['Ants are back. Did they go away after the last spray?', true, 'pest', false],
+    ['Ants are back. Did they go away after the last spray, or did they just go away?', true, 'pest', false],
+    ['Ants came back. They went away?', true, 'pest', false],
     // PR #5465 R2: the sighting a departure drops is still the antecedent of a later pronoun return
     ['The ants came back, then went away, but now they\'re back', true, 'pest', false],
     ['Chinch bugs came back, went away, but now they\'re back', true, 'lawn', false],
