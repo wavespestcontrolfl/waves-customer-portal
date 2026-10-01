@@ -108,6 +108,7 @@ const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, tr
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { writerRulesRejection } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -1936,6 +1937,75 @@ function reportReconcileBlockPayload({
   };
 }
 
+// Plain words for each writer-rules rejection, for the edit heads-up.
+const REPORT_RULE_FINDING_LABELS = Object.freeze({
+  amount: 'An amount or measurement',
+  footage: 'A measured area (feet or acres)',
+  percent: 'A percentage',
+  rate: 'A rate or mix strength',
+  per_visit: '"Per visit"',
+  company_name: 'A company name other than Waves Pest Control',
+  safe_word: 'The word "safe" (or harmless, non-toxic)',
+  chemical: 'The word "chemical"',
+  owner_phrase: 'A word the report leaves out',
+  unscoped_absence: '"No activity" for the whole property',
+  aftercare: 'Care instructions (the report prints its own)',
+  reentry: 'Re-entry or drying instructions (the report prints its own)',
+  timeframe: 'A timeframe not from the approved wording',
+  gauge: "The activity gauge's number",
+  quote: 'The customer quoted word for word',
+  price: 'A price, or free, included or covered',
+  date: 'A date or day',
+  time: 'A time or arrival window',
+  active_ingredient: 'An active ingredient name',
+});
+const normalizeSentence = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const reportSentences = (sections) => (Array.isArray(sections) ? sections : [])
+  .flatMap((section) => (section?.paragraphs || []).join(' ').split(/(?<=[.!?])\s+/))
+  .map((sentence) => sentence.trim())
+  .filter(Boolean);
+
+// Edit heads-up for the four-section report (owner 2026-10-01: "it
+// shouldn't stop us, but we should rerun it if I or a tech edits it";
+// Codex #5500). The writer rules run again on every sentence that differs
+// from the installed generated draft; any finding returns one 409 the tech
+// confirms ("send as is") or goes back to edit. Never blocks: a confirmed
+// resubmit passes. Only the four-section report is checked, and it exists
+// only while GATE_REPORT_WRITER_RULES is live. Fail-open on checker errors.
+function reportRulesReviewBlockPayload({
+  isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase = null,
+}) {
+  if (isIncompleteVisit || reportRulesConfirmed) return null;
+  try {
+    const submitted = technicianReportCustomerCopy(technicianNotes);
+    if (!submitted?.sections) return null;
+    const base = typeof reportDraftBase === 'string' && reportDraftBase.trim()
+      ? technicianReportCustomerCopy(reportDraftBase)
+      : null;
+    const unchanged = new Set(reportSentences(base?.sections).map(normalizeSentence));
+    const findings = [];
+    for (const sentence of reportSentences(submitted.sections)) {
+      if (unchanged.has(normalizeSentence(sentence))) continue;
+      const reason = writerRulesRejection(sentence);
+      if (reason) findings.push({ reason, label: REPORT_RULE_FINDING_LABELS[reason] || 'A rule the report follows', sentence });
+    }
+    if (!findings.length) return null;
+    return {
+      status: 409,
+      payload: {
+        // adminFetch surfaces only error + code, so the plain-words list
+        // rides in the error string; the structured list stays for tests.
+        error: findings.map((finding) => `${finding.label}: "${finding.sentence}"`).join('\n'),
+        code: 'report_rules_review',
+        findings,
+        confirmable: true,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 // Completion invoice-candidate lookups + reconciliation live in
 // services/completion-invoice-candidate.js (shared with the card-expiry
 // exemption so both read the same rows through the same rules).
@@ -2554,6 +2624,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // the visit is actually an inspection.
       offerInspectionCredit = true,
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
+      reportRulesConfirmed = false, // tech confirmed the edit heads-up ("send as is")
+      reportDraftBase = null, // the installed generated draft the notes were edited from
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
       // The visit identity the client's form was built against (customer,
@@ -3180,6 +3252,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (reconcileBlock
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: reconcileBlock.status, body: reconcileBlock.payload });
+      }
+    }
+    // Edit heads-up on the four-section report (see
+    // reportRulesReviewBlockPayload): same 409 shape, same committed-retry
+    // exemption as the reconciliation prompt just above.
+    {
+      const rulesBlock = reportRulesReviewBlockPayload({
+        isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase,
+      });
+      if (rulesBlock
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        return ({ status: rulesBlock.status, body: rulesBlock.payload });
       }
     }
     // A committed completion (a saved visit member, a lost-response retry)
@@ -13970,6 +14054,7 @@ module.exports = {
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,
+  reportRulesReviewBlockPayload,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
   reportV1InvoiceBodyCarriesPayLink,

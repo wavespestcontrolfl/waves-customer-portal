@@ -6,6 +6,7 @@ import {
   completionAutoCloseDelay,
   reportShapedNotes,
   shouldCaptureHandwrittenNotes,
+  completionReportRulesPrompt,
 } from "./SchedulePage";
 
 const photo = (n, extra = {}) => ({ data: `data:image/jpeg;base64,${"QUJD".repeat(n)}`, name: `p${n}.jpg`, ...extra });
@@ -115,5 +116,19 @@ describe("shouldCaptureHandwrittenNotes", () => {
   });
   it("saves plain handwritten notes", () => {
     expect(shouldCaptureHandwrittenNotes({ notes: "Ants by the sink.", installedText: draft, draftInstalled: true })).toBe(true);
+  });
+});
+
+describe("completionReportRulesPrompt", () => {
+  it("turns the edit heads-up into a send-as-is / edit choice", () => {
+    const text = completionReportRulesPrompt({ code: "report_rules_review", message: 'An amount or measurement: "We applied 2 gallons."' });
+    expect(text).toContain("Heads-up on your edits");
+    expect(text).toContain('An amount or measurement: "We applied 2 gallons."');
+    expect(text).toContain("OK — send as is.");
+    expect(text).toContain("Cancel — go back and edit the report.");
+  });
+  it("ignores every other error", () => {
+    expect(completionReportRulesPrompt({ code: "report_reconcile", message: "x" })).toBeNull();
+    expect(completionReportRulesPrompt(null)).toBeNull();
   });
 });
