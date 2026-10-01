@@ -107,6 +107,47 @@ test('an fyi digest is severity fyi and absent under every who', async () => {
   expect(all.counts.bySeverity).toEqual({ 'needs-you': 1 });
 });
 
+test('a legacy ops_digest row without a stamped kind is classified by its title prefix, like the Activity feed', async () => {
+  const legacy = (id, title) => row({ id, category: 'ops_digest', title, metadata: {} });
+  expect(mapAlertRow(legacy('l-fix', 'FIX: sync is failing'))).toMatchObject({ severity: 'broken', who: 'person', derived: true });
+  expect(mapAlertRow(legacy('l-act', 'ACT: approve the draft')).severity).toBe('needs-you');
+  expect(mapAlertRow(legacy('l-review', '[Review] price match')).severity).toBe('needs-you');
+  expect(mapAlertRow(legacy('l-fyi', 'FYI: weekly numbers')).severity).toBe('fyi');
+  expect(mapAlertRow(legacy('l-ok', 'OK: all clear')).severity).toBe('fyi');
+  mockRows = [legacy('l-fix', 'FIX: sync is failing'), legacy('l-fyi', 'FYI: weekly numbers'), legacy('l-ok', 'OK: all clear')];
+  const out = await listNeedsMe();
+  expect(out.items.map((i) => i.id)).toEqual(['l-fix']);
+});
+
+test('an ops_digest row with no body carries the bounded diagnosis in detail and a first-sentence why', () => {
+  const diagnosis = `The nightly sync stalled on a bad token. Details follow.\n${'x'.repeat(3000)}`;
+  const item = mapAlertRow(row({ id: 'd1', category: 'ops_digest', body: null, detail: diagnosis, link: null, metadata: { kind: 'FIX', audience: 'engineering', feed: 'activity' } }));
+  expect(item.why).toBe('The nightly sync stalled on a bad token.');
+  expect(item.detail.length).toBe(2000);
+  expect(item.detail.endsWith('\u2026')).toBe(true);
+  expect(item.link).toBe('/admin/agents?tab=activity&focus=d1');
+  expect(mapAlertRow(row({ category: 'ops_digest', body: 'Own body.', detail: 'Long report.', metadata: {} }))).toMatchObject({ why: 'Own body.', detail: 'Long report.' });
+  expect(mapAlertRow(row({ body: null, detail: null })).detail).toBeNull();
+  expect(mapAlertRow(row({ id: 'd2', category: 'ops_digest', link: '/admin/communications', metadata: {} })))
+    .toMatchObject({ link: '/admin/communications', reportLink: '/admin/agents?tab=activity&focus=d2' });
+  expect(mapAlertRow(row({ id: 'd3', category: 'ops_digest', link: '/admin/agents?tab=activity', metadata: {} })).link).toBe('/admin/agents?tab=activity&focus=d3');
+  // A non-digest row's link is untouched.
+  expect(mapAlertRow(row({ id: 'p1', link: null })).link).toBeNull();
+});
+
+test('a failed dashboard generator is named in warnings while the rest still answers', async () => {
+  computeDashboardAlerts.mockResolvedValue({
+    alerts: [{ id: 'ar_overdue_60', severity: 'critical', count: 2, label: '2 invoices over 60 days', href: '/admin/invoices' }],
+    failures: [{ id: 'payments_failed_today' }, { id: 'estimates_expiring' }],
+  });
+  const out = await listNeedsMe();
+  expect(out.warnings).toEqual([
+    { source: 'dashboard_alerts', generator: 'payments_failed_today', error: 'unavailable' },
+    { source: 'dashboard_alerts', generator: 'estimates_expiring', error: 'unavailable' },
+  ]);
+  expect(out.items.map((i) => i.id)).toEqual(['live:ar_overdue_60']);
+});
+
 test('a standing condition is a needs-you count that clears at zero, filed by the page it opens', async () => {
   computeDashboardAlerts.mockResolvedValue({ alerts: [
     { id: 'ar_overdue_60', severity: 'critical', count: 4, label: '4 invoices over 60 days', href: '/admin/invoices?tab=overdue' },
@@ -115,19 +156,20 @@ test('a standing condition is a needs-you count that clears at zero, filed by th
   const { items } = await listNeedsMe();
   expect(items.find((i) => i.id === 'live:ar_overdue_60')).toMatchObject({
     kind: 'standing', area: 'Billing', headline: '4 invoices over 60 days', why: null, severity: 'needs-you',
-    count: 4, link: '/admin/invoices?tab=overdue', who: 'person', doneWhen: 'count_zero',
+    count: 4, link: '/admin/invoices?tab=overdue', who: 'person', doneWhen: 'count_zero', derived: false,
   });
   expect(items.find((i) => i.id === 'live:x_unknown')).toMatchObject({ area: 'System', members: ['a'] });
 });
 
-test('who=claude returns claude and either; who=person only person; broken sorts first, then newest', async () => {
+test('who is exact: claude excludes either, either returns it; broken sorts first, then newest', async () => {
   mockRows = [
     row({ id: 'old-person', created_at: '2026-09-01T00:00:00Z' }),
     row({ id: 'new-person', created_at: '2026-09-29T00:00:00Z' }),
     row({ id: 'either', metadata: { area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent' } }),
     row({ id: 'fix', category: 'ops_digest', created_at: '2026-08-01T00:00:00Z', metadata: { kind: 'FIX', audience: 'engineering' } }),
   ];
-  expect((await listNeedsMe({ who: 'claude' })).items.map((i) => i.id)).toEqual(['fix', 'either']);
+  expect((await listNeedsMe({ who: 'claude' })).items.map((i) => i.id)).toEqual(['fix']);
+  expect((await listNeedsMe({ who: 'either' })).items.map((i) => i.id)).toEqual(['either']);
   expect((await listNeedsMe({ who: 'person' })).items.map((i) => i.id)).toEqual(['new-person', 'old-person']);
   const all = await listNeedsMe();
   expect(all.items.map((i) => i.id)).toEqual(['fix', 'either', 'new-person', 'old-person']);
@@ -225,4 +267,13 @@ test('the bar tool trims item text and drops internals (members, dedupe keys, re
   const standing = out.items.find((i) => i.kind === 'standing');
   expect(standing).toMatchObject({ count: 3, done_when: 'count_zero' });
   for (const item of out.items) expect(Object.keys(item)).not.toEqual(expect.arrayContaining(['members', 'metadata', 'readAt']));
+});
+
+test('the bar tool carries a digest\'s bounded detail and report link', async () => {
+  const { executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
+  mockRows = [row({ id: 'd9', category: 'ops_digest', body: null, detail: `Diagnosis here. ${'Zed '.repeat(2000)}`, link: '/admin/communications', metadata: { kind: 'FIX', audience: 'engineering', feed: 'activity' } })];
+  const out = await executeNeedsMeTool('needs_me', { who: 'claude' });
+  expect(out.items[0]).toMatchObject({ why: 'Diagnosis here.', report_link: '/admin/agents?tab=activity&focus=d9' });
+  expect(out.items[0].detail.length).toBeLessThanOrEqual(1200);
+  expect((await executeNeedsMeTool('needs_me', { who: 'either' })).items).toHaveLength(0);
 });

@@ -147,8 +147,9 @@ rewrite what the customer said to get past it.
 
 Read what is open in one call instead of reading alert text and guessing. Each item comes
 back in the shape of section 2: area, headline, why, severity, link, subject, done-when,
-who. Pick the ones a session may fix alone with `who=claude` (that returns `claude` and
-`either`; section 5 says what each may do), and never resolve a `person` item.
+who. Pick the ones a session may fix alone with `who=claude` (exact: it returns `claude` only,
+never `either`, where a person still approves; `who=either` lists those; section 5 says what each
+may do), and never resolve a `person` item.
 
 - Route: `GET /api/admin/needs-me?who=&area=&limit=` (`server/routes/admin-needs-me.js`),
   scoped to the caller's role like the bell list.
@@ -159,10 +160,16 @@ who. Pick the ones a session may fix alone with `who=claude` (that returns `clau
   admin rows that are not done, including Activity-feed rows (the bell never shows those; they
   carry `activityOnly: true`, and engineering `broken` findings are among them), and the
   dashboard's standing counts, which are `needs-you`, `person`, done when the count is zero.
-An `ops_digest` row for the `fyi` audience is severity `fyi` and is never listed.
+An `ops_digest` row for the `fyi` audience is severity `fyi` and is never listed. An alert
+carries `detail`, the full finding (bounded to 2,000 characters; an engineering digest's
+diagnosis may live only there); when the row has no body, `why` is the first sentence of it.
+A source that partly fails says so in `warnings`: a dashboard queue that threw is named
+(`{ source: 'dashboard_alerts', generator, error }`) instead of reading as empty.
 
 An item with `derived: true` comes from an older raw `notifyAdmin` call that never stamped
-the eight parts. Its area is inferred from the category, its severity is `broken` only for a
-`FIX` digest, its who is `person` (an engineering digest is `claude`), its subject is read
+the eight parts (a dashboard standing condition is not one of these: it is `derived: false`).
+Its area is inferred from the category, its severity is `broken` only for a
+`FIX` digest (for a digest with no stamped kind, the legacy title prefix decides: `FIX:` broken,
+`ACT:` / `[Review]` needs-you, `FYI:` / `OK:` fyi and left out), its who is `person` (an engineering digest is `claude`), its subject is read
 from the ids in its metadata, and its done-when is unknown. Treat those as best guesses and
 read the record behind the link before acting.

@@ -15,16 +15,17 @@ const { AREAS, WHO, cutAtWord } = require('../admin-alert-compose');
 const MAX_ITEMS = 100;
 const HEADLINE_CHARS = 80;
 const WHY_CHARS = 140;
+const DETAIL_CHARS = 1200; // an engineering digest's diagnosis can live only in detail
 
 const NEEDS_ME_TOOLS = [
   {
     name: 'needs_me',
-    description: `Everything open that needs a person or Claude: unresolved admin alerts and the dashboard's standing counts, newest first, broken before needs-you. Each item says its area, what it is about (subject), what clears it (done_when), the link where the fix is made, and who may act: "person" decides, "claude" may fix alone, "either" means Claude drafts and a person approves. Items with derived=true come from older alerts, so area, who and subject are inferred; done_when is unknown for those.
+    description: `Everything open that needs a person or Claude: unresolved admin alerts and the dashboard's standing counts, newest first, broken before needs-you. Each item says its area, what it is about (subject), what clears it (done_when), the link where the fix is made, and who may act: "person" decides, "claude" may fix alone, "either" means Claude drafts and a person approves. Items with derived=true come from older alerts, so area, who and subject are inferred; done_when is unknown for those. An alert's detail, when present, is the full finding (an engineering digest's diagnosis may live only there).
 Use for: "what needs me?", "what's open?", "what can Claude fix on its own?", "what's open in billing?"`,
     input_schema: {
       type: 'object',
       properties: {
-        who: { type: 'string', enum: WHO, description: 'Only items this actor may resolve. "claude" also includes "either".' },
+        who: { type: 'string', enum: WHO, description: 'Only items this actor may resolve. Exact: "claude" returns only what Claude may fix alone; "either" (Claude drafts, a person approves) is its own value.' },
         area: { type: 'string', enum: AREAS, description: 'Only items in this area.' },
         limit: { type: 'integer', minimum: 1, maximum: MAX_ITEMS, description: `How many items to return (default 25, most urgent first).` },
       },
@@ -43,7 +44,9 @@ function toBarItem(item) {
     who: item.who,
     headline: cutAtWord(item.headline || '', HEADLINE_CHARS),
     why: item.why ? cutAtWord(item.why, WHY_CHARS) : null,
+    ...(item.detail ? { detail: cutAtWord(item.detail, DETAIL_CHARS) } : {}),
     link: item.link,
+    ...(item.reportLink ? { report_link: item.reportLink } : {}),
     subject: item.subject || null,
     done_when: item.doneWhen,
     ...(item.count != null ? { count: item.count } : {}),

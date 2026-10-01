@@ -8,7 +8,12 @@
 //
 //   railway run --service Postgres node ops/agents/needs-me.js
 //   railway run --service Postgres node ops/agents/needs-me.js --who claude --area System
+//   railway run --service Postgres node ops/agents/needs-me.js --detail
 //   railway run --service Postgres node ops/agents/needs-me.js --json
+//
+// --who is exact: `claude` is what a session may fix alone, `either` (Claude drafts, a person
+// approves) is listed only under `--who either`. --detail prints each alert's full finding
+// under its row (an engineering digest's diagnosis may live only there); --json always has it.
 //
 // Run from the repo root. A `*` after who marks a row from an older alert whose area, who
 // and subject are inferred. Alert text names customers: do not paste it into the repo.
@@ -53,9 +58,10 @@ const cell = (text, width) => {
   for (const item of result.items) {
     const row = [item.area, item.severity, `${item.who}${item.derived ? '*' : ''}`, item.headline, item.why || (item.count != null ? `${item.count} open` : ''), item.link];
     console.log(row.map((text, i) => cell(text, cols[i][1])).join(' | ').trimEnd());
+    if (process.argv.includes('--detail') && item.detail) console.log(item.detail.split('\n').map((l) => `    ${l}`).join('\n'));
   }
   console.log(`\n${result.items.length} shown of ${result.total} open. * = inferred from an older alert.`);
-  for (const w of result.warnings) console.error(`warning: ${w.source} ${w.error}`);
+  for (const w of result.warnings) console.error(`warning: ${w.source}${w.generator ? ` (${w.generator})` : ''} ${w.error}`);
 })().catch((err) => {
   console.error(`needs-me failed: ${err.message}`);
   process.exitCode = 1;

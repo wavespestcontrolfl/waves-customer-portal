@@ -692,8 +692,11 @@ describe('Action Inbox generators', () => {
       leads: () => { throw new Error('boom'); },
       'estimates as e': [{ id: 'est-1', at_stake: '99' }],
     });
-    const { alerts } = await computeDashboardAlertsUncached();
+    const { alerts, failures } = await computeDashboardAlertsUncached();
 
+    // The failed generators are reported, so a reader can tell a missing queue from an empty one.
+    expect(failures.map((f) => f.id)).toEqual(expect.arrayContaining(['leads_awaiting_contact', 'leads_unattributed_7d']));
+    expect(failures.map((f) => f.id)).not.toContain('estimates_expiring');
     expect(alerts.find((a) => a.id === 'leads_awaiting_contact')).toBeUndefined();
     expect(alerts.find((a) => a.id === 'leads_unattributed_7d')).toBeUndefined();
     expect(alerts.find((a) => a.id === 'estimates_expiring')).toBeDefined();
