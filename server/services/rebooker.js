@@ -3203,7 +3203,19 @@ class SmartRebooker {
       // lock and the partner plan's maintenance lock, both already held),
       // save-time tech eligibility, and the slot-reserve lock — what a swept
       // row takes too.
-      const fencePartner = async ({ partner, dateStr, partnerDateChanges, techChanges, keptTech }) => {
+      const fencePartner = async ({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech }) => {
+        // A partner shifted earlier than the anchor can land in a window that
+        // has already passed today even when the anchor's has not: the
+        // shared rule every mover applies (the anchor's check above), and the
+        // whole move rolls back.
+        if (pUpdate.window_start && sameDayWindowElapsed(dateStr, pUpdate.window_end || pUpdate.window_start)) {
+          throw Object.assign(new Error('That window has already passed today for a grouped service at this stop'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+            memberId: partner.id,
+          });
+        }
         if (partnerDateChanges) await assertPartnerPlanDayFree(trx, partner, dateStr, [...sweptIds, ...carry.partnerIds]);
         if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr);
         if (keptTech) {
@@ -3264,7 +3276,7 @@ class SmartRebooker {
           if (!plan) continue;
           const { pUpdate, partnerDateChanges, techChanges, keptTech, liveStatus, partnerRewound } = plan;
           anyLivePartner = anyLivePartner || liveStatus;
-          await fencePartner({ partner, dateStr, partnerDateChanges, techChanges, keptTech });
+          await fencePartner({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech });
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
           if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
           const awaitingPlacement = applyPartnerPlacementPatch(partner, pUpdate);

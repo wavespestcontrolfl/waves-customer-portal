@@ -1619,6 +1619,10 @@ describe('caller wiring (source)', () => {
     const reb = read('../services/rebooker.js');
     expect(reb).toContain('...[...carryPartners0.values()].flat().map(partnerSeriesRoot).filter(Boolean).map(String),');
     expect(reb).toContain("for (const root of maintenanceRoots) {");
+    // A carried partner's own landing window is checked against "already
+    // passed today", like the anchor's, before its write.
+    const fence = reb.slice(reb.indexOf('const fencePartner = async'), reb.indexOf('const recordCarriedPartner = async'));
+    expect(fence).toContain('sameDayWindowElapsed(dateStr, pUpdate.window_end || pUpdate.window_start)');
     // Staff allowlist: automatic/customer initiators never carry.
     expect(reb).toContain("const SERIES_CARRY_STAFF_INITIATORS = new Set(['admin', 'tech']);");
     // The edit modal commits field edits before the series move: under the
