@@ -55,6 +55,9 @@ async function isOptinRailLive() {
 // helper is best-effort and savepointed: a marker problem must never block or
 // fail an opt-in transition.
 const DEMOTE_MARKER_KEY = 'demote_primary_on_optin';
+// A marker whose booked visit reached one of these is stale: the caller is not
+// demoted for it.
+const DEMOTE_STALE_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show']);
 async function withSavepoint(dbh, fn) {
   try {
     if (dbh && dbh.isTransaction && typeof dbh.transaction === 'function') return await dbh.transaction(fn);
@@ -140,23 +143,30 @@ async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
       const prefs = typeof customer.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer.service_preferences;
       const marker = prefs && prefs[DEMOTE_MARKER_KEY] && prefs[DEMOTE_MARKER_KEY][phoneKey];
       if (!marker || !stamp.stamped) continue;
+      // Revalidate before silencing the caller: the phone must STILL sit in a
+      // slot (a replaced contact's late YES demotes nobody) and the booked
+      // visit must still be live. A stale entry is dropped, never applied.
+      const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+      const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === phoneKey);
+      const visit = slot && marker.scheduled_service_id
+        ? await h('scheduled_services').where({ id: marker.scheduled_service_id, customer_id: customerId }).first('status')
+        : null;
+      const clearEntry = () => h('customers').where({ id: customerId })
+        .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) #- ARRAY['demote_primary_on_optin', ?]::text[]", [phoneKey]) });
+      if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase())) {
+        await clearEntry();
+        continue;
+      }
       await h('notification_prefs')
         .insert({ customer_id: customerId, appointment_notify_primary: false })
         .onConflict('customer_id')
         .merge({ appointment_notify_primary: false });
-      await h('customers').where({ id: customerId })
-        .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) #- ARRAY['demote_primary_on_optin', ?]::text[]", [phoneKey]) });
-      if (marker.scheduled_service_id) {
-        const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
-        const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === phoneKey);
-        if (slot) {
-          replays.push({
-            customerId,
-            scheduledServiceId: marker.scheduled_service_id,
-            contact: { name: customer[slot.name] || '', phone: customer[slot.phone], role: customer[slot.roleCol] || null },
-          });
-        }
-      }
+      await clearEntry();
+      replays.push({
+        customerId,
+        scheduledServiceId: marker.scheduled_service_id,
+        contact: { name: customer[slot.name] || '', phone: customer[slot.phone], role: customer[slot.roleCol] || null },
+      });
     }
     await updateCaptureCard(h, phoneKey, {
       optin_result: 'confirmed',
@@ -187,6 +197,32 @@ function runConfirmationReplays(replays, dbh) {
     dbh.executionPromise.then(run, () => {});
   } else {
     setImmediate(run);
+  }
+}
+
+// The booking site just wrote this phone's marker. The opt-in may already have
+// resolved (the recipient was confirmed on an earlier call, so no new ask went
+// out; or their YES / NO landed before the booking did): apply or drop the
+// marker now instead of waiting for a reply that will never come. Writing the
+// marker FIRST and reading the opt-in row second leaves no gap — a YES landing
+// in between is applied by its own handler, and applying twice is idempotent
+// (the first clears the entry; the replay dedupes on sms_log).
+async function reconcileDemoteMarker(customerId, phoneKey, { dbh = db } = {}) {
+  if (!customerId || !phoneKey) return 'skipped';
+  try {
+    const row = await dbh('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey }).first('status');
+    if (row && row.status === 'confirmed') {
+      runConfirmationReplays((await applyDemoteMarkersOnConfirm(phoneKey, { dbh })).replays, dbh);
+      return 'applied';
+    }
+    if (row && (row.status === 'declined' || row.status === 'ask_failed')) {
+      await clearDemoteMarker(customerId, phoneKey, { dbh });
+      return 'cleared';
+    }
+    return 'pending';
+  } catch (err) {
+    logger.warn(`[recipient-optin] demote marker reconcile failed (${err.code || err.name || 'error'})`);
+    return 'error';
   }
 }
 
@@ -680,6 +716,7 @@ module.exports = {
   clearDemoteMarker,
   applyDemoteMarkersOnConfirm,
   runConfirmationReplays,
+  reconcileDemoteMarker,
   clearDemoteMarkersForPhone,
   OPTIN_TEMPLATE_VERSION,
   isDoubleOptinEnabled,

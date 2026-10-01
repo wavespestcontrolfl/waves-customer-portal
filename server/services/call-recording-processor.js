@@ -2877,7 +2877,9 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
 async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false } = {}) {
-  if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
+  // An on-site contact the opt-in ask may go to is saved too (unstamped): the
+  // slot is where the ask's phone and the later YES stamp live.
+  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOptinAskTrigger(contact))) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
   const customer = await db('customers').where({ id: customerId }).first();
@@ -17922,6 +17924,12 @@ const CallRecordingProcessor = {
                     .update({
                       service_preferences: db.raw('COALESCE(service_preferences, \'{}\'::jsonb) || jsonb_build_object(\'demote_primary_on_optin\', COALESCE(service_preferences -> \'demote_primary_on_optin\', \'{}\'::jsonb) || ?::jsonb)', [JSON.stringify(markers)]),
                     });
+                  // The opt-in may already be settled (confirmed on an earlier
+                  // call, or the reply beat the booking): apply / drop now.
+                  const { reconcileDemoteMarker } = require('./recipient-optin');
+                  for (const phoneKey of deferPrimaryOptOutPhoneKeys) {
+                    await reconcileDemoteMarker(deferPrimaryOptOutCustomerId, phoneKey);
+                  }
                 } catch (prefsErr) {
                   logger.warn(`[call-proc] deferred primary opt-out marker failed for ${maskSid(callSid)}: ${safeErrorToken(prefsErr)}`);
                 }

@@ -523,6 +523,16 @@ describe('persistCallSecondaryContact', () => {
     }]);
   });
 
+  test('an on-site contact with no notification ask is still saved (unstamped) so the opt-in ask can reach them', async () => {
+    const writes = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', wants_notifications: false, on_site: true })).toBe('written');
+    expect(writes.updates[0].service_contacts_consent_at).toBeUndefined();
+    // A non-on-site role with on_site=true is not an ask trigger: no write.
+    const writes2 = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'real_estate_agent', wants_notifications: false, on_site: true })).toBe('skipped_no_intent');
+    expect(writes2.updates).toHaveLength(0);
+  });
+
   test('no explicit notification intent → no write (contact stays triage/lead-only)', async () => {
     const writes = makeDb({ customer: bareCustomer });
     expect(await persistCallSecondaryContact('cust-1', { ...buyer, wants_notifications: false })).toBe('skipped_no_intent');
