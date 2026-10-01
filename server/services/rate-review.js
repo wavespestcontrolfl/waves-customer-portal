@@ -758,6 +758,15 @@ function hasSizeInput(inputs, line) {
   return false;
 }
 
+// Engine `services.<key>` entries → ranking family, and the engine's
+// qualifying-service keys per family (priorQualifyingServices vocabulary).
+const ENGINE_INPUT_SERVICE_FAMILY = Object.freeze({
+  pest: 'pest_control', lawn: 'lawn_care', treeShrub: 'tree_shrub', mosquito: 'mosquito',
+  termite: 'termite', termiteBait: 'termite', termite_bait: 'termite', rodent: 'rodent', rodentBait: 'rodent', rodent_bait: 'rodent',
+});
+const QUALIFYING_KEY_FOR_FAMILY = Object.freeze({
+  pest_control: 'pest_control', lawn_care: 'lawn_care', tree_shrub: 'tree_shrub', mosquito: 'mosquito', termite: 'termite_bait', rodent: 'rodent_bait',
+});
 const PEST_FREQUENCY_FOR_CADENCE = Object.freeze({ quarterly: 'quarterly', bimonthly: 'bimonthly', monthly: 'monthly' });
 const LAWN_TIER_FOR_CADENCE = Object.freeze({ every_6_weeks: 'enhanced', monthly: 'premium', bimonthly: 'standard' });
 
@@ -772,7 +781,13 @@ const REPLAY_PIN_KEYS = ['manualDiscount', 'serviceSpecificDiscounts', 'serviceS
   'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs'];
 const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersion'], lawn: ['programMinimumMonthly', 'useLawnCostFloor'] });
 
-function listReplayInputs(inputs, { familyKey = null, cadence = null } = {}) {
+// `activeFamilies`: the customer's plan lines TODAY. The engine derives the
+// WaveGuard tier from the services it prices plus priorQualifyingServices,
+// so the replay's bundle is reconciled to the current plan — a program the
+// customer has since cancelled comes out of the estimate's services, one
+// added since (on another estimate) goes in as a prior qualifying service —
+// and the list carries today's tier, not the one the old quote was sold at.
+function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFamilies = null } = {}) {
   const clean = JSON.parse(JSON.stringify(inputs));
   for (const key of REPLAY_PIN_KEYS) delete clean[key];
   if (clean.services && typeof clean.services === 'object') {
@@ -781,6 +796,20 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null } = {}) {
         for (const key of keys) delete clean.services[service][key];
       }
     }
+  }
+  if (Array.isArray(activeFamilies) && clean.services && typeof clean.services === 'object') {
+    const active = new Set(activeFamilies);
+    const present = new Set();
+    for (const [service, value] of Object.entries(clean.services)) {
+      const family = ENGINE_INPUT_SERVICE_FAMILY[service];
+      if (!family) continue; // one-time / commercial / unknown keys are left as saved
+      if (!value) continue;
+      if (active.has(family)) present.add(family);
+      else delete clean.services[service]; // cancelled since the quote
+    }
+    const priors = [...active].filter((family) => !present.has(family)).map((family) => QUALIFYING_KEY_FOR_FAMILY[family]).filter(Boolean);
+    clean.priorQualifyingServices = priors;
+    if (priors.length) clean.recurringCustomer = true;
   }
   if (familyKey === 'pest_control' && clean.services && clean.services.pest && PEST_FREQUENCY_FOR_CADENCE[cadence]) {
     clean.services.pest = { ...clean.services.pest, frequency: PEST_FREQUENCY_FOR_CADENCE[cadence] };
@@ -816,7 +845,7 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   };
 }
 
-async function replayEstimate(estimate, { familyKey, cadence }, deps) {
+async function replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps) {
   const inputs = engineInputsFromEstimate(estimate, deps);
   if (!inputs) return null;
   const engine = deps.pricingEngine || require('./pricing-engine');
@@ -824,7 +853,7 @@ async function replayEstimate(estimate, { familyKey, cadence }, deps) {
     if (typeof engine.needsSync === 'function' && engine.needsSync() && typeof engine.syncConstantsFromDB === 'function') {
       await engine.syncConstantsFromDB();
     }
-    return { inputs, result: engine.generateEstimate(listReplayInputs(inputs, { familyKey, cadence })) };
+    return { inputs, result: engine.generateEstimate(listReplayInputs(inputs, { familyKey, cadence, activeFamilies })) };
   } catch (err) {
     logger.warn(`[rate-review] engine replay failed for estimate ${estimate.id}: ${err.message}`);
     return null;
@@ -1371,8 +1400,9 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     for (const estimate of linkedEstimates) {
       const inputs = engineInputsFromEstimate(estimate, deps);
       if (!hasSizeInput(inputs, familyKey)) continue;
-      const cacheKey = `${estimate.id}|${familyKey}|${cadence}`;
-      if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence }, deps));
+      const activeFamilies = planLines.filter((p) => p.customer_id === customer.id).map((p) => p.family_key).sort();
+      const cacheKey = `${estimate.id}|${familyKey}|${cadence}|${activeFamilies.join(',')}`;
+      if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
       const replay = replayCache.get(cacheKey);
       const rate = replay ? listRateFromEngineResult(replay.result, familyKey, cadence, { includeRiders: current.unit === 'month' }) : null;
       if (!rate) continue;

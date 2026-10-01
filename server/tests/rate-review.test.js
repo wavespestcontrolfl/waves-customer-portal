@@ -524,6 +524,22 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(P.listReplayInputs(inputs, { familyKey: 'mosquito', cadence: 'monthly' }).services.pest.frequency).toBe('quarterly');
     expect(inputs.services.pest.frequency).toBe('quarterly'); // never mutates the stored inputs
   });
+  test('the replay bundle is the customer\'s CURRENT plan: cancelled programs come out, later additions go in as prior qualifying services', () => {
+    const sold = { homeSqFt: 2100, lotSqFt: 8000, services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', tier: 'enhanced' }, mosquito: { tier: 'seasonal' } } };
+    // lawn cancelled since, rodent bait added since (on another estimate)
+    const clean = P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control', 'mosquito', 'rodent'] });
+    expect(Object.keys(clean.services).sort()).toEqual(['mosquito', 'pest']);
+    expect(clean.priorQualifyingServices).toEqual(['rodent_bait']);
+    expect(clean.recurringCustomer).toBe(true);
+    // nothing added → no priors, flag untouched; a single-line account drops every other service
+    const solo = P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control'] });
+    expect(Object.keys(solo.services)).toEqual(['pest']);
+    expect(solo.priorQualifyingServices).toEqual([]);
+    expect(solo.recurringCustomer).toBeUndefined();
+    // without plan evidence the saved mix is left alone
+    expect(Object.keys(P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly' }).services).sort()).toEqual(['lawn', 'mosquito', 'pest']);
+    expect(sold.services.lawn).toBeDefined();
+  });
   test('historical pins come off: a v1-pinned pest quote, frozen floors and minimums reprice at today\'s list', () => {
     const saved = {
       homeSqFt: 2100, pestProgramFloorArmed: true, pestProgramFloorPerVisit: 89, lawnProgramMinimumMonthly: 45, useLawnCostFloor: true,
