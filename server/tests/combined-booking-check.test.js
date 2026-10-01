@@ -525,6 +525,14 @@ describe('outcomeOf', () => {
     expect(outcomeOf(hidden, [mismatch])).toEqual({ outcome: 'problems', problems: [{ ...mismatch, families: [], held: true }] });
   });
 
+  test('held findings compare per family: a new lawn mismatch does not stand in for a held pest one', () => {
+    const pestHeld = { code: 'price_mismatch', families: ['pest_control'], text: 'pest $140.00 vs $150.00 on 3 visits' };
+    const lawnNow = { code: 'price_mismatch', families: ['lawn_care'], text: 'lawn $90.00 vs $100.00 on 5 visits' };
+    const verdict = { ok: false, deferred: true, pricesHidden: true, problems: [lawnNow] };
+    expect(check.heldProblems(verdict, [pestHeld])).toEqual([{ ...pestHeld, held: true }]);
+    expect(check.heldProblems(verdict, [lawnNow])).toEqual([]);
+  });
+
   test('a held finding is carried, visibly, while another problem refreshes the bell', async () => {
     const verdict = { ok: false, deferred: true, pricesHidden: true, labels: ['Pest', 'Lawn'],
       problems: [{ code: 'missing_time_tech', text: '3 lawn visits missing time/tech' }] };

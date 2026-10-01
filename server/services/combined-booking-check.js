@@ -751,8 +751,10 @@ async function retireAbandoned(conn) {
 // verdict that can see them says otherwise.
 function heldProblems(verdict, standingProblems = []) {
   if (!verdict.pricesHidden) return [];
-  const now = new Set(verdict.problems.map((problem) => problem.code));
-  return standingProblems.filter((problem) => COMPARISON_CODES.has(problem?.code) && !now.has(problem.code))
+  // Compared per identity (code + family): a new lawn mismatch must not
+  // stand in for a held pest one.
+  const now = new Set(verdict.problems.flatMap(problemKeys));
+  return standingProblems.filter((problem) => COMPARISON_CODES.has(problem?.code) && problemKeys(problem).some((key) => !now.has(key)))
     .map((problem) => ({ code: problem.code, text: problem.text, families: problem.families || [], held: true }));
 }
 
@@ -901,6 +903,9 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         if (!isNew && outcome !== 'frozen') {
           result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
         }
+        // Every family on hold: nothing could be judged, so an owed booking
+        // stays owed until the hold ends.
+        if (outcome === 'frozen') keepOwed(estimate, 'every service is on hold; it is checked again when a hold ends');
         continue;
       }
       result.checked += 1;
