@@ -255,6 +255,46 @@ describe('charge timing line by billing mode (Codex r3)', () => {
       .toBe("After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.");
   });
 
+  // PR-B (GATE_PAF_EXISTING_CUSTOMERS, owner R5): a paused customer keeps the
+  // card but is never auto-charged — the email must not promise a charge.
+  describe('paused Auto Pay (GATE_PAF_EXISTING_CUSTOMERS)', () => {
+    const PAUSED = { ...CUSTOMER, billing_mode: 'per_application', monthly_rate: null, autopay_paused_until: '2099-01-01' };
+    const PER_SERVICE = "After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.";
+    afterEach(() => {
+      delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+      delete process.env.GATE_PAF_EXISTING_CUSTOMERS;
+    });
+
+    test('sub-gate on: says Auto Pay is paused, nothing is charged automatically, a pay link follows each service', async () => {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      process.env.GATE_PAF_EXISTING_CUSTOMERS = 'true';
+      const line = await timingLineFor(PAUSED);
+      expect(line).toBe('Your Auto Pay is paused, so nothing is charged automatically right now. Your card stays on file, and we send you a link to pay after each completed service.');
+      expect(line).not.toMatch(/is charged that service/);
+    });
+
+    test('sub-gate off (or only the master gate): today\'s per-service line, byte for byte', async () => {
+      expect(await timingLineFor(PAUSED)).toBe(PER_SERVICE);
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      expect(await timingLineFor(PAUSED)).toBe(PER_SERVICE);
+    });
+
+    test('sub-gate on but NOT paused (or the pause already lapsed): unchanged per-service line', async () => {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      process.env.GATE_PAF_EXISTING_CUSTOMERS = 'true';
+      expect(await timingLineFor({ ...PAUSED, autopay_paused_until: null })).toBe(PER_SERVICE);
+      jest.clearAllMocks();
+      expect(await timingLineFor({ ...PAUSED, autopay_paused_until: '2001-01-01' })).toBe(PER_SERVICE);
+    });
+
+    test('sub-gate on: a paused monthly-billed account keeps the monthly line (cron lane unchanged)', async () => {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      process.env.GATE_PAF_EXISTING_CUSTOMERS = 'true';
+      expect(await timingLineFor({ ...PAUSED, billing_mode: null, waveguard_tier: 'Silver', monthly_rate: '89.00' }))
+        .toBe('Your card is charged your monthly plan amount on your billing day each month, and you get a receipt every time.');
+    });
+  });
+
   test('annual-prepay accounts get the as-agreed line — no cadence the prepaid term does not have', async () => {
     expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'annual_prepay', monthly_rate: '89.00' }))
       .toBe('Your card is charged for your service invoices as agreed, and you get a receipt every time.');
