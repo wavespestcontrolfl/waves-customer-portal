@@ -82,6 +82,21 @@ describe('pickInTermReseedDate', () => {
     expect(nudged > plain).toBe(true);
   });
 
+  test('a shift that pushes the ideal day out of range tries the days around it', () => {
+    // Codex pre-push P1 repro: today Sat Sep 26 → a week out is Sat Oct 3;
+    // a back-shift moves weekends to Friday (Oct 2), below the lead time.
+    const rows = [row('root', '2026-07-01', 'completed'), row('c1', '2026-10-20')];
+    const backShift = (d) => {
+      const dow = new Date(`${d}T00:00:00Z`).getUTCDay();
+      const back = dow === 6 ? 1 : dow === 0 ? 2 : 0;
+      return new Date(Date.parse(`${d}T00:00:00Z`) - back * 86400000).toISOString().slice(0, 10);
+    };
+    const date = pickInTermReseedDate({
+      rows, window: { start: '2025-10-25', end: '2026-10-25' }, todayStr: '2026-09-26', shift: backShift,
+    });
+    expect(date).toBe('2026-10-05');
+  });
+
   test('never returns a date the series already occupies', () => {
     const plain = pickInTermReseedDate({ rows: quarterly, window, todayStr: '2026-09-30' });
     const other = pickInTermReseedDate({ rows: quarterly, window, todayStr: '2026-09-30', takenDates: new Set([plain]) });

@@ -344,9 +344,17 @@ function pickInTermReseedDate({
     gaps.push({ lo, hi, ideal, room });
   }
   gaps.sort((a, b) => b.room - a.room || a.ideal.localeCompare(b.ideal));
+  // The ideal day first, then outward from it, so a weekend / blackout shift
+  // that pushes one candidate out of range never discards the whole gap.
   for (const gap of gaps) {
-    const placed = shift(gap.ideal);
-    if (placed && placed >= gap.lo && placed <= gap.hi && !(takenDates && takenDates.has(placed))) return placed;
+    const span = daysBetween(gap.lo, gap.hi);
+    for (let step = 0; step <= span * 2; step += 1) {
+      const offset = step % 2 ? Math.ceil(step / 2) : -(step / 2);
+      const candidate = addDays(gap.ideal, offset);
+      if (candidate < gap.lo || candidate > gap.hi) continue;
+      const placed = shift(candidate);
+      if (placed && placed >= gap.lo && placed <= gap.hi && !(takenDates && takenDates.has(placed))) return placed;
+    }
   }
   return null;
 }
