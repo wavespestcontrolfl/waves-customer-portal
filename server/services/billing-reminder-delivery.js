@@ -216,6 +216,15 @@ function ledgerInvoiceIds(invoiceId, invoiceIds) {
 // policyInvoiceIds pins a frozen collectible aggregate. It is separate from
 // ledger invoiceIds: annual-prepay can record a draft invoice while the policy
 // deliberately evaluates its amount as off-ledger debt.
+// A leg whose keyed reservation is already settled (found by its key, past the progress window): delivered
+// is restored with what the reservation recorded; a terminal resolution (a suppression refusal) is settled and
+// never owed again - the per-invoice sender treats claim.resolved the same way.
+async function restoreSettledLeg(claim, entry, channel, { delivered, resolved, restored }) {
+  if (claim.delivered) { delivered.add(channel); restored.push(await restoredDelivery(entry, channel)); return true; }
+  if (claim.resolved) { resolved.add(channel); return true; }
+  return false;
+}
+
 async function sendReminderChannels({
   customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents,
 }) {
@@ -273,7 +282,7 @@ async function sendReminderChannels({
     episodeRowIds.add(entry?.id);
     // A retry under the same key re-quotes: its claim refreshes the debt snapshot.
     const claim = await ContactLedger.claimAttempt(entry, reservation);
-    if (claim.delivered) { delivered.add(channel); restored.push(await restoredDelivery(entry, channel)); continue; }
+    if (await restoreSettledLeg(claim, entry, channel, { delivered, resolved, restored })) continue;
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
     const result = await sendLeg(send, channel, entry);
     results[channel] = result;

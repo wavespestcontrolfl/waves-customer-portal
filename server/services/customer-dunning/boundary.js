@@ -19,6 +19,9 @@
  * the SMS hook holds no transaction and reads through the pool (a control write
  * landing between that read and the provider call is the window every send has).
  *
+ * The CUSTOMER is re-read as well: an archived (deleted_at) or missing customer is a non-retryable refusal
+ * (DUNNING_CUSTOMER_DELETED), and the runner pauses the schedule customer_deleted, as decideCustomer does.
+ *
  * The handle matters (A-17): the email authority holds a transaction and
  * DB_POOL_MAX=2 leaves no third connection, so an email/push boundary read
  * must use the `database` it is handed; only the SMS hook runs with no
@@ -32,6 +35,7 @@ const { resolveDunnableSet } = require('./balance-set');
 
 const SET_CHANGED = 'DUNNING_SET_CHANGED';
 const SCHEDULE_CHANGED = 'DUNNING_SCHEDULE_CHANGED';
+const CUSTOMER_DELETED = 'DUNNING_CUSTOMER_DELETED';
 const SCHEDULE_TABLE = 'customer_dunning_schedules';
 const SENDABLE_STATUSES = ['active', 'held'];
 
@@ -47,6 +51,15 @@ const scheduleRefusal = () => ({
   code: SCHEDULE_CHANGED,
   reason: 'The reminder schedule was paused, released or taken over after this reminder was prepared',
   retryable: true,
+});
+
+// Staff archive a customer by stamping customers.deleted_at; nothing else about the schedule or the open
+// invoices changes, so the boundary reads the customer itself. Not retryable: the runner pauses the schedule.
+const customerDeletedRefusal = () => ({
+  ok: false,
+  code: CUSTOMER_DELETED,
+  reason: 'The customer was archived after this reminder was prepared',
+  retryable: false,
 });
 
 /**
@@ -71,6 +84,11 @@ function sameSet(live, snapshot) {
     && !!live.anchor && live.anchor.id === snapshot.anchorId;
 }
 
+async function customerArchived(customerId, database) {
+  const row = await database('customers').where({ id: customerId }).first('id', 'deleted_at');
+  return !row || !!row.deleted_at;
+}
+
 /** Still open, and still claimed by THIS run (see the header). Locks the row on a transaction. */
 async function scheduleStillOurs(snapshot, database) {
   const query = database(SCHEDULE_TABLE).where({ id: snapshot.scheduleId }).select('status', 'touch_claimed_at');
@@ -90,6 +108,7 @@ function check(snapshot) {
     const handle = database || db;
     try {
       if (snapshot.scheduleId && !await scheduleStillOurs(snapshot, handle)) return scheduleRefusal();
+      if (await customerArchived(snapshot.customerId, handle)) return customerDeletedRefusal();
       const live = await resolveDunnableSet(snapshot.customerId, { database: handle });
       return sameSet(live, snapshot) ? { ok: true } : refusal();
     } catch (err) {
@@ -99,4 +118,4 @@ function check(snapshot) {
   };
 }
 
-module.exports = { check, snapshotOf, sameSet, SET_CHANGED, SCHEDULE_CHANGED };
+module.exports = { check, snapshotOf, sameSet, SET_CHANGED, SCHEDULE_CHANGED, CUSTOMER_DELETED };

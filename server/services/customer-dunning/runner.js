@@ -317,7 +317,9 @@ async function planStage(run, set) {
   run.rows = rows;
   const oldest = oldestActive(rows);
   const attemptedAndHeld = run.schedule.status === 'held';
-  run.plannedStage = oldest && !attemptedAndHeld
+  // An operator send-now sends the STORED stage: the control is documented as sending the current step, so
+  // it never catches up to the calendar (the next scheduled tick does).
+  run.plannedStage = oldest && !attemptedAndHeld && !run.operatorInitiated
     ? Schedule.stageFor(Followups.sequenceAnchor(oldest), run.now, run.schedule.step_index)
     : Number(run.schedule.step_index);
   run.step = STEPS[run.plannedStage];
@@ -469,7 +471,13 @@ async function deliveryFacts(run, result) {
 
 // ── stage 10: disposition ────────────────────────────────────────────────
 
+const customerArchived = (result) => Object.values(result.results || {})
+  .some((r) => r?.code === Boundary.CUSTOMER_DELETED || r?.reason === Boundary.CUSTOMER_DELETED);
+
 async function dispose(run, facts) {
+  // Archived at the provider boundary with nothing delivered: pause as decideCustomer does (the email leg's
+  // generic not-sent would otherwise read as retryable and keep the schedule held).
+  if (!facts.delivered?.size && customerArchived(facts)) return pause(run, 'customer_deleted');
   const verdict = Schedule.dispositionOf(facts);
   if (verdict.kind === 'advance') return finishDelivered(run, facts);
   if (verdict.kind === 'told') {
@@ -499,8 +507,10 @@ async function sendPhase(run, set) {
 const decideEmptySet = (set) => (set.kind !== 'hold' && !sendable(set) ? decideEndOfSet(set) : null);
 
 /** The guards after recover-first and the set read, shared by the live and the shadow run. */
+// A set HOLD (unused account credit, a paused member, ...) comes before the autopay guard: it is a hold the
+// office must hear about (markHeld alerts it), while an autopay hold only parks the schedule silently.
 async function decideAfterSet(run, set) {
-  return decideEmptySet(set) || await decideAutopay(run);
+  return decideEmptySet(set) || (set.kind === 'hold' ? decideEndOfSet(set) : null) || await decideAutopay(run);
 }
 
 async function runClaimed(claimed, opts) {
@@ -612,28 +622,34 @@ async function decideShadowPolicy(run, set) {
   const verdictOf = new Map();
   for (const channel of allowed) verdictOf.set(channel, claimVerdict(await standingReservation(run, channel)));
   const deduped = allowed.filter((channel) => verdictOf.get(channel).delivered);
-  const unclaimable = allowed.filter((channel) => !verdictOf.get(channel).allowed && !verdictOf.get(channel).delivered);
-  if (unclaimable.length === allowed.length - deduped.length && unclaimable.length) {
+  // A leg the keyed reservation already resolved terminally (a suppression refusal, found past the 90-day
+  // window) is settled, never owed again: live restores it into the resolved set and moves on.
+  const resolvedOld = allowed.filter((channel) => verdictOf.get(channel).resolved);
+  const owed = allowed.filter((channel) => !deduped.includes(channel) && !resolvedOld.includes(channel));
+  const unclaimable = owed.filter((channel) => !verdictOf.get(channel).allowed);
+  if (unclaimable.length === owed.length && unclaimable.length) {
     return decision('hold', 'REMINDER_OUTCOME_UNCONFIRMED', { denied, unclaimable });
   }
-  if (deduped.length === allowed.length) return dedupedDisposition(event, deduped, denied, pending, verdicts);
+  if (!owed.length) return settledDisposition(event, { deduped, denied, pending, verdicts });
   run.policyDenied = denied; // a partial send: the claimable allowed channels go, these do not
   run.unclaimable = unclaimable;
   run.deduped = deduped;
   return null;
 }
 
-// Every owed channel that was not denied is already delivered. Judged by the SAME disposition live uses on
-// the facts the send would have produced: a durably denied leg is waived (the touch settles), a transiently
-// denied one stays owed (live leaves the step TOLD and retries it), so shadow holds instead of settling.
-function dedupedDisposition(event, deduped, denied, pending, verdicts) {
-  if (!denied.length) return decision('settle', 'already_delivered', { denied });
+// Every owed channel that was not denied is already settled (delivered, or terminally resolved). Judged by
+// the SAME disposition live uses on the facts the send would produce: a durably denied leg is waived (the
+// touch settles), a transiently denied one stays owed (live leaves the step TOLD and retries it), so shadow
+// holds instead of settling; nothing delivered and nothing left owed is live's all_channels_terminal pause.
+function settledDisposition(event, { deduped, denied, pending, verdicts }) {
   const delivered = new Set([...(event?.delivered || []), ...deduped]);
   const waived = new Set([...(event?.waived || []), ...denied.filter((c) => verdictDurablyDenied(verdicts[pending.indexOf(c)]))]);
   const results = Object.fromEntries(denied.map((c) => [c, { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }]));
-  const complete = denied.every((c) => waived.has(c));
-  const { kind } = Schedule.dispositionOf({ delivered, complete, results });
-  return kind === 'advance' ? decision('settle', 'policy_waived', { denied }) : decision('hold', 'COLLECTIONS_POLICY', { denied });
+  const complete = denied.every((c) => waived.has(c) && delivered.size > 0);
+  const verdict = Schedule.dispositionOf({ delivered, complete, results });
+  if (verdict.kind === 'advance') return decision('settle', denied.length ? 'policy_waived' : 'already_delivered', { denied });
+  if (verdict.kind === 'paused') return decision('pause', verdict.reason === 'COLLECTIONS_POLICY' ? 'all_channels_terminal' : verdict.reason, { denied });
+  return decision('hold', 'COLLECTIONS_POLICY', { denied });
 }
 
 // The ledger row a channel's keyed reservation already has, shaped as recordContact returns a reused one.

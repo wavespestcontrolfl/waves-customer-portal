@@ -46,7 +46,7 @@ const mockScheduleReader = (table) => {
     where() { return q; },
     select() { return q; },
     forUpdate() { mockLocked.push(table); return q; },
-    first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : undefined),
+    first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : (table === 'customers' ? customer : undefined)),
   };
   return q;
 };
@@ -1367,7 +1367,20 @@ describe('shadow models an ambiguous reservation before logging a send (R5-2)', 
       mockLedger.length = 0;
       old('email', { resolved: true });
       await shadow();
-      expect(lines()).toMatch(/would hold .* reason=REMINDER_OUTCOME_UNCONFIRMED/);
+      // R11-1: a terminally resolved leg is settled (live restores it), not an unconfirmed one
+      expect(lines()).not.toMatch(/REMINDER_OUTCOME_UNCONFIRMED/);
+      expect(lines()).toMatch(/would pause .* reason=all_channels_terminal/);
+    });
+
+    test('R11-1: an old RESOLVED email beside a claimable text is a would-SEND of the text only; with the text delivered too it settles', async () => {
+      old('email', { resolved: true });
+      untouched(await shadow());
+      expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder kind=multi/);
+      expect(lines()).not.toMatch(/REMINDER_OUTCOME_UNCONFIRMED/);
+      logger.info.mockClear();
+      old('sms', { delivered: true });
+      untouched(await shadow());
+      expect(lines()).toMatch(/SHADOW would settle .* reason=already_delivered/);
     });
   });
 
@@ -2730,5 +2743,114 @@ describe('delivery evidence is recovered before an unreachable customer is pause
     expect(lines()).toMatch(/SHADOW would pause .* reason=no_reachable_channel/);
     expect(database.writes).toEqual([]);
     expect(again.writes).toEqual([]);
+  });
+});
+
+describe('R11-1: an old terminally resolved leg is restored, not left unconfirmed (live)', () => {
+  const oldRow = (channel, metadata) => mockLedger.push({
+    id: `old-${channel}`, customer_id: CUSTOMER_ID, channel, source: 'invoice_followups_customer', occurred_at: ago(120),
+    invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: keyFor(`customer-dunning:${SCHEDULE_ID}:1:d60_reminder`, channel),
+    metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`, selectedChannels: ['email', 'sms'], ...metadata },
+  });
+
+  test('email resolved >90 days ago + a fresh text: the text goes, the touch completes and advances (no REMINDER_OUTCOME_UNCONFIRMED hold)', async () => {
+    oldRow('email', { resolved: true });
+    expect(await run()).toMatchObject({ outcome: 'advanced' });
+    expect(mockSendTemplate).not.toHaveBeenCalled(); // the resolved email is never sent again
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('email-only customer whose only leg was resolved long ago: all_channels_terminal, never an endless held/unconfirmed loop', async () => {
+    prefs = { invoice_channels: ['email'] };
+    oldRow('email', { resolved: true });
+    expect(await run()).toMatchObject({ outcome: 'paused', reason: 'all_channels_terminal' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('R11-2: the provider boundary rejects an archived customer', () => {
+  const archiveDuringSetRead = () => {
+    const first = mockResolve.getMockImplementation();
+    mockResolve.mockImplementation(async (...args) => {
+      if (args[1]?.now && !customer.deleted_at) customer.deleted_at = new Date(); // staff archive after decideCustomer read them
+      return first ? first(...args) : live;
+    });
+  };
+
+  test('boundary unit: a deleted or missing customer is a NON-retryable DUNNING_CUSTOMER_DELETED on the pool and on a transaction', async () => {
+    mockResolve.mockResolvedValue(makeSet(['inv-a', 'inv-b', 'inv-c']));
+    const check = Boundary.check(Boundary.snapshotOf(CUSTOMER_ID, makeSet(['inv-a', 'inv-b', 'inv-c'])));
+    customer.deleted_at = new Date();
+    for (const args of [{}, { database: MOCK_TRX }]) {
+      expect(await check(args)).toMatchObject({ ok: false, code: 'DUNNING_CUSTOMER_DELETED', retryable: false });
+    }
+    expect(Boundary.CUSTOMER_DELETED).toBe('DUNNING_CUSTOMER_DELETED');
+  });
+
+  test('default channels: archived after the read => no email, no text, the schedule PAUSES customer_deleted', async () => {
+    archiveDuringSetRead();
+    expect(await run()).toMatchObject({ outcome: 'paused', reason: 'customer_deleted' });
+    expect(mockEmailMessages).toHaveLength(0);
+    expect(mockSendMessage.mock.results.every((r) => r.type === 'return')).toBe(true);
+    expect(Schedule.markPaused).toHaveBeenCalledWith(expect.anything(), 'customer_deleted', expect.anything());
+    expect(Schedule.advance).not.toHaveBeenCalled();
+  });
+
+  test('operator send-now (email through the comms-lock handoff, no billing authority) is refused too', async () => {
+    customer.phone = null;
+    archiveDuringSetRead();
+    expect(await run({ operatorInitiated: true, force: true })).toMatchObject({ outcome: 'paused', reason: 'customer_deleted' });
+    expect(mockEmailMessages).toHaveLength(0); // the final-boundary check vetoed the provider handoff
+    expect(mockLedger.some((r) => r.metadata.delivered === true)).toBe(false);
+  });
+});
+
+describe('R11-3: a set hold surfaces before the autopay hold', () => {
+  const creditHold = () => makeSet(['inv-a', 'inv-b', 'inv-c'], { kind: 'hold', reason: 'account_credit_available' });
+
+  test('LIVE: autopay customer with unused credit => held account_credit_available (one office alert), never a silent autopay_hold', async () => {
+    mockOnAutopay.mockResolvedValue(true);
+    live = creditHold();
+    expect(await run()).toMatchObject({ outcome: 'held', reason: 'account_credit_available' });
+    expect(Schedule.markHeld).toHaveBeenCalledWith(expect.anything(), 'account_credit_available', expect.anything());
+    expect(Schedule.markAutopayHold).not.toHaveBeenCalled();
+  });
+
+  test('autopay customer with NO credit still parks as autopay_hold', async () => {
+    mockOnAutopay.mockResolvedValue(true);
+    expect(await run()).toMatchObject({ outcome: 'autopay_hold' });
+    expect(Schedule.markHeld).not.toHaveBeenCalled();
+  });
+
+  test('an empty set still closes before any hold or autopay', async () => {
+    mockOnAutopay.mockResolvedValue(true);
+    live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
+    expect((await run()).outcome).toBe('closed');
+  });
+
+  test('SHADOW logs the set hold reason for an autopay customer', async () => {
+    const logger = require('../services/logger');
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    mockOnAutopay.mockResolvedValue(true);
+    live = creditHold();
+    shadowDb([{ id: SCHEDULE_ID, customer_id: CUSTOMER_ID, step_index: 4 }]);
+    await Runner.shadowRun(NOW);
+    expect(logger.info.mock.calls.map(([m]) => String(m)).join('\n')).toMatch(/SHADOW would hold .* reason=account_credit_available/);
+  });
+});
+
+describe('R11-4: operator send-now stays on the stored stage', () => {
+  test('a schedule at D30 whose invoices are 65 days old: the scheduled tick catches up to D60, send-now sends D30 with no stage write', async () => {
+    setup({ stepIndex: 3, sentDaysAgo: 65 });
+    const out = await run({ operatorInitiated: true, force: true });
+    expect(Schedule.writeStage).not.toHaveBeenCalled();
+    expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('invoice.followup_combined_30_day');
+    expect(out.outcome).toBe('advanced');
+  });
+
+  test('control: the same schedule on an ordinary tick still catches up to Day 60', async () => {
+    setup({ stepIndex: 3, sentDaysAgo: 65 });
+    await run();
+    expect(Schedule.writeStage).toHaveBeenCalledWith(expect.anything(), 4, expect.anything());
   });
 });

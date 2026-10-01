@@ -74,7 +74,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     await admin.schema.createSchema(schema);
     app = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 6 } });
     mockDatabase = app;
-    await app.schema.createTable('customers', (t) => { t.uuid('id').primary(); });
+    await app.schema.createTable('customers', (t) => { t.uuid('id').primary(); t.timestamp('deleted_at'); });
     await app.schema.createTable('notification_prefs', (t) => { t.uuid('customer_id'); });
     await app.schema.createTable('invoices', (t) => {
       t.uuid('id').primary();
@@ -801,6 +801,15 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       await app.transaction(async (trx) => { expect(await check({ database: trx })).toEqual({ ok: true }); });
     });
 
+    test('R11-2: an archived customer (deleted_at stamped, schedule and invoices untouched) is a non-retryable DUNNING_CUSTOMER_DELETED on the pool and on a transaction', async () => {
+      const { c, check } = await claimedWithBoundary();
+      await app('customers').where({ id: c }).update({ deleted_at: NOW });
+      expect(await check({ database: app })).toMatchObject({ ok: false, code: Boundary.CUSTOMER_DELETED, retryable: false });
+      await app.transaction(async (trx) => {
+        expect(await check({ database: trx })).toMatchObject({ ok: false, code: 'DUNNING_CUSTOMER_DELETED', retryable: false });
+      });
+    });
+
     test('pause after the claim: the boundary refuses (pool and transaction) and the schedule stays paused', async () => {
       const { s, check } = await claimedWithBoundary();
       // a control write that got past the in-flight guard (e.g. after a claim TTL expiry)
@@ -1083,6 +1092,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
   describe('A-17: the email boundary reads on the authority\'s transaction', () => {
     test('with the pool exhausted (lease + authority transaction), the boundary read completes on the handed trx; a pool read would time out', async () => {
       const tight = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 }, acquireConnectionTimeout: 1500 });
+      const cust = await customer();
       try {
         const lease = await tight.transaction(); // runExclusive's connection
         try {
@@ -1091,9 +1101,9 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
               await database.raw('select 1');
               return { kind: 'multi', digest: 'd', totalCents: 200, anchor: { id: 'a1' }, members: [] };
             });
-            const snap = { customerId: 'c1', kind: 'multi', digest: 'd', totalCents: 200, anchorId: 'a1' };
+            const snap = { customerId: cust, kind: 'multi', digest: 'd', totalCents: 200, anchorId: 'a1' };
             expect(await Boundary.check(snap)({ database: trx })).toEqual({ ok: true });
-            expect(mockResolve).toHaveBeenLastCalledWith('c1', { database: trx });
+            expect(mockResolve).toHaveBeenLastCalledWith(cust, { database: trx });
             await expect(tight.raw('select 1')).rejects.toThrow(/timeout|acquire/i); // what a pooled read would have done
           });
         } finally {
