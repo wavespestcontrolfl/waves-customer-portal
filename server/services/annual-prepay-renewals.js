@@ -4228,6 +4228,14 @@ async function keepEndAtTermLapseCoverage(termOrId, conn = db, { reseed = false,
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
+async function fileSkippedPastSlots(conn, term, skippedPast, windowEnd) {
+  if (!skippedPast?.length) return;
+  const many = skippedPast.length > 1;
+  await fileCoverageExceptionAfterCommit(conn, term, 'restamp_past_slot_unscheduled',
+    `This customer's paid annual prepay has ${many ? `${skippedPast.length} visits` : 'a visit'} with no appointment whose date has passed (${skippedPast.join(', ')}). Coverage runs through ${windowEnd}. If the slot was cancelled on purpose, no action is needed; otherwise book ${many ? 'replacements' : 'a replacement'} with the customer.`,
+    { title: 'Annual prepay: a paid visit needs a replacement booked' });
+}
+
 // seedNotBefore (opt-in, the re-stamp sweep): the gap-fill never seeds a
 // visit dated before it — passed through to ensureCoverageRowsForTerm.
 // Unset (every activation / schedule-edit caller), behavior is unchanged.
@@ -4269,6 +4277,11 @@ async function refreshTermSnapshot(termOrId, conn = db, { seedNotBefore = null }
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn, { seedNotBefore });
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
+    // A paid slot the floor declined to seed (its date passed) is never
+    // dropped silently: after a partial activation the sweep would stamp
+    // what exists and stop matching the term, leaving the customer a visit
+    // short (Codex #5515 r1 P2). Filed after commit, deduped per term.
+    if (seedNotBefore) await fileSkippedPastSlots(conn, term, ensured?.unseededPastDates, windowEnd);
     // Attach + prepaid stamping run even on a palm-identity DEFERRAL
     // (codex r18 pre-push P0, superseding the earlier hard-stop): the
     // prepaid stamp is the anti-double-bill mechanism — an already-booked
@@ -5906,7 +5919,11 @@ async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), st
     if (ended || !(await activationNeverSeeded(term, rows, conn))) return 'clean';
   } else {
     const { held, heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
-    if (!open.some((row) => !heldIds.has(String(row.id)))) {
+    // Every open row price-held: nothing to stamp — unless the activation
+    // never seeded, when the refresh must still schedule the remaining sold
+    // visits (it keeps the hold itself). Fable review on #5515.
+    if (!open.some((row) => !heldIds.has(String(row.id)))
+      && (ended || !(await activationNeverSeeded(term, rows, conn)))) {
       // The stamp pass that held these may have thrown before its after-commit
       // alert filed; the hold's dedupe key is per term+visit and never expires,
       // so re-filing here is a no-op once the office has been told.

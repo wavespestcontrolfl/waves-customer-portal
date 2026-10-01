@@ -7954,6 +7954,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       terms: [term],
       perTerm: [{
         rows: [stamped('v1', 'term-h', '2026-10-15'), visit('v2', 'term-h', '2027-01-15', { estimated_price: 125 })],
+        link: { id: 'v1' },
       }],
       extra: { activity_log: [query({ first: SECURE_MINT_RECORD })] },
     });
@@ -7967,6 +7968,23 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     // never-expiring dedupe keeps a re-file to one alert.
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(notifyAdmin.mock.calls[0][1]).toMatch(/repriced visit left uncovered/i);
+  });
+
+  test('every open row price-held but the activation never seeded: still refreshed, so the remaining sold visits get scheduled', async () => {
+    // A hand-booked, since-repriced visit is the only canonical row; no visit
+    // was ever linked to the term.
+    const term = termRow('term-h');
+    queues({
+      terms: [term],
+      perTerm: [{ term, reachesRefresh: true, rows: [visit('v2', 'term-h', '2027-01-15', { estimated_price: 125 })], link: null }],
+      extra: { activity_log: [query({ first: SECURE_MINT_RECORD })] },
+    });
+    const refresh = jest.fn(async () => term);
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-h' }), db, { seedNotBefore: '2026-10-20' });
   });
 
   test('a term that stopped being paid-backed between the read and the lock is skipped, not refreshed', async () => {
@@ -8314,6 +8332,54 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       expect(result.createdCount).toBe(2);
       expect(lateInserts[0].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-12-15' }));
       expect(lateInserts[1].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+    });
+
+    test('the re-stamp floor (seedNotBefore): an activated term never re-creates a past slot, only the future one', async () => {
+      // Activated term (a visit was linked), checked in January: the June and
+      // September slots have no visit (cancelled on their day), December has
+      // its visit, March is missing. Without the floor the gap-fill would
+      // insert June and September as pending visits dated in the past.
+      const marchInsert = inserted('svc-mar', '2027-03-15');
+      setDbQueues({
+        scheduled_services: [
+          query({ columnInfo: SS_COLS }),
+          query({ rows: [other('dec', '2026-12-15')] }),
+          query({ first: { id: 'linked-earlier' } }),
+          marchInsert,
+        ],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { today: '2027-01-10', seedNotBefore: '2027-01-10' });
+
+      expect(result.createdCount).toBe(1);
+      expect(marchInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+      expect(result.unseededPastDates).toEqual(['2026-06-15', '2026-09-15']);
+    });
+
+    test('refreshTermSnapshot passes the floor through and files ONE office alert for the skipped past slots', async () => {
+      const { notifyAdmin } = require('../services/notification-service');
+      notifyAdmin.mockClear();
+      const marchInsert = inserted('svc-mar', '2027-03-15');
+      const term = { ...SEED_TERM, status: 'active' };
+      setDbQueues({
+        scheduled_services: [
+          query({ columnInfo: SS_COLS }),
+          query({ rows: [other('dec', '2026-12-15')] }),
+          query({ first: { id: 'linked-earlier' } }),
+          marchInsert,
+          // detach / attach / stamp / snapshot reads.
+          ...Array.from({ length: 8 }, () => query({ rows: [other('dec', '2026-12-15')] })),
+        ],
+        annual_prepay_terms: [query({ returning: [term] })],
+        notifications: [query({ first: undefined })],
+      });
+
+      await AnnualPrepayRenewals.refreshTermSnapshot(term, db, { seedNotBefore: '2027-01-10' });
+
+      expect(marchInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+      const alert = notifyAdmin.mock.calls.find((c) => c[3]?.metadata?.reason === 'restamp_past_slot_unscheduled');
+      expect(alert).toBeTruthy();
+      expect(alert[2]).toMatch(/2026-06-15, 2026-09-15/);
     });
 
     test('a concurrent refresh already filled every sold slot: nothing is inserted', async () => {
