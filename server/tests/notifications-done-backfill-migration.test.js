@@ -93,6 +93,42 @@ describeOrSkip('20261001003000 notifications done backfill (DB-backed)', () => {
     })).rejects.toThrow('rollback');
   });
 
+  test('20261001008000 re-dates a backfilled close recorded BEFORE a later read; down() puts it back', async () => {
+    const early = require('../models/migrations/20261001008000_notifications_done_redate_early_closes');
+    await expect(knex.transaction(async (trx) => {
+      const resolvedAt = '2026-09-10T10:00:00.000Z';
+      const openedAt = '2026-09-25T08:30:00.000Z';
+      const insert = async (fields) => {
+        const [row] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Early close fixture', ...fields,
+          metadata: JSON.stringify(fields.metadata || {}) }).returning('id');
+        return row.id || row;
+      };
+      const digest = await insert({ read_at: openedAt, metadata: { resolved: true, resolvedBy: 'ops-crons', resolvedAt } });
+      const episode = await insert({ read_at: openedAt, metadata: { autoCleared: true, autoClearedAt: resolvedAt } });
+      const sameInstant = await insert({ read_at: openedAt, metadata: { resolved: true, resolvedBy: 'ops-crons', resolvedAt: openedAt } });
+      const junkStamp = await insert({ read_at: openedAt, metadata: { autoCleared: true, autoClearedAt: 'not a date' } });
+      const personDone = await insert({ read_at: openedAt, done_at: openedAt, done_by: '7', metadata: { resolved: true, resolvedAt } });
+
+      await migration.up(trx);
+      await followup.up(trx);
+      await early.up(trx);
+      const get = (id) => trx('notifications').where({ id }).first();
+      const doneAt = async (id) => (await get(id)).done_at.toISOString();
+      expect(await doneAt(digest)).toBe(resolvedAt);
+      expect(await doneAt(episode)).toBe(resolvedAt);
+      expect(await doneAt(sameInstant)).toBe(openedAt);
+      expect(await doneAt(junkStamp)).toBe(openedAt);
+      expect(await doneAt(personDone)).toBe(openedAt);
+      expect((await get(sameInstant)).metadata.doneBackfillRedatedEarly).toBeUndefined();
+
+      await early.down(trx);
+      expect(await doneAt(digest)).toBe(openedAt);
+      expect(await doneAt(episode)).toBe(openedAt);
+      expect((await get(digest)).metadata.doneBackfillRedatedEarly).toBeUndefined();
+      throw new Error('rollback');
+    })).rejects.toThrow('rollback');
+  });
+
   test('the follow-up ensures each done column on its own (idempotent when all exist)', async () => {
     await expect(knex.transaction(async (trx) => {
       await followup.up(trx);
