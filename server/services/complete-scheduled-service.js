@@ -13969,6 +13969,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           body: finalRecordNotes.completionSmsBody || finalRecordNotes.sentSmsBody || null,
           channel: finalRecordNotes.sentSmsChannel || null,
           error: finalRecordNotes.completionSmsError || null,
+          deliveryUnverified: !!finalRecordNotes.completionSmsDeliveryUnverifiedAt,
         }),
       } : {}),
       completionPhotoUpload: completionPhotoUploadResult,

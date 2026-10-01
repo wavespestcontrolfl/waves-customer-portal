@@ -177,7 +177,7 @@ async function loadReserviceFixedRecapFacts(db, { svc, recordId, reportUrl }) {
 // What the tech sees after Complete: the exact text that went, or why none did
 // (`reason` is a lowercase fragment: the sheet writes "No text sent: <reason>").
 // `status` is the record's completionSmsStatus.
-function customerTextOutcome({ honored, status, body, error, channel }) {
+function customerTextOutcome({ honored, status, body, error, channel, deliveryUnverified }) {
   const via = channel === 'push' ? { channel: 'push' } : { channel: 'sms' };
   // A stored sent / held text is the truth even when this request is no
   // longer honored (a gate flipped between a first attempt that sent and a
@@ -185,6 +185,15 @@ function customerTextOutcome({ honored, status, body, error, channel }) {
   if (status === 'sent') return { sent: true, ...via, body: body || null, reason: null };
   if (status === 'deferred') {
     return { sent: false, queued: true, ...via, body: body || null, reason: 'held until the morning send window, then it goes out' };
+  }
+  // A provider handoff with an unknown result (completionSmsDeliveryUnverifiedAt
+  // kept beside 'failed'): the text may have arrived, so the tech must not
+  // read it as not sent and text the customer again by hand.
+  if (status === 'failed' && deliveryUnverified) {
+    return {
+      sent: false, unverified: true, ...via, body: body || null,
+      reason: "it may have gone out, but delivery wasn't confirmed. The office will check, so don't send another",
+    };
   }
   if (!honored) return { sent: false, body: null, reason: 'the customer text is turned off for this visit' };
   const reasons = {

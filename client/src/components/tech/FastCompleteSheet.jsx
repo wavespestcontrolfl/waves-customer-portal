@@ -860,14 +860,15 @@ const recapOn = (service) => service?.recapEnabled === true;
 // or why none went. Nothing when the sheet never asked for one.
 function CustomerTextResult({ outcome }) {
   if (!outcome) return null;
-  const { sent, queued, body, reason, channel } = outcome;
+  const { sent, queued, unverified, body, reason, channel } = outcome;
   // The recorded channel decides the words: a text is not an app message.
   const app = channel === 'push';
   return (
     <div data-testid="fast-complete-text-result">
       {sent && <p className="tech-visit-muted">{app ? 'Sent to the customer\'s app:' : 'Text sent to the customer:'}</p>}
       {!sent && queued && <p className="tech-visit-muted">{app ? 'Queued for the customer\'s app' : 'Text queued'}: {reason}.</p>}
-      {!sent && !queued && <p className="tech-visit-muted">No text sent: {reason}.</p>}
+      {!sent && unverified && <p className="tech-visit-muted">Delivery not confirmed: {reason}.</p>}
+      {!sent && !queued && !unverified && <p className="tech-visit-muted">No text sent: {reason}.</p>}
       {body && <blockquote data-testid="fast-complete-text-body">{body}</blockquote>}
     </div>
   );

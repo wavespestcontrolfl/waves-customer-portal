@@ -620,6 +620,15 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByTestId('fast-complete-text-body').textContent).toContain('Your re-service is done.');
   });
 
+  test('recap gate on: an unconfirmed delivery is never shown as "No text sent"', async () => {
+    const reason = "it may have gone out, but delivery wasn't confirmed. The office will check, so don't send another";
+    const request = makeRequest({ completeResponse: { success: true, customerText: { sent: false, unverified: true, body: 'Your re-service is done. Details: x.test/r/1', reason } } });
+    await completeRe({ ...SERVICE, recapEnabled: true }, request);
+    expect(await screen.findByText(`Delivery not confirmed: ${reason}.`)).toBeTruthy();
+    expect(screen.queryByText(/^No text sent:/)).toBeNull();
+    expect(screen.getByTestId('fast-complete-text-body').textContent).toContain('Your re-service is done.');
+  });
+
   test('gate off: the done view shows nothing about a customer text', async () => {
     await completeRe({ ...SERVICE });
     expect(await screen.findByText('Re-service complete')).toBeTruthy();

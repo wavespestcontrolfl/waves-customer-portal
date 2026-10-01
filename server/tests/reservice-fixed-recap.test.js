@@ -380,3 +380,16 @@ describe('review fixes (#5363 r3)', () => {
     expect(src).toContain('...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),');
   });
 });
+
+describe('review fixes (#5363 pre-push r3)', () => {
+  test('an unknown provider outcome reads as unconfirmed, never as not sent', () => {
+    const out = customerTextOutcome({ honored: true, status: 'failed', body: 'X', deliveryUnverified: true });
+    expect(out).toMatchObject({ sent: false, unverified: true, body: 'X' });
+    expect(out.reason).toMatch(/may have gone out/);
+    expect(customerTextOutcome({ honored: true, status: 'failed', body: 'X' })).toMatchObject({ sent: false, body: null, reason: 'the text could not be sent' });
+  });
+  test('the response passes the uncertainty marker', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).toContain('deliveryUnverified: !!finalRecordNotes.completionSmsDeliveryUnverifiedAt,');
+  });
+});
