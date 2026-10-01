@@ -210,3 +210,23 @@ describe('tech-track: the row-locked advance guard also refuses a confirmed-but-
     expect(s.split('await guardAdvance(trx, req, svc);').length - 1).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe('office approval counts from any prior status (a moved hold is already confirmed)', () => {
+  const { hasRecordedOfficeConfirm } = require('../services/outbound-review-confirm')._test || {};
+  const src = fs.readFileSync(require.resolve('../services/outbound-review-confirm'), 'utf8');
+  const body = src.slice(src.indexOf('async function hasRecordedOfficeConfirm'), src.indexOf('async function activateLegacyOutboundReviewRowIfNeeded'));
+
+  test('the lookup keys on to_status confirmed by a user, never on from_status pending', () => {
+    expect(body).toMatch(/to_status: 'confirmed'/);
+    expect(body).not.toMatch(/from_status/);
+    expect(body).toMatch(/whereNotNull\('transitioned_by'\)/);   // SmartRebooker moves record no user
+  });
+
+  (hasRecordedOfficeConfirm ? test : test.skip)('a confirmed -> confirmed office row is recognized', async () => {
+    const wheres = [];
+    const q = { where: (w) => { wheres.push(w); return q; }, whereNotNull: () => q, first: async () => ({ job_id: 'v1' }) };
+    const dbh = () => q;
+    expect(await hasRecordedOfficeConfirm(dbh, 'v1')).toBe(true);
+    expect(wheres[0]).toEqual({ job_id: 'v1', to_status: 'confirmed' });
+  });
+});

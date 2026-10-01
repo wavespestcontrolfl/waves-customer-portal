@@ -775,12 +775,14 @@ async function reconcileStreetLevelHoldAfterStamp(dbh, svc) {
   }
 }
 
-// True when the visit has a recorded pending -> confirmed transition BY A USER (the
-// office confirm route's transitionJobStatus row). Fails closed (false) on a lookup error.
+// True when the visit has a recorded transition TO confirmed BY A USER (the office confirm
+// route's transitionJobStatus row) from ANY prior status: a hold SmartRebooker moved is
+// already `confirmed`, so the office's later confirm records confirmed -> confirmed and
+// must still count. Fails closed (false) on a lookup error.
 async function hasRecordedOfficeConfirm(dbh, serviceId) {
   try {
     const row = await dbh('job_status_history')
-      .where({ job_id: serviceId, from_status: 'pending', to_status: 'confirmed' })
+      .where({ job_id: serviceId, to_status: 'confirmed' })
       // SmartRebooker records its own pending -> confirmed on a move with transitioned_by NULL;
       // the office confirm route records the acting user. Only the latter is an approval.
       .whereNotNull('transitioned_by')
@@ -1040,4 +1042,5 @@ module.exports = {
   activateLegacyOutboundReviewRowIfNeeded,
   sweepStrandedLegacyOutboundActivations,
   verifyReminderSlotAfterRegistration,
+  _test: { hasRecordedOfficeConfirm },
 };
