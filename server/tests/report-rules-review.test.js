@@ -34,6 +34,12 @@ describe('edit heads-up', () => {
     expect(block.payload.error).toContain('An amount or measurement: "We applied 2 gallons outside."');
   });
 
+  test('an edit that adds a word the report refuses is named, not silently dropped', () => {
+    const block = reportRulesReviewBlockPayload(args({ technicianNotes: DRAFT.replace('Let us know if they keep trailing.', 'It is safe for pets. Let us know if they keep trailing.') }));
+    expect(block.payload.findings.map((finding) => finding.reason)).toEqual(expect.arrayContaining(['refused_words', 'safe_word']));
+    expect(block.payload.error).toContain("Words the report can't publish");
+  });
+
   test('the untouched draft, an approved timeframe it carries, and a confirmed resubmit all pass', () => {
     expect(reportRulesReviewBlockPayload(args({ technicianNotes: DRAFT }))).toBeNull();
     expect(reportRulesReviewBlockPayload(args({ reportRulesConfirmed: true }))).toBeNull();

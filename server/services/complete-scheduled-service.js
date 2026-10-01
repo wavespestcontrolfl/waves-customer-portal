@@ -107,7 +107,7 @@ const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeS
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
 const { writerRulesRejection } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
@@ -1977,13 +1977,23 @@ function reportRulesReviewBlockPayload({
 }) {
   if (isIncompleteVisit || reportRulesConfirmed) return null;
   try {
-    const submitted = technicianReportCustomerCopy(technicianNotes);
-    if (!submitted?.sections) return null;
+    // Structure, not the publishable parse: an edit that adds a refused
+    // word ("safe") drops the whole body at render, and the tech must hear
+    // about that too (Codex #5500).
+    const submitted = fourSectionReport(technicianNotes);
+    if (!submitted) return null;
     const base = typeof reportDraftBase === 'string' && reportDraftBase.trim()
-      ? technicianReportCustomerCopy(reportDraftBase)
+      ? fourSectionReport(reportDraftBase)
       : null;
     const unchanged = new Set(reportSentences(base?.sections).map(normalizeSentence));
     const findings = [];
+    if (submitted.violations.length) {
+      findings.push({
+        reason: 'refused_words',
+        label: 'Words the report can\'t publish (it would show the plain summary instead)',
+        sentence: submitted.violations.join(', '),
+      });
+    }
     for (const sentence of reportSentences(submitted.sections)) {
       if (unchanged.has(normalizeSentence(sentence))) continue;
       const reason = writerRulesRejection(sentence);
