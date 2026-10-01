@@ -162,24 +162,45 @@ describe('the scope', () => {
   });
 });
 
-function noteDb(rows) {
+// A ledger under locks: customers, each promise's source row, the promise.
+function ledgerDb({ customers = ['cust-1'], commitments = {}, sources = {} } = {}) {
   const updates = [];
+  const locks = [];
   const trx = (table) => {
-    const state = { id: null };
+    const state = { criteria: {}, lock: null };
     const chain = {
-      where: (criteria) => { state.id = criteria.id; return chain; },
-      forUpdate: () => chain,
-      first: async () => (table === 'call_commitments' ? rows[state.id] || null : null),
-      update: async (patch) => { updates.push({ id: state.id, patch }); rows[state.id] = { ...rows[state.id], ...patch }; return 1; },
+      where: (criteria) => { Object.assign(state.criteria, criteria); return chain; },
+      whereNull: () => chain,
+      forShare: () => { state.lock = 'share'; return chain; },
+      forUpdate: () => { state.lock = 'update'; return chain; },
+      first: async () => {
+        if (state.lock) locks.push(`${table}:${state.lock}`);
+        if (table === 'customers') return customers.includes(state.criteria.id) ? { id: state.criteria.id } : null;
+        if (table === 'call_commitments') return commitments[state.criteria.id] ? { ...commitments[state.criteria.id] } : null;
+        return sources[`${table}:${state.criteria.id}`] || null;
+      },
+      update: async (patch) => {
+        updates.push({ id: state.criteria.id, patch });
+        commitments[state.criteria.id] = { ...commitments[state.criteria.id], ...patch };
+        return 1;
+      },
     };
     return chain;
   };
-  return { conn: { transaction: (fn) => fn(trx) }, updates };
+  return { conn: { transaction: (fn) => fn(trx) }, updates, locks };
 }
+
+const LEDGER = () => ({
+  commitments: {
+    [ID(1)]: { status: 'open', party: 'waves', kind: 'technician_follow_up', call_log_id: 'call-1' },
+    [ID(2)]: { status: 'open', party: 'waves', kind: 'other', sms_log_id: 'sms-1', human_note: 'Customer prefers mornings' },
+  },
+  sources: { 'call_log:call-1': { customer_id: 'cust-1' }, 'sms_log:sms-1': { customer_id: 'cust-1' } },
+});
 
 describe('marks reach the office list after the save', () => {
   test('Done closes a call promise and a text promise through the office paths, naming the visit', async () => {
-    const { conn } = noteDb({});
+    const { conn, locks } = ledgerDb(LEDGER());
     const results = await VisitPromises.applyVisitPromiseMarks(conn, {
       customerId: 'cust-1',
       marks: [{ id: ID(1), mark: 'done' }, { id: ID(2), mark: 'done' }],
@@ -187,7 +208,7 @@ describe('marks reach the office list after the save', () => {
       reviewedBy: 'tech-1',
     });
     const note = 'Done at the October 1 visit (marked by the technician).';
-    expect(CallCommitments.applyHumanUpdate).toHaveBeenCalledWith(conn, ID(1), { action: 'fulfill', note, reviewedBy: 'tech-1' });
+    expect(CallCommitments.applyHumanUpdate).toHaveBeenCalledWith(expect.any(Function), ID(1), { action: 'fulfill', note, reviewedBy: 'tech-1' });
     expect(SmsActions.applySmsCommitmentUpdate).toHaveBeenCalledWith(conn, ID(2), {
       customerId: 'cust-1', action: 'fulfill', note, reviewedBy: 'tech-1',
     });
@@ -195,11 +216,31 @@ describe('marks reach the office list after the save', () => {
       { id: ID(1), mark: 'done', applied: true },
       { id: ID(2), mark: 'done', applied: true },
     ]);
+    // The call promise is re-checked under locks first: customer, call, promise.
+    expect(locks).toEqual(['customers:share', 'call_log:share', 'call_commitments:update']);
+  });
+
+  test('Done is not written when the call moved to another customer or the office settled the promise meanwhile', async () => {
+    const moved = LEDGER();
+    moved.sources['call_log:call-1'] = { customer_id: 'cust-2' };
+    const movedDb = ledgerDb(moved);
+    const movedResults = await VisitPromises.applyVisitPromiseMarks(movedDb.conn, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done' }], visitDate: '2026-10-01',
+    });
+    expect(movedResults).toEqual([{ id: ID(1), mark: 'done', applied: false }]);
+
+    const settled = LEDGER();
+    settled.commitments[ID(1)].status = 'dismissed';
+    const settledDb = ledgerDb(settled);
+    const settledResults = await VisitPromises.applyVisitPromiseMarks(settledDb.conn, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done' }], visitDate: '2026-10-01',
+    });
+    expect(settledResults).toEqual([{ id: ID(1), mark: 'done', applied: false }]);
+    expect(CallCommitments.applyHumanUpdate).not.toHaveBeenCalled();
   });
 
   test('Partly keeps the promise open with the still-left note, added once', async () => {
-    const rows = { [ID(2)]: { status: 'open', human_note: 'Customer prefers mornings' } };
-    const { conn, updates } = noteDb(rows);
+    const { conn, updates } = ledgerDb(LEDGER());
     const args = { customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', stillLeft: 'seal the left side' }], visitDate: '2026-10-01' };
     await VisitPromises.applyVisitPromiseMarks(conn, args);
     await VisitPromises.applyVisitPromiseMarks(conn, args); // a resumed completion
@@ -210,9 +251,20 @@ describe('marks reach the office list after the save', () => {
     expect(SmsActions.applySmsCommitmentUpdate).not.toHaveBeenCalled();
   });
 
+  test('Partly adds no note once the text belongs to another customer', async () => {
+    const moved = LEDGER();
+    moved.sources['sms_log:sms-1'] = { customer_id: 'cust-2' };
+    const { conn, updates } = ledgerDb(moved);
+    const results = await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', stillLeft: 'x' }], visitDate: '2026-10-01',
+    });
+    expect(results).toEqual([{ id: ID(2), mark: 'partly', applied: false }]);
+    expect(updates).toEqual([]);
+  });
+
   test('Not yet changes nothing, and one failure leaves the others applied', async () => {
     CallCommitments.applyHumanUpdate.mockRejectedValueOnce(new Error('Commitment not found'));
-    const { conn, updates } = noteDb({});
+    const { conn, updates } = ledgerDb(LEDGER());
     const results = await VisitPromises.applyVisitPromiseMarks(conn, {
       customerId: 'cust-1',
       marks: [{ id: ID(1), mark: 'done' }, { id: ID(2), mark: 'done' }, { id: ID(3), mark: 'not_yet' }],
@@ -228,7 +280,7 @@ describe('marks reach the office list after the save', () => {
 
   test('a promise no longer open is left alone', async () => {
     CallCommitments.listOpenCommitments.mockResolvedValue([]);
-    const { conn } = noteDb({});
+    const { conn } = ledgerDb(LEDGER());
     const results = await VisitPromises.applyVisitPromiseMarks(conn, {
       customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done' }], visitDate: '2026-10-01',
     });

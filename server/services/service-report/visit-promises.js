@@ -159,16 +159,50 @@ function visitDayLabel(value) {
   return date.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric' });
 }
 
+const SOURCE_TABLES = Object.freeze({
+  call: ['call_log', 'call_log_id'],
+  text: ['sms_log', 'sms_log_id'],
+  email: ['emails', 'email_id'],
+});
+
+// The promise as it stands under locks, or null when it is no longer this
+// customer's open visit promise (dismissed or done by the office meanwhile,
+// or its call, text or email moved to another customer). The marks were
+// resolved from an unlocked read, so every write re-checks here first.
+// Lock order: the customer, then the promise's source row, then the
+// promise: the call relink and customer merge order, and
+// applySmsCommitmentUpdate's.
+async function lockOwnedOpenPromise(trx, id, { customerId, source }) {
+  const [table, column] = SOURCE_TABLES[source] || [];
+  if (!table || !customerId) return null;
+  const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id');
+  if (!customer) return null;
+  const initial = await trx('call_commitments').where({ id }).first(column, 'email_customer_id');
+  if (!initial?.[column]) return null;
+  const sourceRow = await trx(table).where({ id: initial[column] }).forShare().first('customer_id');
+  // An email ask follows a merge through emails.customer_id; a staff
+  // promise's sent email carries none, so its own email_customer_id does
+  // (the rule applySmsCommitmentUpdate applies).
+  const owner = source === 'email' ? (sourceRow?.customer_id || initial.email_customer_id) : sourceRow?.customer_id;
+  if (!sourceRow || String(owner || '') !== String(customerId)) return null;
+  const row = await trx('call_commitments').where({ id }).forUpdate()
+    .first('status', 'party', 'kind', 'human_note', column);
+  if (!row || row.status !== 'open' || row.party !== 'waves' || !VISIT_PROMISE_KINDS.includes(row.kind)) return null;
+  // The promise still points at the source just checked.
+  if (String(row[column] || '') !== String(initial[column])) return null;
+  return row;
+}
+
 // Partly: the promise stays open and carries the technician's note, added
 // once (a resumed completion finds it already there).
-async function addStillLeftNote(conn, id, line) {
+async function addStillLeftNote(conn, promise, customerId, line) {
   return conn.transaction(async (trx) => {
-    const row = await trx('call_commitments').where({ id }).forUpdate().first('status', 'human_note');
-    if (!row || row.status !== 'open') return false;
+    const row = await lockOwnedOpenPromise(trx, promise.id, { customerId, source: promise.source });
+    if (!row) return false;
     const current = String(row.human_note || '');
     if (current.includes(line)) return false;
     const combined = current ? `${current}\n${line}` : line;
-    await trx('call_commitments').where({ id }).update({
+    await trx('call_commitments').where({ id: promise.id }).update({
       human_note: combined.length > MAX_HUMAN_NOTE_CHARS ? combined.slice(-MAX_HUMAN_NOTE_CHARS) : combined,
       updated_at: new Date(),
     });
@@ -189,17 +223,26 @@ async function applyVisitPromiseMarks(conn, { customerId, marks, visitDate = nul
     try {
       if (promise.mark === 'done') {
         const note = `Done at ${visit} (marked by the technician).`;
+        let applied = true;
         if (promise.source === 'call') {
-          await require('../call-commitments').applyHumanUpdate(conn, promise.id, { action: 'fulfill', note, reviewedBy });
+          // applyHumanUpdate writes by id; the ownership and open checks
+          // run under locks in the same transaction first.
+          applied = await conn.transaction(async (trx) => {
+            if (!await lockOwnedOpenPromise(trx, promise.id, { customerId, source: 'call' })) return false;
+            await require('../call-commitments').applyHumanUpdate(trx, promise.id, { action: 'fulfill', note, reviewedBy });
+            return true;
+          });
         } else {
+          // The office's own text/email path re-checks the customer, the
+          // source and the open status under its own locks.
           await require('../sms-operational-actions').applySmsCommitmentUpdate(conn, promise.id, {
             customerId, action: 'fulfill', note, reviewedBy,
           });
         }
-        results.push({ id: promise.id, mark: 'done', applied: true });
+        results.push({ id: promise.id, mark: 'done', applied });
       } else {
         const line = `Partly done at ${visit}. Still left: ${promise.stillLeft || 'not noted'}.`;
-        results.push({ id: promise.id, mark: 'partly', applied: await addStillLeftNote(conn, promise.id, line) });
+        results.push({ id: promise.id, mark: 'partly', applied: await addStillLeftNote(conn, promise, customerId, line) });
       }
     } catch (err) {
       logger.warn(`[visit-promises] mark not applied for promise ${promise.id}: ${err.message}`);
