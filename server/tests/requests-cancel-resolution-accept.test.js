@@ -171,6 +171,12 @@ test('a pause with nothing to pause asks for its case to be released; other refu
   expect((await accept({ reasonCode: 'away', templateId: 'away_hold' })).body.code).toBe('hold_not_needed');
   expect(mockRelease).toHaveBeenCalledWith(expect.objectContaining({ customerId: expect.anything(), code: 'hold_not_needed' }));
 
+  // The schedule changing under the locked re-read is refused before any write: released too.
+  mockRelease.mockClear();
+  mockExecute.mockRejectedValueOnce(Object.assign(new Error('Your schedule just changed — please try again'), { code: 'hold_visits_changed' }));
+  expect((await accept({ reasonCode: 'away', templateId: 'away_hold' })).body.code).toBe('hold_visits_changed');
+  expect(mockRelease).toHaveBeenCalledWith(expect.objectContaining({ customerId: expect.anything(), code: 'hold_visits_changed' }));
+
   mockRelease.mockClear();
   mockExecute.mockRejectedValueOnce(Object.assign(new Error('already held'), { code: 'hold_cooldown' }));
   await accept({ reasonCode: 'away', templateId: 'away_hold' });

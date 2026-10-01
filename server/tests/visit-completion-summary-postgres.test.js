@@ -4822,6 +4822,92 @@ postgres('visit summary recipient recovery', () => {
       });
     });
 
+    // Owner ruling 2026-09-30 (PR #5424): while ANY collection_hold stands, no automated message
+    // carries a pay link. The combined-stop summary text is one: it goes plain, and the invoice takes
+    // the hold-aware sender (it waits, then texts and emails normally after the release).
+    describe('a collections hold forbids the pay link in the summary text', () => {
+      const DISPUTE = 'dispute on call: synthetic billing question';
+      const WRONG_NUMBER = 'wrong-number report: synthetic';
+      const placeHold = async (reason) => (await mockPg('collections_flags')
+        .insert({ customer_id: fixture.customerId, flag: 'collection_hold', reason, created_by: 'test' }).returning('id'))[0].id;
+      const release = (id) => mockPg('collections_flags').where({ id }).update({ released_at: new Date() });
+      afterEach(() => mockPg('collections_flags').where({ customer_id: fixture.customerId }).del());
+
+      test.each([['a dispute hold', DISPUTE], ['a wrong-number fallback hold', WRONG_NUMBER]])('%s at closeout: the plain summary, nothing folded, the invoice queued for the hold-aware sender', async (_name, reason) => {
+        const invoiceId = await stop();
+        const holdId = await placeHold(reason);
+        expect(await coordinate()).toMatchObject({ status: 200, body: { payment: { state: 'payment_needed', invoiceId } } });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body).toBe(plainBody());
+        expect(await recorded()).toBeUndefined();
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: null, sms_sent_at: null });
+        // The sender waits while the hold stands: nothing is sent, no attempt is spent, the claim is given back.
+        await Invoice.processScheduledSends();
+        expect(strayTexts).toEqual([]);
+        expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
+        // After the release the invoice goes out through its own sender, text and email, exactly once.
+        await release(holdId);
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+        await Invoice.processScheduledSends();
+        expect(strayTexts).toEqual(['payment_link']);
+        expect(require('../services/invoice-email').sendInvoiceEmail).toHaveBeenCalledTimes(1);
+        expect((await invoiceRow(invoiceId)).status).toBe('sent');
+      });
+
+      test('a hold released before closeout folds as usual', async () => {
+        const invoiceId = await stop();
+        await release(await placeHold(DISPUTE));
+        await coordinate();
+        expect(sendCustomerMessage.mock.calls[0][0].body.startsWith(`${plainBody()} Pay your invoice: `)).toBe(true);
+        expect(await recorded()).toEqual({ kind: 'pay_link', invoiceId });
+      });
+
+      test('a hold landing after the plan sends the plain summary at the locked handoff, and the planned invoice waits behind it', async () => {
+        const invoiceId = await stop();
+        let calls = 0;
+        let holdId;
+        sendCustomerMessage.mockImplementation(async (input) => {
+          calls += 1;
+          if (calls === 1) holdId = await placeHold(DISPUTE);
+          return handoffSender()(input);
+        });
+        await coordinate();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+        expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/Pay your invoice: /);
+        expect(sendCustomerMessage.mock.calls[1][0].body).toBe(plainBody());
+        expect(await summaryEffect()).toMatchObject({ status: 'sent' });
+        // The invoice is the sender's: held while the dispute stands, never texted by the sender.
+        await Invoice.processScheduledSends();
+        expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'scheduled', sms_sent_at: null });
+        await release(holdId);
+      });
+
+      test('a hold landing while the link text is queued for quiet hours swaps in the plain body when it goes out', async () => {
+        await stop();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: new Date(Date.now() + 8 * 3600000).toISOString() }));
+        await coordinate();
+        const queued = await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first();
+        expect(queued.metadata.billing_link).toBeTruthy();
+        await placeHold(WRONG_NUMBER);
+        await mockPg('sms_log').where({ id: queued.id }).update({ status: 'sending' });
+        const refused = await deferredHandoff(queued.metadata);
+        expect(refused).toMatchObject({ ok: false, code: 'VISIT_SUMMARY_LINK_CHANGED', retryable: true });
+        const swapped = await mockPg('sms_log').where({ id: queued.id }).first();
+        expect(swapped.message_body).toBe(plainBody());
+        expect(swapped.metadata.billing_link).toBeUndefined();
+      });
+
+      test('a receipt link asks for no payment: a hold does not stop the paid fold', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        await placeHold(DISPUTE);
+        await coordinate();
+        expect(sendCustomerMessage.mock.calls[0][0].body.startsWith(`${plainBody()} Your receipt: `)).toBe(true);
+        expect(await recorded()).toEqual({ kind: 'receipt', invoiceId });
+      });
+    });
+
     test('paid and not eligible: the receipt job texts as today', async () => {
       const invoiceId = await stop({ status: 'paid', sameRecipient: false });
       await coordinate();

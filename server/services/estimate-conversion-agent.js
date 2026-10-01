@@ -590,7 +590,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt, factsBlock, reserviceBooked } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -658,10 +658,25 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // Pre-push audit P1: the actions this draft promises (payment link,
     // booking, escalate for a follow-up) ride to the review card the same
     // way the suggestion lane's do, so /agent-draft can show them.
+    // Codex round-3 P2 (siblings sweep): this lane also creates a
+    // pending_review decision that verifyAgentDecisionForSend guards at
+    // /sms and /schedule-sms time (same as publishSuggestion's cards) — a
+    // re-service promise drafted here needs the same send-time revalidation
+    // (reservicePromiseStillEligible), which reads its promised lane(s) back
+    // from input_snapshot. Pure re-run of validateReserviceOffer's own
+    // resolution over the already-verified reply/facts/actions; null for an
+    // ordinary draft with no re-service promise.
+    const reserviceLanesSnapshot = drafter.validateReserviceOffer({
+      reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage: body,
+      // The SAME context the verification ran with, so a pronoun-only pest report resolves the same lane (Codex round-20 P2).
+      context,
+    }).promisedLanes || null;
     return {
       reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
+      reserviceLanesSnapshot,
+      reserviceBookedSnapshot: drafter.reserviceBookedSnapshot(reserviceBooked),
     };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
@@ -768,6 +783,15 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // at /sms and /schedule-sms time. Absent for template drafts and for
         // any llm draft whose reply never quoted an open-times window.
         ...(llmDraft?.openTimesSnapshot ? { open_times_snapshot: llmDraft.openTimesSnapshot } : {}),
+        // Codex round-3 P2 — same shape/purpose as publishSuggestion's
+        // reservice_lanes_snapshot (sms-suggest-mode.js).
+        ...(Array.isArray(llmDraft?.reserviceLanesSnapshot) && llmDraft.reserviceLanesSnapshot.length
+          ? { reservice_lanes_snapshot: llmDraft.reserviceLanesSnapshot }
+          : {}),
+        // Codex round-18 P2 — same as publishSuggestion's reservice_booked_snapshot.
+        ...(llmDraft?.reserviceBookedSnapshot && Object.keys(llmDraft.reserviceBookedSnapshot).length
+          ? { reservice_booked_snapshot: llmDraft.reserviceBookedSnapshot }
+          : {}),
         // Same sanitized shape publishSuggestion persists, read back by
         // GET /agent-draft (pre-push audit P1). Template drafts carry none.
         ...(llmDraft && Array.isArray(llmDraft.intendedActions)

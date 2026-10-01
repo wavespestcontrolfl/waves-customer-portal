@@ -8031,6 +8031,8 @@ const EstimateConverter = {
         try {
           const InvoiceService = require('./invoice');
           invoiceDelivery = await InvoiceService.sendViaSMSAndEmail(draftInvoiceId, {
+            // Estimate accept: the customer asked for this invoice (dispute-hold exempt).
+            holdExempt: 'customer',
             payUrlParams: {
               source: 'estimate',
               saveCard: '1',

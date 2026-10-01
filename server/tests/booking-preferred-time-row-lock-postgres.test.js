@@ -71,7 +71,7 @@ jest.setTimeout(60000);
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), first_name text, last_name text, phone text, email text, address text, city text, zip text,
       lead_type text, service_interest text, first_contact_at timestamptz, first_contact_channel text, status text, is_residential boolean,
       transcript_summary text, extracted_data jsonb, lead_source_id uuid, gclid text, wbraid text, gbraid text, fbclid text, fbc text, fbp text,
-      converted_at timestamptz, deleted_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now())`, [schema]);
+      converted_at timestamptz, deleted_at timestamptz, customer_id uuid, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now())`, [schema]);
     await database.raw('CREATE TABLE ??.funnel_rows (lead_id uuid PRIMARY KEY)', [schema]);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text)', [schema]);
     await database.raw(`CREATE TABLE ??.self_booked_appointments (
@@ -245,6 +245,44 @@ jest.setTimeout(60000);
     const before = (await noteRows()).length;
     await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
     expect((await noteRows()).length).toBe(before);
+  });
+
+  test('the lead is revalidated under its row lock (codex #5399 r14): staff reassigning or closing it after the open-lead query means no note', async () => {
+    const { noteBookingOnPreferredLeads } = require('../services/booking-preferred-time');
+    const first = await recordPreferredTimeRequest(database, value(), { notify: false });
+    const cust = randomUUID();
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() + 5000) }).returning(['id', 'created_at']);
+    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+    // Staff holds the lead row mid-edit (reassigning its phone) while the note runs: the note parks on the row lock,
+    // then re-reads the committed state and writes nothing.
+    const edit = gate();
+    const staff = database.transaction(async (trx) => {
+      await trx('leads').where({ id: first.leadId }).forUpdate().first('id');
+      await edit.p;
+      await trx('leads').where({ id: first.leadId }).update({ phone: '+19415559999' });
+    });
+    await tick();
+    const note = noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    const noteState = settled(note);
+    await tick();
+    expect(noteState.done).toBe(false); // parked on the lead row
+    edit.open();
+    await staff;
+    expect(await note).toEqual({ live: true, noted: 0 });
+    expect(await noteRows()).toHaveLength(0);
+    // linked to another customer: no note
+    await database('leads').where({ id: first.leadId }).update({ phone: '+19415550100', customer_id: randomUUID() });
+    await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    expect(await noteRows()).toHaveLength(0);
+    // closed: no note
+    await database('leads').where({ id: first.leadId }).update({ customer_id: null, status: 'lost' });
+    await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    expect(await noteRows()).toHaveLength(0);
+    // unchanged (reopened, same phone): noted once
+    await database('leads').where({ id: first.leadId }).update({ status: 'new' });
+    expect((await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] })).noted).toBe(1);
+    expect(await noteRows()).toHaveLength(1);
   });
 
   test('a booking made BEFORE the request began (beyond the skew slack) is not this request\'s to reconcile: no note, the bell rings', async () => {
