@@ -2954,7 +2954,15 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // re-filed under the buyer/tenant's name and future appointment emails
   // reach it mislabeled. Email-only contacts with a known email are a no-op.
   const emailOnRecord = contact.email && knownEmails.includes(lowerEmail(contact.email));
-  if (!contact.phone && emailOnRecord) {
+  // An unconsented phone never joins a STAMPED row (see phoneWithheld at the
+  // slot write below). Decide it HERE too, before dedupe: a withheld-phone
+  // contact is effectively phone-less, so it must dedupe on what WILL be
+  // written (email, else name) — otherwise every reprocess of the same call
+  // would fill another slot with the same name-only lender until the slots
+  // are full (pre-push codex P1, round 6).
+  const phoneWithheld = !!contact.phone && !smsConsentExplicit && !!customer.service_contacts_consent_at;
+  const effectivePhone = phoneWithheld ? null : contact.phone;
+  if (!effectivePhone && emailOnRecord) {
     if (await backfillSlotRole()) return 'skipped_email_on_record_role_backfilled';
     return 'skipped_email_on_record';
   }
@@ -2975,6 +2983,14 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
 
   const fullName = [contact.first_name, contact.last_name]
     .map((v) => String(v || '').trim()).filter(Boolean).join(' ') || null;
+  if (phoneWithheld && !fullName && !slotEmail) return 'skipped_phone_withheld_unconsented';
+  if (phoneWithheld && !slotEmail) {
+    // Name-only write on a stamped row: dedupe on the name against every
+    // slot (a name-only placeholder is exactly what a prior pass left).
+    const normName = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const nameOnRecord = SERVICE_CONTACT_SLOTS.some((s) => normName(customer[s.name]) && normName(customer[s.name]) === normName(fullName));
+    if (nameOnRecord) return 'skipped_name_on_record_phone_withheld';
+  }
   // Prefs FIRST, slot second: the moment a service-contact slot is populated,
   // getAppointmentContacts / getServiceReportEmailRecipients drop the primary
   // unless the notify-primary prefs are set — so the prefs write must land
@@ -2996,7 +3012,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // (codex P1). Tradeoff accepted: an admin's deliberate opt-out set while
   // the customer had zero slot contacts can be re-enabled by a later call —
   // rare, visible on the prefs UI, and strictly better than the inverse.
-  if (contact.phone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
+  if (effectivePhone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
   if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
     await db('notification_prefs')
@@ -3024,11 +3040,9 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // the secondary_contact_captured review card for the office to add through
   // the portal flow (which asks the recipient). Unstamped rows are unchanged:
   // the phone is written and no stamp exists to protect.
-  const phoneWithheld = !!contact.phone && !smsConsentExplicit && !!customer.service_contacts_consent_at;
-  if (phoneWithheld && !fullName && !slotEmail) return 'skipped_phone_withheld_unconsented';
   const slotWrite = {
     [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
-    [emptySlot.phone]: phoneWithheld ? null : (contact.phone || null),
+    [emptySlot.phone]: effectivePhone || null,
     [emptySlot.email]: slotEmail,
     // The extracted relationship (home_buyer/tenant/...) — recorded so
     // role-aware recipient selection is possible later; 'unknown' stays null.

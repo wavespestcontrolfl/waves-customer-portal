@@ -512,6 +512,20 @@ describe('persistCallSecondaryContact', () => {
     }]);
   });
 
+  test('withheld-phone contact dedupes on email, then on name — a reprocess never fills a second slot', async () => {
+    const stamped = { ...bareCustomer, service_contact_name: 'Sample Lender', service_contact_phone: '+19415557777', service_contacts_consent_at: '2026-07-22T00:00:00Z' };
+    // Name-only (phone withheld, no email) and the name is already on a slot.
+    const w1 = makeDb({ customer: stamped });
+    expect(await persistCallSecondaryContact('cust-1', { first_name: 'sample', last_name: 'LENDER', phone: '+15550100444', wants_notifications: true, role: 'lender' }))
+      .toBe('skipped_name_on_record_phone_withheld');
+    expect(w1.updates).toEqual([]);
+    // Email on record + phone withheld → the email-dedupe skip, not a new slot.
+    const w2 = makeDb({ customer: { ...stamped, service_contact_email: 'lender@example.com' } });
+    expect(await persistCallSecondaryContact('cust-1', { first_name: 'Other', last_name: 'Name', email: 'LENDER@example.com', phone: '+15550100444', wants_notifications: true, role: 'lender' }))
+      .toMatch(/^skipped_email_on_record/); // role backfill on the matched slot is fine
+    expect(w2.updates.some((u) => Object.keys(u).some((k) => /phone|_name$/.test(k)))).toBe(false);
+  });
+
   test('unconsented phone-only contact on a STAMPED row is skipped outright', async () => {
     const writes = makeDb({
       customer: { ...bareCustomer, service_contact_phone: '+19415557777', service_contacts_consent_at: '2026-07-22T00:00:00Z' },
