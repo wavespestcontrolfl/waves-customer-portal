@@ -11045,8 +11045,12 @@ export function TreeShrubCloseoutBlock({
   const [bandPick, setBandPick] = useState({ product: "", key: "" });
   // What the tech is typing in the dose and trunk fields: the record keeps
   // only a number it can read ("1 1/2" reads 1.5), never digits run together.
-  const [doseDraft, setDoseDraft] = useState(null);
-  const [trunkDraft, setTrunkDraft] = useState(null);
+  // A draft stands only while the record still holds what it stored; any
+  // other change to the record (another product, a restored draft) wins.
+  const [doseTyped, setDoseTyped] = useState(null);
+  const [trunkTyped, setTrunkTyped] = useState(null);
+  const doseDraft = doseTyped && doseTyped.stored === String(record.dose || "") ? doseTyped.typed : null;
+  const trunkDraft = trunkTyped && trunkTyped.stored === String(record.sizeClassOrDbh || "") ? trunkTyped.typed : null;
   const chosenInjection = injectionProducts.find((product) => product.name === record.product) || null;
   const labelRate = chosenInjection?.rate || null;
   const pickKey = bandPick.product === record.product ? bandPick.key : "";
@@ -11286,9 +11290,10 @@ export function TreeShrubCloseoutBlock({
                 value={trunkTyping}
                 onChange={(e) => {
                   const typed = e.target.value;
-                  setTrunkDraft(typed);
                   const inches = quantityOf(typed);
-                  setInjectionField("sizeClassOrDbh", inches ? `${inches} in DBH` : "");
+                  const stored = inches ? `${inches} in DBH` : "";
+                  setTrunkTyped({ typed, stored });
+                  setInjectionField("sizeClassOrDbh", stored);
                 }}
                 placeholder="Inches"
                 style={input}
@@ -11326,8 +11331,9 @@ export function TreeShrubCloseoutBlock({
                 value={doseTyping}
                 onChange={(e) => {
                   const typed = e.target.value;
-                  setDoseDraft(typed);
-                  setInjectionField("dose", doseText(quantityOf(typed), doseUnit));
+                  const stored = doseText(quantityOf(typed), doseUnit);
+                  setDoseTyped({ typed, stored });
+                  setInjectionField("dose", stored);
                 }}
                 placeholder="Dose"
                 style={input}

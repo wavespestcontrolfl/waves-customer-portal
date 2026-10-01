@@ -134,6 +134,16 @@ describe('the injection record', () => {
     expect(screen.queryByText(/Enter the dose as a number/)).toBeNull();
   });
 
+  it('shows the trunk the record holds after it changes elsewhere', async () => {
+    render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(IMA_JET.name));
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText('Injection product'), { target: { value: '__other__' } });
+    fireEvent.change(screen.getByPlaceholderText('DBH / palm size'), { target: { value: '20 in DBH' } });
+    fireEvent.change(screen.getByLabelText('Injection product'), { target: { value: IMA_JET.name } });
+    expect(screen.getByLabelText('Trunk (inches across, chest high)').value).toBe('20');
+  });
+
   it('never reads a saved trunk size in another unit as inches', () => {
     render(
       <Block
