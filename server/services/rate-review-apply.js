@@ -100,6 +100,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { rateReviewLive, isEnabled } = require('../config/feature-gates');
 const { MIN_NOTICE_DAYS } = require('./price-change-notices');
 const PlanRateLedger = require('./plan-rate-ledger');
+const { hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   PLAN_LINE_SQL, LEDGER_FAMILIES_FOR_LINE, anniversaryInWindow, familyOfCoverage, visitsPerYearFor, lockBatch,
@@ -262,21 +263,38 @@ async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDat
   return rows.map((r) => ({ ...r, scheduled_date: ymd(r.scheduled_date) }));
 }
 
-// Every open (not terminal) visit of the customer with its plan line — the
-// consumers of customers.per_application_fee (billing-lane.js
-// completionInvoiceAmount bills an unpriced per-application visit at the
-// fee, whatever its family, cadence or date, one-off visits included).
+// Every UNFINISHED visit of the customer with its plan line — anything a
+// completion can still bill (pending, confirmed, a parked reschedule
+// request, en_route, on_site; the terminal set is
+// customer-lifecycle-guard.js TERMINAL_STATUSES plus the 'canceled'
+// spelling). These are the possible consumers of
+// customers.per_application_fee: billing-lane.js completionInvoiceAmount
+// bills a per-application visit at the fee whenever its own stamp is not a
+// price, whatever its family, cadence or date, one-off visits included.
+const UNFINISHED_VISIT_SQL = "s.status NOT IN ('completed', 'cancelled', 'canceled', 'skipped', 'no_show')";
 async function loadCustomerOpenVisits(dbh, { customerId }) {
   const { LINE_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(`
-    SELECT s.id, s.scheduled_date, s.status, s.estimated_price, s.is_callback, s.is_recurring, s.recurring_parent_id, ${LINE_SQL} AS line
+    SELECT s.id, s.scheduled_date, s.status, s.estimated_price, s.primary_line_price, s.is_callback, s.is_recurring, s.recurring_parent_id, ${LINE_SQL} AS line
     FROM scheduled_services s
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ?
-      AND s.status IN ('pending', 'confirmed', 'rescheduled')
+      AND ${UNFINISHED_VISIT_SQL}
     ORDER BY s.scheduled_date ASC, s.id ASC
   `, [customerId]);
   return rows.map((r) => ({ ...r, scheduled_date: ymd(r.scheduled_date) }));
+}
+
+// billing-lane.js completionInvoiceAmount's precedence, mirrored: a visit
+// bills its own stamp when that is a price (> 0) or an authoritative $0
+// (hasAuthoritativeZeroPrice — GATE_STAMPED_ZERO_FREE on, or a positive
+// primary_line_price base), a callback bills nothing — every other
+// per-application visit falls through to customers.per_application_fee.
+function consumesPerApplicationFee(visit) {
+  if (visit.is_callback) return false;
+  if (visit.estimated_price != null && visit.estimated_price !== '' && Number(visit.estimated_price) > 0) return false;
+  if (hasAuthoritativeZeroPrice(visit.estimated_price, visit.primary_line_price)) return false;
+  return true;
 }
 
 // The live prepaid term that carries this line (the ranking's matchPrepayTerm
@@ -709,15 +727,18 @@ async function repriceTargets(trx, { notice, parentId, lockedIds, effectiveDate,
   if (off.length) throw hold('reprice_mismatch', { visitIds: off.map((v) => v.id) });
 }
 
-// customers.per_application_fee — the completion fallback when a visit
-// carries no stamp (billing-lane.js completionInvoiceAmount step 4) — is
-// ACCOUNT-WIDE: every unpriced open visit of the customer bills it, whatever
-// its family or date. Its only writer today is acceptance; this is the one
-// sanctioned non-accept writer, and it moves ONLY when every consumer of
-// the fallback is provably inside the noticed scope: the fee equals the
-// amount the customer was told, every open visit of the account belongs to
-// THIS plan line, and no open visit outside the repriced set (a visit
-// before the effective date, a one-off, a callback) is unpriced. Otherwise
+// customers.per_application_fee — the completion fallback when a visit's
+// own stamp is not a price (billing-lane.js completionInvoiceAmount) — is
+// ACCOUNT-WIDE: every unfinished per-application visit of the customer
+// whose stamp is not a price bills it, whatever its family or date. Its
+// only writer today is acceptance; this is the one sanctioned non-accept
+// writer, and it moves ONLY when every consumer of the fallback is provably
+// inside the noticed scope: the fee equals the amount the customer was
+// told, every unfinished visit of the account belongs to THIS plan line,
+// and no unfinished visit outside the repriced set falls through to the fee
+// by billing-lane's own rule (consumesPerApplicationFee: NULL, '', or a
+// bare $0 the stamped-zero gate does not make authoritative — a visit before
+// the effective date, a one-off, an en_route or on_site stop). Otherwise
 // the old fee is left as it was and the reason recorded. A NULL fee stays
 // NULL — unpriced is never invented.
 async function feeScopeRefusal(trx, { customer, familyKey, repricedIds, noticedCurrent }) {
@@ -726,7 +747,7 @@ async function feeScopeRefusal(trx, { customer, familyKey, repricedIds, noticedC
   if (feeCents !== noticedCurrent) return 'fee_differs_from_noticed_current';
   const open = await loadCustomerOpenVisits(trx, { customerId: customer.id });
   if (open.some((v) => v.line !== familyKey)) return 'fee_shared_with_other_lines';
-  if (open.some((v) => !repricedIds.has(String(v.id)) && cents(v.estimated_price) == null)) return 'fee_consumers_outside_scope';
+  if (open.some((v) => !repricedIds.has(String(v.id)) && consumesPerApplicationFee(v))) return 'fee_consumers_outside_scope';
   return null;
 }
 
@@ -948,9 +969,14 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
   return out;
 }
 
-// Undo before the send: delete the batch's DRAFT (never delivered) notice
-// rows and clear the ranking rows' links, so the batch can be rebuilt or
-// re-scheduled. A delivered notice is never touched (reported as kept).
+// Undo before the send: delete the batch's UNDELIVERED notice rows (a
+// draft, or a draft the public page flipped to 'viewed' on a preview — no
+// sent_at, no delivered leg) and clear the ranking rows' links, so the
+// batch can be rebuilt or re-scheduled. A delivered notice is never
+// touched (reported as kept). The notices are locked, judged by the same
+// delivery evidence the apply uses (wasDelivered), deleted under those
+// same guards in the DELETE's own predicate, and unlinked — one
+// transaction under the batch lock.
 async function retireDraftNotices(batchKey, { dbh = db } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   if (!BATCH_KEY_RE.test(String(batchKey || ''))) throw badInput('batchKey must be YYYY-MM');
@@ -959,16 +985,17 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
     const rows = await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id').select('id', 'notice_id');
     const noticeIds = rows.map((r) => r.notice_id);
     if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0 };
-    const linked = await trx('price_change_notices').whereIn('id', noticeIds).select('id', 'status', 'sent_at', 'email_sent', 'sms_sent');
-    const drafts = linked.filter((n) => String(n.status) === 'draft' && !n.sent_at && !n.email_sent && !n.sms_sent);
-    const draftIds = drafts.map((n) => n.id);
+    const linked = await trx('price_change_notices').whereIn('id', noticeIds).forUpdate().select('id', 'status', 'sent_at', 'email_sent', 'sms_sent');
+    const undeliveredIds = linked.filter((n) => !wasDelivered(n) && !n.sent_at && !n.email_sent && !n.sms_sent).map((n) => n.id);
     let retired = 0;
-    if (draftIds.length) {
-      await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereIn('notice_id', draftIds).update({ notice_id: null, updated_at: new Date() });
-      retired = await trx('price_change_notices').whereIn('id', draftIds).where({ status: 'draft' }).whereNull('sent_at').delete();
+    if (undeliveredIds.length) {
+      await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereIn('notice_id', undeliveredIds).update({ notice_id: null, updated_at: new Date() });
+      retired = await trx('price_change_notices').whereIn('id', undeliveredIds)
+        .whereIn('status', ['draft', 'viewed']).whereNull('sent_at').where('email_sent', false).where('sms_sent', false)
+        .delete();
     }
-    logger.info(`[rate-review-apply] ${batchKey}: ${retired} draft notice rows retired, ${linked.length - draftIds.length} delivered kept`);
-    return { ok: true, batchKey, retired, keptDelivered: linked.length - draftIds.length };
+    logger.info(`[rate-review-apply] ${batchKey}: ${retired} undelivered notice rows retired, ${linked.length - undeliveredIds.length} delivered kept`);
+    return { ok: true, batchKey, retired, keptDelivered: linked.length - undeliveredIds.length };
   });
 }
 
@@ -1048,6 +1075,6 @@ module.exports = {
   noticedRenewalAmountConflict,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
-    loadLineOpenVisits, loadCustomerOpenVisits, feeScopeRefusal, resolvePrepayTerm, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
+    loadLineOpenVisits, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

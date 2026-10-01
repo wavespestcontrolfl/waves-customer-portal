@@ -223,7 +223,8 @@ class Query {
     if (!table) throw new Error(`fake-knex: unknown table ${this.table}`);
     const inserted = [];
     for (const raw of this.pendingInsert) {
-      const row = { ...raw };
+      // schema defaults the real table applies (NOT NULL DEFAULT …)
+      const row = { ...(this.db.defaults[this.table] || {}), ...raw };
       if (row.id === undefined) row.id = uuid();
       if (row.created_at === undefined) row.created_at = new Date(this.db.clock.getTime() + table.length);
       if (this.conflictCols) {
@@ -266,6 +267,8 @@ function createFakeDb(tables = {}) {
   db.log = [];
   db.clock = new Date('2026-12-10T08:10:00Z');
   db.columns = { scheduled_services: SCHEDULED_SERVICE_COLUMNS };
+  // migration 20260712300000 + 20260930230000 column defaults
+  db.defaults = { price_change_notices: { status: 'draft', email_sent: false, sms_sent: false, view_count: 0, apply_attempts: 0, cadence_label: 'month' } };
   db.reset = (next = {}) => {
     const base = {
       customers: [], price_change_notices: [], rate_review_snapshots: [], rate_review_batches: [], scheduled_services: [], scheduled_service_addons: [],
@@ -291,12 +294,12 @@ function createFakeDb(tables = {}) {
         .map((s) => ({ ...s }));
       return { rows };
     }
-    if (/SELECT s\.id, s\.scheduled_date, s\.status, s\.estimated_price, s\.is_callback/.test(sql)) {
+    if (/SELECT s\.id, s\.scheduled_date, s\.status, s\.estimated_price, s\.primary_line_price, s\.is_callback/.test(sql)) {
       const [customerId] = bindings;
       const rows = db.store.scheduled_services
-        .filter((s) => same(s.customer_id, customerId) && ['pending', 'confirmed', 'rescheduled'].includes(s.status))
+        .filter((s) => same(s.customer_id, customerId) && !['completed', 'cancelled', 'canceled', 'skipped', 'no_show'].includes(s.status))
         .sort((a, b) => compare(a.scheduled_date, b.scheduled_date) || compare(a.id, b.id))
-        .map((s) => ({ id: s.id, scheduled_date: s.scheduled_date, status: s.status, estimated_price: s.estimated_price, is_callback: s.is_callback, is_recurring: s.is_recurring, recurring_parent_id: s.recurring_parent_id, line: s._line }));
+        .map((s) => ({ id: s.id, scheduled_date: s.scheduled_date, status: s.status, estimated_price: s.estimated_price, primary_line_price: s.primary_line_price, is_callback: s.is_callback, is_recurring: s.is_recurring, recurring_parent_id: s.recurring_parent_id, line: s._line }));
       return { rows };
     }
     if (/pg_(try_)?advisory_xact_lock/.test(sql)) return { rows: [{ locked: true }] };

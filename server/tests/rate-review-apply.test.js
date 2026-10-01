@@ -190,8 +190,8 @@ describe('scheduleNoticeRows — per_application effective date', () => {
       cadence_label: 'application', effective_date: '2026-12-10', billing_lane: 'per_application', family_key: 'pest_control',
       rate_review_row_id: ROW(1), apply_attempts: 0,
     });
-    // nothing sent, nothing applied: the send columns and applied_at are left to their NULL defaults
-    expect(notice.sent_at == null && notice.email_sent == null && notice.sms_sent == null && notice.applied_at == null).toBe(true);
+    // nothing sent, nothing applied: sent_at / applied_at stay NULL and the leg flags their false defaults
+    expect(notice.sent_at == null && notice.applied_at == null && notice.email_sent === false && notice.sms_sent === false).toBe(true);
     expect(notice.notice_token).toMatch(/^[0-9a-f]{32}$/);
     const meta = JSON.parse(notice.metadata);
     expect(meta).toMatchObject({ source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, anniversary_occurrence: '2026-12-05', first_visit_id: VISIT(101), visits_per_year: 4, current_rate_source: 'visit_median' });
@@ -544,6 +544,44 @@ describe('applyDueRateChanges — per_application', () => {
     expect(out.applied).toBe(1);
     expect(customer1().per_application_fee).toBe(121);
   });
+  test('the fee consumers mirror billing-lane\'s own fallback rule: a bare $0 the stamped-zero gate does not make authoritative, an en_route stop, an on_site stop — but never a callback or an authoritative $0', async () => {
+    const { consumesPerApplicationFee } = apply._private;
+    const stampedZeroGate = process.env.GATE_STAMPED_ZERO_FREE;
+    delete process.env.GATE_STAMPED_ZERO_FREE;
+    try {
+      expect(consumesPerApplicationFee({ estimated_price: null, is_callback: false })).toBe(true);
+      expect(consumesPerApplicationFee({ estimated_price: '', is_callback: false })).toBe(true);
+      expect(consumesPerApplicationFee({ estimated_price: '0.00', primary_line_price: null, is_callback: false })).toBe(true); // bare zero, gate off → fee
+      expect(consumesPerApplicationFee({ estimated_price: '0.00', primary_line_price: '117.00', is_callback: false })).toBe(false); // authoritative $0 (discounted to free)
+      expect(consumesPerApplicationFee({ estimated_price: null, is_callback: true })).toBe(false);
+      expect(consumesPerApplicationFee({ estimated_price: '117.00', is_callback: false })).toBe(false);
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      expect(consumesPerApplicationFee({ estimated_price: '0.00', primary_line_price: null, is_callback: false })).toBe(false); // gate on: every stamped $0 is free
+    } finally {
+      if (stampedZeroGate === undefined) delete process.env.GATE_STAMPED_ZERO_FREE; else process.env.GATE_STAMPED_ZERO_FREE = stampedZeroGate;
+    }
+    // an overdue bare-$0 pest visit before the effective date (gate off) bills the fee → the fee stays
+    delete process.env.GATE_STAMPED_ZERO_FREE;
+    let book = sentBook();
+    book.scheduled_services.push({ ...book.scheduled_services[1], id: VISIT(504), scheduled_date: '2026-12-03', estimated_price: '0.00', primary_line_price: null, is_recurring: false, recurring_parent_id: null });
+    let out = await runApply(book);
+    expect(out.applied).toBe(1);
+    expect(customer1().per_application_fee).toBe('117.00');
+    expect(mockDb.store.audit_log[0].metadata.feeUntouchedReason).toBe('fee_consumers_outside_scope');
+    // an on_site unpriced stop (not pending/confirmed, not terminal) is still a consumer
+    book = sentBook();
+    book.scheduled_services.push({ ...book.scheduled_services[1], id: VISIT(505), scheduled_date: '2026-12-09', status: 'on_site', estimated_price: null, is_recurring: false, recurring_parent_id: null });
+    out = await runApply(book);
+    expect(out.applied).toBe(1);
+    expect(customer1().per_application_fee).toBe('117.00');
+    expect(mockDb.store.audit_log[0].metadata.feeUntouchedReason).toBe('fee_consumers_outside_scope');
+    // an unpriced CALLBACK bills nothing → not a consumer → the fee moves
+    book = sentBook();
+    book.scheduled_services.push({ ...book.scheduled_services[1], id: VISIT(506), scheduled_date: '2026-12-04', estimated_price: null, is_callback: true, is_recurring: false, recurring_parent_id: null });
+    out = await runApply(book);
+    expect(out.applied).toBe(1);
+    expect(customer1().per_application_fee).toBe(121);
+  });
   test('a NULL fee stays NULL (unpriced is never $0 and never invented)', async () => {
     const book = sentBook({ book: { customer: { per_application_fee: null } } });
     await runApply(book);
@@ -812,19 +850,25 @@ describe('scheduling races', () => {
 });
 
 describe('retireDraftNotices and the rebuild guard', () => {
-  test('retires the batch\'s draft rows and unlinks their ranking rows; a delivered notice is kept', async () => {
+  test('retires the batch\'s undelivered rows (a draft, and a draft the public page flipped to viewed on a preview) and unlinks their ranking rows; a delivered notice is kept', async () => {
     const book = pestBook();
     await scheduleBook(book);
-    // a second line already delivered
+    // a previewed draft: the public page flipped it to 'viewed' without any delivery
+    mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(3, { customer_id: CUSTOMER(1), status: 'approved', family_key: 'mosquito', notice_id: 'n-previewed-3' }));
+    mockDb.store.price_change_notices.push(fixture.noticeRow(3, { id: 'n-previewed-3', customer_id: CUSTOMER(1), family_key: 'mosquito', status: 'viewed', sent_at: null, email_sent: false, sms_sent: false }));
+    // a second line already delivered (and viewed)
     mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(2, { status: 'sent', family_key: 'lawn_care', notice_id: 'n-sent-2' }));
-    mockDb.store.price_change_notices.push(fixture.noticeRow(2, { id: 'n-sent-2', family_key: 'lawn_care' }));
+    mockDb.store.price_change_notices.push(fixture.noticeRow(2, { id: 'n-sent-2', family_key: 'lawn_care', status: 'viewed' }));
     const out = await apply.retireDraftNotices(BATCH_KEY);
-    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 1, keptDelivered: 1 });
+    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 2, keptDelivered: 1 });
     expect(notices().map((n) => n.id)).toEqual(['n-sent-2']);
-    expect(snapshots().map((r) => r.notice_id)).toEqual([null, 'n-sent-2']);
-    // and the batch can be scheduled again
+    expect(snapshots().map((r) => [r.family_key, r.notice_id])).toEqual([['pest_control', null], ['mosquito', null], ['lawn_care', 'n-sent-2']]);
+    expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'price_change_notices')).toBe(true);
+    // and the batch can be scheduled again (the mosquito line has no visits in this book → held, not re-linked)
     const again = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
-    expect(again.created).toBe(1);
+    expect(again).toMatchObject({ created: 1, alreadyScheduled: 0 });
+    expect(again.held.map((h) => [h.familyKey, h.reason])).toEqual([['mosquito', 'no_future_visit']]);
+    expect(snapshots().find((r) => r.family_key === 'pest_control').notice_id).not.toBeNull();
   });
   test('gate off → retires nothing', async () => {
     process.env.GATE_RATE_REVIEW = 'false';
