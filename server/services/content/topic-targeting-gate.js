@@ -1115,7 +1115,11 @@ function stem(w) {
 // both reduce to "paper wasp".
 function topicKey(text) {
   const cities = cityTokens();
-  const words = tokenize(text)
+  // Footprint regions ("Manatee County", "Southwest Fla.") and a bare
+  // statewide qualifier are geo too: changing only the geo must not
+  // resurrect a retired topic.
+  const geoFree = String(text || '').replace(new RegExp(REGIONAL_RE.source, 'gi'), ' ').replace(/\b(?:florida|fla|fl)\b\.?/gi, ' ');
+  const words = tokenize(geoFree)
     .filter((w) => !GEO_TOKENS.has(w) && !cities.has(w) && !GENERIC_TOKENS.has(w))
     .map(stem)
     .filter((w) => !RETIRED_FILLER.has(w) && !GENERIC_TOKENS.has(w));

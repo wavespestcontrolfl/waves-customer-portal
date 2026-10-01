@@ -2162,7 +2162,7 @@ describe('Astro publisher hero image republish', () => {
       title: 'Keeping Rats Out of Bradenton Homes',
       slug: 'rats-out-of-bradenton-homes',
       meta_description: 'Bradenton homeowners can use this guide to spot early rodent activity and seal entry points before damage spreads. Learn more on the Waves blog.',
-      keyword: 'rodent control Bradenton',
+      keyword: 'rodent entry points Bradenton', // 'rodent control' alone is a retired topic (2026-10-01 prune)
       category: 'pest-control', // broad Astro category…
       tag: 'Rodents', // …real topic lives on `tag`
       post_type: 'location',

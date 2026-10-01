@@ -1164,6 +1164,8 @@ describe('retired topics', () => {
       ['paper wasp pest control', '/pest-control/get-rid-of-paper-wasps/'],
       ['paper wasps removal tips', '/pest-control/get-rid-of-paper-wasps/'],
       ['what do exterminators get rid of', '/pest-control/what-do-exterminators-get-rid-of/'],
+      ['How to get rid of paper wasps in Manatee County', '/pest-control/get-rid-of-paper-wasps/'],
+      ['paper wasps southwest fla.', '/pest-control/get-rid-of-paper-wasps/'],
     ]) {
       const r = gate.evaluate(blog({ query }), { requireCorpus: false });
       expect(r.findings.find((f) => f.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url });
