@@ -149,6 +149,16 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/notifications/done — recently done alerts (last 7 days) so an
+// admin can reopen an accidental Done. Admin-only, like reopen itself.
+router.get('/done', requireAdmin, async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
+    const notifications = await NotificationService.getAdminDoneNotifications({ role: req.techRole, limit });
+    res.json({ notifications });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/notifications/issues — recent internal/admin delivery issues.
 router.get('/issues', requireAdmin, async (req, res, next) => {
   try {

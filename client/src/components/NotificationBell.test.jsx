@@ -875,3 +875,86 @@ describe('NotificationBell admin "Done" (docs/admin-notifications.md section 4.3
     expect(screen.queryByRole('button', { name: 'Done' })).toBeNull();
   });
 });
+
+describe('NotificationBell admin "Recently done" (reopen an accidental Done)', () => {
+  const staffToken = (role) => `h.${btoa(JSON.stringify({ role })).replace(/=+$/, '')}.s`;
+  const alive = { id: 'a1', category: 'schedule', title: 'Open alert', body: 'Still open.', link: null, created_at: new Date().toISOString(), read_at: null };
+  const doneRow = { id: 'd9', category: 'schedule', title: 'Closed by mistake', body: 'Oops.', link: null,
+    created_at: new Date(Date.now() - 86400000).toISOString(), done_at: new Date(Date.now() - 5 * 60000).toISOString(), done_by: '1', resolution: null };
+
+  const setup = () => {
+    let reopened = false;
+    global.fetch = vi.fn(async (url, options = {}) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 1 });
+      if (options.method === 'PUT') { reopened = true; return jsonResponse({ success: true, updated: true }); }
+      if (u.endsWith('/admin/notifications/done')) return jsonResponse({ notifications: reopened ? [] : [doneRow] });
+      return jsonResponse({ notifications: reopened ? [alive, { ...doneRow, done_at: null }] : [alive] });
+    });
+  };
+
+  it.each([['desktop', 1280], ['phone', 390]])('lists a done row and reopens it (%s)', async (_label, width) => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    localStorage.setItem('waves_admin_token', staffToken('admin'));
+    setup();
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      await screen.findByText('Open alert');
+      fireEvent.click(screen.getByRole('button', { name: 'Recently done' }));
+      expect(await screen.findByText('Closed by mistake')).toBeInTheDocument();
+      expect(screen.getByText(/Marked done · 5m ago/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Reopen' }));
+      await waitFor(() => expect(global.fetch.mock.calls.some(([url, o]) => String(url).endsWith('/admin/notifications/d9/reopen') && o?.method === 'PUT')).toBe(true));
+      // Gone from the done list, back in the main list.
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Reopen' })).toBeNull());
+      expect(await screen.findByText('Closed by mistake')).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+    }
+  });
+
+  it('shows a short inline error when the done list cannot load, and keeps the row when reopen fails', async () => {
+    localStorage.setItem('waves_admin_token', staffToken('admin'));
+    global.fetch = vi.fn(async (url, options = {}) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 0 });
+      if (u.endsWith('/admin/notifications/done')) return { ok: false, status: 500, json: async () => ({}) };
+      return jsonResponse({ notifications: [alive] });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Open alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Recently done' }));
+    expect(await screen.findByText(/couldn.t load recently done/i)).toBeInTheDocument();
+
+    global.fetch.mockImplementation(async (url, options = {}) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 0 });
+      if (options.method === 'PUT') return { ok: false, status: 500, json: async () => ({}) };
+      if (u.endsWith('/admin/notifications/done')) return jsonResponse({ notifications: [doneRow] });
+      return jsonResponse({ notifications: [alive] });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Hide recently done' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recently done' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reopen' }));
+    expect(await screen.findByText(/couldn.t reopen/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
+  });
+
+  it('offers no toggle to a technician role hint or a customer bell', async () => {
+    setup();
+    localStorage.setItem('waves_admin_token', staffToken('technician'));
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Open alert');
+    expect(screen.queryByRole('button', { name: /recently done/i })).toBeNull();
+    cleanup();
+    localStorage.setItem('waves_admin_token', staffToken('admin'));
+    render(<NotificationBell type="customer" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findAllByText('Open alert');
+    expect(screen.queryByRole('button', { name: /recently done/i })).toBeNull();
+  });
+});

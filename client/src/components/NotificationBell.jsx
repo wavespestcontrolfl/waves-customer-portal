@@ -188,6 +188,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailed, setMoreFailed] = useState(false);
   const [tab, setTab] = useState('account'); // 'account' | 'whats_new'
+  // "Recently done" (admin role only): done rows from the last 7 days, so an
+  // accidental Done can be reopened. doneError is 'load' | 'reopen' | null.
+  const [doneOpen, setDoneOpen] = useState(false);
+  const [doneRows, setDoneRows] = useState([]);
+  const [doneLoading, setDoneLoading] = useState(false);
+  const [doneError, setDoneError] = useState(null);
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
   // hides itself once the user grants permission.
@@ -443,7 +449,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   };
 
   const handleOpen = () => {
-    if (!open) loadNotifications();
+    if (!open) { loadNotifications(); setDoneOpen(false); }
     setOpen(!open);
   };
 
@@ -493,6 +499,43 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     } catch { return; }
     setNotifications(prev => prev.filter(x => x.id !== n.id));
     if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
+    fetchCount();
+  };
+
+  const doneSeqRef = useRef(0);
+  const loadDone = async () => {
+    const seq = ++doneSeqRef.current;
+    setDoneLoading(true);
+    setDoneError(null);
+    try {
+      const d = await requestJson(`${basePath}/done`);
+      if (seq !== doneSeqRef.current) return;
+      setDoneRows(d.notifications || []);
+    } catch {
+      if (seq !== doneSeqRef.current) return;
+      setDoneError('load');
+    }
+    setDoneLoading(false);
+  };
+
+  const toggleDone = () => {
+    const next = !doneOpen;
+    setDoneOpen(next);
+    if (next) loadDone();
+  };
+
+  // Reopen puts the row back in the bell: it leaves this list once the server
+  // accepts it, then the main list and the badge are re-read.
+  const reopenDone = async (n) => {
+    setDoneError(null);
+    try {
+      await requestJson(`${basePath}/${n.id}/reopen`, { method: 'PUT' });
+    } catch {
+      setDoneError('reopen');
+      return;
+    }
+    setDoneRows(prev => prev.filter(x => x.id !== n.id));
+    loadNotifications();
     fetchCount();
   };
 
@@ -566,6 +609,47 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       <a href="/admin/communications#tab=notifications" style={{ color: colors.teal, fontSize: 14, fontWeight: 500, textDecoration: 'none' }}>
         Notification settings →
       </a>
+    </div>
+  );
+
+  // Reopen is admin-only on the server, so the list is offered to the admin
+  // role only (the local role hint gates nothing — the server enforces it).
+  const doneControl = type === 'admin' && staffRoleFromToken() === 'admin' && (
+    <div style={{ padding: '4px 20px 8px', textAlign: 'center' }}>
+      <button type="button" className="waves-focus-ring" onClick={toggleDone} aria-expanded={doneOpen} style={{
+        padding: '0 12px', minHeight: 44, border: 0, background: 'none', cursor: 'pointer',
+        color: colors.teal, fontSize: 14, fontWeight: 500,
+      }}>{doneOpen ? 'Hide recently done' : 'Recently done'}</button>
+      {doneOpen && (
+        <div style={{ textAlign: 'left' }}>
+          {doneLoading && <div style={{ padding: '8px 0', fontSize: 14, color: colors.muted }}>Loading…</div>}
+          {doneError && (
+            <div role="alert" style={{ padding: '8px 0', fontSize: 14, color: colors.text }}>
+              {doneError === 'reopen' ? 'Couldn\u2019t reopen that alert. Try again.' : 'Couldn\u2019t load recently done alerts.'}
+            </div>
+          )}
+          {!doneLoading && !doneError && doneRows.length === 0 && (
+            <div style={{ padding: '8px 0', fontSize: 14, color: colors.muted }}>Nothing marked done in the last 7 days.</div>
+          )}
+          {doneRows.map(n => (
+            <div key={n.id} style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0',
+              borderTop: `1px solid ${colors.border}`,
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayTitle(n)}</div>
+                <div style={{ fontSize: 12, color: colors.muted }}>
+                  {n.resolution || 'Marked done'} · {timeAgo(n.done_at)}
+                </div>
+              </div>
+              <button type="button" className="waves-focus-ring" onClick={() => reopenDone(n)} style={{
+                padding: '0 12px', minHeight: 44, border: 0, background: 'none', cursor: 'pointer',
+                fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.text,
+              }}>Reopen</button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 
@@ -795,6 +879,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 );
               })}
               {tab === 'account' && moreControl}
+              {doneControl}
               {settingsLink}
             </div>
           </div>
@@ -959,6 +1044,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 </div>
               ))}
               {moreControl}
+              {doneControl}
               {settingsLink}
             </div>
           </div>

@@ -20,6 +20,8 @@ jest.mock('../models/db', () => () => {
     where(filters) { rows = rows.filter(r => Object.entries(filters).every(([k, v]) => r[k] === v)); return q; },
     // The bell list leaves done rows out (done_at).
     whereNull(key) { rows = rows.filter(r => r[key] == null); return q; },
+    whereNotNull(key) { rows = rows.filter(r => r[key] != null); return q; },
+    select() { return q; },
     // The one raw predicate the bell list adds: Activity-only rows
     // (metadata.feed = 'activity') never reach the bell.
     whereRaw(sql, bindings) {
@@ -30,11 +32,21 @@ jest.mock('../models/db', () => () => {
         rows = rows.filter(r => Date.parse(r.created_at) < atMs || (Date.parse(r.created_at) === atMs && r.id < id));
         return q;
       }
+      // The Recently done window: done_at within the last N days.
+      if (/done_at >= now\(\)/.test(sql)) {
+        const cutoff = Date.now() - bindings[0] * 86400000;
+        rows = rows.filter(r => Date.parse(r.done_at) >= cutoff);
+        return q;
+      }
       if (!/metadata->>'feed'/.test(sql)) throw new Error(`unexpected whereRaw: ${sql}`);
       rows = rows.filter(r => r.metadata?.feed !== 'activity');
       return q;
     },
-    orderBy(key, direction) { sorts.push([key, direction]); return q; },
+    orderBy(key, direction) {
+      if (Array.isArray(key)) key.forEach(({ column, order }) => sorts.push([column, order]));
+      else sorts.push([key, direction]);
+      return q;
+    },
     // The feed order: created_at to the millisecond, then id, both DESC.
     orderByRaw(sql) {
       if (!/date_trunc\('milliseconds', created_at\) DESC, id DESC/.test(sql)) throw new Error(`unexpected orderByRaw: ${sql}`);
@@ -203,5 +215,47 @@ describe('PUT /:id/done and /:id/reopen', () => {
     const res = await call(routeHandler('/:id/reopen', 'put'), { params: { id: 'n1' }, techRole: 'admin', technicianId: 1 });
     expect(reopen).toHaveBeenCalledWith('n1');
     expect(res.json).toHaveBeenCalledWith({ success: true, updated: true });
+  });
+});
+
+describe('GET /done (Recently done list)', () => {
+  const NotificationService = require('../services/notification-service');
+  const day = 86400000;
+  const iso = (ago) => new Date(Date.now() - ago).toISOString();
+  const layer = router.stack.find(l => l.route?.path === '/done' && l.route.methods.get);
+  const call = async (req) => {
+    const res = { json: jest.fn(), status: jest.fn(() => res) };
+    await layer.route.stack.slice(-1)[0].handle({ query: {}, ...req }, res, err => { throw err; });
+    return res;
+  };
+
+  beforeEach(() => {
+    mockRows = [
+      { id: 'open', recipient_type: 'admin', title: 'Open', done_at: null, created_at: iso(day) },
+      { id: 'old', recipient_type: 'admin', title: 'Done long ago', done_at: iso(9 * day), created_at: iso(10 * day) },
+      { id: 'b', recipient_type: 'admin', title: 'Done earlier', done_at: iso(2 * day), created_at: iso(3 * day) },
+      { id: 'c', recipient_type: 'admin', title: 'Done latest', done_at: iso(60000), created_at: iso(day) },
+      { id: 'cust', recipient_type: 'customer', title: 'Customer', done_at: iso(60000), created_at: iso(day) },
+      { id: 'act', recipient_type: 'admin', title: 'Activity only', done_at: iso(1000), created_at: iso(day), metadata: { feed: 'activity' } },
+    ];
+  });
+
+  test('returns only recent done admin rows, newest done first, without activity-only rows', async () => {
+    const res = await call({ techRole: 'admin' });
+    expect(res.json.mock.calls[0][0].notifications.map(n => n.id)).toEqual(['c', 'b']);
+  });
+
+  test('honors the limit', async () => {
+    const rows = await NotificationService.getAdminDoneNotifications({ role: 'admin', limit: 1 });
+    expect(rows.map(n => n.id)).toEqual(['c']);
+  });
+
+  test('is behind requireAdmin', () => {
+    expect(layer.route.stack).toHaveLength(2); // requireAdmin, then the handler
+  });
+
+  test('is declared before any /:id route so it is not shadowed', () => {
+    const paths = router.stack.filter(l => l.route).map(l => l.route.path);
+    expect(paths.indexOf('/done')).toBeLessThan(paths.findIndex(p => p.startsWith('/:id')));
   });
 });

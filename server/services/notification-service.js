@@ -791,6 +791,19 @@ const NotificationService = {
       .limit(limit).offset(offset);
   },
 
+  // Recently done admin rows (the "Recently done" list, so an accidental Done
+  // can be reopened). Scoped exactly like the bell list; newest done first.
+  async getAdminDoneNotifications({ role, limit = 20, days = 7 } = {}) {
+    return excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
+      role,
+    ))
+      .whereRaw("done_at >= now() - (? * interval '1 day')", [days])
+      .select('id', 'title', 'body', 'link', 'category', 'done_at', 'done_by', 'resolution', 'created_at')
+      .orderBy([{ column: 'done_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .limit(limit);
+  },
+
   // Get unread count for admin
   // trx (optional): run on an existing transaction's connection — the
   // badge ordering section (admin-unread.js) computes counts inside its
