@@ -915,6 +915,29 @@ describe('NotificationBell admin "Recently done" (reopen an accidental Done)', (
     }
   });
 
+  it('Load more done continues from the server cursor and appends the older page', async () => {
+    localStorage.setItem('waves_admin_token', staffToken('admin'));
+    const cursor = '2026-09-30T10:00:00.000Z~00000000-0000-4000-8000-000000000001';
+    const older = { ...doneRow, id: 'd-older', title: 'Older done alert' };
+    global.fetch = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 0 });
+      if (u.includes('/admin/notifications/done?before=')) return jsonResponse({ notifications: [older], hasMore: false, next: null });
+      if (u.endsWith('/admin/notifications/done')) return jsonResponse({ notifications: [doneRow], hasMore: true, next: cursor });
+      return jsonResponse({ notifications: [alive] });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Open alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Recently done' }));
+    await screen.findByText('Closed by mistake');
+    fireEvent.click(screen.getByRole('button', { name: 'Load more done' }));
+    expect(await screen.findByText('Older done alert')).toBeInTheDocument();
+    expect(screen.getByText('Closed by mistake')).toBeInTheDocument();
+    expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith(`/done?before=${encodeURIComponent(cursor)}`))).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Load more done' })).toBeNull();
+  });
+
   it('shows a short inline error when the done list cannot load, and keeps the row when reopen fails', async () => {
     localStorage.setItem('waves_admin_token', staffToken('admin'));
     global.fetch = vi.fn(async (url, options = {}) => {

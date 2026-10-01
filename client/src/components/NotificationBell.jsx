@@ -194,6 +194,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [doneRows, setDoneRows] = useState([]);
   const [doneLoading, setDoneLoading] = useState(false);
   const [doneError, setDoneError] = useState(null);
+  const [doneNext, setDoneNext] = useState(null); // the server's cursor for older done rows
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
   // hides itself once the user grants permission.
@@ -503,14 +504,21 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   };
 
   const doneSeqRef = useRef(0);
-  const loadDone = async () => {
+  // more: append the page after the last one read (keyset cursor), so every
+  // done row in the window is reachable however many closed after it.
+  const loadDone = async ({ more = false } = {}) => {
     const seq = ++doneSeqRef.current;
     setDoneLoading(true);
     setDoneError(null);
     try {
-      const d = await requestJson(`${basePath}/done`);
+      const d = await requestJson(`${basePath}/done${more && doneNext ? `?before=${encodeURIComponent(doneNext)}` : ''}`);
       if (seq !== doneSeqRef.current) return;
-      setDoneRows(d.notifications || []);
+      setDoneRows(prev => {
+        if (!more) return d.notifications || [];
+        const ids = new Set(prev.map(n => n.id));
+        return [...prev, ...(d.notifications || []).filter(n => !ids.has(n.id))];
+      });
+      setDoneNext(d.next || null);
     } catch {
       if (seq !== doneSeqRef.current) return;
       setDoneError('load');
@@ -648,6 +656,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               }}>Reopen</button>
             </div>
           ))}
+          {!doneLoading && doneNext && (
+            <button type="button" className="waves-focus-ring" onClick={() => loadDone({ more: true })} style={{
+              padding: '0 12px', minHeight: 44, border: 0, background: 'none', cursor: 'pointer',
+              color: colors.teal, fontSize: 14, fontWeight: 500,
+            }}>Load more done</button>
+          )}
         </div>
       )}
     </div>

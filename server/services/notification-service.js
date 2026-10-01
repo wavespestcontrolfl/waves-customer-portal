@@ -792,15 +792,19 @@ const NotificationService = {
   },
 
   // Recently done admin rows (the "Recently done" list, so an accidental Done
-  // can be reopened). Scoped exactly like the bell list; newest done first.
-  async getAdminDoneNotifications({ role, limit = 20, days = 7 } = {}) {
-    return excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+  // can be reopened). Scoped exactly like the bell list; newest done first,
+  // keyset-paged on (done_at to the millisecond, id) like the bell list, so
+  // every row in the window stays reachable however many closed after it.
+  async getAdminDoneNotifications({ role, limit = 20, days = 7, before = null } = {}) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
       role,
     ))
-      .whereRaw("done_at >= now() - (? * interval '1 day')", [days])
+      .whereRaw("done_at >= now() - (? * interval '1 day')", [days]);
+    if (before) query.whereRaw("(date_trunc('milliseconds', done_at), id) < (?::timestamptz, ?::uuid)", [before.at, before.id]);
+    return query
       .select('id', 'title', 'body', 'link', 'category', 'done_at', 'done_by', 'resolution', 'created_at')
-      .orderBy([{ column: 'done_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .orderByRaw("date_trunc('milliseconds', done_at) DESC, id DESC")
       .limit(limit);
   },
 

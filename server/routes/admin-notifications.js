@@ -99,8 +99,8 @@ function notificationIssueLimit(value) {
 // The feed is ordered by the same millisecond-truncated created_at, so a
 // cursor built from a serialized (millisecond) timestamp sits exactly in it.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function formatCursor(row) {
-  const at = new Date(row.created_at);
+function formatCursor(row, column = 'created_at') {
+  const at = new Date(row[column]);
   return Number.isNaN(at.getTime()) ? null : `${at.toISOString()}~${row.id}`;
 }
 function parseCursor(raw) {
@@ -154,8 +154,15 @@ router.get('/', async (req, res, next) => {
 router.get('/done', requireAdmin, async (req, res, next) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
-    const notifications = await NotificationService.getAdminDoneNotifications({ role: req.techRole, limit });
-    res.json({ notifications });
+    const before = parseCursor(req.query.before);
+    if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
+    const rows = await NotificationService.getAdminDoneNotifications({ role: req.techRole, limit: limit + 1, before });
+    const page = rows.slice(0, limit);
+    res.json({
+      notifications: page,
+      hasMore: rows.length > limit,
+      next: rows.length > limit ? formatCursor(page[page.length - 1], 'done_at') : null,
+    });
   } catch (err) { next(err); }
 });
 

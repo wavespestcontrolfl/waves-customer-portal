@@ -26,10 +26,12 @@ jest.mock('../models/db', () => () => {
     // (metadata.feed = 'activity') never reach the bell.
     whereRaw(sql, bindings) {
       // The keyset cursor: (created_at to the ms, id) strictly after it.
-      if (/date_trunc\('milliseconds', created_at\), id\) </.test(sql)) {
+      const cursor = /date_trunc\('milliseconds', (created_at|done_at)\), id\) </.exec(sql);
+      if (cursor) {
+        const col = cursor[1];
         const [at, id] = bindings;
         const atMs = Date.parse(at);
-        rows = rows.filter(r => Date.parse(r.created_at) < atMs || (Date.parse(r.created_at) === atMs && r.id < id));
+        rows = rows.filter(r => Date.parse(r[col]) < atMs || (Date.parse(r[col]) === atMs && r.id < id));
         return q;
       }
       // The Recently done window: done_at within the last N days.
@@ -49,8 +51,9 @@ jest.mock('../models/db', () => () => {
     },
     // The feed order: created_at to the millisecond, then id, both DESC.
     orderByRaw(sql) {
-      if (!/date_trunc\('milliseconds', created_at\) DESC, id DESC/.test(sql)) throw new Error(`unexpected orderByRaw: ${sql}`);
-      sorts.push(['created_at', 'desc'], ['id', 'desc']);
+      const m = /date_trunc\('milliseconds', (created_at|done_at)\) DESC, id DESC/.exec(sql);
+      if (!m) throw new Error(`unexpected orderByRaw: ${sql}`);
+      sorts.push([m[1], 'desc'], ['id', 'desc']);
       return q;
     },
     limit(n) { limit = n; return q; },
@@ -248,6 +251,24 @@ describe('GET /done (Recently done list)', () => {
   test('honors the limit', async () => {
     const rows = await NotificationService.getAdminDoneNotifications({ role: 'admin', limit: 1 });
     expect(rows.map(n => n.id)).toEqual(['c']);
+  });
+
+  test('pages by cursor: every row in the window stays reachable, even with more closed after it', async () => {
+    const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    mockRows = Array.from({ length: 25 }, (_, i) => ({ id: uuid(i), recipient_type: 'admin', title: `Done ${i}`, done_at: iso((i + 1) * 3600000), created_at: iso(3 * day) }));
+    const first = (await call({ techRole: 'admin' })).json.mock.calls[0][0];
+    expect(first.notifications).toHaveLength(20);
+    expect(first).toMatchObject({ hasMore: true, next: `${mockRows[19].done_at}~${uuid(19)}` });
+    // Three more rows close before Load more: nothing older is pushed out.
+    mockRows.push(...[90, 91, 92].map(n => ({ id: uuid(n), recipient_type: 'admin', title: 'New', done_at: iso(1000), created_at: iso(day) })));
+    const second = (await call({ techRole: 'admin', query: { before: first.next } })).json.mock.calls[0][0];
+    expect(second.notifications.map(n => n.id)).toEqual([20, 21, 22, 23, 24].map(uuid));
+    expect(second).toMatchObject({ hasMore: false, next: null });
+  });
+
+  test('a malformed cursor is a 400', async () => {
+    const res = await call({ techRole: 'admin', query: { before: 'nope' } });
+    expect(res.status).toHaveBeenCalledWith(400);
   });
 
   test('is behind requireAdmin', () => {

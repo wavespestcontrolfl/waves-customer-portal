@@ -17,6 +17,7 @@ const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 
 const migration = require('../models/migrations/20261001003000_notifications_done_backfill');
+const followup = require('../models/migrations/20261001004000_notifications_done_followup');
 
 describeOrSkip('20261001003000 notifications done backfill (DB-backed)', () => {
   let knex;
@@ -58,6 +59,45 @@ describeOrSkip('20261001003000 notifications done backfill (DB-backed)', () => {
       for (const id of [retired, cleared, resolved]) expect((await get(id)).done_at).toBeNull();
       expect(await get(alreadyDone)).toMatchObject({ done_by: '7', resolution: 'By hand' });
 
+      throw new Error('rollback');
+    })).rejects.toThrow('rollback');
+  });
+
+  test('the follow-up re-dates a backfilled auto-close to its recorded close time; down() puts it back', async () => {
+    await expect(knex.transaction(async (trx) => {
+      const readAt = '2026-09-10T10:00:00.000Z';
+      const clearedAt = '2026-09-25T08:30:00.000Z';
+      const insert = async (fields) => {
+        const [row] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Follow-up fixture', ...fields,
+          metadata: JSON.stringify(fields.metadata || {}) }).returning('id');
+        return row.id || row;
+      };
+      const episode = await insert({ read_at: readAt, metadata: { autoCleared: true, autoClearedAt: clearedAt } });
+      const digest = await insert({ read_at: readAt, metadata: { resolved: true, resolvedBy: 'ops-crons', resolvedAt: clearedAt } });
+      const noStamp = await insert({ read_at: readAt, metadata: { autoCleared: true } });
+      const junkStamp = await insert({ read_at: readAt, metadata: { autoCleared: true, autoClearedAt: 'not a date' } });
+
+      await migration.up(trx);
+      await followup.up(trx);
+      const doneAt = async (id) => (await trx('notifications').where({ id }).first()).done_at.toISOString();
+      expect(await doneAt(episode)).toBe(clearedAt);
+      expect(await doneAt(digest)).toBe(clearedAt);
+      expect(await doneAt(noStamp)).toBe(readAt);
+      expect(await doneAt(junkStamp)).toBe(readAt);
+
+      await followup.down(trx);
+      expect(await doneAt(episode)).toBe(readAt);
+      expect(await doneAt(digest)).toBe(readAt);
+      throw new Error('rollback');
+    })).rejects.toThrow('rollback');
+  });
+
+  test('the follow-up ensures each done column on its own (idempotent when all exist)', async () => {
+    await expect(knex.transaction(async (trx) => {
+      await followup.up(trx);
+      for (const column of ['done_at', 'done_by', 'resolution']) {
+        expect(await trx.schema.hasColumn('notifications', column)).toBe(true);
+      }
       throw new Error('rollback');
     })).rejects.toThrow('rollback');
   });
