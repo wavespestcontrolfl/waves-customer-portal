@@ -267,6 +267,17 @@ describe('recheckPlacements', () => {
     expect(r).toMatchObject({ unresolved: 1, verdict: 'not_named_yet' });
   });
 
+  test('a model change inside the window keeps only the engine\'s newest answer', () => {
+    const rows = [
+      row({ query: Q1, platform: 'claude', model: 'claude-a', date: '2026-09-25', urls: [PAGE] }),
+      row({ query: Q1, platform: 'claude', model: 'claude-a', date: '2026-10-05', urls: [PAGE], named: true }),
+      row({ query: Q1, platform: 'claude', model: 'claude-b', date: '2026-10-18', urls: ['https://www.yelp.com/x'] }),
+    ];
+    const [r] = recheckPlacements([placement()], rows, { now: NOW });
+    expect(r.current).toEqual({ answers: 1, named: 0, citingPage: 0, namedWhenCiting: 0 });
+    expect(r.verdict).toBe('page_not_cited_now');
+  });
+
   test('an answer older than the dashboard window is history, not current', () => {
     const rows = [
       row({ query: Q1, platform: 'claude', model: 'claude-old', date: '2026-07-01', urls: [PAGE] }),

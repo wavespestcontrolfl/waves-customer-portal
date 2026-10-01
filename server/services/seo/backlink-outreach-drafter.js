@@ -199,16 +199,24 @@ function citedPagesByHost(pages) {
 
 /**
  * citedPagesFor(prospect, byHost) → the cited pages to try, in order: the
- * prospect's own page first when an engine cites it, then the host's other
- * cited lists by rank — every one of them, since a skip is final for the
- * prospect and an untried list would be lost. A subdomain prospect matches
+ * prospect's own page first when an engine cites it, then (homepage link
+ * only) the host's other cited lists by rank — every one of them, since a
+ * skip is final for the prospect and an untried list would be lost. A subdomain prospect matches
  * only its own host.
  */
 function citedPagesFor(prospect, byHost) {
   const pages = (byHost && byHost.get(canonicalProspectDomain(prospect.target_domain))) || [];
   const own = prospect.target_url ? pageKey(prospect.target_url) : null;
   const first = own ? pages.filter((p) => p.key === own) : [];
-  return [...first, ...pages.filter((p) => !first.includes(p))];
+  // The host's other lists only when the link to earn is the homepage (every
+  // registry placement): a prospect planned for a service page (strategy
+  // agent, manual row) is pitched only on its own page, never on a list for
+  // another service or city that the planned link would not fit.
+  return linksToHomepage(prospect) ? [...first, ...pages.filter((p) => !first.includes(p))] : first;
+}
+
+function linksToHomepage(prospect) {
+  try { return new URL(prospect.target_page || '/', 'https://wavespestcontrol.com').pathname.replace(/\/+$/, '') === ''; } catch { return false; }
 }
 
 /**

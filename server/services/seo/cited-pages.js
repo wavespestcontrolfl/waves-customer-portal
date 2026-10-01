@@ -393,6 +393,7 @@ function recheckPlacements(placements, rows, { now = new Date(), currentSurfaces
     // placement's, so a newer one must not take questions from before its own
     const windowStart = etDateString(addETDays(new Date(`${liveOn}T12:00:00Z`), -RECHECK_BEFORE_DAYS));
     const cites = (r) => r.keys.has(liveKey);
+    const pairOf = (r) => `${r.query}::${r.llm_platform}`;
     const questions = new Set(dated.filter((r) => r.date >= windowStart && r.date < liveOn && cites(r)).map((r) => r.query));
     if (!questions.size) continue; // engines did not cite this page in the window before the link went live
     const asked = dated.filter((r) => questions.has(r.query) && r.date >= windowStart);
@@ -405,17 +406,21 @@ function recheckPlacements(placements, rows, { now = new Date(), currentSurfaces
     // current = the dashboard's window too: a retired model's answer from
     // months ago is history, not the engine's answer now
     const currentIds = currentRowIds(since.filter((r) => r.date >= currentFrom), currentSurfaces);
+    // …then ONE answer per question and engine, the newest: a retired model's
+    // older answer never stands beside its replacement's (since is newest first)
+    const newestPerPair = new Map();
+    for (const r of since) if (currentIds.has(r.id) && !newestPerPair.has(pairOf(r))) newestPerPair.set(pairOf(r), r);
+    const newest = [...newestPerPair.values()];
     const tallies = {
       before: tallyAnswers(asked.filter((r) => r.measured && r.date < liveOn), cites),
       after: tallyAnswers(since.filter((r) => r.measured), cites),
-      current: tallyAnswers(since.filter((r) => r.measured && currentIds.has(r.id)), cites),
+      current: tallyAnswers(newest.filter((r) => r.measured), cites),
     };
     // every question and engine that cited the page before the link went live
     // must have a measured current answer before loss can be declared: a
     // failed newest probe, or no answer at all in the window, is unresolved
-    const pairOf = (r) => `${r.query}::${r.llm_platform}`;
     const expected = new Set(asked.filter((r) => r.measured && r.date < liveOn && cites(r)).map(pairOf));
-    const answered = new Set(since.filter((r) => r.measured && currentIds.has(r.id)).map(pairOf));
+    const answered = new Set(newest.filter((r) => r.measured).map(pairOf));
     const unresolved = [...expected].filter((k) => !answered.has(k)).length;
     const daysLive = daysBetween(liveOn, today);
     const [verdict] = RECHECK_VERDICTS.find(([, test]) => test({ daysLive, current: tallies.current, unresolved }));

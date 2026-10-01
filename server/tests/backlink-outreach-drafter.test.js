@@ -298,6 +298,15 @@ describe('cited-page pitches', () => {
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'drafted', notes: expect.stringContaining(`cited page ${other.url}`) }));
   });
 
+  test('a prospect planned for a service page is pitched only on its own cited page', () => {
+    const best = citedPage();
+    const other = citedPage({ key: 'floridist.com/best-exterminators-venice', url: 'https://floridist.com/best-exterminators-venice' });
+    const byHost = citedPagesByHost([best, other]);
+    const wdo = { target_domain: 'floridist.com', target_page: 'https://www.wavespestcontrol.com/wdo-inspection/' };
+    expect(citedPagesFor(wdo, byHost)).toEqual([]);
+    expect(citedPagesFor({ ...wdo, target_url: 'https://floridist.com/best-exterminators-venice' }, byHost)).toEqual([other]);
+  });
+
   test('every cited list is tried — a fourth list is reached when the first three already name Waves', () => {
     const pages = [1, 2, 3, 4].map((n) => citedPage({ key: `floridist.com/best-${n}`, url: `https://floridist.com/best-${n}`, rank: n }));
     expect(citedPagesFor({ target_domain: 'floridist.com', target_url: 'https://floridist.com/contact' }, citedPagesByHost(pages))).toHaveLength(4);
