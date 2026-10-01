@@ -54,6 +54,45 @@ describe('the rate and dose as the tech reads them', () => {
   });
 });
 
+describe('the shown range stays inside the label', () => {
+  const ML_PER_FL_OZ = 29.5735;
+  const AMOUNT = /^(≈ )?(\d*)([⅛¼⅜½⅝¾⅞]?)(\.\d+)?$/;
+  const FRACTION = { '': 0, '⅛': 0.125, '¼': 0.25, '⅜': 0.375, '½': 0.5, '⅝': 0.625, '¾': 0.75, '⅞': 0.875 };
+  const toMl = (amount, unit) => {
+    const m = AMOUNT.exec(amount.trim());
+    if (!m) throw new Error(`unreadable amount "${amount}"`);
+    const n = Number(m[2] || 0) + FRACTION[m[3]] + Number(m[4] || 0);
+    return (unit === 'tsp' ? n / 6 : n) * ML_PER_FL_OZ;
+  };
+  const shownMl = (text) => {
+    const [, ends, unit] = /^(.+) (tsp|fl oz)$/.exec(text);
+    return ends.split(' – ').map((end) => toMl(end, unit));
+  };
+
+  it('never shows an end outside the exact label limits, for any trunk', () => {
+    for (const label of ['1-6', '3.5-7', '0.5-1', '1-2', '8-16', '5-30', '2', '10']) {
+      const rate = injectionLabelRate({ default_rate: label, default_unit: 'ml/inch dbh' });
+      for (let inches = 1; inches <= 48; inches += 1) {
+        const text = injectionDoseText(rate, inches);
+        const ends = shownMl(text);
+        // Display rounds to 3 places at most; allow that and nothing more.
+        const slack = 0.0005 * ML_PER_FL_OZ;
+        for (const ml of ends) {
+          expect(ml, `${label} mL/in at ${inches} in: ${text}`).toBeLessThanOrEqual(rate.high * inches + slack);
+          if (ends.length > 1) expect(ml, `${label} mL/in at ${inches} in: ${text}`).toBeGreaterThanOrEqual(rate.low * inches - slack);
+        }
+      }
+    }
+  });
+
+  it('reads a single-rate label as one amount', () => {
+    const rate = injectionLabelRate({ default_rate: '10', default_unit: 'ml/inch dbh' });
+    expect(injectionLabelText(rate)).toBe('2 tsp per inch of trunk');
+    expect(injectionDoseText(rate, 10)).toBe('≈ 3¼ fl oz');
+    expect(injectionDoseText(rate, 10)).not.toMatch(/ – /);
+  });
+});
+
 describe('doseOverLabel', () => {
   // 10-inch trunk at 1-6 mL per inch: the label allows up to 60 mL (2.03 fl oz).
   const rate = injectionLabelRate(IMA_JET_10);

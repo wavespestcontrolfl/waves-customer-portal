@@ -7,7 +7,7 @@
 // record shows that rate, and the dose for the tree measured, through the job
 // card's spoon-and-cup formatter (lib/mix-amount.js), rounded inside the
 // label; the dose itself is entered as a number of tsp or fl oz.
-import { formatMeasuredRange } from "./mix-amount";
+import { formatMeasuredAmount, formatMeasuredRange } from "./mix-amount";
 import { TSP_PER_FL_OZ, isMlUnit } from "./measure-units";
 
 const ML_PER_FL_OZ = 29.5735;
@@ -38,8 +38,9 @@ export function injectionLabelRate(product) {
 
 // An mL range in spoons or ounces, rounded inside it (the job card's truck
 // measures); "½ fl oz – 2 fl oz" reads "½ – 2 fl oz" when both ends share a
-// unit.
+// unit. A single-rate label is one amount, measured at or just under it.
 function rangeText(lowMl, highMl) {
+  if (lowMl === highMl) return formatMeasuredAmount(lowMl, "ml", { truckMeasures: true });
   const text = formatMeasuredRange(lowMl, highMl, "ml", { truckMeasures: true });
   const shared = /^(.+?) (tsp|fl oz) – (.+?) \2$/.exec(text || "");
   return shared ? `${shared[1]} – ${shared[3]} ${shared[2]}` : text;
