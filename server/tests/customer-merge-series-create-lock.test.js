@@ -236,7 +236,13 @@ describe('executeMerge — recurring-series-create lock ordering', () => {
     return q;
   }
 
-  beforeEach(() => { jest.clearAllMocks(); resetFkCache(); });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resetFkCache();
+    // executeMerge's pre-transaction read of open customer_dunning_schedules
+    // (customer-dunning/merge.js) runs on the module db: none open here.
+    db.mockImplementation((table) => makeChain(table, () => []));
+  });
 
   test('acquires no recurring-series-create locks when neither party anchors a recurring parent', async () => {
     const winner = { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550101' };

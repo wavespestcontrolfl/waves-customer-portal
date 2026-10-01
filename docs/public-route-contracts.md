@@ -1713,7 +1713,22 @@ until it fits. The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
-not be carried as `lead.next`. The PDF is unchanged and ignores it.
+not be carried as `lead.next`. While the gate is on the lawn payload also
+drops stock copy (lawn only; every field keeps its key): the unverifiable
+past-tense `insights[].wavesAction` lines and four stock `whyItMatters` lines
+become null (product-grounded `wavesAction` and every watering
+`customerAction` / `nextVisitPlan` are unchanged), and `mowing.recommendation`
+is null for a too-short / too-tall reading when the mowing finding is among the
+three findings the web card shows. The sprinkler-coverage water finding
+carries `kind: 'coverage_watch'` (lead mode only) so the water card knows the
+finding owns that guidance even after a narrative headline rewrite. The web report folds secondary finding,
+water and photo-note detail into expanders that print open. The lawn PDF, when
+`lead` is present, prints `lead.why` as the status detail, finding bullets as
+headline + what we saw (+ why it matters only for needs_attention) with no
+"What Waves did" line, and skips the follow-up's stock "No action is needed"
+line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
+stamp while the gate is on, so gate-off PDFs are never served after the flip
+(or the reverse on rollback).
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

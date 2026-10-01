@@ -3596,6 +3596,8 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
       }
       if (table === 'agent_decisions') {
         const b = makeUniversalBuilder();
+        // the provider-boundary LABEL FACTS check re-reads the decision row (Codex #5416 P1)
+        b.first = jest.fn(async () => decision);
         b.update = jest.fn(async (patch) => { claimUpdates.push(patch); return 1; });
         return b;
       }
@@ -3677,7 +3679,7 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
 
   // Codex round-41 P2 (PR #5334): the decision's live-ETA check also runs at the TRUE provider
   // boundary for an Agent Review send — decision-linked sends only.
-  test('a decision-linked send carries the live-ETA providerPreSendCheck; a hand-typed one does not', async () => {
+  test('a decision-linked send carries the live-ETA + LABEL FACTS providerPreSendCheck; a hand-typed one does not', async () => {
     const claimUpdates = [];
     mockDb({ decision: decisionRow({ suggested_message: 'Thanks for reaching out! We appreciate you.', input_snapshot: JSON.stringify({}) }), claimUpdates });
     await withServer(async (baseUrl) => {

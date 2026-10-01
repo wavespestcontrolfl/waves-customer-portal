@@ -337,9 +337,9 @@ describe("DashboardPageV2 sections", () => {
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Pending"),
     );
-    // Lead funnel by source: card + a source row with visible low-sample pill
+    // Lead funnel: card + a source row with visible low-sample pill
     expect(document.getElementById("growth")).toContainElement(
-      screen.getByText("Lead funnel by source"),
+      screen.getByText("Lead funnel"),
     );
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Low sample · n=3"),

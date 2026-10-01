@@ -203,13 +203,35 @@ async function freshOverdueRecurringInvoices(customerId, now = new Date(), datab
       return null;
     }
   }).filter(Boolean));
-  return overdue.filter((invoice) => isInvoiceCollectibleStatus(invoice.status)
+  const fresh = overdue.filter((invoice) => isInvoiceCollectibleStatus(invoice.status)
     && !invoiceWithdrawnFromCustomer(invoice)
     && invoiceAmountDue(invoice) > 0
     && !legacyDunnedIds.has(String(invoice.id))
     && [invoice.last_reminder_at, invoice.followup_last_touch_at]
       .filter(Boolean)
       .every((touch) => new Date(touch) < cutoff));
+  // A customer-level overdue reminder (dunning consolidation §8) names the
+  // customer's whole balance and stamps only its schedule row, never the
+  // per-invoice sequence: a schedule touch inside the window covers every
+  // invoice here. With no schedule rows this changes nothing.
+  if (fresh.length && await customerScheduleTouchedSince(customerId, cutoff, database)) return [];
+  return fresh;
+}
+
+// Only a touch the SCHEDULE made counts: last_touch_at after the row was
+// created. Promotion seeds last_touch_at from the members' own per-invoice
+// touches (seed.js), which the followup_last_touch_at check above already
+// judges invoice by invoice; counting the seeded copy would suppress every
+// invoice right after promotion, before any combined reminder went out. Every
+// engine write of last_touch_at (advance, completeFinal, markTold) is a delivery
+// under a claim taken after the row existed.
+async function customerScheduleTouchedSince(customerId, cutoff, database) {
+  const row = await database('customer_dunning_schedules')
+    .where({ customer_id: customerId })
+    .where('last_touch_at', '>=', cutoff)
+    .whereRaw('last_touch_at > created_at')
+    .first('id');
+  return !!row;
 }
 
 async function visitPayerBilled(visit) {
@@ -789,5 +811,5 @@ module.exports = {
   // GATE_BALANCE_REMINDER_LEGACY_OFF (dunning unification round-2 review).
   gateEnabled,
   smsTemplateActive,
-  _test: { previsitQuoteAuthority },
+  _test: { previsitQuoteAuthority, freshOverdueRecurringInvoices, customerScheduleTouchedSince },
 };

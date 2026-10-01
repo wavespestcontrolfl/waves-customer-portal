@@ -1825,3 +1825,77 @@ describe('ServiceReportDocument: the four-section report', () => {
     expect(screen.getByText('We completed the scheduled service.')).toBeInTheDocument();
   });
 });
+
+// Lawn PDF diet (lawn report rebuild P8): a payload carrying `lead`
+// (GATE_LAWN_REPORT_LEAD) prints the lead's reason as the status detail, finding
+// bullets as headline + what we saw (+ why it matters only for needs_attention),
+// never the "What Waves did" line, and not the follow-up's stock no-action line.
+// The same payload without `lead`, and tree & shrub, print exactly as before.
+describe('lawn PDF lead diet', () => {
+  const STOCK = 'No action is needed from you before then unless the area changes quickly.';
+  const lawnV2 = (extra = {}) => ({
+    snapshot: { overallScore: 78, statusHeadline: 'Stable, watching the edge', rootCause: 'Snapshot root cause sentence.', scoreExplanation: 'Score explanation sentence.' },
+    insights: [
+      { category: 'weeds', status: 'needs_attention', headline: 'Weed pressure is climbing', whatWeSaw: 'Weeds compete with the turf.', whyItMatters: 'Weeds spread fastest in thin turf.', wavesAction: 'Spot-treated the weeds.' },
+      { category: 'damage', status: 'watch', headline: 'A few stress patterns', whatWeSaw: 'Some stress patterns in the turf.', whyItMatters: 'Catching them early helps.', wavesAction: 'Documented the areas.' },
+    ],
+    followUp: { scheduled: true, headline: 'Follow-up already planned', reason: 'We will recheck the edge.', customerAction: STOCK },
+    ...extra,
+  });
+  const lawn = (reportV2) => ({ ...BASE_DATA, serviceLine: 'lawn', typedReport: null, reportV2 });
+  const text = (data) => render(<ServiceReportDocument data={data} token="tok123" />).container.textContent;
+
+  it('with a lead: status detail is lead.why, bullets are headline + what we saw, no What Waves did, no stock no-action line', () => {
+    const out = text(lawn(lawnV2({ lead: { headline: 'Stable', why: 'The edge is the main driver.', applied: null, yourPart: [], next: null } })));
+    expect(out).toContain('The edge is the main driver.');
+    expect(out).not.toContain('Snapshot root cause sentence.');
+    expect(out).toContain('Weed pressure is climbing');
+    expect(out).toContain('Weeds compete with the turf.');
+    // why it matters prints for needs_attention only
+    expect(out).toContain('Weeds spread fastest in thin turf.');
+    expect(out).not.toContain('Catching them early helps.');
+    expect(out).toContain('Some stress patterns in the turf.');
+    expect(out).not.toContain('Spot-treated the weeds.');
+    expect(out).not.toContain('Documented the areas.');
+    expect(out).not.toContain(STOCK);
+    // the follow-up section itself still prints
+    expect(out).toContain('Follow-up already planned');
+    expect(out).toContain('We will recheck the edge.');
+  });
+
+  it('with a lead, a real follow-up task still prints in the recommendations list', () => {
+    const out = text(lawn(lawnV2({ lead: { headline: 'Stable', why: null, applied: null, yourPart: [], next: null }, followUp: { scheduled: true, headline: 'Follow-up already planned', reason: 'We will recheck.', customerAction: 'Mark the sprinkler head near the fence.' } })));
+    expect(out).toContain('Mark the sprinkler head near the fence.');
+  });
+
+  it('without a lead: legacy status detail, full bullets and the stock line are unchanged', () => {
+    const out = text(lawn(lawnV2()));
+    expect(out).toContain('Snapshot root cause sentence.');
+    expect(out).toContain('Weeds spread fastest in thin turf.');
+    expect(out).toContain('Catching them early helps.');
+    expect(out).toContain('Spot-treated the weeds.');
+    expect(out).toContain('Documented the areas.');
+    expect(out).toContain(STOCK);
+  });
+
+  it('a lead "why" the web dropped falls back to the score explanation in the PDF', () => {
+    const out = text(lawn(lawnV2({ lead: { headline: 'x', why: null, yourPart: [], next: null } })));
+    expect(out).toContain('Score explanation sentence.');
+  });
+
+  it('the mowing step still prints when the gauge line is dropped', () => {
+    const mowCard = { category: 'mowing', status: 'watch', headline: 'Lawn is being mowed a bit short', whatWeSaw: 'Height is below the band.', customerAction: 'Raise the mower one setting.' };
+    const v2 = lawnV2({ lead: { headline: 'x', why: 'Lead why.', yourPart: [], next: null }, mowing: { status: 'too_short', measuredHeightInches: 2, recommendation: null } });
+    const out = text(lawn({ ...v2, insights: [...v2.insights, mowCard] }));
+    expect(out).toContain('Raise the mower one setting.');
+  });
+
+  it('tree & shrub ignores a lead and prints the full bullets', () => {
+    const data = { ...BASE_DATA, serviceLine: 'tree_shrub', typedReport: null, reportV2: lawnV2({ lead: { headline: 'x', why: 'Lead why should not print.', yourPart: [], next: null } }) };
+    const out = text(data);
+    expect(out).not.toContain('Lead why should not print.');
+    expect(out).toContain('Snapshot root cause sentence.');
+    expect(out).toContain('Spot-treated the weeds.');
+    expect(out).toContain('Catching them early helps.');
+  });
+});
