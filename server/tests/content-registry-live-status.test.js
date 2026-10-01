@@ -582,11 +582,18 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<script type="text/template"><h1>Page not found</h1></script><!-- <h1>Not found</h1> -->')).toBe(false);
   });
   test('stays linear on malformed or unclosed tags (600 KB fetch cap)', () => {
-    for (const junk of ['<template>', '<h1>', '<h1 class="x"', '<a <b <c', '<!-- ', '</h1><title>']) {
+    for (const junk of ['<template>', '<h1>', '<h1 class="x"', '<a <b <c', '<!-- ', '</h1><title>', '<template></template>', '<h1><template></template>', '<template><template></template>']) {
       const started = Date.now();
       notFoundHeading(junk.repeat(Math.ceil(600000 / junk.length)));
       expect(Date.now() - started).toBeLessThan(500);
     }
+  });
+  test('inert markup inside a heading, and nested templates, contribute no heading text', () => {
+    expect(notFoundHeading('<h1>Waves Pest Control<template>Not found</template></h1>')).toBe(false);
+    expect(notFoundHeading('<h1>Waves<!-- Not found --> Pest Control</h1>')).toBe(false);
+    expect(notFoundHeading('<template><template></template><h1>Page not found</h1></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<h1>Page <script>x()</script>not found</h1>')).toBe(true);
+    expect(notFoundHeading('<template></template><h1>Page not found</h1>')).toBe(true);
   });
   test('matches tags case-insensitively and only the exact tag name', () => {
     expect(notFoundHeading('<H1 class="t">Page Not Found</H1>')).toBe(true);

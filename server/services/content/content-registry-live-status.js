@@ -160,21 +160,33 @@ const NON_RENDERED_TAGS = new Set(['script', 'style', 'template']);
 const TAG_NAME_RE = /<\/?([a-z][a-z0-9-]*)/y;
 const headingText = (inner) => decodeHTML(visibleText(inner)).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
 // One forward pass (every indexOf resumes past the last), so malformed or unclosed tags in a
-// 600 KB fetched page cannot make this quadratic.
+// 600 KB fetched page cannot make this quadratic. Comments and script/style/template bodies
+// (templates nest) are skipped both between and inside headings, so inert markup never
+// contributes heading text.
 function headingTexts(html) {
   const src = String(html || '');
   const lower = src.toLowerCase();
   const out = [];
   let i = 0;
   let nextGt = -1;
-  let open = null; // { name, start } of the <title>/<h1> being read
+  let open = null; // { name, parts, from } of the <title>/<h1> being read
+  const nextAt = { '<template': -1, '</template': -1 };
+  const find = (needle, from) => {
+    if (nextAt[needle] < from) nextAt[needle] = lower.indexOf(needle, from);
+    return nextAt[needle];
+  };
+  const skipTo = (lt, end) => {
+    if (open) open.parts.push(src.slice(open.from, lt));
+    i = end;
+    if (open) open.from = end;
+  };
   while (i < lower.length) {
     const lt = lower.indexOf('<', i);
     if (lt === -1) break;
     if (lower.startsWith('<!--', lt)) {
       const close = lower.indexOf('-->', lt + 4);
       if (close === -1) break;
-      i = close + 3;
+      skipTo(lt, close + 3);
       continue;
     }
     TAG_NAME_RE.lastIndex = lt;
@@ -184,15 +196,31 @@ function headingTexts(html) {
     if (nextGt === -1) break;
     const name = m[1];
     const closing = lower[lt + 1] === '/';
-    i = nextGt + 1;
+    if (!closing && name === 'template') {
+      let depth = 1;
+      let at = nextGt + 1;
+      while (depth > 0) {
+        const close = find('</template', at);
+        if (close === -1) break;
+        const inner = find('<template', at);
+        if (inner !== -1 && inner < close) { depth += 1; at = inner + 9; } else { depth -= 1; at = close + 10; }
+      }
+      if (depth > 0) break;
+      skipTo(lt, at);
+      continue;
+    }
     if (!closing && NON_RENDERED_TAGS.has(name)) {
-      const close = lower.indexOf(`</${name}`, i);
+      const close = lower.indexOf(`</${name}`, nextGt + 1);
       if (close === -1) break;
-      i = close;
-    } else if (!closing && HEADING_TAGS.has(name) && !open) {
-      open = { name, start: i };
+      skipTo(lt, close);
+      continue;
+    }
+    i = nextGt + 1;
+    if (!closing && HEADING_TAGS.has(name) && !open) {
+      open = { name, parts: [], from: i };
     } else if (closing && open && name === open.name) {
-      out.push(src.slice(open.start, lt));
+      open.parts.push(src.slice(open.from, lt));
+      out.push(open.parts.join(' '));
       open = null;
     }
   }

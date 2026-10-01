@@ -172,12 +172,15 @@ const fmtPhone = (k) => `(${k.slice(0, 3)}) ${k.slice(3, 6)}-${k.slice(6)}`;
 
 // Expanded JSON-LD wraps values as {"@value": ...} (possibly inside arrays, addresses and their
 // fields). Unwrap them all BEFORE any field is read, so a name, telephone or street given that
-// way is judged as its value, not as "[object Object]".
+// way is judged as its value, not as "[object Object]". Expanded keys are schema.org IRIs
+// ("https://schema.org/telephone"); they are read as the compact property name. A one-entry
+// array (expanded form wraps every value) is read as its entry.
+const SCHEMA_IRI_RE = /^(?:https?:\/\/schema\.org\/|schema:)/i;
 function unwrapLd(v) {
-  if (Array.isArray(v)) return v.map(unwrapLd);
+  if (Array.isArray(v)) return v.length === 1 ? unwrapLd(v[0]) : v.map(unwrapLd);
   if (v && typeof v === 'object') {
     if ('@value' in v) return unwrapLd(v['@value']);
-    return Object.fromEntries(Object.entries(v).map(([k, val]) => [k, unwrapLd(val)]));
+    return Object.fromEntries(Object.entries(v).map(([k, val]) => [k.replace(SCHEMA_IRI_RE, ''), unwrapLd(val)]));
   }
   return v;
 }
@@ -306,11 +309,19 @@ const ZIP_TAIL = '\\.?,?\\s+\\d{5}(?:-\\d{4})?\\b';
 const AMBIGUOUS_STATE_CODES = new Set(['ID', 'IN', 'OR', 'OK', 'ME', 'HI', 'OH', 'AL', 'LA', 'MS', 'CO', 'DE', 'PA']);
 const BARE_STATE_CODES = US_STATE_CODES.split('|').filter((c) => !AMBIGUOUS_STATE_CODES.has(c));
 const BARE_STATE_ALTS = [...BARE_STATE_CODES, ...BARE_STATE_CODES.map((c) => c[0] + c[1].toLowerCase())].join('|');
-const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|FLORIDA)${ZIP_TAIL}`);
+// Full state names count too ("Atlanta, Georgia 30303"), title or upper case without a comma.
+const US_STATE_NAMES = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
+  'District of Columbia', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
+  'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana',
+  'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio',
+  'Oklahoma', 'Oregon', 'Pennsylvania', 'Puerto Rico', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee',
+  'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming'];
+const STATE_NAME_ALTS = US_STATE_NAMES.flatMap((n) => [n, n.toUpperCase()]).map((n) => n.replace(/ /g, '\\s+')).join('|');
+const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|${STATE_NAME_ALTS})${ZIP_TAIL}`);
 const AMBIGUOUS_ALTS = [...AMBIGUOUS_STATE_CODES].flatMap((c) => [c, c[0] + c[1].toLowerCase()]).join('|');
 // Within 120 characters, not a word count, so long street and city names still count.
 const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s[^;!?]{1,120}?\\s(?:${AMBIGUOUS_ALTS})${ZIP_TAIL}`);
-const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|Florida)${ZIP_TAIL}`, 'i');
+const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
 // Address, conservative: a false "unverified" is fine, a false "verified" is not.

@@ -46,6 +46,17 @@ describe('classifyListing', () => {
     expect(r.nap.nap_phone).toBe('(941) 555-0142');
   });
 
+  test('expanded JSON-LD (schema.org IRI keys, @value arrays) is read like compact JSON-LD', () => {
+    const S = 'https://schema.org/';
+    const expandedLd = (phone) => ld([{ '@type': [`${S}LocalBusiness`], [`${S}name`]: [{ '@value': 'Waves Pest Control' }], [`${S}telephone`]: [{ '@value': phone }] }]);
+    const conflicting = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${expandedLd('(941) 555-0142')}`), expected);
+    expect(conflicting.status).toBe('mismatched');
+    expect(conflicting.detail.mismatches).toEqual([{ field: 'phone', expected: WAVES_LOCATIONS.map((l) => l.phone).join(' or '), seen: ['(941) 555-0142'] }]);
+    expect(classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${expandedLd(BRAND.phone)}`), expected).status).toBe('verified');
+    const addr = ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, 'schema:address': { 'schema:streetAddress': '99 Old Rd', 'schema:addressLocality': 'Tampa' } });
+    expect(classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${addr}`), expected).status).toBe('mismatched');
+  });
+
   test('mismatched structured address reports the address seen', () => {
     const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa', postalCode: '33601' } })}`), expected);
     expect(r.status).toBe('mismatched');
@@ -397,6 +408,9 @@ describe('classifyListing', () => {
       expect(text('<p>Boise, ID 83702</p>').status).toBe('unverified');
       expect(text('<p>Portland, or 97201</p>').status).toBe('unverified');
       expect(text('<p>Atlanta GA 30303</p>').status).toBe('unverified'); // unambiguous code, no comma needed
+      expect(text('<p>99 Palm Terrace, Atlanta, Georgia 30303</p>').status).toBe('unverified'); // full state name
+      expect(text('<p>Raleigh NORTH CAROLINA 27601</p>').status).toBe('unverified');
+      expect(text('<p>Brooklyn, new york 11201</p>').status).toBe('unverified');
       expect(text('<p>99 Palm Terrace Boise ID 83702</p>').status).toBe('unverified'); // house number gives context
       expect(text('<p>123 North Martin Luther King Junior Drive Boise ID 83702</p>').status).toBe('unverified');
       expect(text('<p>Order ID 12345 confirmed</p><p>Open 7 days</p>').status).toBe('verified');
