@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ATTACHMENT_HELP_TEXT,
   ATTACHMENT_VISIBILITY_TEXT,
@@ -451,7 +451,7 @@ describe("FollowupPanel send-now on combined reminders (Codex #5503 r2 P1)", () 
       "On combined reminders with 3 invoices for this customer. Combined reminders are paused.",
     );
     const dated = combinedReminderSummary({ ...customerSchedule, nextTouchAt: "2026-10-05T14:00:00Z" });
-    expect(dated).toMatch(/^On combined reminders with 3 invoices for this customer\. Next: the 60-day reminder on .+\.$/);
+    expect(dated).toMatch(/^On combined reminders with 3 invoices for this customer\. Next: the 60-day reminder on .+ ET\.$/);
     expect(combinedReminderSummary({ ...customerSchedule, invoiceCount: 1 })).toMatch(/with 1 invoice for/);
   });
 
@@ -466,6 +466,27 @@ describe("FollowupPanel send-now on combined reminders (Codex #5503 r2 P1)", () 
     expect(combinedReminderSummary(noCount)).toBe("On combined reminders for this customer. Next: the 60-day reminder.");
     expect(combinedReminderSummary({ ...noCount, invoiceCount: undefined })).not.toMatch(/undefined|null|NaN/);
     expect(followupSendNowPlan({ customerSchedule: { ...noCount, invoiceCount: 0 } }).confirmText).toMatch(/to all invoices on/);
+  });
+
+  // Codex #5503 r3 P1: the next combined touch was formatted in the BROWSER's zone; the portal is Eastern-only.
+  it("the next combined touch is shown in Eastern time, whatever the browser's zone", () => {
+    // A browser in Pacific time: any toLocaleString that does not name its zone gets the browser's.
+    const original = Date.prototype.toLocaleString;
+    const spy = vi.spyOn(Date.prototype, "toLocaleString").mockImplementation(function pacific(locales, options) {
+      return original.call(this, locales, { timeZone: "America/Los_Angeles", ...(options || {}) });
+    });
+    try {
+      // 14:00Z on 2026-10-05 is 10:00 AM EDT
+      expect(combinedReminderSummary({ ...customerSchedule, nextTouchAt: "2026-10-05T14:00:00Z" })).toBe(
+        "On combined reminders with 3 invoices for this customer. Next: the 60-day reminder on 10/5/2026, 10:00:00 AM ET.",
+      );
+      // 02:30Z on 2026-12-01 is still Nov 30 in Eastern (EST, UTC-5)
+      expect(combinedReminderSummary({ ...customerSchedule, nextTouchAt: "2026-12-01T02:30:00Z" })).toMatch(
+        /on 11\/30\/2026, 9:30:00 PM ET\.$/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("a refused action shows the server's own words, else the generic toast", () => {

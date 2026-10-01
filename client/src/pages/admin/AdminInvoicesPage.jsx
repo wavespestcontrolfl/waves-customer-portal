@@ -98,7 +98,7 @@ import {
   formatInvoiceDate,
   isInvoiceDueDateOverdue,
 } from "../../lib/invoiceDates";
-import { formatETDate } from "../../lib/timezone";
+import { formatETDate, formatETDateTime } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
@@ -9042,7 +9042,8 @@ export function combinedReminderSummary(customerSchedule) {
     : "On combined reminders for this customer.";
   if (status === "paused") return `${lead} Combined reminders are paused.`;
   if (!stepLabel) return lead;
-  const when = nextTouchAt ? ` on ${new Date(nextTouchAt).toLocaleString()}` : "";
+  // Eastern wall clock (the portal is Eastern-only), whatever zone the browser is in.
+  const when = nextTouchAt ? ` on ${formatETDateTime(nextTouchAt)} ET` : "";
   return `${lead} Next: the ${stepLabel}${when}.`;
 }
 
@@ -9178,7 +9179,7 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           {!combinedSummary && nextStep && seq.next_touch_at && seq.status === "active" && (
             <div>
               Next: <span className="font-medium">{nextStep.label}</span>on{" "}
-              {new Date(seq.next_touch_at).toLocaleString()}
+              {formatETDateTime(seq.next_touch_at)} ET
             </div>
           )}
           {seq.status === "autopay_hold" && (
@@ -9196,7 +9197,7 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           )}
           {seq.last_touch_at && (
             <div>
-              Last touch: {new Date(seq.last_touch_at).toLocaleString()}
+              Last touch: {formatETDateTime(seq.last_touch_at)} ET
             </div>
           )}
         </div>
