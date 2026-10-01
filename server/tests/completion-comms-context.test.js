@@ -551,3 +551,12 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.promptHint).toContain('rodent');
   });
 });
+
+describe('scrubCustomerText: bites without a pest word', () => {
+  const { scrubCustomerText } = require('../services/completion-comms-context');
+  test('"getting bit" is pest talk; "a bit late" is not', () => {
+    expect(scrubCustomerText('Still getting bit on the lanai in the evenings.')).toBe('Still getting bit on the lanai in the evenings.');
+    expect(scrubCustomerText('We got bit by the pool last night.')).toBe('We got bit by the pool last night.');
+    expect(scrubCustomerText('I will be a bit late today.')).toBe('');
+  });
+});

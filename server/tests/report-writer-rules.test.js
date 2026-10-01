@@ -7,6 +7,7 @@ const path = require('path');
 const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
 const {
   OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned, bookedReasonBlock,
+  groundedTimeframePhrases,
 } = require('../services/service-report/report-writer-rules');
 const { scrubCustomerText } = require('../services/completion-comms-context');
 const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
@@ -108,19 +109,22 @@ describe('prompt rewrites', () => {
     },
   );
 
-  test('the rules prompt no longer invites active ingredients, paragraphs or the coverage phrase', () => {
+  test('the rules prompt asks for the four sections, never the old one-line shape, actives or the coverage phrase', () => {
     for (const prompt of inScopePrompts) {
       expect(prompt).not.toMatch(/Use active ingredient names/);
       expect(prompt).not.toMatch(/use a supplied active ingredient/);
       expect(prompt).not.toContain('other labeled crawling pests');
-      expect(prompt).not.toContain('plain-text paragraphs');
-      expect(prompt).toContain('exactly ONE line');
+      expect(prompt).not.toContain('exactly ONE line');
+      expect(prompt).not.toContain('80–140 words');
+      expect(prompt).not.toContain('Never state a recovery or response timeframe of any kind');
+      expect(prompt).toContain('WHAT WE DID AND WHY');
+      expect(prompt).toContain("WHAT'S NEXT");
     }
   });
 
   test('the gauge rule keeps the activity level in words', () => {
     expect(OWNER_RULES).toMatch(/activity gauge's number or scale/);
-    expect(OWNER_RULES).toMatch(/activity level in words .* belongs in the paragraph/);
+    expect(OWNER_RULES).toMatch(/activity level in words .* belongs in WHAT WE FOUND/);
   });
 
   test('the owner style rules ride along with the grounding exception', () => {
@@ -454,5 +458,36 @@ describe('bookedReasonBlock', () => {
 
   test('without a scrub the reason is left out, never passed on raw', () => {
     expect(bookedReasonBlock({ customer_request: 'Gate code 4821. Ants again.', customer_request_pests: ['ants'] })).toBe('');
+  });
+});
+
+describe('four-section report: supplied timeframes and dates', () => {
+  const lines = [
+    'Non-repellent products (like what we used) work by transfer — ants may show up more for a few days as they carry it back to the colony, then drop off over about 1–2 weeks.',
+    'With gel bait, dead roaches may show up out in the open for a week or two as the colony feeds and dies off.',
+  ];
+  const allowedPhrases = groundedTimeframePhrases(lines);
+
+  test('the timeframes are the duration phrases inside the approved lines', () => {
+    expect(allowedPhrases).toEqual(['a few days', '1–2 weeks', 'a week']);
+  });
+
+  test('a supplied timeframe passes, with either dash; an invented or stretched one does not', () => {
+    expect(writerRulesRejection('Activity should drop off over about 1–2 weeks.', { allowedPhrases })).toBeNull();
+    expect(writerRulesRejection('Activity should drop off over about 1-2 weeks.', { allowedPhrases })).toBeNull();
+    expect(writerRulesRejection('Activity should drop off over about 1–2 weeks.')).toBe('timeframe');
+    expect(writerRulesRejection('Activity should drop off within 3 weeks.', { allowedPhrases })).toBe('timeframe');
+    expect(writerRulesRejection('Activity should drop off over the coming weeks.', { allowedPhrases })).toBe('timeframe');
+  });
+
+  test('the supplied reach-out date passes; the next visit date never does', () => {
+    const withDate = ['Wednesday, October 14', 'October 14'];
+    expect(writerRulesRejection('If ants are still trailing by Wednesday, October 14, let us know.', { allowedPhrases: withDate })).toBeNull();
+    expect(writerRulesRejection('If ants are still trailing by Wednesday, October 14, let us know.')).toBe('date');
+    expect(writerRulesRejection('Your next visit is on Tuesday, December 9.', { allowedPhrases: withDate })).toBe('date');
+  });
+
+  test('an allowed phrase never hides another rule', () => {
+    expect(writerRulesRejection('You may see more ants for a few days; it is safe once dry.', { allowedPhrases })).toBe('safe_word');
   });
 });

@@ -256,9 +256,9 @@ describe('buildReportCopyContext — writer rules', () => {
     knex,
   });
 
-  it('drops footage, product safety, household notes and the automatic no-activity finding; marks expectations as printed', async () => {
+  it('drops footage, product safety, household notes and the automatic no-activity finding; gives the approved wording', async () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
-    const { contextText } = await buildReportCopyContext(args(knexFor(), true));
+    const { contextText, writerAllowedPhrases } = await buildReportCopyContext(args(knexFor(), true));
     expect(contextText).toMatch(/APPLICATION DETAILS/);
     expect(contextText).toContain('selected area: Exterior perimeter');
     expect(contextText).not.toContain('treated area entered');
@@ -268,7 +268,19 @@ describe('buildReportCopyContext — writer rules', () => {
     expect(contextText).not.toContain('HOUSEHOLD NOTES');
     expect(contextText).not.toContain('No activity observed this visit');
     expect(contextText).toContain('PRIOR VISITS: this is an established customer');
-    expect(contextText).toContain('EXPECTATIONS (the report prints these lines as their own card');
+    expect(contextText).toContain('EXPECTATIONS (approved wording on what the customer may see');
+    expect(contextText).toContain('dropping off over about 1–2 weeks');
+    // This fixture's EPA number matches no approved product wording, so no
+    // HOW IT WORKS line: unmatched products fail closed.
+    expect(contextText).not.toContain('HOW IT WORKS');
+    expect(writerAllowedPhrases).toEqual(expect.arrayContaining(['a few days', '1–2 weeks']));
+  });
+
+  it('gives the writer the approved wording even while the expectations card is off', async () => {
+    delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    const { contextText } = await buildReportCopyContext(args(knexFor(), true));
+    expect(contextText).toContain('EXPECTATIONS (approved wording on what the customer may see');
+    expect(contextText).not.toContain('EXPECTATIONS (honest, deterministic facts');
   });
 
   it('keeps every block exactly as before without the rules', async () => {

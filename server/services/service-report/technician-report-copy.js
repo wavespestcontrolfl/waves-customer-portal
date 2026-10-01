@@ -177,6 +177,40 @@ const MAX_REPORT_CHARS = 1600;
 const WHAT_WE_DID_HEADER = /^\s*WHAT WE DID:?\s*$/;
 const WHAT_WE_FOUND_HEADER = /^\s*WHAT WE FOUND:?\s*$/;
 
+// The four-section report the writer produces under GATE_REPORT_WRITER_RULES
+// (owner "ok go" 2026-10-01): these titles, once each, in this order, each
+// with one to four paragraphs. Longer than the two-section paragraph, so it
+// carries its own cap.
+const FOUR_SECTION_HEADERS = Object.freeze([
+  ['whatWeFound', 'What we found', /^\s*WHAT WE FOUND:?\s*$/],
+  ['whatWeDid', 'What we did and why', /^\s*WHAT WE DID AND WHY:?\s*$/],
+  ['whatToExpect', 'What to expect', /^\s*WHAT TO EXPECT:?\s*$/],
+  ['whatsNext', 'What’s next', /^\s*WHAT['’]S NEXT:?\s*$/],
+]);
+const MAX_FOUR_SECTION_CHARS = 3200;
+const MAX_SECTION_PARAGRAPHS = 4;
+const ANY_REPORT_HEADER_RE = /^\s*WHAT (?:WE DID(?: AND WHY)?|WE FOUND|TO EXPECT|['’]S NEXT):?\s*$/;
+
+function parseFourSections(text) {
+  const lines = text.split(/\r?\n/);
+  const starts = FOUR_SECTION_HEADERS.map(([, , header]) => lines.findIndex((line) => header.test(line)));
+  if (starts.some((index) => index === -1)) return null;
+  if (starts.some((index, i) => i > 0 && index <= starts[i - 1])) return null;
+  // Free text above the report is not reviewed customer copy.
+  if (contentLines(lines.slice(0, starts[0])).length) return null;
+  const sections = FOUR_SECTION_HEADERS.map(([key, title], i) => ({
+    key,
+    title,
+    paragraphs: contentLines(lines.slice(starts[i] + 1, i + 1 < starts.length ? starts[i + 1] : lines.length)),
+  }));
+  // Every section says something, within the paragraph cap, and a repeated
+  // or two-section title inside a section rejects the parse.
+  if (sections.some((section) => !section.paragraphs.length
+    || section.paragraphs.length > MAX_SECTION_PARAGRAPHS
+    || section.paragraphs.some((paragraph) => ANY_REPORT_HEADER_RE.test(paragraph)))) return null;
+  return sections;
+}
+
 function contentLines(lines) {
   return lines
     .map((line) => String(line).replace(/\s+/g, ' ').trim())
@@ -199,7 +233,25 @@ const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['
 
 function technicianReportCustomerCopy(notes) {
   const text = String(notes || '');
-  if (!text.trim() || text.length > MAX_REPORT_CHARS) return null;
+  if (!text.trim()) return null;
+
+  // Four-section report: the same screens over the joined text; `sections`
+  // keeps the titles for surfaces that render them.
+  const fourSections = text.length <= MAX_FOUR_SECTION_CHARS ? parseFourSections(text) : null;
+  if (fourSections) {
+    const body = fourSections.map((section) => section.paragraphs.join(' ')).join(' ').trim();
+    const violations = customerCopyViolations(body);
+    const sectionText = (key) => fourSections.find((section) => section.key === key).paragraphs.join(' ');
+    return {
+      whatWeDid: sectionText('whatWeDid'),
+      whatWeFound: sectionText('whatWeFound'),
+      sections: violations.length ? null : fourSections,
+      body: violations.length ? null : body,
+      violations,
+    };
+  }
+
+  if (text.length > MAX_REPORT_CHARS) return null;
 
   const lines = text.split(/\r?\n/);
   const didIndex = lines.findIndex((line) => WHAT_WE_DID_HEADER.test(line));

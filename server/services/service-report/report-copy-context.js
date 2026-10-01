@@ -20,6 +20,7 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
 const { redactAccessCodes } = require('../context-aggregator');
+const { buildWriterRecords } = require('./report-writer-records');
 const {
   pestReportExpectationsGateOn, buildWhatToExpect, toExpectationProduct,
 } = require('./pest-report-expectations');
@@ -405,7 +406,7 @@ async function loadProductSafety(products, knex) {
   const list = Array.isArray(products) ? products : [];
   const ids = [...new Set(list.map((p) => p && p.productId).filter(Boolean))];
   const names = [...new Set(list.map((p) => cleanText(p && p.name)).filter(Boolean))];
-  const empty = { safetyFacts: [], deterministicApplications: [] };
+  const empty = { safetyFacts: [], deterministicApplications: [], writerApplications: [] };
   if (!ids.length && !names.length) return empty;
   try {
     const rows = await knex('products_catalog')
@@ -462,7 +463,31 @@ async function loadProductSafety(products, knex) {
           : null,
       }];
     });
-    return { safetyFacts, deterministicApplications };
+    // Each selected product's catalog identity with its recorded method,
+    // area and targets: the writer rules' approved wording (EXPECTATIONS,
+    // HOW IT WORKS) is chosen per application from these.
+    const writerApplications = list.flatMap((selected) => {
+      const catalog = selected?.productId
+        ? rowsById.get(String(selected.productId))
+        : rowsByName.get(cleanText(selected?.name).toLowerCase());
+      if (!catalog) return [];
+      const method = cleanText(redactAccessCodes(selected?.applicationMethod));
+      const role = [catalog.category, catalog.product_type]
+        .map((value) => DETERMINISTIC_APPLICATION_ROLES.get(cleanText(value).toLowerCase().replace(/[_-]+/g, ' ')))
+        .find(Boolean);
+      return [{
+        name: cleanText(catalog.name),
+        epaReg: cleanText(catalog.epa_reg_number) || null,
+        role: role || null,
+        method: method || null,
+        methodLabel: Object.hasOwn(DETERMINISTIC_METHOD_LABELS, method) ? DETERMINISTIC_METHOD_LABELS[method] : null,
+        applicationArea: cleanText(redactAccessCodes(selected?.applicationArea)) || null,
+        targets: Array.isArray(selected?.targets)
+          ? selected.targets.map((target) => cleanText(redactAccessCodes(target))).filter(Boolean)
+          : null,
+      }];
+    });
+    return { safetyFacts, deterministicApplications, writerApplications };
   } catch (err) {
     logger.warn(`[report-copy-context] product-safety load failed: ${err.message}`);
     return empty;
@@ -519,8 +544,13 @@ async function buildReportCopyContext({
   // GATE_REPORT_WRITER_RULES, decided by the route for writers in scope
   // (never lawn or tree/shrub/palm): no footage, no product-safety or
   // household block, no automatic no-activity prior finding, and the
-  // expectation lines marked as printed on their own.
+  // writer records (approved expectations and how-it-works wording, the
+  // next booked visit, the service type, the reach-out date).
   writerRules = false,
+  // Writer-rules inputs from the route's resolved service profile.
+  findingsType = null,
+  // 'one_time' | 're_service' | 'recurring' (null when unknown).
+  serviceKind = null,
   knex = db,
 } = {}) {
   const line = serviceLine || detectServiceLine(serviceType) || null;
@@ -732,15 +762,29 @@ async function buildReportCopyContext({
   // number until `windowClosed`. Only the product-class what-to-expect
   // lines (deterministic, not time-dependent) ground the writer; the rain
   // card stays a render-time, deterministic surface.
-  if (line === 'pest' && pestReportExpectationsGateOn()) {
+  // Under the writer rules the approved wording reaches the writer for every
+  // line it covers, whatever the expectations card's own gate says, and the
+  // screen allows exactly the timeframes and dates it supplies.
+  let writerAllowedPhrases = [];
+  if (writerRules) {
+    const records = await buildWriterRecords({
+      knex,
+      customerId,
+      scheduledServiceId,
+      serviceYmd,
+      line,
+      findingsType,
+      serviceKind,
+      applications: productEvidence.writerApplications,
+    });
+    sections.push(...records.sections);
+    writerAllowedPhrases = records.allowedPhrases;
+  } else if (line === 'pest' && pestReportExpectationsGateOn()) {
     const expectationProducts = productSafety.map(toExpectationProduct);
     const whatToExpect = buildWhatToExpect({ products: expectationProducts });
     const expectationLines = whatToExpect?.lines || [];
     if (expectationLines.length) {
-      const expectationsHeader = writerRules
-        ? 'EXPECTATIONS (the report prints these lines as their own card — never repeat them, never contradict them)'
-        : 'EXPECTATIONS (honest, deterministic facts about this treatment — reflect these, never contradict them; never promise elimination or a guarantee)';
-      sections.push(`${expectationsHeader}:\n${expectationLines.map((l) => `- ${l}`).join('\n')}`);
+      sections.push(`EXPECTATIONS (honest, deterministic facts about this treatment — reflect these, never contradict them; never promise elimination or a guarantee):\n${expectationLines.map((l) => `- ${l}`).join('\n')}`);
     }
   }
 
@@ -808,6 +852,7 @@ async function buildReportCopyContext({
     contextText,
     signals,
     deterministicApplications: productEvidence.deterministicApplications,
+    writerAllowedPhrases,
   };
 }
 
