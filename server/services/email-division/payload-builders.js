@@ -130,6 +130,15 @@ function defaultDeps() {
     isCommercialAccount: (...args) => require('../self-booking-plan-sync').isCommercialAccount(...args),
     get commercialPropertyTypes() { return require('../self-booking-plan-sync').COMMERCIAL_PROPERTY_TYPES; },
     addressKey: (...args) => require('../customer-properties').addressKey(...args),
+    // The catalog keys that are ONE residential general-pest service: the visit-facts
+    // contract's recurring-pest keys (the canonical registry of which catalog row is
+    // which service line), kept only where the canonical lane parser reads the key as
+    // pest (the membership umbrella key is not a single service).
+    get singlePestCatalogKeys() {
+      const keys = require('../../config/visit-facts-contract').VISIT_FACTS_CONTRACT.recurring_pest.catalogKeys;
+      const { copyCategoryForEstimate } = require('../estimate-followup-copy');
+      return keys.filter((key) => copyCategoryForEstimate({ service_interest: key }) === 'pest');
+    },
     scheduledServiceColumns: (...args) => require('../recurring-appointment-seeder').scheduledServiceColumns(...args),
     overlayRecurringTemplateOverrides: (...args) => require('../recurring-template-overrides').overlayRecurringTemplateOverrides(...args),
     recurringServiceAddress: (...args) => require('../booking/visit-financial-stamps').recurringServiceAddress(...args),
@@ -443,8 +452,20 @@ function activeRecurringPestPlan({ deps, record, rows }) {
 function freeReserviceEligible({ deps, record, rows }) {
   if (isCommercialPlan({ deps, record, rows })) return skip('commercial plans are not sent this residential email', 'not_residential_plan');
   const planRows = record.scheduled_service_id ? [rows.visit, rows.root] : rows.active;
-  const named = [record.service_type, ...planRows.map((row) => row?.service_type)].map(clean).filter(Boolean);
-  if (!named.length || named.some((label) => deps.copyCategoryForEstimate({ service_interest: label }) !== 'pest')) {
+  const isPestLabel = (label) => deps.copyCategoryForEstimate({ service_interest: label }) === 'pest';
+  // The catalog KEY is a row's primary identity. A row that carries a snapshot is a
+  // single pest service only when the snapshot is an allow-listed pest key AND its
+  // label (when it has one) reads as pest too; any disagreement fails closed. A row
+  // with no snapshot is judged on its label alone.
+  const rowIsSinglePest = (row) => {
+    const key = clean(row.service_key_snapshot).toLowerCase();
+    const label = clean(row.service_type);
+    if (key) return deps.singlePestCatalogKeys.includes(key) && (!label || isPestLabel(label));
+    return Boolean(label) && isPestLabel(label);
+  };
+  const recordLabel = clean(record.service_type);
+  const rowsToJudge = planRows.filter(Boolean);
+  if ((!recordLabel && !rowsToJudge.length) || (recordLabel && !isPestLabel(recordLabel)) || !rowsToJudge.every(rowIsSinglePest)) {
     return skip('the plan is not a single residential general-pest service (bundles, other lanes and unrecognised labels stay terms-neutral)', 'not_single_pest_lane');
   }
   if (!activeRecurringPestPlan({ deps, record, rows })) {
@@ -757,6 +778,20 @@ async function nextVisitStillValid(trx, deps, record, payload) {
   return null;
 }
 
+// B5's product predicate (the plan's non-repellent is Taurus SC only, a contact
+// product is recorded), re-run at the provider boundary on the plan's first two
+// visits' records and product rows, share-locked: a pest recap resubmission can
+// replace service_products after closeout, so a build-time read is not enough.
+async function planProductsStillValid(trx, deps, gate) {
+  const ids = gate.planRecordIds.slice(0, 2);
+  await trx('service_records').whereIn('id', ids).orderBy('id').forShare().select('id');
+  await trx('service_products').whereIn('service_record_id', ids).orderBy('id').forShare().select('id');
+  const plan = await whyPlanProducts({
+    record: gate.record, planRecordIds: gate.planRecordIds, conn: trx, deps,
+  });
+  return plan.skip ? { reason: VISIT_NOT_ELIGIBLE, detail: plan.reason } : null;
+}
+
 // Which once-rule (if any) a template has: per customer (B5), per customer and
 // property (B1), or per estimate (C1).
 function onceScopeFor(run) {
@@ -796,7 +831,8 @@ function ledgerGuardsFor(run, payload = {}) {
         run, conn: trx, deps, lock: true,
       });
       if (gate.skip) return { reason: VISIT_NOT_ELIGIBLE, detail: gate.reason };
-      return run.template_key === 'lc.first_visit_pest' ? nextVisitStillValid(trx, deps, gate.record, payload) : null;
+      if (run.template_key === 'lc.why_91_days') return planProductsStillValid(trx, deps, gate);
+      return nextVisitStillValid(trx, deps, gate.record, payload);
     },
   };
 }

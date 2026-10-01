@@ -984,6 +984,21 @@ describeOrSkip('email division wiring (Postgres)', () => {
       };
     }
 
+    test('B5: a pest recap swaps Taurus for another non-repellent on the plan\'s visit AFTER the build, before the provider handoff: the product predicate is re-run at the boundary, nothing sent', async () => {
+      const { visit2, report } = await whyScenario();
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: async () => {
+          await db('service_products').where({ service_record_id: visit2 }).del();
+          for (const key of ['alpine', 'talak']) await db('service_products').insert({ service_record_id: visit2, ...PRODUCTS[key], targets: [] });
+        },
+      }));
+      const run = await report(visit2);
+      expect(run.status).toBe('skipped');
+      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'visit_not_eligible' }));
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
     test('a reclaimed crashed run (REAL lc.why_91_days builder) is not skipped by its own reservation: an accepted delivery is recovered as sent, an abandoned reservation is settled and sent', async () => {
       const { customer, visit2, report } = await whyScenario();
       sendTemplate.mockImplementation(libraryLike());
@@ -1527,6 +1542,29 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const r2 = await makeVisit({ customerId: c2.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: root2 });
         expect(await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', r2, c2), deps: baseDeps({ getActivityRatingAverages: async () => cohort }) }))
           .toEqual(expect.objectContaining({ skip: true, code }));
+      });
+
+      test('the CATALOG KEY is the identity: a generic label with a termite snapshot, and any label/snapshot conflict, are skipped (fail closed); a matching pest key and label sends; no snapshot falls back to the label', async () => {
+        const techId = await makeTech();
+        const build = async ({ label, key }) => {
+          const customer = await makeCustomer();
+          await makeNextVisit(customer.id);
+          const root = await makeDoneRecurring(customer.id, { service_type: label, service_key_snapshot: key });
+          const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, serviceType: label, scheduledServiceId: root });
+          return Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+        };
+        const skipped = { skip: true, code: 'not_single_pest_lane' };
+        // A generic "Pest Control" label whose catalog key is the termite bait plan.
+        expect(await build({ label: 'Pest Control', key: 'termite_bait_quarterly' })).toEqual(expect.objectContaining(skipped));
+        expect(await build({ label: 'Pest Control', key: 'pest_termite_bait_quarterly' })).toEqual(expect.objectContaining(skipped));
+        // A pest label against a non-pest key, and a pest key against a non-pest label: conflicts.
+        expect(await build({ label: 'Quarterly Pest Control Service', key: 'lawn_care_quarterly' })).toEqual(expect.objectContaining(skipped));
+        expect(await build({ label: 'Lawn Care Service', key: 'pest_general_quarterly' })).toEqual(expect.objectContaining(skipped));
+        // The membership umbrella key is not a single pest service.
+        expect(await build({ label: 'Quarterly Pest Control Service', key: 'waveguard_membership' })).toEqual(expect.objectContaining(skipped));
+        // Agreement sends; no snapshot is the label alone (as before).
+        expect((await build({ label: 'Pest Control', key: 'pest_general_quarterly' })).ok).toBe(true);
+        expect((await build({ label: 'Quarterly Pest Control Service', key: null })).ok).toBe(true);
       });
 
       test('a cancelled (or lapsed) series is not an ACTIVE plan: a cancelled recurring root plus a separately booked future pest visit is no B1', async () => {
