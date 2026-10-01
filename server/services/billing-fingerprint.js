@@ -6,7 +6,7 @@
 // / policy, the re-service handoff) before Twilio. Repeating the full recheck at the provider boundary would need a second pool
 // connection while the handoff holds one (a pool of 2 can deadlock). Instead the fingerprint of every row the recheck reads is taken
 // BEFORE that recheck, and re-read at the boundary in ONE query on the handoff's own connection: any change in between (a payment
-// landing, an invoice settling or being withdrawn, a plan, a payer assignment) refuses the send as RETRYABLE - the retry reruns the
+// landing, an invoice settling or being withdrawn, a plan, a payer assignment, account credit that would cover it) refuses the send as RETRYABLE - the retry reruns the
 // full recheck on the new state. Content-based (md5 of the rows), so a write that does not bump updated_at still counts.
 const db = require('../models/db');
 
@@ -21,7 +21,7 @@ const BILLING_FINGERPRINT_SQL = `SELECT md5(concat_ws('#',
    FROM stripe_invoice_charge_attempts a JOIN invoices i ON i.id = a.invoice_id WHERE i.customer_id = ?),
   (SELECT string_agg(concat_ws('|', id, status), ',' ORDER BY id) FROM payment_plans WHERE customer_id = ?),
   (SELECT string_agg(concat_ws('|', id, payer_id), ',' ORDER BY id) FROM scheduled_services WHERE customer_id = ? AND payer_id IS NOT NULL),
-  (SELECT concat_ws('|', 'c', payer_id) FROM customers WHERE id = ?)
+  (SELECT concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit) FROM customers WHERE id = ?)
 )) AS fingerprint`;
 
 // The fingerprint string, or null when it cannot be read (callers fail closed).
@@ -41,7 +41,7 @@ async function billingFingerprint(customerId, dbh = db) {
 // Codex round-50 P1: a Zelle OFFER also depends on live Stripe state no row records - a card / ACH PaymentIntent the customer advances
 // to processing moves money without changing a hashed column. For a body offering Zelle, the PaymentIntent attached to the invoice the
 // full recheck resolved (`zelleInvoiceId`) is inspected live (Stripe only, no pool slot; the pay page's own inspect-only guard).
-function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleInvoiceId = null, getBody = null }) {
+function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleInvoiceId = null, zelleDenial = null, getBody = null }) {
   const check = async ({ dbi } = {}) => {
     const dbh = dbi || db;
     const now = fingerprint ? await billingFingerprint(customerId, dbh) : null;
@@ -53,12 +53,39 @@ function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleIn
         retryable: true,
       };
     }
-    const body = typeof getBody === 'function' ? getBody() : getBody;
-    if (!body || !require('./sms-amount-recheck').hasAffirmativeZelleMention(String(body))) return { ok: true };
-    return zelleOfferStillOpen({ customerId, zelleInvoiceId, dbh });
+    const body = String((typeof getBody === 'function' ? getBody() : getBody) || '');
+    const recheck = require('./sms-amount-recheck');
+    if (recheck.hasAffirmativeZelleMention(body)) {
+      const offer = await zelleOfferStillOpen({ customerId, zelleInvoiceId, dbh });
+      if (!offer.ok) return offer;
+    }
+    // Codex round-51 P2: a scoped DENIAL can stand on a payment in flight; that PaymentIntent's state, read BEFORE the recheck judged the
+    // denial, must be the same now (a canceled / returned intent can make Zelle available again without changing a row)
+    if (zelleDenial?.invoiceId && recheck.hasNegativeZelleAvailabilityClaim(body)) {
+      const now = await paymentIntentStateOf({ invoiceId: zelleDenial.invoiceId, customerId, dbh });
+      if (now !== zelleDenial.piState) {
+        return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: 'the payment on the invoice changed since the Zelle recheck', retryable: true };
+      }
+    }
+    return { ok: true };
   };
   check.afterMarker = check;
   return check;
+}
+
+// The live state of the PaymentIntent attached to one of the customer's invoices: 'none' (no intent), 'open' (nothing moving), 'blocked'
+// (processing / succeeded / unverifiable - the pay page's inspect-only guard), or 'unreadable' (the invoice row could not be read).
+async function paymentIntentStateOf({ invoiceId, customerId, dbh = db }) {
+  let invoice;
+  try {
+    invoice = await dbh('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'stripe_payment_intent_id');
+  } catch {
+    return 'unreadable';
+  }
+  if (!invoice || String(invoice.customer_id) !== String(customerId)) return 'unreadable';
+  if (!invoice.stripe_payment_intent_id) return 'none';
+  const verdict = await require('./prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly: true }).catch(() => ({ ok: false }));
+  return verdict.ok ? 'open' : 'blocked';
 }
 
 async function zelleOfferStillOpen({ customerId, zelleInvoiceId, dbh }) {
@@ -75,4 +102,4 @@ async function zelleOfferStillOpen({ customerId, zelleInvoiceId, dbh }) {
   return verdict.ok ? { ok: true } : refuse('a card / bank payment on the invoice is in flight or unverifiable');
 }
 
-module.exports = { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL };
+module.exports = { billingFingerprint, billingUnchangedProviderPreSendCheck, paymentIntentStateOf, BILLING_FINGERPRINT_SQL };

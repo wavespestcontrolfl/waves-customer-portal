@@ -230,7 +230,7 @@ describe('scheduled replies: billing fingerprint before the recheck, checked aga
     recheck.outgoingAmountsStale.mockReset().mockImplementation(async () => { order.push('recheck'); return { stale: false, zelleInvoiceId: 'inv-9' }; });
     const verdict = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'You can Zelle us at pay@example.com.' }, claimMeta });
     expect(order).toEqual(['fingerprint', 'recheck']);
-    expect(verdict).toEqual({ stale: false, reason: null, boundary: { customerId: 'c1', fingerprint: 'fp-1', zelleInvoiceId: 'inv-9' } });
+    expect(verdict).toEqual({ stale: false, reason: null, boundary: { customerId: 'c1', fingerprint: 'fp-1', zelleInvoiceId: 'inv-9', zelleDenial: null } });
     delete db.raw;
   });
   test('the replay composes the billing boundary check after the ETA one', () => {

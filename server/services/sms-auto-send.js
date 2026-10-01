@@ -793,7 +793,7 @@ function reserviceBookedHandoffCheck({ claim, reply, customerId }) {
 }
 
 /** The lane-specific sendCustomerMessage input for a claimed reply. */
-function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint = undefined }) {
+function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint = undefined, zelleDenial = null }) {
   const parkedIds = claim.parkedIds || [];
   const laneFields = gratitudeLane ? {
     providerPreSendCheck: checkHandoff,
@@ -832,7 +832,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
         // Codex round-49 P1: a billing reply's rows must be exactly as they were before its recheck (one read on the handoff connection)
         billingFingerprint !== undefined
-          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelleInvoiceId: claim.zelleInvoiceId || null, getBody: () => reply })
+          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelleInvoiceId: claim.zelleInvoiceId || null, zelleDenial, getBody: () => reply })
           : undefined,
         laneFields.providerPreSendCheck,
       );
@@ -867,6 +867,8 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
 // BILLING rechecks of an auto-send reply (PR #5331): Zelle offer, Zelle denial, payment status. Returns null when the reply may go
 // on, else { reason, note } - the caller marks it not sent and reopens the suggestion with that note.
 async function autoSendBillingRecheck({ claim, reply, customerId, inboundMessage }) {
+  // a denial that stands carries its invoice + PaymentIntent baseline to the provider-boundary check (Codex round-51 P2)
+  let zelleDenial = null;
   // Zelle send-time recheck (pre-push audit P1, finding 2; widened round 3,
   // finding 1): autoSendReadiness's hasPriceQuote check (3.7) refuses any
   // reply with a dollar figure before the claim, but a "You can Zelle to X"
@@ -919,6 +921,7 @@ async function autoSendBillingRecheck({ claim, reply, customerId, inboundMessage
       logger.warn(`[sms-auto-send] Zelle denial stale (decision ${claim.decisionId}): ${denial.reason}`);
       return { reason: denial.reason, note: 'Auto-send held: Zelle availability changed since the draft — suggestion reopened.' };
     }
+    zelleDenial = denial.zelleDenial || null;
   }
   // PAYMENT STATUS recheck (owner ruling 2026-10-01): (3.7) above refuses any DOLLAR-bearing reply before the claim, but a status
   // sentence with no figure ("Your account has no balance due.") clears that guard and would reach the provider unchecked.
@@ -939,7 +942,7 @@ async function autoSendBillingRecheck({ claim, reply, customerId, inboundMessage
       return { reason: statusReason, note: 'Auto-send held: a payment status statement is no longer accurate — suggestion reopened.' };
     }
   }
-  return null;
+  return zelleDenial ? { zelleDenial } : null;
 }
 
 /**
@@ -1065,7 +1068,7 @@ async function dispatchClaimedSend({
       ? await require('./billing-fingerprint').billingFingerprint(customerId)
       : undefined;
     const billingHold = await autoSendBillingRecheck({ claim, reply, customerId, inboundMessage });
-    if (billingHold) {
+    if (billingHold?.reason) {
       logger.warn(`[sms-auto-send] billing recheck held (decision ${claim.decisionId}): ${billingHold.reason}`);
       const outcome = await notSent(billingHold.reason);
       await reopenParked(billingHold.note);
@@ -1087,7 +1090,7 @@ async function dispatchClaimedSend({
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
-    result = await sendCustomerMessage(autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint }));
+    result = await sendCustomerMessage(autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint, zelleDenial: billingHold?.zelleDenial || null }));
   } catch (err) {
     if (!isRealProviderSend(err?.providerOutcome) && !isAmbiguousProviderOutcome(err?.providerOutcome)) {
       const outcome = await notSent('send_error', `send threw: ${err.message}`);

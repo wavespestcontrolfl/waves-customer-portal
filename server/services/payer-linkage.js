@@ -62,7 +62,8 @@ async function loadPayerLinkage(customerId, dbh = db) {
     // combined-visit invoice keeps payer_id NULL, so an id-only test let
     // its failed attempts and receipts read as the homeowner's own.
     .where(function payerOwned() {
-      this.whereNotNull('payer_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
+      // Codex round-51 P2: a statement-accrued child (payer_statement_id, payer_id NULL) is the payer's too
+      this.whereNotNull('payer_id').orWhereNotNull('payer_statement_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
     })
     .select('id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
     .catch(() => { failed = true; return []; });

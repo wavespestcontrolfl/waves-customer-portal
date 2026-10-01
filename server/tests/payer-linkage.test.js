@@ -41,12 +41,13 @@ describe('isPayerLinked recognizes every linkage', () => {
 });
 
 describe('the payer-invoice lookup includes the WITHDRAWAL stamp (payer_billed:), not only payer_id', () => {
-  test('query shape: customer-scoped, payer_id NOT NULL OR scheduled_send_error LIKE payer_billed:%, selects the four linkage columns', async () => {
+  test('query shape: customer-scoped, payer_id NOT NULL OR payer_statement_id NOT NULL OR scheduled_send_error LIKE payer_billed:%, selects the four linkage columns', async () => {
     const calls = [];
     const q = {};
     q.where = jest.fn((arg) => { calls.push(['where', typeof arg === 'function' ? 'fn' : arg]); if (typeof arg === 'function') arg.call(q); return q; });
     q.whereNotNull = jest.fn((c) => { calls.push(['whereNotNull', c]); return q; });
     q.orWhere = jest.fn((...a) => { calls.push(['orWhere', ...a]); return q; });
+    q.orWhereNotNull = jest.fn((c) => { calls.push(['orWhereNotNull', c]); return q; });
     q.select = jest.fn((...c) => { calls.push(['select', ...c]); return q; });
     q.catch = jest.fn(() => Promise.resolve([PAYER_INV]));
     const dbh = jest.fn(() => q);
@@ -54,13 +55,15 @@ describe('the payer-invoice lookup includes the WITHDRAWAL stamp (payer_billed:)
     expect(out.failed).toBe(false);
     expect(calls).toEqual([
       ['where', { customer_id: 'c1' }], ['where', 'fn'], ['whereNotNull', 'payer_id'],
+      // Codex round-51 P2: a statement-accrued child is payer-owned too
+      ['orWhereNotNull', 'payer_statement_id'],
       ['orWhere', 'scheduled_send_error', 'like', 'payer_billed:%'],
       ['select', 'id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number'],
     ]);
     expect(out.isPayerLinked({ metadata: { invoice_id: PAYER_INV.id } })).toBe(true);
   });
   test('a failed lookup is reported (ownership UNKNOWN)', async () => {
-    const q = { where: jest.fn(() => q), whereNotNull: jest.fn(() => q), orWhere: jest.fn(() => q), select: jest.fn(() => q), catch: (h) => Promise.resolve(h(new Error('down'))) };
+    const q = { where: jest.fn(() => q), whereNotNull: jest.fn(() => q), orWhereNotNull: jest.fn(() => q), orWhere: jest.fn(() => q), select: jest.fn(() => q), catch: (h) => Promise.resolve(h(new Error('down'))) };
     const out = await loadPayerLinkage('c1', jest.fn(() => q));
     expect(out.failed).toBe(true);
     expect(out.payerInvRows).toEqual([]);
@@ -79,7 +82,7 @@ describe('loadLivePayerLinkage is bounded', () => {
   const chain = (reads) => {
     const q = {};
     q.calls = [];
-    for (const m of ['where', 'whereNull', 'whereNotNull', 'orWhere', 'select', 'orderBy', 'whereRaw']) q[m] = jest.fn((...a) => { if (typeof a[0] === 'function') a[0].call(q); return q; });
+    for (const m of ['where', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'orWhere', 'select', 'orderBy', 'whereRaw']) q[m] = jest.fn((...a) => { if (typeof a[0] === 'function') a[0].call(q); return q; });
     q.limit = jest.fn((n) => { q.limitedTo = n; return q; });
     q.catch = jest.fn(() => Promise.resolve(reads.shift() ?? []));
     return q;

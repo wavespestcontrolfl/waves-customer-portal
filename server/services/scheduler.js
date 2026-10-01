@@ -49,7 +49,7 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
     const fingerprint = args.customerId ? await require('./billing-fingerprint').billingFingerprint(args.customerId) : null;
     const verdict = await recheck.outgoingAmountsStale(args);
     if (verdict.stale) return { stale: true, reason: verdict.reason || 'amount_recheck_failed' };
-    return { stale: false, reason: null, boundary: { customerId: args.customerId, fingerprint, zelleInvoiceId: verdict.zelleInvoiceId || null } };
+    return { stale: false, reason: null, boundary: { customerId: args.customerId, fingerprint, zelleInvoiceId: verdict.zelleInvoiceId || null, zelleDenial: verdict.zelleDenial || null } };
   } catch (err) {
     logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
     return { stale: true, reason: 'amount_recheck_failed' };

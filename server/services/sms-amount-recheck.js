@@ -122,17 +122,34 @@ function hasNegativeZelleAvailabilityClaim(body) {
 function zelleClauseTexts(body) {
   const text = String(body || '');
   const clauses = text.split(CLAUSE_SPLIT_RE);
-  const offers = clauses.filter((clause) => classifyZelleClause(clause) === 'offer');
-  const denials = clauses.filter((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause));
+  const kindOf = (clause) => {
+    if (classifyZelleClause(clause) === 'offer') return 'offer';
+    if (ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause)) return 'denial';
+    return null;
+  };
+  const kinds = clauses.map(kindOf);
   // Codex round-46 P1: the transfer instruction or invoice reference can sit in a clause that never says "Zelle" ("We take Zelle.
-  // Send it to pay@x.com for invoice WPC-2026-0002."): every non-denial clause carrying one belongs to the offer, so the retarget
-  // check sees the invoice the instruction names. An unrelated invoice reference makes the target ambiguous: held, never guessed.
+  // Send it to pay@x.com for invoice WPC-2026-0002."). A transfer INSTRUCTION always belongs to the offer. Codex round-51 P2: a
+  // reference-only clause belongs to the NEAREST Zelle clause before it (else after it), offer or denial - "Zelle isn't available for
+  // your invoice. Regarding invoice #0002." scopes the denial to #0002 - so each claim's own target is checked, never the other's.
   const { explicitInvoiceReference } = require('./zelle-target-invoice');
-  const attached = clauses.filter((clause) => !ZELLE_WORD_RE.test(clause)
-    && (isTransferInstructionClause(clause) || explicitInvoiceReference(clause)));
+  const nearestKind = (i) => {
+    for (let j = i - 1; j >= 0; j -= 1) if (kinds[j]) return kinds[j];
+    for (let j = i + 1; j < kinds.length; j += 1) if (kinds[j]) return kinds[j];
+    return 'offer';
+  };
+  const offers = [];
+  const denials = [];
+  clauses.forEach((clause, i) => {
+    if (kinds[i] === 'offer') offers.push(clause);
+    else if (kinds[i] === 'denial') denials.push(clause);
+    else if (!ZELLE_WORD_RE.test(clause) && isTransferInstructionClause(clause)) offers.push(clause);
+    else if (!ZELLE_WORD_RE.test(clause) && explicitInvoiceReference(clause)) (nearestKind(i) === 'denial' ? denials : offers).push(clause);
+  });
   // the cross-clause case (Zelle affirmed in one clause, the transfer instruction in another) has no single offer clause
-  const offerText = offers.length ? [...offers, ...attached].join(' ') : (hasAffirmativeZelleMention(text) ? text : '');
-  return { offerText, denialText: denials.join(' ') };
+  const hasOfferClause = kinds.includes('offer');
+  const offerText = hasOfferClause ? offers.join(' ') : (hasAffirmativeZelleMention(text) ? text : '');
+  return { offerText, denialText: kinds.includes('denial') ? denials.join(' ') : '' };
 }
 function hasAffirmativeZelleMention(body) {
   const clauses = String(body || '').split(CLAUSE_SPLIT_RE);
@@ -308,11 +325,15 @@ async function zelleDenialVerdict({ ctx, customerId, body, inboundMessage, dbh }
     // denying — so a denial is blocked.
     return target.reason === 'no_open_invoice' ? { stale: false } : { stale: true, reason: 'zelle_target_ambiguous' };
   }
+  // Codex round-51 P2: the invoice's PaymentIntent state BEFORE the eligibility read - the provider-boundary check refuses if it differs
+  // at send (a canceled / returned intent can make Zelle available without changing a row)
+  const piState = await require('./billing-fingerprint').paymentIntentStateOf({ invoiceId: target.invoiceId, customerId, dbh });
   const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: target.invoiceId, dbh });
   if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
   // an UNVERIFIABLE state (lookup failed, payer or credit state unknown) is not a confirmed "ineligible" —
   // the denial can't be confirmed, so block (Codex round-21 P2); only confirmed reasons let it stand
-  return ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason) ? { stale: true, reason: eligibility.reason } : { stale: false };
+  if (ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason)) return { stale: true, reason: eligibility.reason };
+  return { stale: false, zelleDenial: { invoiceId: target.invoiceId, piState } };
 }
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
@@ -411,7 +432,8 @@ async function zelleClaimsStale({ customerId, text, zelleInvoiceId, inboundMessa
   const target = offer ? { zelleInvoiceId: offer.target } : null;
   if (!denialText) return target;
   const denial = await zelleDenialStale({ customerId, dbh, inboundMessage, body: denialText });
-  return denial.stale ? denial : target;
+  if (denial.stale) return denial;
+  return denial.zelleDenial ? { ...(target || {}), zelleDenial: denial.zelleDenial } : target;
 }
 
 // OWNED AMOUNTS - the figures outside any copied payment-status sentence. Price grammar the numeric extractor cannot verify ("fifty
@@ -457,7 +479,12 @@ async function outgoingAmountsStale({
   if (zelle?.stale) return zelle;
   const verdict = await statusAndAmountsStale({ customerId, text, promptVersion, inboundMessage, paymentStatusSnapshot, humanEditedBody, trustOwedAmounts, dbh });
   // a passing verdict names the Zelle invoice the offer was checked against (for the provider-boundary check)
-  return !verdict.stale && zelle?.zelleInvoiceId ? { ...verdict, zelleInvoiceId: zelle.zelleInvoiceId } : verdict;
+  if (verdict.stale || !zelle) return verdict;
+  return {
+    ...verdict,
+    ...(zelle.zelleInvoiceId ? { zelleInvoiceId: zelle.zelleInvoiceId } : {}),
+    ...(zelle.zelleDenial ? { zelleDenial: zelle.zelleDenial } : {}),
+  };
 }
 
 async function statusAndAmountsStale({ customerId, text, promptVersion, inboundMessage, paymentStatusSnapshot, humanEditedBody, trustOwedAmounts, dbh }) {

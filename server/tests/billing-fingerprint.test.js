@@ -5,7 +5,7 @@
 jest.mock('../models/db', () => jest.fn());
 const mockGuard = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/prepaid-pi-guard', () => ({ guardOpenPaymentIntentForPrepaid: (...a) => mockGuard(...a) }));
-const { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL } = require('../services/billing-fingerprint');
+const { billingFingerprint, billingUnchangedProviderPreSendCheck, paymentIntentStateOf, BILLING_FINGERPRINT_SQL } = require('../services/billing-fingerprint');
 
 describe('billingFingerprint', () => {
   test('one content hash over every row the recheck reads: payments, invoices, plans, payer assignments', () => {
@@ -66,5 +66,40 @@ describe('a Zelle offer at the provider boundary: the invoice\'s PaymentIntent i
     await expect(offer()({ dbi: dbiWith('abc', { ...INV, customer_id: 'c2' }) })).resolves.toMatchObject({ ok: false });
     await expect(offer({ getBody: () => 'Your account balance is $95.00.' })({ dbi: dbiWith('abc', INV) })).resolves.toEqual({ ok: true });
     expect(mockGuard).toHaveBeenCalledTimes(0);
+  });
+});
+
+// Codex round-51 P1: account credit that would cover the invoice changes Zelle visibility - it is billing state too
+test('the fingerprint hashes the customer\'s account credit and auto-apply setting', () => {
+  expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit) FROM customers WHERE id = ?");
+});
+
+// Codex round-51 P2: a scoped Zelle DENIAL can stand on a payment in flight; its PaymentIntent state is re-read at the boundary
+describe('a Zelle denial at the provider boundary: the PaymentIntent baseline must still hold', () => {
+  const INV = { id: 'inv-1', customer_id: 'c1', stripe_payment_intent_id: 'pi_1' };
+  const dbiWith = (invoice) => {
+    const dbi = jest.fn(() => ({ where: () => ({ first: async () => invoice }) }));
+    dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] });
+    return dbi;
+  };
+  const denial = (piState, body = "Zelle isn't available for your invoice right now.") => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleDenial: { invoiceId: 'inv-1', piState }, getBody: () => body });
+  afterEach(() => { mockGuard.mockReset(); mockGuard.mockResolvedValue({ ok: true }); });
+  test('the payment was in flight at the recheck and still is => ok; it was canceled since (now open) => refused, retryable', async () => {
+    mockGuard.mockResolvedValue({ ok: false });
+    await expect(denial('blocked')({ dbi: dbiWith(INV) })).resolves.toEqual({ ok: true });
+    mockGuard.mockResolvedValue({ ok: true });
+    await expect(denial('blocked')({ dbi: dbiWith(INV) })).resolves.toMatchObject({ ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', retryable: true });
+  });
+  test('an intent attached since the recheck, or an unreadable invoice, refuses; a body with no denial never re-reads', async () => {
+    await expect(denial('none')({ dbi: dbiWith(INV) })).resolves.toMatchObject({ ok: false });
+    await expect(denial('none')({ dbi: dbiWith(null) })).resolves.toMatchObject({ ok: false });
+    await expect(denial('blocked', 'Your account balance is $95.00.')({ dbi: dbiWith(INV) })).resolves.toEqual({ ok: true });
+  });
+  test('paymentIntentStateOf: none / open / blocked / unreadable', async () => {
+    await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c1', dbh: dbiWith({ ...INV, stripe_payment_intent_id: null }) })).resolves.toBe('none');
+    await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c1', dbh: dbiWith(INV) })).resolves.toBe('open');
+    mockGuard.mockResolvedValue({ ok: false });
+    await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c1', dbh: dbiWith(INV) })).resolves.toBe('blocked');
+    await expect(paymentIntentStateOf({ invoiceId: 'inv-1', customerId: 'c2', dbh: dbiWith(INV) })).resolves.toBe('unreadable');
   });
 });

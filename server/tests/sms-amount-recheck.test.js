@@ -512,6 +512,19 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     expect(t.offerText).not.toContain('0001');
     expect(t.denialText).toContain('0001');
   });
+  // Codex round-51 P2: a reference-only clause belongs to the NEAREST Zelle clause - a denial keeps its own target too
+  test('a reference-only clause after a denial scopes the DENIAL; after an offer, the offer', () => {
+    const { zelleClauseTexts } = require('../services/sms-amount-recheck');
+    const d = zelleClauseTexts("Zelle isn't available for your invoice. Regarding invoice #0002.");
+    expect(d.denialText).toContain('#0002');
+    expect(d.offerText).toBe('');
+    const o = zelleClauseTexts('You can use Zelle. Invoice WPC-2026-0002 is the one to pay.');
+    expect(o.offerText).toContain('WPC-2026-0002');
+    expect(o.denialText).toBe('');
+    const both = zelleClauseTexts("Zelle isn't available for invoice WPC-2026-0001. You can Zelle invoice WPC-2026-0002.");
+    expect(both.denialText).not.toContain('0002');
+    expect(both.offerText).not.toContain('0001');
+  });
   test.each(['You can use Zelle.', 'Zelle is available for your account.', 'Yes, Zelle is on for this invoice.', 'Zelle is accepted here: pay@example.com'])('and affirmative wording stays an offer: %s', (d) => {
     expect(hasAffirmativeZelleMention(d)).toBe(true);
   });
@@ -522,7 +535,7 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     const body = 'Zelle is disabled for this account right now.';
     await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', piState: 'none' } });
   });
 
   test('detected as denials (not offers); the scheduler prescreen sends them to the recheck', () => {
@@ -551,8 +564,8 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false });
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for this account right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', piState: 'none' } });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for this account right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', piState: 'none' } });
   });
 
   // Codex round-44 (older thread, judged on 9f0f509): an unreadable billing leaves the open-invoice list EMPTY, which must not read as a
@@ -611,7 +624,7 @@ describe('negative Zelle availability claims are revalidated before sending', ()
         expect(out.stale).toBe(true);
         expect(out.reason).toMatch(/^(?:payer_unverifiable|credit_unverifiable|zelle_recheck_failed)$/);
       } else {
-        expect(out).toEqual({ stale: false });
+        expect(out).toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', piState: 'none' } });
       }
     },
   );
