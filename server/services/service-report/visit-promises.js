@@ -32,7 +32,9 @@ const MAX_LISTED_PROMISES = 10;
 const MARKS = Object.freeze(['done', 'partly', 'not_yet']);
 const MAX_MARKS = 50;
 const MAX_STILL_LEFT_CHARS = 200;
-const MAX_DESCRIPTION_CHARS = 300;
+// The ledger's own cap on a promise's wording: the card shows the whole
+// promise the tech closes, never a cut (Codex #5516).
+const MAX_DESCRIPTION_CHARS = 2000;
 const MAX_HUMAN_NOTE_CHARS = 2000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const VERSION_RE = /^[0-9a-f]{16}$/;

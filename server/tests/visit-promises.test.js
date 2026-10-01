@@ -88,6 +88,16 @@ describe('the promises listed', () => {
     expect(SmsActions.listSmsCommitments).not.toHaveBeenCalled();
   });
 
+  test('a long promise is listed in full: the tech sees everything Done would close', async () => {
+    const long = `Check under the dishwasher, ${'and every cabinet along that wall, '.repeat(15)}then the sink.`;
+    CallCommitments.listOpenCommitments.mockResolvedValue([{ ...CALL_ROW, description: long }]);
+    SmsActions.listSmsCommitments.mockResolvedValue([]);
+    const { promises } = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
+    expect(long.length).toBeGreaterThan(300);
+    expect(promises[0].description).toBe(long);
+    expect(promises[0].version).toBe(V(long));
+  });
+
   test('the card lists the newest ten', async () => {
     CallCommitments.listOpenCommitments.mockResolvedValue(Array.from({ length: 14 }, (_, i) => ({
       ...CALL_ROW, id: ID(100 + i), call_started_at: `2026-09-${String(10 + i).padStart(2, '0')}T12:00:00Z`,
