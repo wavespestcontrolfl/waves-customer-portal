@@ -38,8 +38,11 @@
 // here; template with no active version; active body that already carries
 // the sentence (idempotent re-run, or an admin added it by hand); active
 // body whose pricing sentence was edited away (no safe splice point — add
-// the sentence from the document library). A version whose body already
-// equals the spliced text is reused rather than duplicated.
+// the sentence from the document library). A version that already equals
+// the spliced result in full (body AND title, disclosure, variables,
+// required fields) is reused rather than duplicated; a body-equal row with
+// different metadata is not — a fresh version copying the active
+// metadata is inserted instead.
 //
 // Termite and commercial templates are deliberately NOT touched: termite
 // renewal fees are fixed in the contract (Rule 5E-14.105, F.A.C.) and the
@@ -92,6 +95,27 @@ function jsonColumn(value, fallback) {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
+function parseJsonValue(value) {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+function sameJson(a, b) {
+  return JSON.stringify(parseJsonValue(a) ?? null) === JSON.stringify(parseJsonValue(b) ?? null);
+}
+
+// A version is reused only when it is the spliced ACTIVE version in full —
+// body AND signature metadata. Body-equal alone could activate a draft or
+// historical row whose title, disclosure, variables, or required fields
+// differ from the live agreement's (pre-push Codex P1).
+function isCanonicalSplice(version, active, splicedBody) {
+  return version.body === splicedBody
+    && version.title === active.title
+    && (version.signer_disclosure || null) === (active.signer_disclosure || null)
+    && sameJson(version.variables, active.variables)
+    && sameJson(version.required_fields, active.required_fields);
+}
+
 exports.up = async function up(knex) {
   const hasTemplates = await knex.schema.hasTable('document_templates');
   const hasVersions = await knex.schema.hasTable('document_template_versions');
@@ -115,7 +139,7 @@ exports.up = async function up(knex) {
     const versions = await knex('document_template_versions')
       .where({ template_id: template.id })
       .orderBy('version_number', 'asc');
-    let next = versions.find((v) => v.body === spliced.body) || null;
+    let next = versions.find((v) => isCanonicalSplice(v, active, spliced.body)) || null;
     if (!next) {
       const nextNumber = Math.max(0, ...versions.map((v) => Number(v.version_number) || 0)) + 1;
       [next] = await knex('document_template_versions').insert({

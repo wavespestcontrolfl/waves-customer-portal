@@ -359,7 +359,7 @@ describeOrSkip('20260930213000_residential_agreements_rate_review_sentence — r
     expect((await db('document_templates').where({ id: lawn.id }).first()).active_version_id).toBeNull();
   });
 
-  test('reuses a version whose body already equals the spliced text instead of inserting a duplicate', async () => {
+  test('reuses a version whose body AND signature metadata already equal the spliced result instead of inserting a duplicate', async () => {
     const { db } = fixture;
     await seedAll(db);
     const lawn = await db('document_templates').where({ template_key: LAWN_KEY }).first();
@@ -384,6 +384,42 @@ describeOrSkip('20260930213000_residential_agreements_rate_review_sentence — r
     const live = await activeVersionFor(db, LAWN_KEY);
     expect(live.active_version_id).toBe(draft.id);
     expect(live.published_at).not.toBeNull();
+  });
+
+  test('does not reuse a body-equal draft whose signature metadata differs — a fresh version copying the active metadata is inserted (pre-push Codex P1)', async () => {
+    const { db } = fixture;
+    await seedAll(db);
+    const lawn = await db('document_templates').where({ template_key: LAWN_KEY }).first();
+    const [v1] = await versionsFor(db, LAWN_KEY);
+    const target = migration.TARGETS.find((t) => t.template_key === LAWN_KEY);
+    const splicedBody = migration.spliceRateReviewSentence(v1.body, target.anchor).body;
+    // Same body, but a draft title, a different disclosure, and no required fields.
+    const [draft] = await db('document_template_versions').insert({
+      template_id: lawn.id,
+      version_number: 2,
+      title: 'DRAFT — do not send',
+      body: splicedBody,
+      signer_disclosure: 'Draft disclosure',
+      variables: JSON.stringify(v1.variables),
+      required_fields: JSON.stringify([]),
+      published_at: null,
+    }).returning('*');
+
+    await migration.up(db);
+
+    const versions = await versionsFor(db, LAWN_KEY);
+    expect(versions).toHaveLength(3);
+    const v3 = versions[2];
+    expect(v3.version_number).toBe(3);
+    expect(v3.body).toBe(splicedBody);
+    expect(v3.title).toBe(v1.title);
+    expect(v3.signer_disclosure).toBe(v1.signer_disclosure);
+    expect(v3.variables).toEqual(v1.variables);
+    expect(v3.required_fields).toEqual(v1.required_fields);
+    const live = await activeVersionFor(db, LAWN_KEY);
+    expect(live.active_version_id).toBe(v3.id);
+    // The mismatched draft is left exactly as it was: unpublished, not active.
+    expect(await db('document_template_versions').where({ id: draft.id }).first()).toEqual(draft);
   });
 
   test('down() is a documented no-op: the pointer stays on version 2 and every row stays', async () => {
