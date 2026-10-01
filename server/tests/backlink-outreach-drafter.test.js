@@ -219,6 +219,23 @@ describe('cited-page pitches', () => {
     expect(citedPagesFor({ target_domain: 'floridist.com' }, new Map())).toEqual([]);
   });
 
+  test('the pitch evidence lists only the hire questions, even when other questions sort first', () => {
+    const page = citedPage({ questions: [
+      { id: 'Q3', query: 'How much does pest control cost?', engines: ['claude'], provider: false, current: true },
+      { id: 'Q1', query: 'Who is the best pest control company in Sarasota FL?', engines: ['perplexity'], provider: true },
+    ] });
+    const text = buildUserPrompt(cited, worker.businessProfile(), null, null, page);
+    expect(text).toContain('Who is the best pest control company in Sarasota FL?');
+    expect(text).not.toContain('How much does pest control cost?');
+  });
+
+  test('a PDF cited page is not read as a page (text null)', async () => {
+    const { fetchPageText } = require('../services/seo/contact-finder');
+    const fetchFn = jest.fn(async () => ({ ok: true, status: 200, headers: { get: (n) => (n === 'content-type' ? 'application/pdf' : null) }, body: null, text: async () => `%PDF-1.7 ${'x'.repeat(2000)}` }));
+    const page = await fetchPageText('https://8.8.8.8/list.pdf', { fetchFn, withText: true });
+    expect(page && page.text).toBeNull();
+  });
+
   test('the prompt carries the page, its questions and engines, and only the approved Waves facts', () => {
     const text = buildUserPrompt(cited, worker.businessProfile(), null, null, citedPage());
     expect(text).toMatch(/CITED PAGE/);

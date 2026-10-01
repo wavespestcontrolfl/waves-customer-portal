@@ -234,7 +234,8 @@ async function pickCitedPage(candidates, fetchPageFn) {
 
 function citedPageBlock(cited) {
   if (!cited) return [];
-  const questions = (cited.questions || []).slice(0, MAX_CITED_QUESTIONS)
+  // only the "who should I hire" questions: they are why this page qualifies
+  const questions = (cited.questions || []).filter((q) => q.provider).slice(0, MAX_CITED_QUESTIONS)
     .map((q) => `  - "${q.query}" (${(q.engines || []).join(', ')})${q.miss ? ' — the current answer does not name Waves' : ''}`);
   return [
     '',

@@ -368,8 +368,8 @@ function tallyAnswers(rows, cites) {
 const RECHECK_VERDICTS = Object.freeze([
   ['too_early', ({ daysLive, current }) => daysLive < RECHECK_SETTLE_DAYS || current.answers === 0],
   ['named_when_cited', ({ current }) => current.namedWhenCiting > 0],
-  // only when every current engine answered: a failed or unresolved current
-  // probe may still cite the page, so loss is never declared over it
+  // only when every engine that cited the page has a measured current answer:
+  // an unresolved one may still cite it, so loss is never declared over it
   ['page_not_cited_now', ({ current, unresolved }) => current.citingPage === 0 && unresolved === 0],
   ['not_named_yet', () => true],
 ]);
@@ -410,7 +410,13 @@ function recheckPlacements(placements, rows, { now = new Date(), currentSurfaces
       after: tallyAnswers(since.filter((r) => r.measured), cites),
       current: tallyAnswers(since.filter((r) => r.measured && currentIds.has(r.id)), cites),
     };
-    const unresolved = since.filter((r) => !r.measured && currentIds.has(r.id)).length;
+    // every question and engine that cited the page before the link went live
+    // must have a measured current answer before loss can be declared: a
+    // failed newest probe, or no answer at all in the window, is unresolved
+    const pairOf = (r) => `${r.query}::${r.llm_platform}`;
+    const expected = new Set(asked.filter((r) => r.measured && r.date < liveOn && cites(r)).map(pairOf));
+    const answered = new Set(since.filter((r) => r.measured && currentIds.has(r.id)).map(pairOf));
+    const unresolved = [...expected].filter((k) => !answered.has(k)).length;
     const daysLive = daysBetween(liveOn, today);
     const [verdict] = RECHECK_VERDICTS.find(([, test]) => test({ daysLive, current: tallies.current, unresolved }));
     out.push({ prospectId: pl.id, host, liveOn, daysLive, page: liveKey, questions: [...questions].sort(), ...tallies, unresolved, verdict });

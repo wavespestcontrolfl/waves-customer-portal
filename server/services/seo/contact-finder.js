@@ -357,7 +357,8 @@ async function findContact(domain, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TI
  */
 // `withText` also returns the whole visible text (`text`), not only the
 // 400-character snippet — and `text: null` when the body was cut short (size
-// cap / early close), so a caller never reads a partial page as complete —
+// cap / early close) or is not HTML, so a caller never reads a partial page or
+// a binary document as a complete page —
 // plus `finalUrl`, the page the redirects actually ended on.
 async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, withText = false } = {}) {
   const page = await fetchPage(url, { fetchFn, timeoutMs });
@@ -372,7 +373,9 @@ async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIM
   // entities decoded (&nbsp;, &#32;, &amp; …) so the text reads as displayed
   const text = decodeHTML(stripped).replace(/\s+/g, ' ').trim();
   const out = { title, snippet: text.slice(0, 400) || null };
-  if (withText) Object.assign(out, { text: page.truncated ? null : text, finalUrl: page.finalUrl || null });
+  // a PDF, image or other explicitly non-HTML body was not read as a page
+  const readAsHtml = !page.contentType || /html/i.test(page.contentType);
+  if (withText) Object.assign(out, { text: page.truncated || !readAsHtml ? null : text, finalUrl: page.finalUrl || null });
   return out;
 }
 

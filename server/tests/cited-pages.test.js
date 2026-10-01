@@ -249,6 +249,7 @@ describe('recheckPlacements', () => {
   test('loss is never declared while another current engine\'s newest probe is unresolved', () => {
     const rows = [
       row({ query: Q1, date: '2026-09-25', urls: [PAGE] }),
+      row({ query: Q1, platform: 'claude', model: 'claude', date: '2026-09-25', urls: [PAGE] }),
       row({ query: Q1, date: '2026-10-18', urls: ['https://www.yelp.com/x'] }),
       row({ query: Q1, platform: 'claude', model: 'claude', date: '2026-10-18', answered: false }),
     ];
@@ -256,9 +257,19 @@ describe('recheckPlacements', () => {
     expect(r).toMatchObject({ unresolved: 1, verdict: 'not_named_yet' });
   });
 
+  test('an engine that cited the page but logged no answer since is unresolved, not lost', () => {
+    const rows = [
+      row({ query: Q1, date: '2026-09-25', urls: [PAGE] }),
+      row({ query: Q1, platform: 'claude', model: 'claude', date: '2026-09-25', urls: [PAGE] }),
+      row({ query: Q1, date: '2026-10-18', urls: ['https://www.yelp.com/x'] }), // claude: no row since
+    ];
+    const [r] = recheckPlacements([placement()], rows, { now: NOW });
+    expect(r).toMatchObject({ unresolved: 1, verdict: 'not_named_yet' });
+  });
+
   test('an answer older than the dashboard window is history, not current', () => {
     const rows = [
-      row({ query: Q1, date: '2026-07-01', urls: [PAGE] }),
+      row({ query: Q1, platform: 'claude', model: 'claude-old', date: '2026-07-01', urls: [PAGE] }),
       row({ query: Q1, platform: 'claude', model: 'claude-old', date: '2026-07-20', urls: [PAGE], named: true }),
       row({ query: Q1, platform: 'claude', model: 'claude-new', date: '2026-10-18', urls: ['https://www.yelp.com/x'] }),
     ];
