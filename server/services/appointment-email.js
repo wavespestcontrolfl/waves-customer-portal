@@ -338,6 +338,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
       await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
       return { ok: false, held: true, reason: 'move_hold' };
     }
+    let abortedBy = null;
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey,
@@ -355,14 +356,20 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         // that gap must still abort. onQueued resolving false aborts
         // PRE-dispatch; moveHoldLive fails closed internally, so a read
         // error holds rather than sends.
-        ...(moveHoldServiceId ? { onQueued: async () => !(await moveHoldLive(moveHoldServiceId, renderedSlotMs)) } : {}),
+        // Street-level address hold boundary re-check (owner ruling 2026-10-01): a promotion that commits
+        // during the library's own awaits still holds the send; the predicate fails closed.
+        onQueued: async () => {
+          if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
+          if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
+          return true;
+        },
       });
       // An onQueued abort is a HELD outcome, not a delivery failure: stop
       // the fan-out (the hold covers the visit) and let the caller defer.
-      if (moveHoldServiceId && result?.aborted) {
-        logger.info(`[appointment-email] ${eventType} for ${moveHoldServiceId} held at the dispatch boundary — grouped move in progress`);
-        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
-        return { ok: false, held: true, reason: 'move_hold' };
+      if (result?.aborted && abortedBy) {
+        logger.info(`[appointment-email] ${eventType} for ${holdVisitId} held at the dispatch boundary — ${abortedBy}`);
+        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: abortedBy, metadata });
+        return { ok: false, held: true, reason: abortedBy };
       }
       outcomes.push(result);
       if (!result.deduped) {

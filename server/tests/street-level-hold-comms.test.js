@@ -155,3 +155,46 @@ describe('the appointment email sender holds it too', () => {
     expect(s.slice(at, at + 300)).not.toContain('callLeadFormAddressStreetLevelLive');
   });
 });
+
+describe('the provider-handoff boundary re-checks the hold (a promotion committing mid-flight still holds the send)', () => {
+  test('SMS: not a hold at step 6.35, a hold by the provider\'s preSendCheck -> blocked there, nothing dialed', async () => {
+    isStreetLevelHoldVisit.mockResolvedValueOnce(false).mockResolvedValue(true);
+    sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+      const verdict = await hooks.preSendCheck();
+      if (!verdict.ok) return { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent' };
+      return { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+    });
+    const result = await sendCustomerMessage({ ...base, ...notices['a reschedule notice'] });
+    expect(isStreetLevelHoldVisit).toHaveBeenCalledTimes(2);
+    expect(result.sent).toBe(false);
+    expect(result.code === 'STREET_LEVEL_HOLD' || result.deliveryOutcome === 'not_sent').toBe(true);
+  });
+
+  test('email: the library\'s onQueued hook aborts a send whose visit became a hold, and the fan-out reports held', () => {
+    const s = fs.readFileSync(require.resolve('../services/appointment-email.js'), 'utf8');
+    const hook = s.indexOf("abortedBy = 'street_level_hold'; return false;");
+    expect(hook).toBeGreaterThan(s.indexOf('onQueued: async () => {'));
+    expect(s).toContain("if (result?.aborted && abortedBy) {");
+    expect(s).toContain("return { ok: false, held: true, reason: abortedBy };");
+  });
+});
+
+describe('the prep guide sender carries the visit so the shared send step applies', () => {
+  test('SMS passes metadata.scheduled_service_id; the visit email aborts in onQueued while the visit is a hold', () => {
+    const s = fs.readFileSync(require.resolve('../services/prep-guide-sender.js'), 'utf8');
+    expect(s).toContain('...(visitId ? { scheduled_service_id: visitId } : {}),');
+    expect(s).toContain('visitId: visit?.id || null, ...smsPlan,');
+    expect(s).toContain('if (visit?.id && await isStreetLevelHoldVisit(visit.id)) return false;');
+  });
+  test('a prep SMS for a held visit is held by the sender (metadata.scheduled_service_id), a visit-less guide is not', async () => {
+    isStreetLevelHoldVisit.mockResolvedValue(true);
+    const held = await sendCustomerMessage({
+      to: '+19415550142', channel: 'sms', audience: 'customer', customerId: 'cust-1', purpose: 'appointment',
+      body: 'How to prepare.', metadata: { scheduled_service_id: 'visit-3', original_message_type: 'prep_info' },
+    });
+    expect(held).toMatchObject({ sent: false, code: 'STREET_LEVEL_HOLD' });
+    isStreetLevelHoldVisit.mockClear();
+    await sendCustomerMessage({ to: '+19415550142', channel: 'sms', audience: 'customer', customerId: 'cust-1', purpose: 'appointment', body: 'x', metadata: { original_message_type: 'prep_info' } });
+    expect(isStreetLevelHoldVisit).not.toHaveBeenCalled();
+  });
+});

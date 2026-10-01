@@ -1133,6 +1133,14 @@ async function sendCustomerMessageCore(input) {
         'move_hold_boundary',
       );
     }
+    // Street-level address hold boundary re-check: a promotion that commits during the provider's
+    // own awaits must still hold the send (the same retryable deferral as the move hold).
+    if (await streetLevelHoldBlocksSend(sendInput)) {
+      return rememberBoundaryBlock(
+        { ok: false, code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason, retryable: true },
+        'street_level_hold_boundary',
+      );
+    }
     // callback_number_needed boundary re-check (codex round-6 P1): step
     // 6.45 ran before preDispatchCheck and the provider's own async
     // preparation — a hold committed in between (the call pipeline's
