@@ -1343,6 +1343,24 @@ describe('extraction compat adapter', () => {
     expect(flatView(v2).definite_commitment).toBeNull();
   });
 
+  test('flatView secondary_contacts_consent_signature is order-stable over every entry (schema 1.21.0)', () => {
+    const v2 = validPersisted();
+    expect(flatView(v2).secondary_contacts_consent_signature).toBe('');
+    const entry = (role, texts, onSite, name) => ({
+      name_full: name, first_name: name, last_name: null, phone_e164: '+15550100123', email: null,
+      role, wants_notifications: true, wants_appointment_texts: texts, on_site: onSite,
+    });
+    v2.secondary_contacts = [entry('spouse_partner', true, true, 'Sample'), entry('tenant', true, false, 'Other'), entry('lender', false, false, 'Third')];
+    expect(flatView(v2).secondary_contacts_consent_signature).toBe('spouse_partner:1:1|tenant:1:0|lender:0:0');
+    // Absent flags (older rows) read as 0.
+    delete v2.secondary_contacts[1].on_site;
+    delete v2.secondary_contacts[1].wants_appointment_texts;
+    expect(flatView(v2).secondary_contacts_consent_signature).toBe('spouse_partner:1:1|tenant:0:0|lender:0:0');
+    // Flat singleton mirrors.
+    v2.secondary_contact = v2.secondary_contacts[0];
+    expect(flatView(v2)).toMatchObject({ secondary_wants_appointment_texts: true, secondary_on_site: true });
+  });
+
   test('flatView preserves _v2 reference', () => {
     const v2 = validPersisted();
     const flat = flatView(v2);

@@ -2665,8 +2665,15 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
   const v1 = (extracted.secondary_contact && typeof extracted.secondary_contact === 'object')
     ? extracted.secondary_contact
     : null;
-  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
-  if (!v1 || !v2) return v1 || v2;
+  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact, { evidence: v2Extraction?.evidence });
+  // V1 has no evidence contract: its on-site consent flags can NEVER authorize
+  // the stamp on their own (owner 2026-09-30 audit). Only a valid V2
+  // extraction's evidence-pinned flags can — a V1-only (or V1-unmerged)
+  // contact therefore always leaves here with both flags false.
+  const withoutGrounding = (c) => ((c && (c.wants_appointment_texts === true || c.on_site === true))
+    ? { ...c, wants_appointment_texts: false, on_site: false }
+    : c);
+  if (!v1 || !v2) return v1 ? withoutGrounding(v1) : v2;
 
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
   const norm = (v) => String(v || '').trim().toLowerCase();
@@ -2676,7 +2683,7 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // Same first name is NOT the same person when the surnames disagree —
     // without this, "Joe Smith" (V1) could inherit "Joe Jones"'s (V2) phone.
     || (v1.last_name && v2.last_name && norm(v1.last_name) !== norm(v2.last_name));
-  if (conflicts) return v1;
+  if (conflicts) return withoutGrounding(v1);
 
   // POSITIVE same-person evidence (shared email, phone, or full name). The
   // conflict check above only proves the two extractions do not DISAGREE —
@@ -2688,25 +2695,22 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
     || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
       && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name));
-  // On-site text consent (wants_appointment_texts + on_site) is each
-  // extractor's statement about ITS OWN person, so a flag may only authorize
-  // the merged phone when that phone is the flagging extractor's own, or the
-  // two are positively the same person. Otherwise a name-only V1 "he'll be
-  // there, text him" would authorize texting whatever number V2 attached to a
-  // possibly different contact (pre-push codex P1) — and the mirror: a V2 flag
-  // must never authorize V1's phone.
-  // The merged phone is V1's when V1 has one, else V2's.
-  const v1GroundingCarries = !!v1.phone || samePerson;
+  // On-site text consent (wants_appointment_texts + on_site) comes ONLY from
+  // the valid V2 extraction (V1 true never carries, however it agrees): V2's
+  // flags are evidence-pinned and verified against the transcript downstream
+  // (verifyOnSiteGrounding). A V2 flag is that extractor's statement about ITS
+  // OWN person, so it may only authorize the merged phone when that phone is
+  // V2's own (V1 has none) or the two are positively the same person —
+  // otherwise it would authorize texting V1's different number (pre-push
+  // codex P1s on #5467). It is also bound to the role V2 itself assigned: a
+  // merged role (V1's unless 'unknown', else V2's) must never pair with V2's
+  // flags to pass onSiteNotifyConsent ("V2 says spouse_partner, V1 says
+  // lender" is not an on-site spouse).
   const v2GroundingCarries = !v1.phone || samePerson;
-  // ...and the flags are bound to the ROLE the same extractor assigned: a
-  // merged role (V1's unless 'unknown', else V2's) must never pair with the
-  // other extractor's flags to pass onSiteNotifyConsent — "V2 says
-  // spouse_partner, V1 says lender but 'text him'" is not an on-site spouse
-  // (pre-push codex P1, round 7). A flag carries only when its own
-  // extractor's role is an on-site role.
   const onSiteRole = (r) => ON_SITE_NOTIFY_ROLES.has(String(r || '').trim().toLowerCase());
-  const grounded = (field) => (v1[field] === true && v1GroundingCarries && onSiteRole(v1.role))
-    || (v2[field] === true && v2GroundingCarries && onSiteRole(v2.role));
+  const grounded = (field) => v2[field] === true && v2GroundingCarries && onSiteRole(v2.role);
+  const textsGrounded = grounded('wants_appointment_texts');
+  const onSiteGrounded = grounded('on_site');
 
   return {
     first_name: v1.first_name || v2.first_name,
@@ -2717,12 +2721,15 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
-    // Appointment-text intent and on-site presence (schema 1.21.0 in V2): a
-    // flag from either extractor, gated by the carry rules above. The
-    // identity-conflict check already returned V1 unmerged for a different
-    // person, so a conflicting V2 partner's flags never arrive here.
-    wants_appointment_texts: grounded('wants_appointment_texts'),
-    on_site: grounded('on_site'),
+    // Appointment-text intent and on-site presence (schema 1.21.0): V2's flags
+    // under the carry rules above, each with the pinned caller quote that
+    // verifyOnSiteGrounding checks. The identity-conflict check already
+    // returned V1 unmerged for a different person, so a conflicting V2
+    // partner's flags never arrive here.
+    wants_appointment_texts: textsGrounded,
+    on_site: onSiteGrounded,
+    wants_appointment_texts_quote: textsGrounded ? (v2.wants_appointment_texts_quote || null) : null,
+    on_site_quote: onSiteGrounded ? (v2.on_site_quote || null) : null,
     // Billing flag: V1's own flag always stands. A V2 flag is only inherited
     // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
     // full name. The identity-conflict check above can't see this gap: if V1
@@ -2753,7 +2760,7 @@ function identityConflicts(a, b) {
 function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
   const { mapSecondaryContactsToLegacy, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
   const primary = resolveCallSecondaryContact(extracted, v2Extraction);
-  let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
+  let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts, v2Extraction?.evidence);
   // When the single-contact resolver rejected V2's person on an identity
   // conflict (V1 wins unmerged), that same person is REQUIRED to lead the V2
   // array as the mirror entry — appending it here would resurrect the
@@ -2938,16 +2945,69 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     }
     return !!wrote;
   };
+  // Consent UPGRADE for a phone already filed in a slot (owner 2026-09-30 on-site
+  // rule): an earlier pass — or an older prompt — wrote this person's phone
+  // with no stamp, and THIS call grounds their consent. Without this the dedupe
+  // below returned first, so no stamp and no opt-in claim ever followed and
+  // they never got texts (pre-push codex P1 on #5467). The stamp is
+  // ACCOUNT-WIDE, so it is only truthful when every slot phone on the row is
+  // THIS phone; any other unconsented slot phone blocks it (existing status).
+  // The UPDATE re-asserts both the unstamped state and every slot phone so a
+  // concurrent edit makes it a 0-row no-op.
+  // Returns 'upgraded', 'withheld' (another unconsented slot phone blocks the
+  // account-wide stamp — the office needs to see why) or null (nothing to do).
+  const upgradeConsentOnRecord = async () => {
+    if (!smsConsentExplicit || customer.service_contacts_consent_at) return null;
+    const phone10 = last10(contact.phone);
+    const slotPhones = SERVICE_CONTACT_SLOTS.map((s) => last10(customer[s.phone])).filter(Boolean);
+    if (!slotPhones.length) return null;
+    if (slotPhones.some((p) => p !== phone10)) return slotPhones.includes(phone10) ? 'withheld' : null;
+    let upgrade = db('customers').where({ id: customerId }).whereNull('service_contacts_consent_at');
+    for (const s of SERVICE_CONTACT_SLOTS) {
+      upgrade = upgrade.whereRaw('?? IS NOT DISTINCT FROM ?', [s.phone, customer[s.phone] ?? null]);
+    }
+    const stamp = {
+      service_contacts_consent_at: new Date(),
+      service_contacts_consent_source: smsConsentSource,
+      service_contacts_consent_text_version: 'call-2026-07-23',
+    };
+    const wrote = await upgrade.update(stamp);
+    const stampedAt = new Date();
+    if (!wrote) return null;
+    // Same post-write timeline recorder as the slot write below (stamp-only
+    // changes diff to no person event; the recorder never throws).
+    await require('./service-contact-events').recordServiceContactChanges({
+      customerId,
+      before: customer,
+      after: { ...customer, ...stamp },
+      source: 'call',
+      occurredAt: stampedAt,
+    });
+    return 'upgraded';
+  };
   if (contact.phone && knownPhones.includes(last10(contact.phone))) {
-    if (await backfillSlotRole()) return 'skipped_phone_on_record_role_backfilled';
+    const upgraded = await upgradeConsentOnRecord();
+    const backfilled = await backfillSlotRole();
+    if (upgraded === 'upgraded') return 'consent_upgraded_phone_on_record';
+    if (upgraded === 'withheld') return 'skipped_phone_on_record_consent_withheld';
+    if (backfilled) return 'skipped_phone_on_record_role_backfilled';
     return 'skipped_phone_on_record';
   }
+  // An unconsented phone never joins a STAMPED row (see the slot write below):
+  // it is WITHHELD. Decided before the cross-customer guard — a phone that will
+  // never be written must not raise a collision review card — and before
+  // dedupe, so a withheld-phone contact dedupes on what WILL be written (email,
+  // else name); otherwise every reprocess of the same call would fill another
+  // slot with the same name-only lender until the slots are full (pre-push
+  // codex P1, round 6).
+  const phoneWithheld = !!contact.phone && !smsConsentExplicit && !!customer.service_contacts_consent_at;
+  const effectivePhone = phoneWithheld ? null : contact.phone;
   // Cross-customer guard: a secondary phone that belongs to a DIFFERENT
   // existing customer must never land in this customer's fan-out slots —
   // customer B would start receiving customer A's appointment texts at
   // service_contact_authorized trust. The call site escalates this to its own
   // review flag so the office adjudicates the collision.
-  if (contact.phone) {
+  if (contact.phone && !phoneWithheld) {
     const otherCustomer = await db('customers')
       .whereNull('deleted_at')
       .whereNot('id', customerId)
@@ -2961,14 +3021,6 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // re-filed under the buyer/tenant's name and future appointment emails
   // reach it mislabeled. Email-only contacts with a known email are a no-op.
   const emailOnRecord = contact.email && knownEmails.includes(lowerEmail(contact.email));
-  // An unconsented phone never joins a STAMPED row (see phoneWithheld at the
-  // slot write below). Decide it HERE too, before dedupe: a withheld-phone
-  // contact is effectively phone-less, so it must dedupe on what WILL be
-  // written (email, else name) — otherwise every reprocess of the same call
-  // would fill another slot with the same name-only lender until the slots
-  // are full (pre-push codex P1, round 6).
-  const phoneWithheld = !!contact.phone && !smsConsentExplicit && !!customer.service_contacts_consent_at;
-  const effectivePhone = phoneWithheld ? null : contact.phone;
   if (!effectivePhone && emailOnRecord) {
     if (await backfillSlotRole()) return 'skipped_email_on_record_role_backfilled';
     return 'skipped_email_on_record';
@@ -3019,7 +3071,14 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // (codex P1). Tradeoff accepted: an admin's deliberate opt-out set while
   // the customer had zero slot contacts can be re-enabled by a later call —
   // rare, visible on the prefs UI, and strictly better than the inverse.
-  if (effectivePhone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
+  // Owner ruling 2026-09-30 ("the caller is a contact, not the recipient"):
+  // when the first slot phone is the ON-SITE contact — the person at the
+  // property who gets the appointment texts — the out-of-state caller stops
+  // receiving them (appointment_notify_primary FALSE). Their own same-call
+  // booking confirmation is a separate primary send and is unchanged. Every
+  // other first slot phone keeps the default: the caller stays in the loop.
+  const onSiteOwnsTexts = smsConsentExplicit && smsConsentSource === 'call_pipeline_onsite_contact';
+  if (effectivePhone && !hadSlotPhone) prefsToSet.appointment_notify_primary = !onSiteOwnsTexts;
   if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
     await db('notification_prefs')
@@ -3065,10 +3124,15 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       && (!SERVICE_CONTACT_SLOTS.some((s) => String(customer[s.phone] || '').trim())
         || customer.service_contacts_consent_at)) ? {
       service_contacts_consent_at: new Date(),
+      // Source/text version describe HOW the row was attested, so they are set
+      // only on a FRESH stamp. Adding an on-site contact to a row the portal
+      // already attested must not relabel that attestation as a call stamp.
       // 'call_pipeline_onsite_contact' when the on-site rule (not V2 explicit
-      // consent) authorized the stamp, so the two are distinguishable in audit.
-      service_contacts_consent_source: smsConsentSource,
-      service_contacts_consent_text_version: 'call-2026-07-23',
+      // consent) authorized a fresh stamp, so the two are distinguishable.
+      ...(customer.service_contacts_consent_at ? {} : {
+        service_contacts_consent_source: smsConsentSource,
+        service_contacts_consent_text_version: 'call-2026-07-23',
+      }),
     } : {}),
   };
   const updated = await write.update(slotWrite);
@@ -3305,17 +3369,52 @@ function onSiteNotifyConsent(contact) {
   if (!String(contact.phone || '').trim()) return false;
   return ON_SITE_NOTIFY_ROLES.has(String(contact.role || '').trim().toLowerCase());
 }
+// Evidence check for the on-site consent inputs. The flags are model-judged
+// and a schema-valid V2 response may omit evidence[] entirely, so a
+// hallucinated true/true pair must not stamp consent or fire an opt-in text.
+// Returns a COPY with wants_appointment_texts / on_site forced false unless the
+// flag's pinned quote (V2 evidence[], speaker 'caller' — see
+// extraction-compat) sits word for word inside a CALLER turn of the
+// speaker-labeled transcript (turn parsing and the short-quote rule are the
+// reschedule applier's: a quote under three words must be the whole turn, so
+// a bare "Yeah." grounds only when it is that turn). An unlabeled transcript
+// fails closed. Pure; applied once where the call's contacts are resolved.
+function verifyOnSiteGrounding(contact, transcript) {
+  if (!contact || typeof contact !== 'object') return contact;
+  const { parseTurns, turnsHolding } = require('./call-reschedule-agreement');
+  const turns = parseTurns(transcript);
+  const verified = (flag, quote) => flag === true && !!turns
+    && typeof quote === 'string' && quote.trim().length > 0
+    && turnsHolding(turns, quote, 'caller').length > 0;
+  return {
+    ...contact,
+    wants_appointment_texts: verified(contact.wants_appointment_texts, contact.wants_appointment_texts_quote),
+    on_site: verified(contact.on_site, contact.on_site_quote),
+  };
+}
 // Per-contact consent decision for the persistence loop: explicit V2 consent
 // wins (and keeps the original stamp source); otherwise the on-site rule may
 // authorize the stamp under its own source so audits can tell them apart.
-function resolveSecondaryConsent(contact, v2SmsConsentExplicit) {
+// A caller who asked not to be contacted (V2 consent.do_not_contact_request)
+// never earns the on-site stamp or its opt-in claim — the slot may still be
+// written, unstamped (owner 2026-09-30 audit).
+function resolveSecondaryConsent(contact, v2SmsConsentExplicit, { doNotContact = false } = {}) {
   if (v2SmsConsentExplicit) {
     return { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' };
   }
   return {
-    smsConsentExplicit: onSiteNotifyConsent(contact),
+    smsConsentExplicit: !doNotContact && onSiteNotifyConsent(contact),
     smsConsentSource: 'call_pipeline_onsite_contact',
   };
+}
+// Persistence order for a call's secondary contacts. The consent artifact is
+// ACCOUNT-WIDE, so with mixed per-contact consent the ORDER matters: a
+// consented on-site contact can only stamp an empty-or-stamped row, so it must
+// be written before an unconsented phone can land (which is then withheld by
+// persistCallSecondaryContact). Stable: ties keep extraction order.
+function orderSecondaryEntriesForPersistence(entries, v2SmsConsentExplicit, opts = {}) {
+  const consented = (e) => Number(resolveSecondaryConsent(e, v2SmsConsentExplicit, opts).smsConsentExplicit);
+  return [...(entries || [])].sort((a, b) => consented(b) - consented(a));
 }
 // Slot-only match gating: the number belongs to a person STORED ON this
 // account (tenant/spouse/buyer/agent). Household-type roles identify the
@@ -11366,7 +11465,13 @@ const CallRecordingProcessor = {
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
     const callAgreedPrice = resolveCallAgreedPrice(v2CanonicalExtraction);
-    const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
+    // Consent flags survive only with a pinned quote that is really in the
+    // transcript (verifyOnSiteGrounding) — before anything reads them.
+    const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction)
+      .map((c) => verifyOnSiteGrounding(c, transcription));
+    // The caller asked not to be contacted: no on-site consent stamp or opt-in
+    // claim for any contact on this call (the slot may still be written).
+    const v2DoNotContact = v2CanonicalExtraction?.consent?.do_not_contact_request === true;
     const callSecondaryContact = callSecondaryContacts[0] || null;
     // Capture the caller's email BEFORE the secondary-contact scrub below clears
     // it — payer linking (resolveCallBillingPayer) uses it to reject a billing
@@ -13126,28 +13231,42 @@ const CallRecordingProcessor = {
       // withholds their phone (see phoneWithheld there) — the stamp is never
       // cleared, on this pass or a reprocess. V2-explicit calls are unaffected
       // (every entry consents).
-      const orderedEntries = [...callSecondaryContacts].sort((a, b) =>
-        Number(resolveSecondaryConsent(b, v2SmsConsentExplicit).smsConsentExplicit)
-        - Number(resolveSecondaryConsent(a, v2SmsConsentExplicit).smsConsentExplicit));
+      const orderedEntries = orderSecondaryEntriesForPersistence(callSecondaryContacts, v2SmsConsentExplicit, { doNotContact: v2DoNotContact });
       for (const secondaryEntry of orderedEntries) {
       try {
         // On-site rule (owner 2026-09-30): consent for THIS contact is explicit
         // V2 consent OR the on-site-contact rule above; the stamp source records
         // which one authorized it.
         const { smsConsentExplicit: entryConsent, smsConsentSource } =
-          resolveSecondaryConsent(secondaryEntry, v2SmsConsentExplicit);
+          resolveSecondaryConsent(secondaryEntry, v2SmsConsentExplicit, { doNotContact: v2DoNotContact });
         const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
           smsConsentExplicit: entryConsent,
           smsConsentSource,
         });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+        if (result === 'skipped_phone_on_record_consent_withheld') {
+          // The call grounded this person's consent but the account-wide stamp
+          // can't describe another unconsented slot phone on the row — say so
+          // on the review card so the office sees why no texts will go.
+          try {
+            await db('triage_items')
+              .where({ call_log_id: call.id, reason_code: 'secondary_contact_captured' })
+              .whereIn('status', ['open', 'in_progress'])
+              .update({
+                payload: db.raw('(coalesce(payload, \'{}\'::jsonb)) || ?::jsonb', [JSON.stringify({ consent_withheld: true })]),
+                updated_at: new Date(),
+              });
+          } catch (triageErr) {
+            logger.warn(`[call-proc] consent-withheld triage update failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+          }
+        }
         // Recipient double opt-in parity with the portal flow (#2956): a
         // call-created phone recipient gets the same claim + confirmation
         // ask (dark template = nothing pends; gate off = no-op). The CLAIM
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
-        if (result === 'written' && secondaryEntry?.phone && entryConsent) {
+        if ((result === 'written' || result === 'consent_upgraded_phone_on_record') && secondaryEntry?.phone && entryConsent) {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -18968,7 +19087,7 @@ const CallRecordingProcessor = {
                       // consent artifact and filterRecipientsByOptin the opt-in state,
                       // so widening for an on-site contact (owner 2026-09-30) cannot
                       // text anyone whose slot was not stamped.
-                      const anyOnSiteConsent = callSecondaryContacts.some(onSiteNotifyConsent);
+                      const anyOnSiteConsent = !v2DoNotContact && callSecondaryContacts.some(onSiteNotifyConsent);
                       const extraContacts = (!v2SmsConsentExplicit && !anyOnSiteConsent) ? [] : (await filterRecipientsByOptin(
                         getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
                       )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
@@ -21628,7 +21747,9 @@ CallRecordingProcessor._test = {
   resolveCallBillingPayer,
   persistCallSecondaryContact,
   onSiteNotifyConsent,
+  verifyOnSiteGrounding,
   resolveSecondaryConsent,
+  orderSecondaryEntriesForPersistence,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,

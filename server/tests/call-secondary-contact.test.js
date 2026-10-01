@@ -29,10 +29,12 @@ const {
   resolveCallSecondaryContacts,
   persistCallSecondaryContact,
   onSiteNotifyConsent,
+  verifyOnSiteGrounding,
   resolveSecondaryConsent,
+  orderSecondaryEntriesForPersistence,
   validatePhoneCallAppointmentCustomer,
 } = _test;
-const { flatView, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+const { flatView, mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
 const { normalizeSecondaryContact: normalizeSecondaryContactV2 } = require('../utils/normalize-extraction-v2');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { ADVISORY_TRIAGE_FLAGS, computeDeterministicTriageFlags } = require('../services/call-triage-flags');
@@ -141,6 +143,8 @@ describe('secondary_contact V2 mapping', () => {
       wants_notifications: true,
       wants_appointment_texts: false,
       on_site: false,
+      wants_appointment_texts_quote: null,
+      on_site_quote: null,
       is_billing_party: false,
       notes: null,
     });
@@ -179,6 +183,8 @@ describe('secondary_contact V2 mapping', () => {
       wants_notifications: true,
       wants_appointment_texts: false,
       on_site: false,
+      wants_appointment_texts_quote: null,
+      on_site_quote: null,
       is_billing_party: false,
       notes: null,
     });
@@ -488,8 +494,12 @@ describe('persistCallSecondaryContact', () => {
       service_contact2_phone: '+19542901693',
       service_contact2_email: 'joseph.haught89431@gmail.com',
       service_contact2_role: 'home_buyer',
-      ...CALL_CONSENT_STAMP,
+      // Stamped row: the attestation's source and text version are KEPT (not
+      // in the write); only the timestamp refreshes.
+      service_contacts_consent_at: expect.any(Date),
     }]);
+    expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_source');
+    expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_text_version');
   });
 
   test('unconsented phone never joins a STAMPED row — phone withheld, stamp kept (#5467; supersedes codex r5 on #2948)', async () => {
@@ -958,11 +968,21 @@ describe('secondary-contact grounding fields through the compat mappers', () => 
     expect(present.on_site).toBe(true);
   });
 
-  test('resolveCallSecondaryContact keeps V1 grounding fields, and a V2-only partner WITHOUT the fields never qualifies', () => {
+  test('V1 flags alone NEVER carry (no evidence contract) — only a valid V2 extraction\'s flags do (owner 2026-09-30 audit)', () => {
     const v1 = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true });
+    // V1 + V2 without the fields: V1's true flags are dropped.
     const merged = resolveCallSecondaryContact({ secondary_contact: v1 }, { secondary_contact: v2Base });
-    expect(merged.wants_appointment_texts).toBe(true);
-    expect(merged.on_site).toBe(true);
+    expect(merged.wants_appointment_texts).toBe(false);
+    expect(merged.on_site).toBe(false);
+    // V1 only (no valid V2 extraction): fail closed.
+    const v1Only = resolveCallSecondaryContact({ secondary_contact: v1 }, null);
+    expect(v1Only.wants_appointment_texts).toBe(false);
+    expect(onSiteNotifyConsent(v1Only)).toBe(false);
+    // V1 and V2 DISAGREE (V1 true, V2 false): V2's reading wins — false.
+    expect(onSiteNotifyConsent(resolveCallSecondaryContact({ secondary_contact: v1 }, { secondary_contact: { ...v2Base, wants_appointment_texts: false, on_site: true } }))).toBe(false);
+    // V2 true, V1 silent/false: V2's flags carry on the shared phone.
+    const v2True = { ...v2Base, wants_appointment_texts: true, on_site: true };
+    expect(onSiteNotifyConsent(resolveCallSecondaryContact({ secondary_contact: { ...v1, wants_appointment_texts: false, on_site: false } }, { secondary_contact: v2True }))).toBe(true);
     const v2Only = resolveCallSecondaryContact({}, { secondary_contact: v2Base });
     expect(onSiteNotifyConsent(v2Only)).toBe(false);
   });
@@ -996,35 +1016,343 @@ describe('secondary-contact grounding fields through the compat mappers', () => 
     expect(merged.on_site).toBe(false);
     expect(onSiteNotifyConsent(merged)).toBe(false);
 
-    // Same full name on both sides = positively the same person: V2's phone
-    // may carry V1's consent.
+    // Same full name on both sides = positively the same person. V1's flags
+    // still never carry (V1 has no evidence contract); V2's own flags do.
     const v2SameName = { ...v2PhoneOnly, name_full: 'Sample Spouse', first_name: 'Sample', last_name: 'Spouse' };
     const same = resolveCallSecondaryContact({ secondary_contact: v1NoPhone }, { secondary_contact: v2SameName });
     expect(same.phone).toBe('+15550100777');
-    expect(same.wants_appointment_texts).toBe(true);
-    expect(same.on_site).toBe(true);
-    expect(onSiteNotifyConsent(same)).toBe(true);
+    expect(onSiteNotifyConsent(same)).toBe(false);
+    const sameV2Flags = resolveCallSecondaryContact({ secondary_contact: v1NoPhone }, { secondary_contact: { ...v2SameName, wants_appointment_texts: true, on_site: true } });
+    expect(onSiteNotifyConsent(sameV2Flags)).toBe(true);
   });
 });
 
+// Stateful db stub: every update merges into the one customer row, so a
+// multi-contact sequence sees the stamp a previous contact left behind.
+function statefulDb(initial) {
+  const state = { customer: { ...initial }, updates: [], collisionQueries: 0 };
+  db.mockImplementation((table) => {
+    if (table === 'customers') {
+      let isCollision = false;
+      const b = {
+        where: jest.fn((arg) => {
+          if (typeof arg === 'function') {
+            const sub = { whereNull: jest.fn(() => sub), orWhere: jest.fn(() => sub) };
+            arg(sub);
+          }
+          return b;
+        }),
+        whereNull: jest.fn(() => b),
+        whereNot: jest.fn(() => b),
+        whereRaw: jest.fn(() => { isCollision = true; return b; }),
+        first: jest.fn(async () => {
+          if (isCollision) { state.collisionQueries += 1; return null; }
+          return { ...state.customer };
+        }),
+        update: jest.fn(async (payload) => { state.updates.push(payload); Object.assign(state.customer, payload); return 1; }),
+      };
+      return b;
+    }
+    if (table === 'notification_prefs') {
+      const b = {
+        where: jest.fn(() => b),
+        first: jest.fn(async () => undefined),
+        insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ merge: jest.fn(async () => 1) })) })),
+      };
+      return b;
+    }
+    throw new Error(`unexpected table ${table}`);
+  });
+  return state;
+}
+
 // Pre-push codex P1 on #5467: the consent artifact is account-wide, so a
-// non-consented phone written AFTER the on-site contact's stamp would clear
-// it. The loop orders consented entries first and withholds a later
+// non-consented phone written AFTER the on-site contact's stamp must never
+// clear it. The loop orders consented entries first and withholds a later
 // unconsented phone from the slot (review card keeps it).
 describe('mixed per-contact consent on one call never clears the on-site stamp (#5467)', () => {
-  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-  const loopAt = src.indexOf('const orderedEntries = [...callSecondaryContacts].sort(');
-  const loop = src.slice(loopAt, loopAt + 7000);
+  const emptyRow = {
+    id: 'cust-1', phone: '+15550100999', email: null,
+    service_contact_name: null, service_contact_phone: null, service_contact_email: null,
+    service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+    service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null,
+  };
+  const lender = { first_name: 'Sample', last_name: 'Lender', phone: '+15550100444', role: 'lender', wants_notifications: true };
+  const spouse = {
+    first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner',
+    wants_notifications: true, wants_appointment_texts: true, on_site: true,
+  };
 
-  test('consented entries are persisted before unconsented ones', () => {
-    expect(loopAt).toBeGreaterThan(-1);
-    expect(loop).toContain('Number(resolveSecondaryConsent(b, v2SmsConsentExplicit).smsConsentExplicit)');
-    expect(loop).toContain('for (const secondaryEntry of orderedEntries)');
+  test('orderSecondaryEntriesForPersistence puts consented entries first, stable otherwise', () => {
+    const ordered = orderSecondaryEntriesForPersistence([lender, spouse], false);
+    expect(ordered).toEqual([spouse, lender]);
+    // V2 explicit consent: every entry consents, so extraction order stands.
+    expect(orderSecondaryEntriesForPersistence([lender, spouse], true)).toEqual([lender, spouse]);
+    expect(orderSecondaryEntriesForPersistence(null, false)).toEqual([]);
   });
 
-  test('the loop no longer clears or withholds itself — persistCallSecondaryContact owns the stamped-row rule', () => {
-    expect(loop).toContain('for (const secondaryEntry of orderedEntries)');
-    expect(loop).not.toContain('consentedPhoneWritten');
-    expect(src).not.toContain('service_contacts_consent_at: null,');
+  test('lender extracted BEFORE the on-site spouse: spouse writes with the stamp, lender phone is withheld', async () => {
+    const state = statefulDb(emptyRow);
+    const results = [];
+    for (const entry of orderSecondaryEntriesForPersistence([lender, spouse], false)) {
+      const { smsConsentExplicit, smsConsentSource } = resolveSecondaryConsent(entry, false);
+      results.push(await persistCallSecondaryContact('cust-1', entry, { smsConsentExplicit, smsConsentSource }));
+    }
+    expect(results).toEqual(['written', 'written']);
+    // Spouse first: slot 1 with phone + on-site stamp.
+    expect(state.updates[0]).toMatchObject({
+      service_contact_phone: '+15550100123',
+      service_contact_role: 'spouse_partner',
+      service_contacts_consent_source: 'call_pipeline_onsite_contact',
+    });
+    // Lender second: name lands, phone withheld, stamp never touched or cleared.
+    expect(state.updates[1]).toMatchObject({ service_contact2_name: 'Sample Lender', service_contact2_phone: null });
+    expect(state.updates[1]).not.toHaveProperty('service_contacts_consent_at');
+    expect(state.customer.service_contacts_consent_at).toBeInstanceOf(Date);
+    expect(state.customer.service_contact2_phone).toBeNull();
+  });
+
+  test('a withheld phone never raises a cross-customer collision lookup', async () => {
+    const state = statefulDb({ ...emptyRow, service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123', service_contacts_consent_at: new Date() });
+    expect(await persistCallSecondaryContact('cust-1', lender)).toBe('written');
+    expect(state.collisionQueries).toBe(0);
+    // A phone that WILL be written still gets the guard.
+    const state2 = statefulDb(emptyRow);
+    await persistCallSecondaryContact('cust-1', lender);
+    expect(state2.collisionQueries).toBe(1);
+  });
+});
+
+describe('consent upgrade for a phone already on record (#5467)', () => {
+  const spouseRow = {
+    id: 'cust-1', phone: '+15550100999', email: null,
+    service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123', service_contact_email: null,
+    service_contact_role: null,
+    service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+    service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null,
+  };
+  const spouse = {
+    first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner',
+    wants_notifications: true, wants_appointment_texts: true, on_site: true,
+  };
+  const onSite = { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' };
+
+  test('single-phone unstamped row: stamps the artifact (and backfills the role) -> consent_upgraded_phone_on_record', async () => {
+    const state = statefulDb(spouseRow);
+    expect(await persistCallSecondaryContact('cust-1', spouse, onSite)).toBe('consent_upgraded_phone_on_record');
+    expect(state.updates[0]).toEqual({
+      service_contacts_consent_at: expect.any(Date),
+      service_contacts_consent_source: 'call_pipeline_onsite_contact',
+      service_contacts_consent_text_version: 'call-2026-07-23',
+    });
+    // Role backfill still ran for the unroled slot.
+    expect(state.updates.some((u) => u.service_contact_role === 'spouse_partner')).toBe(true);
+  });
+
+  test('another UNCONSENTED slot phone on the row blocks the upgrade — existing status, no stamp', async () => {
+    const state = statefulDb({ ...spouseRow, service_contact2_name: 'Sample Lender', service_contact2_phone: '+15550100444' });
+    const status = await persistCallSecondaryContact('cust-1', spouse, onSite);
+    expect(status).toBe('skipped_phone_on_record_consent_withheld');
+    expect(state.updates.some((u) => 'service_contacts_consent_at' in u)).toBe(false);
+  });
+
+  test('already-stamped row keeps its status and artifact', async () => {
+    const stampedAt = new Date('2026-07-22T00:00:00Z');
+    const state = statefulDb({ ...spouseRow, service_contact_role: 'spouse_partner', service_contacts_consent_at: stampedAt, service_contacts_consent_source: 'portal' });
+    expect(await persistCallSecondaryContact('cust-1', spouse, onSite)).toBe('skipped_phone_on_record');
+    expect(state.updates).toEqual([]);
+  });
+
+  test('without explicit consent the on-record phone is never stamped', async () => {
+    const state = statefulDb({ ...spouseRow, service_contact_role: 'spouse_partner' });
+    expect(await persistCallSecondaryContact('cust-1', spouse)).toBe('skipped_phone_on_record');
+    expect(state.updates).toEqual([]);
+  });
+
+  test('the loop claims the opt-in on an upgrade as well as a fresh write', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain("(result === 'written' || result === 'consent_upgraded_phone_on_record') && secondaryEntry?.phone && entryConsent");
+  });
+});
+
+describe('on-site grounding must be pinned to a CALLER quote that is in the transcript (#5467)', () => {
+  const transcript = [
+    'Agent: We could put his cell phone on the account so he gets the reminders.',
+    'Caller: Yeah.',
+    'Agent: And is he going to be there for the visit?',
+    'Caller: Yes, he will be at the house all day Tuesday.',
+  ].join('\n');
+  const grounded = {
+    first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner',
+    wants_notifications: true,
+    wants_appointment_texts: true, wants_appointment_texts_quote: 'Yeah.',
+    on_site: true, on_site_quote: 'he will be at the house all day Tuesday',
+  };
+
+  test('both quotes in CALLER turns -> qualifies (a bare "Yeah" grounds only as the whole turn; punctuation/case-insensitive)', () => {
+    const v = verifyOnSiteGrounding(grounded, transcript);
+    expect(v.wants_appointment_texts).toBe(true);
+    expect(v.on_site).toBe(true);
+    expect(onSiteNotifyConsent(v)).toBe(true);
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'YEAH', on_site_quote: 'Yes, HE will be at the house' }, transcript).on_site).toBe(true);
+  });
+
+  test('missing quote -> that flag is forced false (both are required)', () => {
+    const v = verifyOnSiteGrounding({ ...grounded, on_site_quote: null }, transcript);
+    expect(v.on_site).toBe(false);
+    expect(v.wants_appointment_texts).toBe(true);
+    expect(onSiteNotifyConsent(v)).toBe(false);
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: '   ' }, transcript))).toBe(false);
+  });
+
+  test('a quote that is not in the transcript, or only in an AGENT turn, forces false', () => {
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding({ ...grounded, on_site_quote: 'he lives there full time' }, transcript))).toBe(false);
+    // Said by the agent, not the caller.
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'We could put his cell phone on the account so he gets the reminders' }, transcript))).toBe(false);
+    // A one-word quote must be the whole caller turn — "Yeah" inside a longer turn is not enough.
+    const longer = 'Agent: Text him?\nCaller: Yeah that would be fine thanks.';
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Yeah' }, longer).wants_appointment_texts).toBe(false);
+  });
+
+  test('an unlabeled or empty transcript fails closed; false flags stay false; input not mutated', () => {
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding(grounded, 'Yeah. he will be at the house all day Tuesday'))).toBe(false);
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding(grounded, null))).toBe(false);
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding(grounded, ''))).toBe(false);
+    const input = { ...grounded, on_site: false };
+    expect(verifyOnSiteGrounding(input, transcript).on_site).toBe(false);
+    expect(input.on_site).toBe(false);
+    expect(verifyOnSiteGrounding(null, transcript)).toBeNull();
+  });
+
+  const { normalizeSecondaryContact: normalizeV1 } = require('../utils/intake-normalize');
+  const v2Contact = {
+    name_full: 'Sample Spouse', first_name: 'Sample', last_name: 'Spouse', phone_e164: '+15550100123',
+    email: null, role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true,
+  };
+  const second = { ...v2Contact, name_full: 'Sample Tenant', first_name: 'Sample', last_name: 'Tenant', phone_e164: '+15550100888', role: 'tenant' };
+  const evidence = [
+    { field_path: '/secondary_contact/wants_appointment_texts', quote: 'Yeah.', speaker: 'caller' },
+    { field_path: '/secondary_contact/on_site', quote: 'he will be at the house all day Tuesday', speaker: 'caller' },
+    { field_path: '/secondary_contacts/1/on_site', quote: 'she lives in the back unit', speaker: 'caller' },
+    { field_path: '/secondary_contacts/1/wants_appointment_texts', quote: '   ', speaker: 'caller' },
+    { field_path: '/secondary_contacts/1/wants_appointment_texts', quote: 'text her too', speaker: 'agent' },
+  ];
+
+  test('V2 evidence[] pointers map to the matching contact; agent-spoken or blank quotes are not evidence', () => {
+    const single = mapSecondaryContactToLegacy(v2Contact, { evidence });
+    expect(single.wants_appointment_texts_quote).toBe('Yeah.');
+    expect(single.on_site_quote).toBe('he will be at the house all day Tuesday');
+    const list = mapSecondaryContactsToLegacy([v2Contact, second], evidence);
+    expect(list[0].on_site_quote).toBe('he will be at the house all day Tuesday');
+    expect(list[1].on_site_quote).toBe('she lives in the back unit');
+    expect(list[1].wants_appointment_texts_quote).toBeNull();
+    const alt = mapSecondaryContactToLegacy(v2Contact, { evidence: [{ field_path: 'secondary_contacts[0].on_site', quote: 'he will be at the house', speaker: 'caller' }] });
+    expect(alt.on_site_quote).toBe('he will be at the house');
+    expect(mapSecondaryContactToLegacy(second, { evidence: [{ field_path: '/secondary_contact/on_site', quote: 'x'.repeat(20), speaker: 'caller' }], index: 1 }).on_site_quote).toBeNull();
+    expect(mapSecondaryContactToLegacy(v2Contact).on_site_quote).toBeNull();
+  });
+
+  test('end to end: only V2 with caller-pinned evidence qualifies, after transcript verification', () => {
+    const merged = resolveCallSecondaryContact({}, { secondary_contact: v2Contact, evidence });
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding(merged, transcript))).toBe(true);
+    // Hallucinated flags with no evidence[] never qualify.
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding(resolveCallSecondaryContact({}, { secondary_contact: v2Contact }), transcript))).toBe(false);
+    // V1 saying yes with a V2 that has no flags: never.
+    const v1 = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true });
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding(resolveCallSecondaryContact({ secondary_contact: v1 }, null), transcript))).toBe(false);
+  });
+
+  test('entries 2+ keep their own evidence through resolveCallSecondaryContacts', () => {
+    const list = resolveCallSecondaryContacts({}, { secondary_contact: v2Contact, secondary_contacts: [v2Contact, { ...second, wants_appointment_texts: true }], evidence });
+    expect(list).toHaveLength(2);
+    expect(list[1].on_site_quote).toBe('she lives in the back unit');
+    // Entry 2's text-intent quote was blank/agent-spoken, so it can never verify.
+    expect(onSiteNotifyConsent(verifyOnSiteGrounding(list[1], `${transcript}\nCaller: she lives in the back unit`))).toBe(false);
+  });
+
+  test('the processor applies verifyOnSiteGrounding where callSecondaryContacts is built', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('resolveCallSecondaryContacts(extracted, v2CanonicalExtraction)\n      .map((c) => verifyOnSiteGrounding(c, transcription))');
+  });
+});
+
+describe('do-not-contact, notify-primary and withheld-consent rules for the on-site contact (#5467)', () => {
+  const spouse = {
+    first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner',
+    wants_notifications: true, wants_appointment_texts: true, on_site: true,
+  };
+
+  test('do_not_contact_request: no on-site consent (so no stamp and no opt-in claim); explicit V2 consent path untouched', () => {
+    expect(resolveSecondaryConsent(spouse, false, { doNotContact: true }).smsConsentExplicit).toBe(false);
+    expect(resolveSecondaryConsent(spouse, false, { doNotContact: false }).smsConsentExplicit).toBe(true);
+    expect(resolveSecondaryConsent(spouse, true, { doNotContact: true }).smsConsentExplicit).toBe(true);
+    expect(orderSecondaryEntriesForPersistence([{ ...spouse, role: 'lender', wants_appointment_texts: false }, spouse], false, { doNotContact: true }))
+      .toEqual([{ ...spouse, role: 'lender', wants_appointment_texts: false }, spouse]);
+  });
+
+  test('do_not_contact_request: the slot still writes, with no stamp', async () => {
+    const state = statefulDb({ id: 'cust-1', phone: '+15550100999', email: null,
+      service_contact_name: null, service_contact_phone: null, service_contact_email: null,
+      service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+      service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null });
+    const { smsConsentExplicit, smsConsentSource } = resolveSecondaryConsent(spouse, false, { doNotContact: true });
+    expect(await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit, smsConsentSource })).toBe('written');
+    expect(state.updates[0]).toMatchObject({ service_contact_phone: '+15550100123' });
+    expect(state.updates[0]).not.toHaveProperty('service_contacts_consent_at');
+  });
+
+  test('the loop and fan-out gate read the do-not-contact flag', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('const v2DoNotContact = v2CanonicalExtraction?.consent?.do_not_contact_request === true;');
+    expect(src).toContain('!v2DoNotContact && callSecondaryContacts.some(onSiteNotifyConsent)');
+    expect(src).toContain('{ doNotContact: v2DoNotContact }');
+  });
+
+  test('on-site contact as the first slot phone turns appointment_notify_primary OFF; any other source keeps it ON', async () => {
+    const bare = { id: 'cust-1', phone: '+15550100999', email: null,
+      service_contact_name: null, service_contact_phone: null, service_contact_email: null,
+      service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+      service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null };
+    const merges = [];
+    const withPrefsCapture = () => {
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        if (table === 'notification_prefs') {
+          const b = {
+            where: jest.fn(() => b),
+            first: jest.fn(async () => undefined),
+            insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ merge: jest.fn(async (m) => { merges.push(m); return 1; }) })) })),
+          };
+          return b;
+        }
+        return base(table);
+      });
+    };
+    statefulDb(bare); withPrefsCapture();
+    await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' });
+    expect(merges[0].appointment_notify_primary).toBe(false);
+    merges.length = 0;
+    statefulDb(bare); withPrefsCapture();
+    await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' });
+    expect(merges[0].appointment_notify_primary).toBe(true);
+    // The loop passes the on-site SOURCE even when consent is false (non-grounded contact): still ON.
+    merges.length = 0;
+    statefulDb(bare); withPrefsCapture();
+    await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: false, smsConsentSource: 'call_pipeline_onsite_contact' });
+    expect(merges[0].appointment_notify_primary).toBe(true);
+  });
+
+  test('phone on record + another unconsented slot phone: distinct withheld status (the card says why)', async () => {
+    const row = { id: 'cust-1', phone: '+15550100999', email: null,
+      service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123', service_contact_email: null, service_contact_role: 'spouse_partner',
+      service_contact2_name: 'Sample Lender', service_contact2_phone: '+15550100444', service_contact2_email: null,
+      service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null };
+    const state = statefulDb(row);
+    expect(await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' }))
+      .toBe('skipped_phone_on_record_consent_withheld');
+    expect(state.updates.some((u) => 'service_contacts_consent_at' in u)).toBe(false);
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain("result === 'skipped_phone_on_record_consent_withheld'");
+    expect(src).toContain('JSON.stringify({ consent_withheld: true })');
   });
 });

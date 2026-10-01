@@ -50,6 +50,8 @@ const FIELD_GROUPS = {
     // consent stamp for a spouse/buyer/tenant/family member, so drift must show.
     'secondary_wants_appointment_texts',
     'secondary_on_site',
+    // Same inputs for EVERY entry of secondary_contacts[] (order-stable signature).
+    'secondary_contacts_consent_signature',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -468,6 +470,8 @@ function normalizeField(field, value) {
   // (codex P2). A genuine true↔false disagreement still surfaces.
   if (field === 'agent_committed_booking' || field === 'caller_accepted_slot'
     || field === 'secondary_wants_appointment_texts' || field === 'secondary_on_site') return normalizeBool(value) === true;
+  // Absent and '' both mean "no other parties" — collapse so pre-1.21 rows don't read as drift.
+  if (field === 'secondary_contacts_consent_signature') return normalizeString(value) || '';
   if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
   return normalizeString(value);
 }

@@ -52,7 +52,7 @@ function flatView(extraction) {
   const sentiment = extraction.sentiment_and_lead || {};
   const history = extraction.customer_history || {};
   const consent = extraction.consent || {};
-  const secondary = mapSecondaryContactToLegacy(extraction.secondary_contact);
+  const secondary = mapSecondaryContactToLegacy(extraction.secondary_contact, { evidence: extraction.evidence });
 
   return {
     first_name: caller.first_name || null,
@@ -126,12 +126,18 @@ function flatView(extraction) {
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
     secondary_contact: secondary,
-    secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
+    secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence),
     // Flat mirrors of the first other party's on-site consent inputs (schema
     // 1.21.0) so replay variance watches them (FIELD_GROUPS high — they gate
     // an SMS consent stamp). False when absent, like agent_committed_booking.
     secondary_wants_appointment_texts: secondary?.wants_appointment_texts === true,
     secondary_on_site: secondary?.on_site === true,
+    // Order-stable per-contact signature over the whole secondary_contacts[]
+    // (role:text-intent:on-site, '|'-joined, '' when none) so a flag flipping
+    // on entries 2+ shows in replay variance too (FIELD_GROUPS high).
+    secondary_contacts_consent_signature: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence)
+      .map((c) => `${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`)
+      .join('|'),
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
@@ -192,7 +198,34 @@ function mapAdditionalPropertiesToLegacy(entries) {
 // contact persistence expects (same keys as the V1 extraction's
 // secondary_contact). An entry with no name, phone, or email is dropped —
 // there is nothing to persist or review without one.
-function mapSecondaryContactToLegacy(contact) {
+function secondaryEvidencePrefixes(index) {
+  if (index === null || index === undefined) return ['/secondary_contact', '/secondary_contacts/0'];
+  return index === 0 ? ['/secondary_contacts/0', '/secondary_contact'] : [`/secondary_contacts/${index}`];
+}
+
+// Pinned quote for one on-site consent field from the V2 evidence[] list. The
+// prompt writes JSON pointers (/secondary_contact/on_site,
+// /secondary_contacts/<index>/on_site); dotted and bracketed spellings are
+// tolerated. Returns the first non-empty trimmed quote, else null. A quote
+// is the proof onSiteNotifyConsent's caller verifies against the transcript.
+function secondaryEvidenceQuote(evidence, prefixes, leaf) {
+  if (!Array.isArray(evidence)) return null;
+  for (const e of evidence) {
+    const quote = typeof e?.quote === 'string' ? e.quote.trim() : '';
+    // Only the CALLER's own words can ground the caller's agreement / the
+    // statement that someone will be on site (owner 2026-09-30 audit).
+    if (!quote || e.speaker !== 'caller') continue;
+    let p = String(e.field_path || '').trim().replace(/\[(\d+)\]/g, '/$1').replace(/\./g, '/');
+    if (!p.startsWith('/')) p = `/${p}`;
+    if (prefixes.some((pre) => p === `${pre}/${leaf}`)) return quote;
+  }
+  return null;
+}
+
+// `evidence` (the extraction's evidence[]) and `index` (position in
+// secondary_contacts[], or null for the singleton secondary_contact, which
+// mirrors entry 0) locate this contact's pinned on-site quotes.
+function mapSecondaryContactToLegacy(contact, { evidence = null, index = null } = {}) {
   if (!contact || typeof contact !== 'object') return null;
   // A V2 contact can arrive with only name_full populated ("Joseph Haught"
   // unsplit) — derive first/last from it so the name survives the flat
@@ -216,6 +249,11 @@ function mapSecondaryContactToLegacy(contact) {
     // for the on-site consent rule (onSiteNotifyConsent).
     wants_appointment_texts: contact.wants_appointment_texts === true,
     on_site: contact.on_site === true,
+    // Pinned evidence quotes for those two flags (null when none): without a
+    // quote that appears in the transcript the processor ignores the flag
+    // (verifyOnSiteGrounding) — a schema-valid response may omit evidence.
+    wants_appointment_texts_quote: secondaryEvidenceQuote(evidence, secondaryEvidencePrefixes(index), 'wants_appointment_texts'),
+    on_site_quote: secondaryEvidenceQuote(evidence, secondaryEvidencePrefixes(index), 'on_site'),
     is_billing_party: contact.is_billing_party === true,
     notes: contact.notes || null,
   };
@@ -225,9 +263,11 @@ function mapSecondaryContactToLegacy(contact) {
 
 // 1.4.0 array — every entry through the same single-contact mapper; empty
 // shells drop; hard cap 3 (the slot budget).
-function mapSecondaryContactsToLegacy(list) {
+function mapSecondaryContactsToLegacy(list, evidence = null) {
   if (!Array.isArray(list)) return [];
-  return list.map(mapSecondaryContactToLegacy).filter(Boolean).slice(0, 3);
+  // The ORIGINAL index locates the evidence pointer, so map before dropping
+  // empty shells.
+  return list.map((c, i) => mapSecondaryContactToLegacy(c, { evidence, index: i })).filter(Boolean).slice(0, 3);
 }
 
 function mapServiceCategoryToLegacy(category) {
