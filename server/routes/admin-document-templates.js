@@ -469,11 +469,16 @@ router.post('/:key/contracts', async (req, res, next) => {
       const isProgramAgreement = PROGRAM_TEMPLATE_KEYS.includes(loaded.template.template_key);
       if (isProgramAgreement) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customer.id}`]);
-        // Customer row before the template and contract rows — the order
-        // every program-agreement writer holds; the cancellation event below
-        // takes the customer FK key lock (Codex #4922 r4).
-        await trx('customers').where({ id: customer.id }).forUpdate().first('id');
       }
+      // Customer row before the template and contract rows, for EVERY key —
+      // the order every program-agreement writer holds and the order the
+      // bulk send holds (assertNoRecentBulkContract locks the customer, then
+      // lockActiveVersionForIssue the template). The contract and event
+      // inserts below take the customer FK key lock (Codex #4922 r4), so a
+      // manual issue that locked the template FIRST would deadlock a bulk
+      // send of the same template that holds the customer and waits for the
+      // template (pre-push Codex P1 on d2316043f2).
+      await trx('customers').where({ id: customer.id }).forUpdate().first('id');
       // Template row lock + revalidation for EVERY template key, not only
       // the termite branch (Codex #5463 P1): `loaded` was read before this
       // transaction, so this request may have waited behind a publish, the

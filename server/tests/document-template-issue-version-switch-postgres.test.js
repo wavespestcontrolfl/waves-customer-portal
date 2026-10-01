@@ -12,7 +12,11 @@
  * inserted and sent as the OLD version — after the rollout, without the
  * disclosure. Now every key takes `lockActiveVersionForIssue` under the
  * same template-row lock the writers take, and refuses (409) when the
- * pointer or status moved.
+ * pointer or status moved — AFTER locking the customer row, the order the
+ * bulk send and every program-agreement writer hold (the contract insert's
+ * FK takes a key lock on the customer row, so template-first would deadlock
+ * a bulk send of the same template that holds the customer and waits for
+ * the template).
  *
  * The first block is pure (always runs). The second drives the REAL route
  * handler and the REAL bulk insert against PostgreSQL in a scratch schema
@@ -111,13 +115,19 @@ describe('lockActiveVersionForIssue (pure)', () => {
     expect(routeLockAt).toBeGreaterThan(issueRoute.indexOf('db.transaction(async (trx) =>'));
     expect(routeLockAt).toBeLessThan(issueRoute.indexOf(INSERT));
     expect(issueRoute.indexOf(CALL, routeLockAt + 1)).toBe(-1);
-    // Outside the termite-only branch: after the program-agreement pre-locks
-    // close and before the program-agreement supersession block reopens.
+    // Outside the termite-only branch: after the program-agreement advisory
+    // lock closes and before the program-agreement supersession block
+    // reopens — and after the customer-row lock, which is itself outside
+    // that branch (customer → template, the bulk send's order).
+    const CUSTOMER_LOCK = "await trx('customers').where({ id: customer.id }).forUpdate().first('id');";
     const firstProgramBranch = issueRoute.indexOf('if (isProgramAgreement) {');
     const secondProgramBranch = issueRoute.indexOf('if (isProgramAgreement) {', firstProgramBranch + 1);
+    const customerLockAt = issueRoute.indexOf(CUSTOMER_LOCK);
     expect(firstProgramBranch).toBeGreaterThan(-1);
     expect(secondProgramBranch).toBeGreaterThan(firstProgramBranch);
-    expect(routeLockAt).toBeGreaterThan(firstProgramBranch);
+    expect(customerLockAt).toBeGreaterThan(firstProgramBranch);
+    expect(issueRoute.indexOf(CUSTOMER_LOCK, customerLockAt + 1)).toBe(-1);
+    expect(routeLockAt).toBeGreaterThan(customerLockAt);
     expect(routeLockAt).toBeLessThan(secondProgramBranch);
 
     const bulkLockAt = bulk.indexOf(CALL);
@@ -142,7 +152,10 @@ async function createScratchDb() {
   await db.raw('CREATE SCHEMA ??', [schema]);
   // The library tables as 20260601000009 creates them (minus the technicians
   // FKs), the customer columns the issue route reads, and the contract /
-  // event / payment-method columns it writes or joins.
+  // event / payment-method columns it writes or joins — with the REAL
+  // customer and contract foreign keys (20260511000002): an insert's FK
+  // check takes a key-share lock on the customer row, which is what the
+  // lock-order test below depends on.
   await db.raw(`
     CREATE TABLE document_templates (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -189,7 +202,7 @@ async function createScratchDb() {
     );
     CREATE TABLE customer_contracts (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      customer_id uuid NOT NULL,
+      customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
       created_by uuid,
       payment_method_id uuid,
       contract_type varchar(60) NOT NULL,
@@ -211,8 +224,8 @@ async function createScratchDb() {
     );
     CREATE TABLE customer_contract_events (
       id serial PRIMARY KEY,
-      contract_id uuid NOT NULL,
-      customer_id uuid NOT NULL,
+      contract_id uuid NOT NULL REFERENCES customer_contracts(id) ON DELETE CASCADE,
+      customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
       event_type varchar(60) NOT NULL,
       actor_type varchar(30), actor_id uuid, ip text, user_agent text,
       metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -256,12 +269,12 @@ async function countRows(db, table) {
 }
 
 // Polls until the in-flight issuer has either PARKED on a lock (a backend of
-// this database waiting on a lock inside a query on the template or contract
-// table) or INSERTED a contract. `onTemplateRead` tells WHERE it parked: on
-// the revalidating `... from "document_templates" ... for update` read (the
-// fix), or only on its insert's FK check of the held template row (the
-// pre-fix route, which then inserts the stale render once the holder
-// commits).
+// this database waiting on a lock inside a query on the customer, template
+// or contract table) or INSERTED a contract. `waitingOn` tells WHERE it
+// parked: the revalidating `... from "document_templates" ... for update`
+// read (`template_read`), the customer-row lock (`customer_row`), or its
+// contract insert's own FK checks (`insert` — the pre-fix route, which then
+// inserts the stale render once the holder commits).
 async function waitForIssuer(db) {
   let inserted = 0;
   for (let i = 0; i < 400; i++) {
@@ -269,18 +282,20 @@ async function waitForIssuer(db) {
       SELECT query FROM pg_stat_activity
        WHERE datname = current_database()
          AND wait_event_type = 'Lock'
-         AND (query ILIKE '%"document_templates"%' OR query ILIKE '%"customer_contracts"%')`);
+         AND (query ILIKE '%"document_templates"%' OR query ILIKE '%"customer_contracts"%' OR query ILIKE '%"customers"%')`);
     inserted = await countRows(db, 'customer_contracts');
     if (rows.length || inserted) {
-      return {
-        parked: rows.length > 0,
-        onTemplateRead: rows.some((row) => /from "document_templates".*for update/is.test(row.query)),
-        inserted,
-      };
+      const [{ query = '' } = {}] = rows;
+      let waitingOn = null;
+      if (/from "document_templates".*for update/is.test(query)) waitingOn = 'template_read';
+      else if (/from "customers".*for update/is.test(query)) waitingOn = 'customer_row';
+      else if (/^insert into "customer_contracts"/i.test(query.trim())) waitingOn = 'insert';
+      else if (rows.length) waitingOn = 'other';
+      return { parked: rows.length > 0, waitingOn, inserted };
     }
     await new Promise((resolve) => { setTimeout(resolve, 25); });
   }
-  return { parked: false, onTemplateRead: false, inserted };
+  return { parked: false, waitingOn: null, inserted };
 }
 
 jest.setTimeout(30000);
@@ -335,7 +350,7 @@ describeOrSkip('issuing while the active version switches — real Postgres', ()
       expect(await countRows(db, 'customer_contract_events')).toBe(0);
       // Mechanism: it waited on the revalidating template-row read, not
       // merely on its insert's FK check of the held row.
-      expect(parked).toEqual({ parked: true, onTemplateRead: true, inserted: 0 });
+      expect(parked).toEqual({ parked: true, waitingOn: 'template_read', inserted: 0 });
 
       // The operator reloads and reissues: the snapshot is the NEW version.
       const [, v2] = await versionsFor(db, key);
@@ -359,7 +374,7 @@ describeOrSkip('issuing while the active version switches — real Postgres', ()
     try {
       await holder('document_templates').where({ template_key: LAWN_KEY }).forUpdate().first('id');
       pending = invokeIssue(LAWN_KEY, { customerId: customer.id, values: CONTEXT_VALUES });
-      expect(await waitForIssuer(db)).toEqual({ parked: true, onTemplateRead: true, inserted: 0 });
+      expect(await waitForIssuer(db)).toEqual({ parked: true, waitingOn: 'template_read', inserted: 0 });
       await holder.commit();
     } catch (err) {
       await holder.rollback();
@@ -371,6 +386,37 @@ describeOrSkip('issuing while the active version switches — real Postgres', ()
     expect(issued.body.contract.contractTextSnapshot).not.toContain(SENTENCE);
     expect(await countRows(db, 'customer_contracts')).toBe(1);
     expect(await db('customer_contract_events').orderBy('id').pluck('event_type')).toEqual(['created_from_document_template', 'share_link_created']);
+  });
+
+  test('lock order: a manual issue never deadlocks a writer that holds the customer row and then needs the template row (the bulk send\'s order)', async () => {
+    // The bulk send locks the customer row (assertNoRecentBulkContract),
+    // then the template row (lockActiveVersionForIssue). A manual issue
+    // that took the template row FIRST would hold it while its contract
+    // INSERT waits for the customer row (FK key share) — a cycle PostgreSQL
+    // resolves by aborting one side (pre-push Codex P1 on d2316043f2). The
+    // peer transaction replays the bulk send's two locks with a pause
+    // between them, which is the interleaving a real campaign can hit.
+    const peer = await db.transaction();
+    let pending; let parked;
+    try {
+      await peer('customers').where({ id: customer.id }).forUpdate().first('id');
+      pending = invokeIssue(LAWN_KEY, { customerId: customer.id, values: CONTEXT_VALUES });
+      parked = await waitForIssuer(db);
+      expect(parked.inserted).toBe(0);
+      // Template-first issuance deadlocks HERE (40P01 on one side or the
+      // other); customer-first issuance holds nothing the peer needs.
+      await peer('document_templates').where({ template_key: LAWN_KEY }).forUpdate().first('id');
+      await peer.commit();
+    } catch (err) {
+      await peer.rollback();
+      throw err;
+    }
+    const issued = await pending;
+    expect(issued.status).toBe(201);
+    expect(await countRows(db, 'customer_contracts')).toBe(1);
+    // Mechanism: the manual issue parked on the customer row BEFORE
+    // touching the template row.
+    expect(parked).toEqual({ parked: true, waitingOn: 'customer_row', inserted: 0 });
   });
 
   test('bulk send: a campaign that resolved the template before the rollout is refused per customer once the pointer moved, and writes nothing', async () => {
