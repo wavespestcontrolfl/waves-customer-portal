@@ -413,6 +413,28 @@ describe('current rate per billing lane', () => {
     const blankB = { id: 'b', prepay_amount: 500, coverage_visit_count: 4, coverage_service_type: null };
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application' }), planLine: perApp, liveTerms: [blankA, blankB] })).toMatchObject({ cents: 11700, source: 'visit_median', prepayTermAmbiguous: true, prepayTermMissing: false });
   });
+  test('open visits all stamped $0 are a free line when the zero is authoritative — never a fee-fallback increase', () => {
+    const zeroWithBase = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base: true });
+    const customer = fixture.customer(1, { per_application_fee: 117 });
+    expect(P.resolveCurrentRate({ customer, planLine: zeroWithBase })).toMatchObject({ cents: 0, source: 'stamped_zero', stampedZeroFree: true });
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 0, currentRateSource: 'stamped_zero', stampedZeroFree: true, rateUnit: 'application', listRateCents: 11700, listRateSource: 'engine', facts: fixture.facts() });
+    expect(row.status).toBe('skipped');
+    expect(row.flags).toEqual(expect.arrayContaining(['stamped_zero_free', 'no_current_rate']));
+    // a bare stamped 0 with no base and the stamped-zero gate off is indistinguishable from never priced → fee fallback (today's billing rule)
+    const bare = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base: false });
+    const prior = process.env.GATE_STAMPED_ZERO_FREE;
+    process.env.GATE_STAMPED_ZERO_FREE = 'false';
+    try {
+      expect(P.resolveCurrentRate({ customer, planLine: bare })).toMatchObject({ cents: 11700, source: 'per_application_fee' });
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      expect(P.resolveCurrentRate({ customer, planLine: bare })).toMatchObject({ cents: 0, source: 'stamped_zero', stampedZeroFree: true });
+    } finally {
+      if (prior === undefined) delete process.env.GATE_STAMPED_ZERO_FREE; else process.env.GATE_STAMPED_ZERO_FREE = prior;
+    }
+    // a priced median always wins over zero-stamped siblings
+    const mixed = fixture.planLine('c', 'pest_control', 'quarterly', 117, { priced_visits: 2, zero_priced_visits: 1, zero_with_base: true });
+    expect(P.resolveCurrentRate({ customer, planLine: mixed })).toMatchObject({ cents: 11700, source: 'visit_median' });
+  });
   test('per_visit and NULL lanes read the visit stamp (the exception rule flags lane_cleanup)', () => {
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_visit' }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: null }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
@@ -792,7 +814,7 @@ describe('buildBatch over the synthetic December book', () => {
       expect(snapshotReads.length).toBeGreaterThan(0);
       const priorCall = reviewed.mock.results.map((r) => r.value).find((q) => q && q.calls && q.calls.some(([name, args]) => name === 'where' && args[0] === 'batch_key' && args[1] === '>'));
       expect(priorCall).toBeDefined();
-      expect(priorCall.calls).toEqual(expect.arrayContaining([['whereNot', ['batch_key', '2027-12']], ['where', ['batch_key', '>', '2026-12']]]));
+      expect(priorCall.calls).toEqual(expect.arrayContaining([['where', ['batch_key', '<', '2027-12']], ['where', ['batch_key', '>', '2026-12']]]));
       db.mockImplementation((table) => scripted(table));
       db.raw.mockImplementation((...args) => scripted.raw(...args));
       db.transaction.mockImplementation((fn) => scripted.transaction(fn));

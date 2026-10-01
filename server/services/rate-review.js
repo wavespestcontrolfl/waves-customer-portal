@@ -77,6 +77,7 @@ const { rateReviewLive, isEnabled } = require('../config/feature-gates');
 const { resolveActualMinutes } = require('./pricing-reality-check');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
+const { hasAuthoritativeZeroPrice } = require('./billing-lane');
 
 const SNAPSHOTS = 'rate_review_snapshots';
 const BATCHES = 'rate_review_batches';
@@ -571,6 +572,7 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
   if (line.listRateSource === 'cadence_mode') flags.push('list_from_cadence_mode');
   if (line.listCadenceMismatch) flags.push('list_cadence_mismatch');
   if (line.anniversaryConflict) flags.push('anniversary_predates_portal');
+  if (line.stampedZeroFree) flags.push('stamped_zero_free');
   if (line.rphFromNotHome) flags.push('rph_from_not_home_visits');
   if (line.unknownInteractionVisits > 0) flags.push('interaction_unknown');
   if (line.capturedConversationVisits > 0) flags.push('conversation_minutes_captured');
@@ -827,7 +829,7 @@ const RECURRING_SQL = '(COALESCE(s.is_recurring, false) OR s.recurring_parent_id
 async function loadActivePlanLines(dbh, { today }) {
   const { rows } = await dbh.raw(`
     WITH ov AS (
-      SELECT s.id, s.customer_id, s.scheduled_date, s.estimated_price, s.annual_prepay_term_id, s.source_estimate_id,
+      SELECT s.id, s.customer_id, s.scheduled_date, s.estimated_price, s.primary_line_price, s.annual_prepay_term_id, s.source_estimate_id,
         COALESCE(s.service_key_snapshot, sv.service_key) AS skey, sv.visits_per_year AS cat_vpy,
         ${LINE_SQL} AS line, ${CADENCE_SQL} AS cadence
       FROM scheduled_services s
@@ -844,6 +846,8 @@ async function loadActivePlanLines(dbh, { today }) {
       min(scheduled_date) AS next_visit,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY estimated_price) FILTER (WHERE estimated_price > 0) AS median_price,
       count(estimated_price) FILTER (WHERE estimated_price > 0)::int AS priced_visits,
+      count(*) FILTER (WHERE estimated_price = 0)::int AS zero_priced_visits,
+      bool_or(estimated_price = 0 AND primary_line_price > 0) AS zero_with_base,
       bool_or(annual_prepay_term_id IS NOT NULL) AS prepay_linked,
       array_remove(array_agg(DISTINCT annual_prepay_term_id), NULL) AS prepay_term_ids,
       max(cat_vpy)::int AS catalog_vpy,
@@ -972,15 +976,16 @@ function monthKeyMinus(batchKey, months) {
 // boundary: a line reviewed in the 2026-12 batch is held out of 2027-01 …
 // 2027-11 and eligible again in 2027-12 — one review per 12 months at the
 // anniversary, never a lifetime hold because last year's batch sits exactly
-// 12 months back. Rebuilds of the same batch never count against it.
+// 12 months back. Only earlier batches count: a rebuild of this batch, or a
+// later batch that was built first, never holds a line out.
 async function loadPriorReviews(dbh, customerIds, { batchKey }) {
   if (!customerIds.length) return new Set();
   const cutoffKey = monthKeyMinus(batchKey, 12);
   const rows = await dbh(SNAPSHOTS)
     .whereIn('customer_id', customerIds)
     .whereIn('status', REVIEWED_STATUSES)
-    .whereNot('batch_key', batchKey)
     .where('batch_key', '>', cutoffKey)
+    .where('batch_key', '<', batchKey) // only EARLIER batches review a line; a later batch already built never does
     .select('customer_id', 'family_key');
   return new Set(rows.map((r) => `${r.customer_id}|${r.family_key}`));
 }
@@ -1077,8 +1082,15 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
   const prepayLinked = !!planLine.prepay_linked;
   const visitMedianCents = toCents(planLine.median_price);
   const feeCents = toCents(customer.per_application_fee);
+  // A line whose open visits are all stamped exactly $0 bills nothing when
+  // that zero is authoritative (billing-lane.js hasAuthoritativeZeroPrice:
+  // GATE_STAMPED_ZERO_FREE on, or a positive primary_line_price base) — it
+  // is a free line, never a fee-fallback candidate for an increase.
+  const authoritativeZero = !(visitMedianCents > 0) && (planLine.zero_priced_visits || 0) > 0
+    && hasAuthoritativeZeroPrice(0, planLine.zero_with_base ? 1 : null);
   const fromVisits = () => {
     if (visitMedianCents > 0) return { cents: visitMedianCents, source: 'visit_median', unit: 'application' };
+    if (authoritativeZero) return { cents: 0, source: 'stamped_zero', unit: 'application', stampedZeroFree: true };
     if (feeCents > 0) return { cents: feeCents, source: 'per_application_fee', unit: 'application' };
     return { cents: 0, source: 'none', unit: 'application' };
   };
@@ -1146,6 +1158,8 @@ function consolidatePlanLines(rows) {
       prepay_term_ids: [...new Set(sorted.flatMap((r) => r.prepay_term_ids || []))],
       service_keys: [...new Set(sorted.flatMap((r) => r.service_keys || []))],
       prepay_linked: sorted.some((r) => r.prepay_linked),
+      zero_priced_visits: sorted.reduce((n, r) => n + (Number(r.zero_priced_visits) || 0), 0),
+      zero_with_base: sorted.some((r) => r.zero_with_base),
     });
   }
   const linesPerCustomer = new Map();
@@ -1352,6 +1366,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       tenureMonths: entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null,
       currentRateCents: current.cents,
       currentRateSource: current.source,
+      stampedZeroFree: !!current.stampedZeroFree,
       rateUnit: current.unit,
       listRateCents: listCents,
       listRateSource: listSource,
