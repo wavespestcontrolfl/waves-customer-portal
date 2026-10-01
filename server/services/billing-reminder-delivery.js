@@ -181,10 +181,12 @@ function reminderPolicyVerdicts({
 }
 
 // `send` receives the leg's reservation so a producer can hand its ledger id
-// to a deferred replay that must re-check the collections rail.
-async function sendLeg(send, channel, entry) {
+// to a deferred replay that must re-check the collections rail. Its optional third argument names the legs
+// this attempt may dispatch (the pending ones the collections policy permitted), for a sender that attributes
+// something shared between them (the customer-dunning pay link's channel). Existing senders ignore it.
+async function sendLeg(send, channel, entry, dispatchable) {
   try {
-    return await send(channel, entry);
+    return await send(channel, entry, dispatchable);
   } catch (err) {
     return err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: 'REMINDER_OUTCOME_UNCONFIRMED' };
   }
@@ -296,6 +298,7 @@ async function sendReminderChannels({
     }
     return { complete: false, deliveredNow, results, delivered: [...delivered], restored };
   }
+  const dispatchable = pending.filter((_channel, index) => verdictAllows(permitted[index]));
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
     const reservation = {
@@ -312,7 +315,7 @@ async function sendReminderChannels({
     const claim = await ContactLedger.claimAttempt(entry, reservation);
     if (await restoreSettledLeg(claim, entry, channel, { delivered, resolved, restored })) continue;
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
-    const result = await sendLeg(send, channel, entry);
+    const result = await sendLeg(send, channel, entry, dispatchable);
     results[channel] = result;
     const state = await recordLegOutcome(entry, channel, result, results);
     if (state === 'resolved') resolved.add(channel);

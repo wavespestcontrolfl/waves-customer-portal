@@ -255,14 +255,11 @@ async function finishDelivered(run, facts) {
 // purpose: nothing may hold on to an event object across a change of stage.
 const currentEvent = (run) => (run.progress || []).find((e) => e.metadata.notificationEventKey === run.eventKey) || null;
 
-// A customer with no reachable channel today: completeness is judged against the legs THAT touch selected
-// (an empty list would make every event vacuously complete). Only a fully settled touch with something
-// delivered is recovered; anything else falls through to the reachability pause.
+// A customer with no reachable channel today: the same rule as any removal (recoveryComplete with no enabled
+// channel) - a touch that selected channels and has delivery evidence is settled, anything else falls through
+// to the reachability pause.
 function decideUnreachableRecovery(event) {
-  const selected = Array.isArray(event?.metadata?.selectedChannels) ? event.metadata.selectedChannels : [];
-  const settled = selected.length > 0 && event.delivered.size > 0
-    && selected.every((c) => event.delivered.has(c) || event.resolved.has(c) || event.waived.has(c));
-  return settled
+  return recoveryComplete(event, [])
     ? decision('settle', 'already_delivered', { facts: { event, delivered: event.delivered, deliveredAt: event.deliveredAt, deliveredNow: [] } })
     : null;
 }
@@ -289,11 +286,12 @@ function selectedChannelsOf(event) {
 function recoveryComplete(event, channels) {
   if (!event) return false;
   const selected = selectedChannelsOf(event);
-  // Today's enabled channels narrow the legs (a removal); when none of the selected legs is still enabled the
-  // touch is judged on what it selected (nothing was ever owed on the new channel), never re-sent on it.
-  const stillEnabled = selected ? selected.filter((c) => channels.includes(c)) : channels;
-  const legs = selected?.length && !stillEnabled.length ? selected : stillEnabled;
-  if (!legs.length) return false;
+  // Today's enabled channels narrow the legs (a removal). When the touch selected channels and NONE is still enabled,
+  // nothing it owed can be owed any more: with delivery evidence it is settled (never re-sent over a newly enabled
+  // channel); with none it is not complete (the ordinary send / reachability path decides). A missing / empty
+  // selection falls back to today's channels.
+  const legs = selected?.length ? selected.filter((c) => channels.includes(c)) : channels;
+  if (!legs.length) return !!selected?.length && event.delivered.size > 0;
   return legs.every((c) => event.delivered.has(c) || event.resolved.has(c) || (event.waived.has(c) && event.delivered.size > 0));
 }
 
@@ -441,14 +439,6 @@ function snapshotMetadata(run, set) {
 const setChanged = (result) => Object.values(result.results || {})
   .some((r) => r?.code === Boundary.SET_CHANGED || r?.reason === Boundary.SET_CHANGED);
 
-// The legs this attempt actually carries the shared pay link on: the still-owed ones, not those already delivered,
-// resolved or waived (a retry after a partial delivery sends the link on the remaining leg only).
-function legsBeingSent(run) {
-  const event = currentEvent(run);
-  const settled = new Set([...(event?.delivered || []), ...(event?.resolved || []), ...(event?.waived || [])]);
-  return run.sendChannels.filter((c) => !settled.has(c));
-}
-
 function attemptSend(run, set) {
   const memberIds = set.members.map((m) => m.invoice_id);
   run.memberIds = memberIds;
@@ -456,7 +446,6 @@ function attemptSend(run, set) {
   run.snapshotMeta = snapshotMetadata(run, set);
   const ctx = {
     schedule: run.schedule, step: run.step, customer: run.customer, set, channels: run.sendChannels,
-    linkChannels: legsBeingSent(run),
     explicit: run.explicit, eventKey: run.eventKey, operatorInitiated: run.operatorInitiated,
     snapshot: Boundary.snapshotOf(run.schedule.customer_id, set, { scheduleId: run.schedule.id, claimStamp: run.claimStamp, operatorInitiated: run.operatorInitiated }), claimStamp: run.claimStamp,
   };

@@ -249,7 +249,12 @@ async function sendEmailLeg(ctx, ledger) {
 
 /** The `send(channel, ledger)` callback for sendReminderChannels. */
 function makeSender(ctx) {
-  return (channel, ledger) => (channel === 'email' ? sendEmailLeg(ctx, ledger) : sendTextLeg(ctx, channel, ledger));
+  return (channel, ledger, dispatchable) => {
+    // The shared pay link is attributed to the legs this attempt will actually dispatch (pending AND permitted by the
+    // collections policy), known only once the policy verdicts are in - so it is set here, before the first leg mints.
+    if (Array.isArray(dispatchable)) ctx.linkChannels = dispatchable;
+    return channel === 'email' ? sendEmailLeg(ctx, ledger) : sendTextLeg(ctx, channel, ledger);
+  };
 }
 
 module.exports = { stampNeverContacted, makeSender, ensureLink, sendTextLeg, sendEmailLeg, SOURCE };
