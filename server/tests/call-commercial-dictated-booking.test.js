@@ -1061,3 +1061,44 @@ describe('the embedded schemas let the staff price quote be words (codex #5377 r
     }
   });
 });
+
+// "around / about" before a number (codex #5377 r14 P2): approximate prices are prices.
+describe('approximators: "around 350 total" is a price, "around 2 PM" is a time (codex #5377 r14 P2)', () => {
+  const run = (offerTalk, { between = [], amount = 350, quoteText } = {}) => {
+    const ex = extraction({
+      service: { quoted_price_usd: amount },
+      priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', quoteText || offerTalk.replace(/[,?.]$/, '')), PRICE_EVIDENCE[1]],
+    });
+    const t = [OPENING, `Agent: ${offerTalk}`, ...between, `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
+    return grounded(ex, t);
+  };
+
+  test('an approximate bare-dollar or dollar-marked quote grounds', () => {
+    expect(run('That runs around 350 total.').ok).toBe(true);
+    expect(run('That runs about $350.').ok).toBe(true);
+    expect(run('That runs approximately 350 dollars.').ok).toBe(true);
+    expect(run('That runs roughly three hundred fifty dollars.').ok).toBe(true);
+    expect(run('That runs around 150 total.', { amount: 150 }).ok).toBe(true);
+    // the wrong approximate amount still does not
+    expect(run('That runs around 350 total.', { amount: 150 }).ok).toBe(false);
+  });
+
+  test('around/about a TIME is ignored: it never blocks a grounded price', () => {
+    expect(run('That runs $350 and we can come around 2 PM.').ok).toBe(true);
+    expect(run('That runs $350 and we can come around 2:30.').ok).toBe(true);
+    expect(run('That runs $350 and we can come around two.').ok).toBe(true);
+    expect(run('That runs $350 and we can come about 2 in the afternoon.').ok).toBe(true);
+    expect(run('That runs $350, we are there around 10.').ok).toBe(true); // a bare hour 1-12, no money word
+  });
+
+  test('a correction using "around" between the offer and the yes is still caught', () => {
+    expect(run('That runs $350.', { between: ['Agent: Actually around 400.'] }).ok).toBe(false);
+    expect(run('That runs $350.', { between: ['Agent: Actually about $400.'] }).ok).toBe(false);
+    expect(run('That runs $350.', { between: ['Agent: Actually around four hundred dollars.'] }).ok).toBe(false);
+    expect(run('That runs $350.', { between: ['Agent: We will be there around 2 PM.'] }).ok).toBe(true);
+  });
+
+  test('another approximate price in the offer turn still blocks', () => {
+    expect(run('That runs $350, or around 400 with the garage.').ok).toBe(false);
+  });
+});

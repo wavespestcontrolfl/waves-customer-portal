@@ -69,7 +69,12 @@ const MONTHS = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)
 const MONTH_RE = new RegExp(`^${MONTHS}$`, 'i');
 const DOLLAR_WORDS = new Set(['dollar', 'dollars', 'buck', 'bucks', 'usd']);
 const TIME_AFTER = new Set(['am', 'pm', 'oclock', 'clock', 'morning', 'afternoon', 'evening', 'noon', 'tonight']);
-const TIME_BEFORE = new Set(['at', 'by', 'around', 'until', 'till', 'before', 'after', 'about']);
+const TIME_BEFORE = new Set(['at', 'by', 'until', 'till', 'before', 'after']);
+// "around / about / approximately / roughly" qualify prices as often as clock times
+// ("that runs around 350 total"): they make a number TIME context only when it is
+// clock-shaped (a time word follows: handled by TIME_AFTER) or a bare hour 1-12 with
+// no money word. A number at or above the $20 floor after them is a price.
+const APPROXIMATORS = new Set(['around', 'about', 'approximately', 'roughly']);
 const QUANTITY_AFTER = new Set(['visit', 'visits', 'time', 'times', 'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
   'minute', 'minutes', 'hour', 'hours', 'treatment', 'treatments', 'unit', 'units', 'bedroom', 'bedrooms', 'bathroom', 'bathrooms',
   'building', 'buildings', 'property', 'properties', 'location', 'locations', 'room', 'rooms', 'story', 'stories', 'floor', 'floors',
@@ -77,11 +82,12 @@ const QUANTITY_AFTER = new Set(['visit', 'visits', 'time', 'times', 'day', 'days
   'percent', 'employee', 'employees', 'tenant', 'tenants', 'door', 'doors', 'window', 'windows', 'service', 'services', 'application', 'applications']);
 const STREET_WORDS = new Set(['st', 'street', 'ave', 'avenue', 'rd', 'road', 'dr', 'drive', 'blvd', 'boulevard', 'ln', 'lane', 'way', 'ct', 'court', 'pkwy', 'parkway', 'hwy', 'highway', 'circle', 'cir', 'trail', 'trl', 'place', 'pl', 'terrace']);
 
-function nonPriceContext(prev, next) {
+function nonPriceContext(prev, next, value) {
   const n0 = next[0];
   if (TIME_AFTER.has(n0)) return true;
   if (n0 === 'in' && ['the', 'a'].includes(next[1]) && TIME_AFTER.has(next[2])) return true;
   if (TIME_BEFORE.has(prev[prev.length - 1])) return true;
+  if (APPROXIMATORS.has(prev[prev.length - 1]) && Number.isInteger(value) && value >= 1 && value <= 12) return true;
   if (['st', 'nd', 'rd', 'th'].includes(n0)) return true;
   if (MONTH_RE.test(prev[prev.length - 1] || '') || MONTH_RE.test(n0 || '')) return true;
   if (prev[prev.length - 1] === 'of' && MONTH_RE.test(next[0] || '')) return true;
@@ -104,13 +110,13 @@ function figuresIn(text) {
       // clock "2:30", a number glued to a suffix ("24th", "2pm") or a phone-number group
       if (/:\s*$/.test(before) || /^\s*:\d/.test(after) || /^(?:st|nd|rd|th|am|pm|a\.m|p\.m)\b/i.test(after)) continue;
       if (/\d-$/.test(before) || /^-\d/.test(after)) continue;
-      if (nonPriceContext(prev, next)) continue;
+      if (nonPriceContext(prev, next, Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`))) continue;
     }
     figures.push(Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`));
   }
   for (const run of spokenFigureRuns(src)) {
     const marked = DOLLAR_WORDS.has(run.next[0]);
-    if (!marked && nonPriceContext(run.prev, run.next)) continue;
+    if (!marked && nonPriceContext(run.prev, run.next, run.value)) continue;
     figures.push(run.value);
   }
   return figures;
