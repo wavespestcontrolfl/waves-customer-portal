@@ -236,8 +236,15 @@ function canonicalV2Secondary(extraction) {
   if (!single || !first || !sameV2Person(extraction.secondary_contact, first)) return single;
   const mirror = mapSecondaryContactToLegacy(first);
   if (!mirror) return single;
+  // Same person: the mirror fills any coordinate / identity field the
+  // singleton left empty (a name-only singleton with the phone on the
+  // mirror must not lose the phone), and the flags OR together.
+  const filled = { ...single };
+  for (const [k, v] of Object.entries(mirror)) {
+    if ((filled[k] === null || filled[k] === undefined || filled[k] === '') && v !== null && v !== undefined && v !== '') filled[k] = v;
+  }
   return {
-    ...single,
+    ...filled,
     wants_appointment_texts: single.wants_appointment_texts || mirror.wants_appointment_texts,
     on_site: single.on_site || mirror.on_site,
   };

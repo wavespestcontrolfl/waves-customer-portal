@@ -321,7 +321,8 @@ async function reconcileDemoteMarker(customerId, phoneKey, { dbh = db } = {}) {
       runConfirmationReplays((await applyDemoteMarkersOnConfirm(phoneKey, { dbh })).replays, dbh);
       return 'applied';
     }
-    if (row && (row.status === 'declined' || row.status === 'ask_failed')) {
+    // ask_failed is retryable (a later save re-asks): its entries wait.
+    if (row && row.status === 'declined') {
       await clearDemoteMarker(customerId, phoneKey, { dbh });
       return 'cleared';
     }
@@ -378,7 +379,9 @@ async function releaseAskFailed(phoneKey, customerId) {
     .where({ phone_key: phoneKey, customer_id: customerId, status: 'pending' })
     .update({ status: 'ask_failed', updated_at: new Date() })
     .catch(() => {});
-  await clearDemoteMarker(customerId, phoneKey);
+  // The visit markers stay: ask_failed is reclaimable by a later save, and a
+  // YES after that retry must still replay every still-live booking. Stale
+  // entries are dropped on apply and by the sweep's 14-day cap.
 }
 
 // Same last-10 convention as the webhook's phoneLookupKey.

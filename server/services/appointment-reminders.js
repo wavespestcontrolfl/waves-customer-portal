@@ -5891,7 +5891,11 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
       .where({ scheduled_service_id: scheduledServiceId })
       .first('appointment_time', 'cancelled', 'service_type');
     if (reminder && reminder.cancelled) return { sent: false, reason: 'visit_not_live' };
-    const apptTime = composeScheduledApptTime(svc) || (reminder && reminder.appointment_time ? new Date(reminder.appointment_time) : null);
+    // The reminder row's appointment_time is the canonical customer-promised
+    // arrival (a combined allocation's later member keeps the group's
+    // arrival there, not its own work slot); the visit row covers a reminder
+    // not registered yet.
+    const apptTime = (reminder && reminder.appointment_time ? new Date(reminder.appointment_time) : null) || composeScheduledApptTime(svc);
     if (!apptTime || Number.isNaN(apptTime.getTime()) || apptTime.getTime() <= Date.now()) return { sent: false, reason: 'visit_not_future' };
     // The account's confirmation choices apply to this text exactly as to the
     // primary's: confirmations off or an email-only channel = no text.

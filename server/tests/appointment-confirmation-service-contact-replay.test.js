@@ -183,4 +183,11 @@ describe('sendConfirmationToServiceContact', () => {
     expect(res).toEqual({ sent: false, reason: 'dedupe_unreadable' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
+
+  test('the replay quotes the reminder row\'s canonical arrival, not a combined member\'s later work slot', async () => {
+    const d = new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10);
+    wire({ svc: { id: 's1', status: 'confirmed', service_type: 'Pest Control', scheduled_date: d, window_start: '14:00:00' }, reminder: { appointment_time: future, cancelled: false } });
+    await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+    expect(sendCustomerMessage.mock.calls[0][0].renderedSlotMs).toBe(future.getTime());
+  });
 });

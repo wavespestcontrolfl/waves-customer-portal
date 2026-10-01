@@ -1375,6 +1375,11 @@ describe('extraction compat adapter', () => {
       return x;
     };
     expect(flatView(both('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(both('+15550100123')).secondary_contacts_consent_signature);
+    // A name-only singleton takes the same-person mirror's phone (and flags).
+    const nameOnly = validPersisted();
+    nameOnly.secondary_contact = entry('spouse_partner', false, false, 'Sample Spouse', null);
+    nameOnly.secondary_contacts = [entry('spouse_partner', true, true, 'Sample Spouse', '+15550100123')];
+    expect(flatView(nameOnly).secondary_contact).toMatchObject({ phone: '+15550100123', wants_appointment_texts: true, on_site: true });
     expect(flatView(single('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(single('+15550100123')).secondary_contacts_consent_signature);
     // Flat singleton mirrors; the retired evidence/grounded mirrors and the transcript option are gone.
     const flat = flatView(single('+15550100123'));

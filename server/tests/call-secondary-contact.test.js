@@ -740,11 +740,12 @@ describe('on-site contact opt-in ask', () => {
   };
 
   test('trigger = on-site role AND (wants_appointment_texts OR on_site) AND a phone', () => {
-    for (const role of ['spouse_partner', 'home_buyer', 'tenant', 'family_member']) {
+    // home_seller: the seller who meets the technician (WDO / access visits).
+    for (const role of ['spouse_partner', 'home_buyer', 'home_seller', 'tenant', 'family_member']) {
       expect(onSiteOptinAskTrigger({ ...spouse, role })).toBe(true);
     }
     expect(onSiteOptinAskTrigger({ ...spouse, wants_appointment_texts: false, on_site: true })).toBe(true);
-    for (const role of ['home_seller', 'landlord', 'lender', 'real_estate_agent', 'property_manager', 'other', 'unknown', null]) {
+    for (const role of ['landlord', 'lender', 'real_estate_agent', 'property_manager', 'other', 'unknown', null]) {
       expect(onSiteOptinAskTrigger({ ...spouse, role })).toBe(false);
     }
     expect(onSiteOptinAskTrigger({ ...spouse, wants_appointment_texts: false, on_site: false })).toBe(false);
@@ -821,7 +822,10 @@ describe('on-site contact opt-in ask', () => {
     // Either extractor's do-not-contact request blocks the ask.
     expect(src).toMatch(/const v2DoNotContact = v2CanonicalExtraction\?\.consent\?\.do_not_contact_request === true\s*\|\| extracted\.do_not_contact_request === true;/);
     // Explicit V2 consent keeps the original claim path (fresh slot only).
-    expect(src).toContain("if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {");
+    // ...but never for an entry queued for the booking site; that phone is also
+    // kept out of the same-call fan-out until it has an opt-in row.
+    expect(src).toContain("if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask) {");
+    expect(src).toContain('optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
     // The same-call fan-out gate is the original one.
     expect(src).toContain('const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(');
     // No booking landed: the card says so.
@@ -831,7 +835,8 @@ describe('on-site contact opt-in ask', () => {
   test('the booking site sends the on-site ask only once a visit landed: marker first (deep-merged), claim with the VISIT address, dispatch outcome on the card, reconcile', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const landed = src.indexOf('scheduledServiceId = svc.id;');
-    const site = src.indexOf('if (pendingOnSiteAsks.length && !(await isStreetLevelHoldRow(db, svc))) {', landed);
+    // Never for a street-level hold or an address-disputed visit.
+    const site = src.indexOf('if (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true && !(await isStreetLevelHoldRow(db, svc))) {', landed);
     expect(site).toBeGreaterThan(landed);
     const block = src.slice(site, site + 6000);
     // Marker before the ask; an existing visit entry's fields win (demoted_at / claim kept).

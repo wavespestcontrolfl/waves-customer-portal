@@ -3654,7 +3654,9 @@ const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager', 
 // Roles for a person who will be AT the property on the visit day. Narrower
 // than HOUSEHOLD_SLOT_ROLES on purpose: home_seller and landlord are not
 // on-site for the appointment, and agent-type roles serve many accounts.
-const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'tenant', 'family_member']);
+// home_seller: the seller who meets the technician (WDO / access visits) —
+// only when the on-site or text flag says so, like every role here.
+const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'home_seller', 'tenant', 'family_member']);
 // Owner ruling 2026-09-30 "on-site person is the contact point", redesigned
 // 2026-10-01: when the caller books for someone who will be at the property
 // and the V2 extraction says that person should get the appointment texts
@@ -13595,9 +13597,13 @@ const CallRecordingProcessor = {
         const onSiteDecision = decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result });
         if (onSiteDecision.ask && secondaryEntry?.phone) {
           pendingOnSiteAsks.push({ entry: secondaryEntry, demote: !otherSlotPhone });
+          // Queued for the booking site: excluded from the same-call fan-out
+          // (no opt-in row yet must not read as grandfathered) and from the
+          // explicit-consent claim below, so nobody is asked before a visit lands.
+          optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));
         }
         const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;
-        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {
+        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask) {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -18488,7 +18494,9 @@ const CallRecordingProcessor = {
               // replay claim), then the ask is claimed + dispatched quoting THIS
               // visit's address, then reconcileDemoteMarker settles an opt-in
               // that is already answered (confirmed earlier / failed).
-              if (pendingOnSiteAsks.length && !(await isStreetLevelHoldRow(db, svc))) {
+              // Also never while the visit's house number is disputed (the
+              // address-dispute hold keeps customer-facing side effects off).
+              if (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true && !(await isStreetLevelHoldRow(db, svc))) {
                 onSiteAsksHandled = true;
                 const { claimRecipientOptins, dispatchRecipientOptins, reconcileDemoteMarker } = require('./recipient-optin');
                 const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);

@@ -266,14 +266,15 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
       expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
     });
 
-    test.each(['declined', 'ask_failed'])('%s: drops the marker; the caller stays the recipient', async (status) => {
+    test.each(['declined'])('%s: drops the marker; the caller stays the recipient', async (status) => {
       const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: [{ phone_key: KEY, customer_id: 'c1', status }] });
       expect(await reconcileDemoteMarker('c1', KEY, { dbh })).toBe('cleared');
       expect(state.prefs).toEqual([]);
       expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
     });
 
-    test.each(['pending', 'scheduled'])('%s: the marker waits for the reply', async (status) => {
+    // ask_failed is reclaimable by a later save: its visit entries wait too.
+    test.each(['pending', 'scheduled', 'ask_failed'])('%s: the marker waits for the reply', async (status) => {
       const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: [{ phone_key: KEY, customer_id: 'c1', status }] });
       expect(await reconcileDemoteMarker('c1', KEY, { dbh })).toBe('pending');
       expect(state.customer.service_preferences.demote_primary_on_optin[KEY]).toBeDefined();
