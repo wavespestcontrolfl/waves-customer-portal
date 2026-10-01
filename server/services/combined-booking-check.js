@@ -66,7 +66,7 @@ const CATEGORY = 'alert';
 const AREA = 'Schedule';
 const DONE_WHEN = 'combined_booking_verified';
 const RESOLVED_FIXED = 'Fixed: the combined booking now checks out';
-const RESOLVED_GONE = 'Closed: the plan was cancelled, or the estimate or customer is no longer active';
+const RESOLVED_GONE = 'Closed: the plan was cancelled, or the estimate or customer is no longer active or current';
 
 // Let the accept transaction and its follow-on writes settle before judging.
 const SETTLE_MINUTES = 3;
@@ -351,18 +351,24 @@ function checkStampedFirstDay(stamped, programs, invoices) {
 }
 
 // 3c. members split off onto their own invoice: each bills its own accepted
-// first-application price.
+// first-application price, on exactly ONE live invoice.
 function checkSplitInvoices(split, programs) {
   const off = [];
+  const doubled = [];
   for (const row of split) {
+    const label = lowerLabel(programRowFamilies(row, programs)[0]);
+    const own = row.own_first_invoices || [];
+    if (own.length > 1) { doubled.push(`${label} first visit is on ${own.length} live invoices`); continue; }
     const expected = expectedFor(row, programs);
-    const billed = row.own_first_invoice && !row.own_first_invoice.unbacked_discount
-      ? firstApplicationAmount(row.own_first_invoice) : null;
+    const billed = own[0] && !own[0].unbacked_discount ? firstApplicationAmount(own[0]) : null;
     if (expected != null && billed != null && Math.abs(billed - expected) > PRICE_TOLERANCE) {
-      off.push(`${lowerLabel(programRowFamilies(row, programs)[0])} ${money(billed)} vs ${money(expected)}`);
+      off.push(`${label} ${money(billed)} vs ${money(expected)}`);
     }
   }
-  return off.length ? [{ code: 'split_invoice_mismatch', text: `split first invoice ${off[0]}`, detail: off.join('; ') }] : [];
+  return [
+    ...(doubled.length ? [{ code: 'split_invoice_duplicate', text: doubled[0], detail: doubled.join('; ') }] : []),
+    ...(off.length ? [{ code: 'split_invoice_mismatch', text: `split first invoice ${off[0]}`, detail: off.join('; ') }] : []),
+  ];
 }
 
 // 3b. first-day rows with no invoice stamp. An unpriced one is the
@@ -443,7 +449,7 @@ function evaluateCombinedBooking(ctx) {
   // with no accepted per-visit price to compare against (its problems below
   // are still reported).
   const unbackedDiscount = [...stamped.map((row) => invoices.get(String(row.first_application_invoice_id))),
-    ...split.map((row) => row.own_first_invoice)].some((invoice) => invoice?.unbacked_discount);
+    ...split.flatMap((row) => row.own_first_invoices || [])].some((invoice) => invoice?.unbacked_discount);
   // pricesHidden: the price comparisons below were not looked for.
   const pricesHidden = pricesUnverifiable || unbackedDiscount;
   const deferred = scheduleGaps.length > 0 || scheduleUnjudged || pricesHidden;
@@ -527,7 +533,7 @@ async function markPrepaidCoverage(conn, rows) {
 // is what the combined members are judged against, keyed by the stamped id;
 // any OTHER live base-application invoice on a member's own row is that
 // member's split-off invoice (flagOwnLiveInvoices' evidence:
-// row.has_own_live_invoice + row.own_first_invoice).
+// row.has_own_live_invoice + row.own_first_invoices).
 async function loadFirstInvoices(conn, rows) {
   const invoices = new Map();
   const stamped = rows.filter((row) => row.first_application_invoice_id && !row.recurring_parent_id);
@@ -562,7 +568,9 @@ async function loadFirstInvoices(conn, rows) {
     const row = byRow.get(String(invoice.scheduled_service_id));
     if (row && !governingIds.has(String(invoice.id)) && invoiceBillsBaseApplication(invoice)) {
       row.has_own_live_invoice = true;
-      row.own_first_invoice = invoice;
+      // Every one is kept: two live base-application invoices for one visit
+      // are two collectible charges (checkSplitInvoices).
+      row.own_first_invoices = [...(row.own_first_invoices || []), invoice];
     }
   }
   return invoices;
@@ -679,6 +687,7 @@ async function postAlert(estimate, verdict, ctx, { raise } = {}) {
 // is left to act on, so they close. A bell that only aged past the lookback
 // stays open for a person.
 async function retireAbandoned(conn) {
+  const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const gone = await conn('notifications as n')
     .leftJoin('estimates as e', conn.raw("e.id::text = n.metadata->>'estimateId'"))
     .leftJoin('customers as c', 'c.id', 'e.customer_id')
@@ -686,7 +695,7 @@ async function retireAbandoned(conn) {
     .whereRaw("starts_with(n.metadata->>'dedupeKey', ?)", [`${OPS_KEY}:`])
     .where(function goneForGood() {
       this.whereNull('e.id').orWhereNot('e.status', 'accepted').orWhereNotNull('e.archived_at')
-        .orWhereNot('c.active', true).orWhereNotNull('c.deleted_at');
+        .orWhereNot('c.active', true).orWhereNotNull('c.deleted_at').orWhereIn('c.pipeline_stage', FORMER_CUSTOMER_STAGES);
     })
     .select(conn.raw("n.metadata->>'estimateId' as estimate_id"));
   return retireStanding(conn, [...new Set(gone.map((row) => row.estimate_id))], RESOLVED_GONE);
@@ -722,6 +731,7 @@ function outcomeOf(verdict, standingProblems = []) {
  * `conn` and `raise` are injectable for tests.
  */
 async function runCombinedBookingCheck({ now = new Date(), conn = db, raise } = {}) {
+  const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const settled = new Date(now.getTime() - SETTLE_MINUTES * 60 * 1000);
   const since = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
   const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0 };
@@ -731,6 +741,12 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise } = 
     .where('e.status', 'accepted').whereNull('e.archived_at')
     .where('e.accepted_at', '<=', settled).where('e.accepted_at', '>', since)
     .where('c.active', true).whereNull('c.deleted_at')
+    // A former customer's leftover work is the churned-live-work alert's
+    // (cancel it), never a repair bell here; the shared classifier skips the
+    // same stages.
+    .where(function currentCustomer() {
+      this.whereNotIn('c.pipeline_stage', FORMER_CUSTOMER_STAGES).orWhereNull('c.pipeline_stage');
+    })
     .where(function recurringAccept() {
       this.whereNull('e.accepted_service_mode').orWhereNot('e.accepted_service_mode', 'one_time');
     })

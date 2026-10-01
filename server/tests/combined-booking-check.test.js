@@ -254,14 +254,20 @@ describe('evaluateCombinedBooking', () => {
   });
 
   test('a member the office split onto its own invoice is judged off the combined total', () => {
-    const lawn = lawnRows({ parentOverrides: { has_own_live_invoice: true, own_first_invoice: { id: 'inv-2', status: 'sent', line_items: [firstApp(100, 'Lawn Care')] } } });
+    const own = (amount, id = 'inv-2') => ({ id, status: 'sent', line_items: [firstApp(amount, 'Lawn Care')] });
+    const lawn = lawnRows({ parentOverrides: { has_own_live_invoice: true, own_first_invoices: [own(100)] } });
     const pestOnly = invoice([setupFee, firstApp(150, 'Quarterly Pest Control')]);
     expect(run([PEST, LAWN], [...pestRows(), ...lawn], { invoice: pestOnly }).problems).toEqual([]);
     expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: pestOnly }))).toEqual(['first_invoice_mismatch']);
-    const cheap = lawnRows({ parentOverrides: { has_own_live_invoice: true, own_first_invoice: { id: 'inv-2', status: 'sent', line_items: [firstApp(1, 'Lawn Care')] } } });
+    const cheap = lawnRows({ parentOverrides: { has_own_live_invoice: true, own_first_invoices: [own(1)] } });
     const verdict = run([PEST, LAWN], [...pestRows(), ...cheap], { invoice: pestOnly });
     expect(codes(verdict)).toEqual(['split_invoice_mismatch']);
     expect(verdict.problems[0].text).toBe('split first invoice lawn $1.00 vs $100.00');
+    // Two live first-visit invoices for one visit are two charges, whatever each one says.
+    const doubled = lawnRows({ parentOverrides: { has_own_live_invoice: true, own_first_invoices: [own(100), own(100, 'inv-3')] } });
+    const twice = run([PEST, LAWN], [...pestRows(), ...doubled], { invoice: pestOnly });
+    expect(codes(twice)).toEqual(['split_invoice_duplicate']);
+    expect(twice.problems[0].text).toBe('lawn first visit is on 2 live invoices');
   });
 
   test('a left-out family still on the shared first invoice keeps its share of the invoice total', () => {

@@ -279,6 +279,25 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a churned customer\'s booking is the churned-live-work alert\'s: no repair bell, and a standing one closes', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const rung = await acceptedEstimate(trx, lines);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      await trx('customers').where({ id: rung.customerId }).update({ pipeline_stage: 'churned' });
+      const fresh = await acceptedEstimate(trx, lines);
+      await trx('customers').where({ id: fresh.customerId }).update({ pipeline_stage: 'churned' });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ candidates: 0, closed: 1, problems: 0 });
+      expect((await alertsOf(trx, rung.estimateId))[0].done_at).not.toBeNull();
+      expect(await alertsOf(trx, fresh.estimateId)).toHaveLength(0);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a customer deactivated after a problem rang closes its bell as done', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
