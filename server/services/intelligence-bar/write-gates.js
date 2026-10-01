@@ -11,7 +11,7 @@
  */
 
 // Outside-service writes (owner ruling 2026-09-28, IB scope expansion item 1):
-// Sentry/Cloudflare/Railway/GitHub/Search Console tools whose commit reaches
+// Sentry/Cloudflare/Railway/GitHub/Search Console/GrowthBook tools whose commit reaches
 // a THIRD-PARTY API, not the portal's own DB. They are structurally two-step
 // (folded into WRITE_TWO_STEP_TOOL_NAMES below) — a card, not the owner-only
 // /execute flow — but per the owner ruling every write tool (not just
@@ -37,6 +37,11 @@ const OUTSIDE_WRITE_TOOL_NAMES = new Set([
   'add_github_pr_label',
   'request_codex_review',
   'submit_gsc_sitemap',
+  // Feature switches (owner ruling 2026-09-28, Decision 5): a GrowthBook flag
+  // toggle and a Railway GATE_* variable change. Confirmed, each acts only
+  // on its `_verified_*` pins (outside-write-pins.js).
+  'set_railway_gate',
+  'set_growthbook_feature_environment',
 ]);
 
 // Every outside write is full-access-only. Named separately from

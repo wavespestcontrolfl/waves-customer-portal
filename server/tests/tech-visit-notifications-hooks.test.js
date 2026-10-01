@@ -317,7 +317,7 @@ describe('direct creators tell the tech (source order)', () => {
   test('a phone booking announces the fresh primary and a fresh follow-up child, never a reused row', () => {
     const src = read('../services/call-recording-processor.js');
     const at = src.indexOf('scheduledServiceId = svc.id;');
-    const block = src.slice(at, at + 1500);
+    const block = src.slice(at, at + 2600);
     expect(block).toContain("...(!reusedExistingSchedule || (reuseAssignedTechId && String(svc.technician_id) === String(reuseAssignedTechId)) ? [svc] : []),");
     expect(block).toContain('...(followUpCreated && followUpCreated.id ? [followUpCreated] : [])');
     expect(block).toContain("kind: 'assigned', technicianId: row.technician_id, actorId: null,");
@@ -386,9 +386,12 @@ describe('Codex r9 writers (source order)', () => {
   test('both voice-confirm hooks name the holder from the COMMITTED transition payload, not the pre-transaction read', () => {
     for (const rel of ['../routes/admin-dispatch.js', '../routes/admin-schedule.js']) {
       const src = read(rel);
-      const hook = src.indexOf("const confirmedRow = transition?.adminPayload || null;");
-      expect(hook).toBeGreaterThan(-1);
-      expect(src.lastIndexOf('transition = await transitionJobStatus({', hook)).toBeGreaterThan(src.lastIndexOf('let transition = null;', hook));
+      const read0 = src.indexOf("const confirmedRow = transition?.adminPayload || null;");
+      expect(read0).toBeGreaterThan(-1);
+      expect(src.lastIndexOf('transition = await transitionJobStatus({', read0)).toBeGreaterThan(src.lastIndexOf('let transition = null;', read0));
+      // The card now follows the activation (it keys on pending -> confirmed OR a successful activation).
+      const hook = src.indexOf("if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id", read0);
+      expect(hook).toBeGreaterThan(read0);
       expect(src.slice(hook, hook + 900)).toContain('snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },');
       expect(src.slice(hook, hook + 900)).not.toContain('technicianId: svc.technician_id');
     }
@@ -432,13 +435,13 @@ describe('Codex r7 writers (source order)', () => {
 
   test('the admin-schedule status route confirms voice-agent bookings too and sends the same assigned card, post-commit', () => {
     const src = read('../routes/admin-schedule.js');
-    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id");
+    const hook = src.indexOf("if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id");
     expect(hook).toBeGreaterThan(-1);
     expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,");
-    // After the status transaction's catch block, before the activation helper.
+    // After the status transaction's catch block and (now) after the activation helper, which it keys on.
     expect(src.lastIndexOf('await transitionJobStatus({', hook)).toBeGreaterThan(-1);
     expect(src.lastIndexOf('// ===== Post-success side effects =====', hook)).toBeGreaterThan(-1);
-    expect(src.indexOf("runOfficeConfirmActivation(db, svc, 'admin-schedule'", hook)).toBeGreaterThan(hook);
+    expect(src.lastIndexOf("runOfficeConfirmActivation(db, svc, 'admin-schedule'", hook)).toBeGreaterThan(-1);
   });
 
   test('the cancellation processor names its actor (customer label or the acting staff row), never null', () => {
@@ -475,12 +478,12 @@ describe('Codex r6 writers (source order)', () => {
 
   test('office confirm of a voice-agent booking (pending → confirmed) sends the assigned card, post-commit', () => {
     const src = read('../routes/admin-dispatch.js');
-    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id");
+    const hook = src.indexOf("if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id");
     expect(hook).toBeGreaterThan(-1);
     expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,");
-    // After the status transaction's catch block, before the activation helper.
+    // After the status transaction's catch block and after the activation helper it keys on.
     expect(src.lastIndexOf('await transitionJobStatus({', hook)).toBeGreaterThan(-1);
-    expect(src.indexOf("runOfficeConfirmActivation(db, svc, 'admin-dispatch'", hook)).toBeGreaterThan(hook);
+    expect(src.lastIndexOf("runOfficeConfirmActivation(db, svc, 'admin-dispatch'", hook)).toBeGreaterThan(-1);
   });
 
   test('graduating a reserved estimate slot into a booking announces it on the accept transaction', () => {

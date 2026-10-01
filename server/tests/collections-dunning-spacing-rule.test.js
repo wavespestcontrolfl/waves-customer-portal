@@ -48,12 +48,13 @@ describe('constants', () => {
     expect(SPACING_DAYS).toBe(7);
   });
 
-  test('OVERDUE_SOURCES is exactly the five dunning rails plus the follow-up rail\'s deferred replay', () => {
+  test('OVERDUE_SOURCES is exactly the five dunning rails, the follow-up rail\'s deferred replay and the customer-level schedule', () => {
     expect([...OVERDUE_SOURCES].sort()).toEqual([
       'balance_reminder_late_payment_check',
       'balance_reminder_workflow',
       'invoice_followup_replay',
       'invoice_followups',
+      'invoice_followups_customer',
       'late_payment_checker',
       'previsit_balance_reminder',
     ]);
@@ -187,6 +188,22 @@ describe('dunning spacing replay event reduction', () => {
       leg('checker-other-invoice', 1, { source: 'late_payment_checker', invoice_ids: ['inv-2'] }),
     ]);
     expect(collapsed.map(({ id }) => id).sort()).toEqual(['balance-email', 'checker-email', 'checker-later', 'checker-other-invoice']);
+  });
+
+  test('a customer-level schedule touch (dunning consolidation) is an overdue reminder, and its legs collapse into ONE event', () => {
+    const { SOURCE, eventKey } = require('../services/customer-dunning/constants');
+    const key = eventKey({ id: 'sched-1', episode: 1 }, 'd30_final');
+    const leg = (id, channel, minutes) => event(id, minutes / 60, {
+      source: SOURCE, purpose: 'late_payment', channel, invoice_ids: ['inv-1', 'inv-2'], metadata: { notificationEventKey: key },
+    });
+    const legs = [leg('cust-sms', 'sms', 0), leg('cust-push', 'push', 0.5), leg('cust-email', 'email', 2)];
+    expect(legs.every(isOverdueReminderRow)).toBe(true);
+    expect(collapseDunningReminderEvents(legs).map(({ id }) => id)).toEqual(['cust-email']);
+    // The next step is its own event (a different key), 7 days on: one spacing candidate each, no self-hit.
+    const next = event('cust-next', 7 * 24 + 1, {
+      source: SOURCE, purpose: 'late_payment', metadata: { notificationEventKey: eventKey({ id: 'sched-1', episode: 1 }, 'd60_reminder') },
+    });
+    expect(summarizeDunningSpacingReplay([...legs, next], { windowStart })).toMatchObject({ candidatesInWindow: 2, spacedWithin7d: 0 });
   });
 
   test('JSON metadata dedupes and the latest sent retry wins with an id-stable timestamp tie', () => {

@@ -22,6 +22,9 @@
  * The CUSTOMER is re-read as well: an archived (deleted_at) or missing customer is a non-retryable refusal
  * (DUNNING_CUSTOMER_DELETED), and the runner pauses the schedule customer_deleted, as decideCustomer does.
  *
+ * The AUTOPAY guard is re-run too (fail closed, on the same handle): an enrollment that went active while the
+ * message was prepared is a retryable refusal, and the runner autopay-holds the schedule.
+ *
  * A collections HOLD is re-read as well (the messaging rails gate this sender's entry point, and this is
  * the same check on the handle the hook is given, so a hold landing during rendering or provider preparation
  * stops every leg, the operator handoff included).
@@ -37,10 +40,12 @@ const logger = require('../logger');
 const { redactContact } = require('../../utils/redact-contact');
 const { resolveDunnableSet } = require('./balance-set');
 const collectionHold = require('../collections/collection-hold');
+const { customerOnAutopay } = require('../autopay-eligibility');
 
 const SET_CHANGED = 'DUNNING_SET_CHANGED';
 const SCHEDULE_CHANGED = 'DUNNING_SCHEDULE_CHANGED';
 const CUSTOMER_DELETED = 'DUNNING_CUSTOMER_DELETED';
+const AUTOPAY_ENROLLED = 'DUNNING_AUTOPAY_ENROLLED';
 const SCHEDULE_TABLE = 'customer_dunning_schedules';
 const SENDABLE_STATUSES = ['active', 'held'];
 
@@ -60,6 +65,13 @@ const scheduleRefusal = () => ({
 
 // Staff archive a customer by stamping customers.deleted_at; nothing else about the schedule or the open
 // invoices changes, so the boundary reads the customer itself. Not retryable: the runner pauses the schedule.
+const autopayRefusal = () => ({
+  ok: false,
+  code: AUTOPAY_ENROLLED,
+  reason: 'The customer enrolled in autopay after this reminder was prepared',
+  retryable: true,
+});
+
 const customerDeletedRefusal = () => ({
   ok: false,
   code: CUSTOMER_DELETED,
@@ -90,10 +102,9 @@ function sameSet(live, snapshot) {
     && !!live.anchor && live.anchor.id === snapshot.anchorId;
 }
 
-async function customerArchived(customerId, database) {
-  const row = await database('customers').where({ id: customerId }).first('id', 'deleted_at');
-  return !row || !!row.deleted_at;
-}
+// The customer row as the autopay predicate reads it, on the handle the hook was given.
+const customerRow = (customerId, database) => database('customers').where({ id: customerId }).first();
+const isArchived = (row) => !row || !!row.deleted_at;
 
 /** Still open, and still claimed by THIS run (see the header). Locks the row on a transaction. */
 async function scheduleStillOurs(snapshot, database) {
@@ -114,7 +125,12 @@ function check(snapshot) {
     const handle = database || db;
     try {
       if (snapshot.scheduleId && !await scheduleStillOurs(snapshot, handle)) return scheduleRefusal();
-      if (await customerArchived(snapshot.customerId, handle)) return customerDeletedRefusal();
+      const customer = await customerRow(snapshot.customerId, handle);
+      if (isArchived(customer)) return customerDeletedRefusal();
+      // The runner's autopay guard, fail closed, re-run at the last moment: an enrollment that went active
+      // while the message was being prepared must not be dunned (the next run autopay-holds the schedule).
+      // A lookup that cannot answer throws into the same retryable refusal below.
+      if (await customerOnAutopay(customer, { failClosed: true, now: new Date(), db: handle })) return autopayRefusal();
       // A collections hold (dispute, or the wrong-number / wrong-party fallback) committed after the policy
       // consult stops the notice here too: the WAIT outcome every rail reads as a hold, never a failure.
       // An operator's deliberate send skips a plain dispute hold only; a fallback hold still waits.
@@ -129,4 +145,4 @@ function check(snapshot) {
   };
 }
 
-module.exports = { check, snapshotOf, sameSet, SET_CHANGED, SCHEDULE_CHANGED, CUSTOMER_DELETED };
+module.exports = { check, snapshotOf, sameSet, SET_CHANGED, SCHEDULE_CHANGED, CUSTOMER_DELETED, AUTOPAY_ENROLLED };

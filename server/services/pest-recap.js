@@ -222,25 +222,46 @@ async function loadCommonProducts(svc, knex) {
 }
 
 /**
- * Build the data the recap modal needs: service info, timeline, catalog,
- * prior note. `includeCommonProducts` adds the Fast Complete picker's
- * most-used list; only that sheet asks for it, so the recap modal (and the
- * sheet's stock re-read) never pay for the aggregate.
+ * The visit identity the recap context returns as `service` — also what a
+ * client echoes back as `expectedVisit` (see recapVisitIdentityChanged).
  */
-async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
-  const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
-  if (!ok) return { ok: false, reason };
+function recapServiceIdentity(svc, profile) {
+  return {
+    id: svc.id,
+    customerId: svc.customer_id,
+    customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim() || 'Customer',
+    serviceType: svc.service_type,
+    status: svc.status,
+    scheduledDate: svc.scheduled_date,
+    propertyId: svc.property_id ?? null,
+    catalogServiceId: svc.service_id ?? null,
+    address: resolveVisitAddress({
+      visit: svc,
+      customer: {
+        address_line1: svc.cust_address_line1,
+        address_line2: svc.cust_address_line2,
+        city: svc.cust_city,
+        state: svc.cust_state,
+        zip: svc.cust_zip,
+      },
+    }),
+    hasPhone: !!svc.cust_phone,
+    category: profile?.category || null,
+    // The live completion profile key, so a client routed from a stale
+    // schedule row (the tech Fast Complete sheet) can confirm this is
+    // still the visit type it was opened for.
+    serviceKey: profile?.serviceKey || null,
+  };
+}
 
-  // Started first so the aggregate overlaps the reads below.
-  const commonProductsLoad = includeCommonProducts ? loadCommonProducts(svc, knex) : null;
-
-  const timeline = await knex('job_status_history')
-    .where({ job_id: serviceId })
-    .orderBy('transitioned_at', 'asc')
-    .select('from_status', 'to_status', 'transitioned_at')
-    .catch(() => []);
-
-  const products = await knex('products_catalog')
+/**
+ * The active catalog list the Fast Complete product picker and the recap modal
+ * share. `extraColumns` lets another sheet (Tree & Shrub Fast Complete) add
+ * classifier inputs to the same row shape. Never rejects: a failed read is an
+ * empty list, as it always was here.
+ */
+function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
+  return knex('products_catalog')
     .where({ active: true })
     .orderBy('category')
     .orderBy('name')
@@ -264,9 +285,32 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
       // its "0 in stock" warning, and the formulation that names a gel bait
       // its name doesn't (Vendetta Plus), so it is weighed in grams.
       'display_name', 'inventory_unit', 'inventory_on_hand', 'formulation',
+      ...extraColumns,
     )
     .then((rows) => rows.map((row) => ({ ...row, inventory_on_hand: numberOrNull(row.inventory_on_hand) })))
     .catch(() => []);
+}
+
+/**
+ * Build the data the recap modal needs: service info, timeline, catalog,
+ * prior note. `includeCommonProducts` adds the Fast Complete picker's
+ * most-used list; only that sheet asks for it, so the recap modal (and the
+ * sheet's stock re-read) never pay for the aggregate.
+ */
+async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
+  const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
+  if (!ok) return { ok: false, reason };
+
+  // Started first so the aggregate overlaps the reads below.
+  const commonProductsLoad = includeCommonProducts ? loadCommonProducts(svc, knex) : null;
+
+  const timeline = await knex('job_status_history')
+    .where({ job_id: serviceId })
+    .orderBy('transitioned_at', 'asc')
+    .select('from_status', 'to_status', 'transitioned_at')
+    .catch(() => []);
+
+  const products = await loadRecapCatalogProducts(knex);
 
   // A FAILED lookup is not "no record" (codex P1 r15): reporting null on
   // a transient error would let the modal treat a real completed visit as
@@ -318,32 +362,7 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
     ok: true,
     eligible,
     existingRecordLoadFailed,
-    service: {
-      id: svc.id,
-      customerId: svc.customer_id,
-      customerName: `${svc.first_name || ''} ${svc.last_name || ''}`.trim() || 'Customer',
-      serviceType: svc.service_type,
-      status: svc.status,
-      scheduledDate: svc.scheduled_date,
-      propertyId: svc.property_id ?? null,
-      catalogServiceId: svc.service_id ?? null,
-      address: resolveVisitAddress({
-        visit: svc,
-        customer: {
-          address_line1: svc.cust_address_line1,
-          address_line2: svc.cust_address_line2,
-          city: svc.cust_city,
-          state: svc.cust_state,
-          zip: svc.cust_zip,
-        },
-      }),
-      hasPhone: !!svc.cust_phone,
-      category: profile?.category || null,
-      // The live completion profile key, so a client routed from a stale
-      // schedule row (the tech Fast Complete sheet) can confirm this is
-      // still the visit type it was opened for.
-      serviceKey: profile?.serviceKey || null,
-    },
+    service: recapServiceIdentity(svc, profile),
     timeline,
     products,
     ...(commonProducts && { commonProducts }),
@@ -494,6 +513,8 @@ async function submitRecap({
   // Set under the lock if the visit can't be recapped (cancelled/skipped);
   // the transaction aborts having written nothing and we return ok:false.
   let rejectReason = null;
+  // True when THIS submit moved the visit to completed (a performed completion).
+  let completedHere = false;
   // Set under the lock if the existing record shows the visit was NOT performed
   // (incomplete / inspection-only / customer-declined) — gates the referral credit.
   let recapPriorNonPerformed = false;
@@ -601,6 +622,7 @@ async function submitRecap({
         transitionedBy,
         trx,
       });
+      completedHere = true;
     }
     // 1b. A grouped row completing through this legacy path dissolves its
     //     open packet-less visit IN THIS TRANSACTION (codex #3590 r13):
@@ -791,7 +813,12 @@ async function submitRecap({
     completionSmsAlreadySent = existingNotes.completionSmsStatus === 'sent'
       || !!existingNotes.sentSmsBody
       || completionSmsSendingFresh;
-    const alreadyTexted = !!existing?.recap_sms_sent_at || completionSmsAlreadySent;
+    // Fast Complete's fixed re-service text is frozen onto the record at
+    // insert (completionSmsRecapMode), before /complete writes 'sending':
+    // that record's one completion text belongs to /complete, so a recap
+    // landing in between must not claim and send a second wording.
+    const fixedReserviceText = existingNotes.completionSmsRecapMode === require('./reservice-fixed-recap').MODE;
+    const alreadyTexted = !!existing?.recap_sms_sent_at || completionSmsAlreadySent || fixedReserviceText;
     willSendSms = wantSms && !alreadyTexted;
     const smsClaim = willSendSms ? { recap_sms_sent_at: new Date() } : {};
 
@@ -1374,6 +1401,15 @@ async function submitRecap({
     }
   }
 
+  // A recap is a PERFORMED completion: when it completed a street-level address hold's visit, the shared
+  // transition stamped the field confirmation, and the hold is released here (before the recap text, so
+  // the recap is no longer a held message). A no-op for every other visit; best-effort — an unreleased hold
+  // keeps the recap held (its claim is released below) and the lazy activation / sweep retry the release.
+  if (completedHere) {
+    const holdReleased = await require('./outbound-review-confirm').releaseStreetLevelHoldForPerformedCompletion(serviceId, { technicianId: transitionedBy }, 'pest-recap');
+    if (holdReleased === false) logger.warn(`[pest-recap] street-level hold for ${serviceId} was not released; the recap text stays held`);
+  }
+
   // 4. Customer-facing track_state -> complete (best-effort, post-trx).
   let trackCompleted = false;
   try {
@@ -1449,7 +1485,8 @@ async function submitRecap({
         purpose: 'service_completion',
         customerId: svc.customer_id,
         identityTrustLevel: 'admin_operator',
-        metadata: { original_message_type: 'pest_recap', service_record_id: recordId },
+        // scheduled_service_id lets the shared send step hold the recap while an address hold is live.
+        metadata: { original_message_type: 'pest_recap', service_record_id: recordId, scheduled_service_id: serviceId },
       });
       smsSent = !(msg?.blocked || msg?.sent === false);
       if (!smsSent) smsError = msg?.code || msg?.reason || 'blocked';
@@ -1553,4 +1590,6 @@ module.exports = {
   submitRecap,
   // Shared with completeScheduledService's expectedVisit guard.
   recapVisitIdentityChanged,
+  recapServiceIdentity,
+  loadRecapCatalogProducts,
 };

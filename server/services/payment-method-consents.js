@@ -54,6 +54,10 @@ async function recordConsent({
   consentTextSnapshot = null,
   consentTextVersion = null,
   evidenceContractId = null,
+  // { text, version }: the exact checkbox copy an accept recorded as shown
+  // (a 'v<N>' card-copy version). Recorded verbatim, never re-derived, so a
+  // webhook recovery after a copy change still records what the customer saw.
+  renderedConsent = null,
   // A caller that must decide something ELSE atomically with this row (the
   // pay surface re-judges Bill-To ownership in the same transaction, so a
   // withdrawal committing mid-request cannot leave consent recorded against
@@ -67,8 +71,14 @@ async function recordConsent({
   if ((consentTextSnapshot || evidenceContractId) && !(consentTextSnapshot && consentTextVersion && evidenceContractId)) {
     throw new Error('recordConsent: an agreement-backed consent needs its snapshot, version, and contract id');
   }
-  const consentText = consentTextSnapshot || getConsentText(methodType, { variant: consentVariant, holdTerms });
-  const versionLabel = consentTextVersion || consentVersionForVariant(consentVariant, methodType);
+  const rendered = !consentTextSnapshot && renderedConsent ? renderedConsent : null;
+  if (rendered && !(typeof rendered.text === 'string' && rendered.text && /^v\d+(?:[_-]|$)/.test(String(rendered.version || '')))) {
+    throw new Error('recordConsent: a rendered consent needs its text and a v<N> version');
+  }
+  // Text: the agreement snapshot, else the copy the capture RENDERED (#5481),
+  // else this server's text for the variant (a card hold renders its own).
+  const consentText = consentTextSnapshot || rendered?.text || getConsentText(methodType, { variant: consentVariant, holdTerms });
+  const versionLabel = consentTextVersion || rendered?.version || consentVersionForVariant(consentVariant, methodType);
 
   const [row] = await database('payment_method_consents').insert({
     customer_id: customerId,
@@ -153,12 +163,15 @@ async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { d
 // recovery therefore looks the row up by the version the capture attested
 // (`version`), or by any version at all (`anyVersion`, for jobs stamped
 // before versions were persisted), scoped by `source`/`since` as usual.
-async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, since = null, source = null, version = null, anyVersion = false, dbh = db } = {}) {
+async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, text: renderedText = null, since = null, source = null, version = null, anyVersion = false, dbh = db } = {}) {
   if (!customerId || !stripePaymentMethodId) return false;
+  // The copy the capture RENDERED (#5481) is the snapshot to match, else
+  // this server's text for the variant.
+  const text = renderedText || getConsentText(methodType, { variant });
   const q = dbh('payment_method_consents')
     .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId });
   if (version) q.where({ consent_text_version: String(version) });
-  else if (!anyVersion) q.where({ consent_text_snapshot: getConsentText(methodType, { variant }) });
+  else if (!anyVersion) q.where({ consent_text_snapshot: text });
   // A version/any-version lookup for the PREPAY variant still has to be the
   // prepay authorization (codex #5434 r3 P1): a base save-and-charge row the
   // recurring-card backstop recorded for the same method, matching on

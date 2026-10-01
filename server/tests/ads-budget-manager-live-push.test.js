@@ -653,6 +653,20 @@ describe('in-lock rechecks (requireLivePush)', () => {
     mockOwnOpRow = null;
   });
 
+  test.each([
+    ['setBudget', () => BudgetManager.setBudget('c-1', 50, 'test', { requireLivePush: true, requireNoChangeSince: new Date(Date.now() - 7 * 86400000) })],
+    ['setMode', () => BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true, requireNoChangeSince: new Date(Date.now() - 7 * 86400000) })],
+  ])('%s requireNoChangeSince: a change logged in the window (seen under the lock) throws recent_change before any push (#5486 r12)', async (_n, run) => {
+    campaignFirstRow = baseCampaign();
+    mockIsConfigured.mockReturnValue(true);
+    mockNewerAuditRow = { created_at: new Date().toISOString() };
+
+    await expect(run()).rejects.toMatchObject({ code: 'recent_change' });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    expect(mockLogInsert).not.toHaveBeenCalled();
+  });
+
   test('setMode: applying the already-current mode throws mode_noop before any push', async () => {
     campaignFirstRow = { ...baseCampaign(), budget_mode: 'stop' };
     mockIsConfigured.mockReturnValue(true);

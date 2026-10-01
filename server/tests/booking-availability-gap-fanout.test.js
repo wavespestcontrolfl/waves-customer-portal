@@ -359,7 +359,7 @@ test.each(['self-booking', 'voice'])('a same-day %s move excludes itself from th
   listOccupiedWindows.mockResolvedValue([]);
   findAvailableSlots.mockResolvedValue({ slots: [gapSlot('13:00', { latest_start_min: 16 * 60 })] });
   const subquery = { select() { return this; }, from() { return this; }, as() { return this; }, whereNot: jest.fn().mockReturnThis() };
-  const voiceQuery = { where: () => voiceQuery, whereNotIn: jest.fn().mockReturnThis(), whereBetween: () => voiceQuery,
+  const voiceQuery = { where: () => voiceQuery, whereNotIn: jest.fn().mockReturnThis(), whereNotExists: () => voiceQuery, whereBetween: () => voiceQuery,
     select: () => voiceQuery, count: () => voiceQuery, groupBy: () => voiceQuery,
     then: resolve => resolve(origin === 'voice' ? [{ scheduled_date: D, count: voiceQuery.whereNotIn.mock.calls.some(([key]) => key === 'id') ? 2 : 3 }] : []),
   };

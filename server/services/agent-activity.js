@@ -14,7 +14,7 @@
 // the route answers { available: false } while the gate is off.
 //
 // Item shape (the client renders exactly this):
-//   { id, kind, agent, title, subtitle, status, startedAt, finishedAt,
+//   { id, kind, agent, title, subtitle, status, startedAt, finishedAt, eventAt?,
 //     durationMs, steps: [{ key, label, status, detail, ms }],
 //     stepsDone, stepsTotal, link, detail }
 // status ∈ running | awaiting_review | blocked | completed | failed | skipped
@@ -24,6 +24,11 @@ const db = require('../models/db');
 // feature-gates.js is evaluated once at boot, so isEnabled() would freeze
 // the flag until a redeploy — a kill switch has to work on the next request.
 const { gateEnvValue } = require('../config/feature-gates');
+// The ONE content-version expression (md5 over title/body/link/detail/metadata)
+// the bell's Done fence uses. Activity's Done sends the same value back to
+// PUT /admin/notifications/:id/done, so a row rewritten in place since the
+// owner saw it answers 409 instead of being closed unseen.
+const { NOTIFICATION_VERSION_SQL } = require('./notification-service')._private;
 
 const STATUSES = ['running', 'awaiting_review', 'blocked', 'completed', 'failed', 'skipped'];
 const MAX_WINDOW_HOURS = 24 * 14;
@@ -297,8 +302,9 @@ function jobItem(job) {
 // services/ops-digest.js and routes/ops-digest-ingest.js since the
 // admin-alerts-brevity scope (2026-09-28). Older rows carry no metadata.kind
 // at all: fall back to the subject-prefix grammar their TITLE was written
-// with (ACT:/FIX:/FIRST:/[Review]) before that scope stripped it off. A
-// read ACT/REVIEW row is done.
+// with (ACT:/FIX:/FIRST:/[Review]) before that scope stripped it off. Read is
+// not done: an opened ACT/REVIEW row still needs the owner until a person
+// marks it done or its check clears it (done_at / metadata.resolved).
 const ACTION_PREFIX = /^(ACT:|\[Review\])/i;
 const DIGEST_PREFIX = /^(ACT:|FIX:|FIRST:|FYI:|OK:|\[Review\])\s*/i;
 function legacyKindFromTitle(subject) {
@@ -317,26 +323,40 @@ function digestItem(row) {
   // clean is retired by services/ops-digest.js resolveOpsDigest — read +
   // metadata.resolved. It reads as done (never "failed") and says so.
   const resolved = meta.resolved === true;
-  const status = resolved ? 'completed' : isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
+  // Done (docs/admin-notifications.md section 4.3) reads as handled, never "failed".
+  const done = Boolean(row.done_at);
+  const status = resolved || done ? 'completed' : isFix ? 'failed' : isAct ? 'awaiting_review' : 'completed';
   return {
     id: `digest:${row.id}`,
     kind: 'digest',
     // The Review link marks this bell row read (PUT /admin/notifications/:id/read)
     // so an ACT item clears from the feed once the owner has followed it.
     notificationId: row.id,
+    // Content version for the fenced Done in this feed: only a row that can
+    // still be marked done (not done, not resolved) carries one.
+    version: !done && !resolved && row.version ? String(row.version) : null,
     agent: OPS_AGENT,
     // New rows never carry the prefix (the bell title already dropped it);
     // this strip only matters for a legacy row still holding one.
     title: subject.replace(DIGEST_PREFIX, ''),
-    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
+    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : done ? 'done' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
     status,
     startedAt: iso(row.created_at),
-    finishedAt: resolved && meta.resolvedAt ? iso(meta.resolvedAt) : row.read_at ? iso(row.read_at) : null,
+    // Only a completed row has a finish time. An opened ACT/REVIEW (or FIX)
+    // row is still pending, so its read time is not a finish; an FYI row
+    // finishes when it is read.
+    finishedAt: resolved && meta.resolvedAt ? iso(meta.resolvedAt) : done ? iso(row.done_at) : status === 'completed' && row.read_at ? iso(row.read_at) : null,
     durationMs: null,
     steps: [],
     stepsDone: status === 'completed' ? 1 : 0,
     stepsTotal: 1,
     link: row.link || null,
+    doneAt: done ? iso(row.done_at) : null,
+    // A digest closed (done, or cleared by its check) sits in the timeline at
+    // the close, not where it was first raised: the window loads it because
+    // of that close, so an old digest marked done today reads as today's.
+    eventAt: (resolved && meta.resolvedAt) ? iso(meta.resolvedAt) : done ? iso(row.done_at) : iso(row.created_at),
+    resolution: row.resolution ? String(row.resolution) : null,
     // The full finding: `detail` (admin-alerts-brevity scope) when the row
     // has one, else the legacy long `body` a pre-scope row still carries —
     // either way this is the only copy once the email is skipped.
@@ -388,7 +408,7 @@ function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], dige
     .concat(drafts.map(smsDraftItem))
     .concat(digests.map(digestItem))
     .concat(exceptionJobs.map(jobItem))
-    .sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+    .sort((a, b) => String(b.eventAt || b.startedAt || '').localeCompare(String(a.eventAt || a.startedAt || '')));
   const agents = Array.from(new Set(items.map((i) => i.agent))).sort();
   return { items, agents, summary: summarize(items, jobs.length - exceptionJobs.length) };
 }
@@ -415,7 +435,7 @@ function clampWindowHours(value) {
 // (metadata.resolvedAt), so a just-cleared old finding shows once as
 // "cleared" history instead of vanishing the moment it leaves the pinned
 // set (codex P2 r7). Ids are merged so a row never renders twice.
-const DIGEST_COLUMNS = ['id', 'title', 'body', 'detail', 'link', 'metadata', 'read_at', 'created_at'];
+const DIGEST_COLUMNS = ['id', 'title', 'body', 'detail', 'link', 'metadata', 'read_at', 'done_at', 'resolution', 'created_at'];
 // Safety bound on the pinned query only — an order of magnitude above any
 // real pinned set (a handful of digests a day; the fall-off retires them),
 // never the feed's MAX_ITEMS, so the "pinned rows survive" promise holds.
@@ -428,16 +448,21 @@ const PINNED_CAP = 5000;
 // feed just because the row aged out of both the pinned and windowed sets.
 async function loadDigestRows(db, since, focusId) {
   const base = () => db('notifications')
-    .select(...DIGEST_COLUMNS)
+    .select(...DIGEST_COLUMNS, db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
     .where({ recipient_type: 'admin', category: DIGEST_CATEGORY });
   // Admin-alerts-brevity scope (2026-09-28): new rows carry metadata.kind and
   // no title prefix at all — the title regexes below only still match a
   // pre-scope row that never got a kind stamped.
   const IS_ACT_OR_REVIEW = "(metadata->>'kind' IN ('ACT', 'REVIEW') OR (metadata->>'kind' IS NULL AND title ~* '^(ACT:|\\[Review\\])'))";
   const IS_FIX = "(metadata->>'kind' = 'FIX' OR (metadata->>'kind' IS NULL AND title ~* '^FIX:'))";
+  // A done row (a person's, or the condition cleared) is history: it stays in
+  // the windowed set below but is never pinned.
   const pinned = await base()
+    .whereNull('done_at')
     .where((q) =>
-      q.where((u) => u.whereNull('read_at').andWhereRaw(IS_ACT_OR_REVIEW))
+      // Read is not done: an opened ACT/REVIEW digest stays pinned until it
+      // is done or its check resolved it.
+      q.where((u) => u.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'").andWhereRaw(IS_ACT_OR_REVIEW))
         .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
           .andWhereRaw(IS_FIX)
           .andWhere((r) => r.whereRaw("metadata->>'source' = 'ops-crons'").orWhereRaw("metadata->>'fallOff' = 'true'")))
@@ -445,9 +470,13 @@ async function loadDigestRows(db, since, focusId) {
     .orderBy('created_at', 'desc')
     .limit(PINNED_CAP);
   const windowed = await base()
+    // A row marked done by hand sets neither created_at nor resolvedAt in the
+    // window, so done_at qualifies it too (and orders it): an older pinned
+    // digest a person just closed shows once as Done with its resolution.
     .where((w) => w.where('created_at', '>=', since)
-      .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since]))
-    .orderByRaw("GREATEST(created_at, NULLIF(metadata->>'resolvedAt', '')::timestamptz) DESC")
+      .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since])
+      .orWhere('done_at', '>=', since))
+    .orderByRaw("GREATEST(created_at, NULLIF(metadata->>'resolvedAt', '')::timestamptz, done_at) DESC")
     .limit(MAX_ITEMS);
   const focused = focusId ? await base().where('id', focusId).limit(1) : [];
   const seen = new Set();
@@ -567,6 +596,6 @@ async function getActivity({ windowHours, focus } = {}) {
   };
 }
 
-module.exports = { getActivity, buildActivity, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE,
+module.exports = { getActivity, buildActivity, legacyKindFromTitle, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE,
   _private: { loadDigestRows },
 };

@@ -794,6 +794,11 @@ export class ApiClient {
     return this.request('/feed/weather');
   }
 
+  // "Your yard this month" card (GATE_PORTAL_YARD_CALENDAR; gate-off answers available:false)
+  getYardMonth() {
+    return this.request('/feed/yard');
+  }
+
   getAlerts() {
     return this.request('/feed/alerts');
   }

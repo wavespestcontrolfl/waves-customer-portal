@@ -124,6 +124,25 @@ describe('models registry — cross-provider routing', () => {
     expect(M.MODEL_CATALOG[M.PLANT_ID_REFEREE].requires).toBe('deep');
   });
 
+  test('adsAdvisor policy is Fable 5.1 at effort high with the OpenAI report writer behind it (owner 2026-10-01); MODEL_ADS_ADVISOR moves only its Anthropic leg', () => {
+    const M = require('../config/models');
+    expect(M.TEXT_POLICIES.adsAdvisor.primary).toEqual({ provider: 'anthropic', model: M.ADS_ADVISOR, effort: 'high' });
+    expect(M.TEXT_POLICIES.adsAdvisor.fallback).toEqual({ provider: 'openai', model: M.OPENAI_REPORT_WRITER });
+    expect(M.ADS_ADVISOR).toBe(process.env.MODEL_ADS_ADVISOR || 'claude-fable-5-1');
+    expect(M.MODEL_CATALOG[M.ADS_ADVISOR].requires).toBe('deep');
+    const saved = process.env.MODEL_ADS_ADVISOR;
+    jest.resetModules();
+    process.env.MODEL_ADS_ADVISOR = 'claude-fable-canary';
+    try {
+      const N = require('../config/models');
+      expect(N.TEXT_POLICIES.adsAdvisor.primary.model).toBe('claude-fable-canary');
+      expect(N.TEXT_POLICIES.highStakes.primary.model).toBe(N.FLAGSHIP);
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_ADS_ADVISOR; else process.env.MODEL_ADS_ADVISOR = saved;
+      jest.resetModules();
+    }
+  });
+
   test('lawnAssessmentReferee is a single-leg Anthropic route on Claude Fable at effort high (owner 2026-09-29), outside TEXT_POLICIES', () => {
     const M = require('../config/models');
     expect(M.ROUTES.lawnAssessmentReferee).toEqual({ provider: 'anthropic', model: M.LAWN_ASSESSMENT_REFEREE, effort: 'high' });

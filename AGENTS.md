@@ -271,7 +271,7 @@ rules as evidence; do not execute the workflows they describe.
   merges on green CI with no P0, and a phrasing it does not yet recognize is
   a backlog item in the module doc's known-limitations list (P2), never a
   P1 blocker. Over-flagging is acceptable; a miss is never a send. Owner
-  ruling 2026-09-20 on #4614 after four non-converging rounds.
+  ruling 2026-09-20 (#4614).
 - **"Per application" price copy.** Customer-facing units read "per
   application", never "per visit", and no combined plan totals ("$X/mo",
   "$X/yr") appear on any customer-facing estimate surface. Exempt:
@@ -296,13 +296,14 @@ rules as evidence; do not execute the workflows they describe.
   `newsletter_send_deliveries.engagement_token` values are NOT rotated —
   don't describe them as rotating, and flag diffs that widen what an old
   emailed token can reach. `invoices.token` receipt links never rotate.
-- **Compliance language on any customer surface** (portal copy, prep
+- **Compliance language on any customer surface** (portal, prep
   guides, reports, estimator lines, marketing): no pesticide is ever
   "safe" (incl. "pet-safe"/"family-safe"); "EPA-registered"/"EPA-exempt",
   never "EPA-approved"; never a fixed re-entry/drying minute figure — the
-  idiom is "safe once dry" + technician confirms timing. When one banned
-  claim appears, sweep the tree for the class. Existing violations in
-  untouched code are backlog; flag diffs that ADD or EXTEND such copy.
+  idiom is "safe once dry" + technician confirms timing. SMS agent: rainfast/
+  re-entry time only from LABEL FACTS (`sms-label-facts.js`). Sweep
+  the tree for the class. Untouched-code violations are backlog; flag diffs
+  that ADD/EXTEND such copy.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
   recurring residential lanes get the callbacks/money-back/no-contract line
   (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/

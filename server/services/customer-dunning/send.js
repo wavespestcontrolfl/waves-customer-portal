@@ -12,12 +12,13 @@
  * and the leg retries at the next tick from a FRESH render (B-4).
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { redactContact } = require('../../utils/redact-contact');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const EmailTemplateLibrary = require('../email-template-library');
-const { dispatchUnderBillingEmailAuthority, blocked } = require('../billing-channel-email-authority');
+const { dispatchUnderBillingEmailAuthority } = require('../billing-channel-email-authority');
 const {
   billingEmailRecipient, operatorEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure,
 } = require('../billing-email-sender');
@@ -25,12 +26,24 @@ const ContactLedger = require('../collections/contact-ledger');
 const { isTerminalEmailRefusal } = require('../billing-reminder-delivery');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../short-url');
 const { publicPortalUrl } = require('../../utils/portal-url');
-const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
 const Boundary = require('./boundary');
 const Render = require('./render');
 const { SOURCE, emailIdempotencyKey, triggerEventId } = require('./constants');
 
 const TABLE = 'customer_dunning_schedules';
+
+// The short code's recorded channel for the legs that carry its link: { channel } for a lone email / sms leg, else {}.
+function linkChannelFor(channels = []) {
+  const legs = [...new Set(channels)];
+  return legs.length === 1 && (legs[0] === 'email' || legs[0] === 'sms') ? { channel: legs[0] } : {};
+}
+
+// The cached link's identity: the set digest, and - when the code records a channel - that channel too, so a
+// code minted for an email-only attempt is not reused for an SMS-only one (the recorded channel would be wrong).
+// link_digest is char(64): a channel-specific key is re-hashed to the same width; a neutral link keeps the bare digest.
+function linkCacheKey(digest, channel) {
+  return channel ? crypto.createHash('sha256').update(`${digest}|${channel}`).digest('hex') : digest;
+}
 
 /**
  * MINT ONCE (B-6, B-13): a short code is written only when the schedule's
@@ -41,7 +54,9 @@ const TABLE = 'customer_dunning_schedules';
 async function ensureLink(ctx) {
   if (ctx.link) return ctx.link;
   const { schedule, set, customer } = ctx;
-  if (schedule.link_url && schedule.link_digest === set.digest) {
+  const linkChannel = linkChannelFor(ctx.linkChannels || ctx.channels);
+  const cacheKey = linkCacheKey(set.digest, linkChannel.channel);
+  if (schedule.link_url && schedule.link_digest === cacheKey) {
     ctx.link = schedule.link_url;
     return ctx.link;
   }
@@ -50,13 +65,15 @@ async function ensureLink(ctx) {
     entityType: 'invoices',
     entityId: set.anchor.id,
     customerId: customer.id,
-    channel: 'sms',
+    // One shared link serves every leg of the touch: name its channel only when exactly one leg
+    // (email or sms) will carry it; a touch on several legs, or an app push, stays neutral ('link' in the timeline).
+    ...linkChannel,
     purpose: 'customer_dunning',
     codePrefix: invoiceShortCodePrefix(set.anchor),
   });
   try {
     await db(TABLE).where({ id: schedule.id, touch_claimed_at: ctx.claimStamp })
-      .update({ link_url: ctx.link, link_digest: set.digest, updated_at: db.fn.now() });
+      .update({ link_url: ctx.link, link_digest: cacheKey, updated_at: db.fn.now() });
   } catch (err) {
     logger.warn(`[customer-dunning] could not cache the pay link for schedule ${schedule.id}: ${redactContact(err.message)}`);
   }
@@ -119,71 +136,26 @@ async function sendTextLeg(ctx, channel, ledger) {
   });
 }
 
-/**
- * The operator send's provider handoff: a customer-comms transaction that runs
- * the boundary on ITS handle, then dispatches (the analogue of
- * billing-email-sender's selfPayOnlyHandoff). Fail-closed.
- *
- * It mirrors billing-channel-email-authority's verifyAndDispatch: the check runs
- * once before the provider work, and AGAIN as the `providerBoundaryCheck` the
- * template library calls after its asynchronous marker and SendGrid preparation,
- * immediately before the request. A set that changed in between (an invoice
- * paid, a credit applied) vetoes the send there: `state.boundaryBlock` records
- * the retryable refusal, the tagged throw aborts the dispatch, and the outcome is
- * the same `{ ok: false }` the normal authority returns.
- */
-function boundaryOnlyHandoff(snapshot, state) {
-  const check = Boundary.check(snapshot);
-  const refuse = (verdict) => blocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
-  return async (dispatch) => {
-    try {
-      return await withCustomerCommsLock(db, snapshot.customerId, async (trx) => {
-        const verdict = await check({ database: trx });
-        if (verdict.ok !== true) {
-          state.boundaryBlock = refuse(verdict);
-          return { ok: false };
-        }
-        const providerBoundaryCheck = async ({ database } = {}) => {
-          const final = await check({ database: database || trx, providerBoundary: true });
-          if (final.ok !== true) {
-            state.boundaryBlock = refuse(final);
-            const veto = new Error(state.boundaryBlock.reason);
-            veto.code = state.boundaryBlock.code;
-            veto.retryable = state.boundaryBlock.retryable;
-            veto.providerBoundaryBlocked = true;
-            throw veto;
-          }
-          state.handoffStarted = true;
-          return { ok: true };
-        };
-        state.providerPreparationStarted = true;
-        await dispatch(trx, providerBoundaryCheck);
-        if (state.boundaryBlock) return { ok: false };
-        state.providerAccepted = true;
-        return { ok: true };
-      });
-    } catch (err) {
-      if (state.providerAccepted) return { ok: true };
-      // A final-boundary veto is a definite refusal, however it was thrown.
-      if (state.boundaryBlock && !state.handoffStarted) return { ok: false };
-      throw err;
-    }
-  };
-}
-
 const AUTHORITY_INPUT = (customerId) => ({
   customerId, invoiceId: null, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' },
 });
 
+// Every email - an operator's send-now included - goes through the ONE shared billing email authority: recipient
+// re-resolution under the comms lock, the address lock, both suppression stores, the template check, the
+// collections-hold check and this engine's boundary callback. The operator send differs in exactly two things the
+// authority takes as explicit options: it skips the billing-preference / channel-selection gate (the deliberate
+// bypass) and carries holdExempt 'operator' (a plain dispute hold is skipped, a wrong-party hold still waits).
 function emailHandoff(ctx, to, templateKey, state) {
-  if (ctx.operatorInitiated) return boundaryOnlyHandoff(ctx.snapshot, state);
   return (dispatch) => dispatchUnderBillingEmailAuthority({
     input: AUTHORITY_INPUT(ctx.customer.id),
     recipientEmail: to,
+    // the authority compares against its own lower-cased recipient; an operator address comes from the raw record
+    authorityRecipientEmail: String(to).trim().toLowerCase(),
     templateKey,
     preSendCheck: Boundary.check(ctx.snapshot),
     dispatch,
     state,
+    ...(ctx.operatorInitiated ? { operatorBypassPreferences: true, holdExempt: 'operator' } : {}),
   });
 }
 
@@ -277,7 +249,12 @@ async function sendEmailLeg(ctx, ledger) {
 
 /** The `send(channel, ledger)` callback for sendReminderChannels. */
 function makeSender(ctx) {
-  return (channel, ledger) => (channel === 'email' ? sendEmailLeg(ctx, ledger) : sendTextLeg(ctx, channel, ledger));
+  return (channel, ledger, dispatchable) => {
+    // The shared pay link is attributed to the legs this attempt will actually dispatch (pending AND permitted by the
+    // collections policy), known only once the policy verdicts are in - so it is set here, before the first leg mints.
+    if (Array.isArray(dispatchable)) ctx.linkChannels = dispatchable;
+    return channel === 'email' ? sendEmailLeg(ctx, ledger) : sendTextLeg(ctx, channel, ledger);
+  };
 }
 
-module.exports = { stampNeverContacted, makeSender, ensureLink, sendTextLeg, sendEmailLeg, boundaryOnlyHandoff, SOURCE };
+module.exports = { stampNeverContacted, makeSender, ensureLink, sendTextLeg, sendEmailLeg, SOURCE };
