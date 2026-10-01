@@ -129,6 +129,14 @@ describe('marks from the request', () => {
     ]);
   });
 
+  test('access codes never reach the writer, in the promise or the still-left note', () => {
+    const [line] = VisitPromises.writerPromiseLines([
+      { mark: 'partly', description: 'Check the side yard, gate code 4821', stillLeft: 'the shed, lockbox code 1234' },
+    ]);
+    expect(line).not.toMatch(/4821|1234/);
+    expect(line).toContain('[redacted]');
+  });
+
   test("the writer's PROMISES lines say each promise as marked", () => {
     expect(VisitPromises.writerPromiseLines([
       { mark: 'done', description: 'Check under the dishwasher' },

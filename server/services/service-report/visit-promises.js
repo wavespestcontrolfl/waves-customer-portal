@@ -20,6 +20,7 @@ const logger = require('../logger');
 const { isEnabled, gateEnvValue } = require('../../config/feature-gates');
 const { writerRulesInScope } = require('./lawn-report-copy-prompt');
 const { dateOnlyString } = require('../../utils/datetime-et');
+const { redactAccessCodes } = require('../context-aggregator');
 
 // Promises a technician can keep at a visit. Office work (estimates,
 // confirmations, callbacks, reports, paperwork, scheduling, reschedule
@@ -135,11 +136,17 @@ const MARK_WORDS = Object.freeze({
   not_yet: 'Not done yet',
 });
 
-// The writer's PROMISES record (report-writer-records.js), or null.
+// The writer's PROMISES record (report-writer-records.js). Both texts are
+// free text (a promise can name a gate or lockbox code), so they pass the
+// same access-code scrubber as every other free-text grounding input.
 function writerPromiseLines(resolved) {
-  return (Array.isArray(resolved) ? resolved : []).map((promise) => {
-    const stillLeft = promise.mark === 'partly' && promise.stillLeft ? ` (still left: ${promise.stillLeft})` : '';
-    return `- ${MARK_WORDS[promise.mark]}: ${promise.description}${stillLeft}`;
+  const scrub = (text) => cleanText(redactAccessCodes(text));
+  return (Array.isArray(resolved) ? resolved : []).flatMap((promise) => {
+    const description = scrub(promise.description);
+    if (!description) return [];
+    const stillLeftText = promise.mark === 'partly' ? scrub(promise.stillLeft) : '';
+    const stillLeft = stillLeftText ? ` (still left: ${stillLeftText})` : '';
+    return [`- ${MARK_WORDS[promise.mark]}: ${description}${stillLeft}`];
   });
 }
 
