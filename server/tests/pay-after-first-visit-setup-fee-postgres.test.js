@@ -424,7 +424,7 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
 
   // Pre-push audit P0: a setup line that does not bill the whole fee ($0 or
   // partial) is not the fee billed — the fee goes to the office, no claim.
-  test.each([0, 40])('a series invoice whose setup line bills $%s (not the whole fee) does not retire it: parked for the office, no claim', async (lineAmount) => {
+  test.each([0, 40])('a series invoice whose setup line bills $%s (not the whole fee) does not retire it: only the remainder is parked for the office, no claim', async (lineAmount) => {
     const f = await seed();
     const Obligation = require('../services/setup-fee-obligation');
     try {
@@ -439,8 +439,18 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       const parked = await mockPg.transaction((trx) => Obligation.parkSetupFeeStampForOffice(trx, {
         parentId: f.parentId, rawAmount: SETUP_FEE, customerId: f.customerId, estimateId: f.estimateId, origin: 'test', visit,
       }));
-      expect(parked).toMatchObject({ parentId: f.parentId, amount: SETUP_FEE });
-      expect(await officeFeeAlerts(f)).toHaveLength(1);
+      // The office is handed only what is NOT already billed, with the live
+      // partial charge listed to reconcile (never the full fee on top of it).
+      const remainder = Math.round((SETUP_FEE - lineAmount) * 100) / 100;
+      expect(parked).toMatchObject({ parentId: f.parentId, amount: remainder });
+      const [alert] = await officeFeeAlerts(f);
+      expect(Number(alert.payload.amount)).toBe(remainder);
+      if (lineAmount > 0) {
+        expect(alert.payload.feeAmount).toBe(SETUP_FEE);
+        expect(alert.payload.existingSetupCharges).toEqual([{ invoiceId: String(partial.id), amount: lineAmount }]);
+      } else {
+        expect(alert.payload.existingSetupCharges).toBeUndefined();
+      }
       expect(await mockPg('setup_fee_claims').where({ invoice_id: partial.id })).toHaveLength(0);
     } finally { await cleanup(f); }
   });

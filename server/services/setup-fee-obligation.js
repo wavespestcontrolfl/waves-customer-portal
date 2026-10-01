@@ -355,7 +355,14 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
     .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
     .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
     .select('id', 'line_items');
-  const billedByHand = rows(candidates).find((inv) => setupLineCents(inv.line_items) >= feeCents) || null;
+  const setupCharges = rows(candidates)
+    .map((inv) => ({ invoiceId: String(inv.id), cents: setupLineCents(inv.line_items) }))
+    .filter((c) => c.cents > 0);
+  const billedByHand = setupCharges.find((c) => c.cents >= feeCents) ? { id: setupCharges.find((c) => c.cents >= feeCents).invoiceId } : null;
+  // Partly billed (one $40 line, or several lines that only add up to the
+  // fee): those invoices stay collectible, so the office is handed only the
+  // REMAINDER, with the existing setup charges listed to reconcile.
+  const alreadyBilledCents = setupCharges.reduce((sum, c) => sum + c.cents, 0);
   if (billedByHand) {
     const retired = await trx('scheduled_services')
       .where({ id: parentId, pending_setup_fee: rawAmount })
@@ -384,14 +391,19 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
       .first('c.invoice_id');
     sourceInvoiceId = voidedSource?.invoice_id ? String(voidedSource.invoice_id) : null;
   }
+  const owedAmount = Math.max(0, feeCents - alreadyBilledCents) / 100;
   const alert = await require('./dispatch-alerts').createAlert({
     type: SETUP_FEE_OFFICE_BILLING_ALERT, severity: 'warn', jobId: parentId, trx,
     payload: {
-      amount, seriesId: parentId, estimateId, customerId, billToScheduledServiceId, origin, ...(alertContext || {}),
+      amount: owedAmount, seriesId: parentId, estimateId, customerId, billToScheduledServiceId, origin, ...(alertContext || {}),
       ...(sourceInvoiceId ? { sourceInvoiceId } : {}),
+      ...(alreadyBilledCents > 0 ? {
+        feeAmount: amount,
+        existingSetupCharges: setupCharges.map((c) => ({ invoiceId: c.invoiceId, amount: c.cents / 100 })),
+      } : {}),
     },
   });
-  return { parentId, amount, alertId: alert?.id || null };
+  return { parentId, amount: owedAmount, alertId: alert?.id || null };
 }
 
 /**
