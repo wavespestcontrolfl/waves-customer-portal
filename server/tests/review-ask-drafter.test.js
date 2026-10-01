@@ -47,6 +47,9 @@ describe('verifyDraftBody — the auto-send safety net', () => {
     expect(verify("Aaron, a Google review helps: {review_url} Reply if anything's off.")).toBe('office_phrase');
     expect(verify('Aaron, text me instead of posting if something is wrong: {review_url}')).toBe('steers_from_review');
     expect(Drafter.verifyEmailIntro('Aaron, if you were happy with the visit, a review would help.', { firstName: 'Aaron' })).toBe('satisfaction_condition');
+    // #5511 GitHub r2: the condition and the ask split across sentences.
+    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us. If anything still looks off, just reply. Otherwise leave a Google review.', { firstName: 'Aaron' })).toBe('steers_from_review');
+    expect(verify("Aaron, text me if something's not right. Google review: {review_url}")).toBe('steers_from_review');
   });
 
   test('a clean grounded draft passes', () => {
@@ -220,7 +223,7 @@ describe('draftAskBody — gating + fallback contract', () => {
 
 describe('verifyEmailIntro — the email opener safety net', () => {
   const verify = (body) => Drafter.verifyEmailIntro(body, { firstName: 'Aaron' });
-  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. If anything still looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. A quick Google review would mean a lot to our small crew.';
 
   test('a clean grounded intro passes', () => {
     expect(verify(CLEAN_INTRO)).toBeNull();
@@ -251,7 +254,7 @@ describe('verifyEmailIntro — the email opener safety net', () => {
 });
 
 describe('draftEmailIntro — gating + fallback contract', () => {
-  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. If anything looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. A quick Google review would mean a lot to our small crew.';
 
   test('gate off → null, and no model call is made', async () => {
     mockGates.reviewAskPersonalized = false;
@@ -270,8 +273,9 @@ describe('draftEmailIntro — gating + fallback contract', () => {
   });
 
   test('line breaks in the model output collapse to one paragraph', async () => {
-    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron, thanks for having us out.\n\nA quick review below would mean a lot. Reply here if anything is off.' });
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron, thanks for having us out.\n\nA quick Google review below would mean a lot.' });
     const out = await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron' });
+    expect(out).toBeTruthy();
     expect(out).not.toMatch(/\n/);
   });
 
@@ -287,7 +291,7 @@ describe('draftEmailIntro — gating + fallback contract', () => {
 });
 
 describe('draftEmailIntro — step-aware instruction (codex #3235 r1)', () => {
-  const CLEAN_INTRO = 'Hi Aaron, thanks for having us out. If anything looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+  const CLEAN_INTRO = 'Hi Aaron, thanks for having us out. A quick Google review would mean a lot to our small crew.';
 
   test('a Day-0 step (email fallback) is prompted as a right-after-the-visit email, not a follow-up', async () => {
     mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_INTRO });
@@ -341,7 +345,7 @@ describe('scheme-less URLs detected generically (codex #3235 r16 — closes the 
   });
 
   test('ordinary prose with abbreviations still passes', () => {
-    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out, e.g. the lanai work. If anything looks off, just reply to this email and we will make it right.', { firstName: 'Aaron' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out, e.g. the lanai work. A Google review would mean a lot.', { firstName: 'Aaron' })).toBeNull();
   });
 });
 
@@ -354,7 +358,7 @@ describe('deadline and access-instruction frames are banned (codex #3235 r17 —
   });
 
   test('mentioning pets warmly (no instruction frame) still passes', () => {
-    expect(Drafter.verifyEmailIntro('Hi Aaron, hope the pups are enjoying the yard again. If anything looks off, just reply to this email.', { firstName: 'Aaron' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Aaron, hope the pups are enjoying the yard again. A Google review would mean a lot.', { firstName: 'Aaron' })).toBeNull();
   });
 });
 

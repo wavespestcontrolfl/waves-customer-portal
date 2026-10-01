@@ -155,7 +155,7 @@ function normalizeSmsPunctuation(text) {
 // satisfaction condition, no reply-instead-of-review steer, no office phrasing.
 function neutralityReject(text) {
   if (OFFICE_PHRASE_RE.test(text)) return "office_phrase";
-  if (STEER_RE.test(text)) return "steers_from_review";
+  if (STEER_RE.test(text) || REPLY_ROUTE_RE.test(text)) return "steers_from_review";
   const sentences = text.split(/(?<=[.!?])\s+/);
   if (sentences.some((s) => /review/i.test(s) && SATISFACTION_CONDITION_RE.test(s))) return "satisfaction_condition";
   return null;
@@ -391,6 +391,10 @@ const STEER_RE = /\binstead of\b|\brather than\b|\bprivately\b|\bbefore (?:you )
 // were happy", "if you loved the results"). "if you have a minute" is not a
 // satisfaction condition and stays allowed.
 const SATISFACTION_CONDITION_RE = /\b(?:if|unless|provided)\b[^.!?]*\b(?:happy|pleased|satisf\w*|earn(?:ed)?|enjoy\w*|lov(?:e|ed)|lik(?:e|ed)|good job|great job|hit the mark|went well|worked|did right)\b/i;
+// Routing an unhappy customer to a reply instead of a review, even split
+// across sentences: "If anything still looks off, just reply. Otherwise a
+// quick review...", "Text me if something's not right", "Otherwise ... review".
+const REPLY_ROUTE_RE = /\bif (?:anything|something|there(?:'s| is| are)|you (?:have|see|notice|need|spot))\b[^.!?]*\b(?:reply|text|call|let (?:me|us) know|reach out|email)\b|\b(?:reply|text me|call me|call us|let (?:me|us) know|reach out)\b[^.!?]*\bif (?:anything|something|there|you|it)\b|\botherwise\b[^.!?]*\breviews?\b/i;
 const TERMITE_RE = /\btermites?\b|\bwdo\b/i;
 const COMPANY_NAME_RE = /\b(?:llc|inc|corp|ltd|co|rentals?|propert(?:y|ies)|management|realty|group|vacation|homes|hoa|association|trust|partners)\b/i;
 const CAPITAL_ALLOW = new Set([
@@ -722,7 +726,7 @@ const CONTENT_CHECKS = [
   ["emoji", (b) => EMOJI_RE.test(b)],
   ["banned_phrase", (b) => BANNED_RE.test(b)],
   ["office_phrase", (b) => OFFICE_PHRASE_RE.test(b)],
-  ["steers_from_review", (b) => STEER_RE.test(b)],
+  ["steers_from_review", (b) => STEER_RE.test(b) || REPLY_ROUTE_RE.test(b)],
   ["satisfaction_condition", (b) => b.split(/(?<=[.!?])\s+/).some((s) => /review/i.test(s) && SATISFACTION_CONDITION_RE.test(s))],
   ["termite_off_service", (b, c) => !c.termite && TERMITE_RE.test(b)],
 ];

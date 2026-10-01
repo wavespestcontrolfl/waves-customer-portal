@@ -501,6 +501,10 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({ body: 'Text me instead of posting if something is wrong. Google review: {review_url} You had to get to work.' })).toBe('steers_from_review');
   });
 
+  test('#5511 GitHub r2: a reply-instead-of-review route split across sentences is refused', () => {
+    expect(verify({ body: 'I know you had to get to work. If anything still looks off, just reply. Otherwise a Google review helps: {review_url}' })).toBe('steers_from_review');
+  });
+
   test('office / AI phrasing is rejected', () => {
     expect(verify({ body: 'I know you had to get to work. Google review: {review_url} Questions? Just reply.' })).toBe('office_phrase');
     expect(verify({ body: "I know you had to get to work. Google review: {review_url} Reply if anything's off." })).toBe('office_phrase');
