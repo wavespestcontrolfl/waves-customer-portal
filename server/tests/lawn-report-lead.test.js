@@ -173,8 +173,9 @@ describe('deriveLawnLead', () => {
         const insights = [issue({ category, customerAction: 'Raise your mower to 4 inches this week.', nextVisitPlan: 'Spot-treat the edge weeds.' })];
         const under = deriveLawnLead(reportOf({ banner: HOLD_BANNER, insights }));
         expect(under.yourPart).toEqual([]);
-        // No follow-up: the water-owned issue's plan is not a lead source; wavesNext is.
-        expect(under.next).toBe('We will recheck the edge.');
+        // No follow-up: the water-owned issue's plan is not a lead source, and
+        // neither is snapshot.wavesNext (the same plan copied at build time).
+        expect(under.next).toBeNull();
         const bare = reportOf({ insights });
         expect(deriveLawnLead(bare).yourPart).toEqual(['Raise your mower to 4 inches this week.']);
         expect(deriveLawnLead(bare).next).toBe('Spot-treat the edge weeds.');
@@ -197,11 +198,11 @@ describe('deriveLawnLead', () => {
   });
 
   describe('next precedence', () => {
-    test('followUp.reason, then the top issue plan, then snapshot.wavesNext, else null', () => {
+    test('followUp.reason, then the top issue plan, else null (snapshot.wavesNext is never read)', () => {
       const r = reportOf({ followUp: { reason: 'Recheck the thin edge.' } });
       expect(deriveLawnLead(r).next).toBe('Recheck the thin edge.');
       expect(deriveLawnLead(reportOf()).next).toBe('Spot-treat the edge weeds.');
-      expect(deriveLawnLead(reportOf({ insights: [issue({ nextVisitPlan: null })] })).next).toBe('We will recheck the edge.');
+      expect(deriveLawnLead(reportOf({ insights: [issue({ nextVisitPlan: null })] })).next).toBeNull();
     });
 
     test('a planned follow-up owns next: the top issue plan is never used when one exists, even if it was filtered', () => {

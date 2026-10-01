@@ -92,11 +92,14 @@ function deriveYourPart(reportV2, topIssue, bannerPresent) {
 // follow-up owns the line: when its reason is banner-owned watering wording
 // the line is left empty rather than swapped for a different plan, so the
 // lead never presents a second plan as the follow-up (and the top finding
-// card keeps its own plan, see LawnInsightCards).
+// card keeps its own plan, see LawnInsightCards). Without a follow-up the
+// top finding's plan is the only source: snapshot.wavesNext is that same plan
+// copied at build time, so reading it would let an excluded water-owned
+// finding back in under a banner (codex P0 #5496 r2).
 function deriveNext(reportV2, topIssue, bannerPresent) {
   const followUpReason = clean(reportV2.followUp && reportV2.followUp.reason);
   if (followUpReason) return pick([followUpReason], bannerPresent);
-  return pick([topIssue && topIssue.nextVisitPlan, reportV2.snapshot.wavesNext], bannerPresent);
+  return pick([topIssue && topIssue.nextVisitPlan], bannerPresent);
 }
 
 /**

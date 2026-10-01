@@ -1682,8 +1682,7 @@ explanation, `progress` a reserved slot (null until a later change writes
 `snapshot.progress`), `applied` the treatment summary (never filtered), `yourPart` at most two
 homeowner tasks (may be empty; never the stock "No action is needed" line) and
 `next` the follow-up reason when a follow-up is planned (never replaced by a
-different plan), otherwise the top finding's next-visit plan, else
-`snapshot.wavesNext`. It is derived at the tail of
+different plan), otherwise the top finding's next-visit plan, else null. It is derived at the tail of
 `applyLawnReportReconciliation` from the final reconciled strings, so it carries
 the same wording as the rest of the report. When `reportV2.banner` carries
 watering lines the banner owns the watering task: `yourPart` is the top
