@@ -4525,10 +4525,10 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Pay per application');
     expect(html).toContain('Annual prepay');
     expect(html).toContain('We send the invoice automatically and make secure payment available.');
-    // Pay-per-application card (R2 2026-09-28): nothing collected before the first visit.
-    expect(html).toContain('Next: pick a time, then confirm. Nothing is charged today.');
-    expect(html).not.toContain('so you can pay before service');
-    expect(html).not.toContain('so you can pay in-flow');
+    // GATE_PAY_AFTER_FIRST_VISIT off (the default render): today's wording.
+    expect(html).toContain('so you can pay before service');
+    expect(html).not.toContain('nothing is charged today');
+    expect(html).not.toContain('Nothing is charged today');
     expect(html).toContain('After confirmation, your annual prepay invoice totals');
     expect(html).toContain('id="payment-setup-summary"');
     expect(html).toContain('id="change-payment-setup-btn"');
@@ -7753,8 +7753,8 @@ describe('public estimate one-time breakdown', () => {
       firstApplicationAmount: 89,
     })).toEqual(expect.objectContaining({
       totalAmount: 188,
-      payAfterBody: 'Approve now; nothing is charged today. The setup + first application total of $188.00 is billed at your first visit.',
-      billingSmall: 'No payment is charged on this page. The setup plus first application, totaling $188.00, is billed at your first visit.',
+      payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice for $188.00 so you can pay before service.',
+      billingSmall: 'No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling $188.00.',
       payPrefCardSub: 'Invoice includes bait station setup + first application ($188.00).',
     }));
     expect(buildStandardPayPerApplicationInvoiceCopy({
@@ -7762,9 +7762,84 @@ describe('public estimate one-time breakdown', () => {
       setupLabel: 'bait station setup',
       firstApplicationAmount: 0,
     })).toEqual(expect.objectContaining({
-      payAfterBody: 'Approve now; nothing is charged today. The bait station setup fee of $99.00 is billed at your first visit.',
+      payAfterBody: 'Approve now; after you confirm, we send the bait station setup invoice for $99.00 so you can pay before service.',
       payPrefCardSub: 'Invoice includes bait station setup ($99.00).',
     }));
+  });
+
+  // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): the "nothing is
+  // charged today ... billed at your first visit" wording is for customers on
+  // the card rail only (payAfterFirstVisit true). Setup-only never takes it —
+  // that invoice is still minted unattached and delivered as a pay link.
+  test('pay-after-first-visit wording renders only for the card rail, and never for the setup-only shape', () => {
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      setupLabel: 'bait station setup',
+      firstApplicationAmount: 89,
+      payAfterFirstVisit: true,
+    })).toEqual(expect.objectContaining({
+      totalAmount: 188,
+      payAfterBody: 'Approve now; nothing is charged today. The setup + first application total of $188.00 is billed at your first visit.',
+      billingSmall: 'No payment is charged on this page. The setup plus first application, totaling $188.00, is billed at your first visit.',
+      payPrefCardSub: 'Invoice includes bait station setup + first application ($188.00).',
+    }));
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 0,
+      firstApplicationAmount: 89,
+      payAfterFirstVisit: true,
+    })).toEqual(expect.objectContaining({
+      payAfterBody: 'Approve now; nothing is charged today. The first application ($89.00) is billed at your first visit.',
+      billingSmall: 'No payment is charged on this page. The first application ($89.00) is billed at your first visit.',
+    }));
+    // Setup-only keeps today's wording even for a card-rail customer.
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      setupLabel: 'bait station setup',
+      firstApplicationAmount: 0,
+      payAfterFirstVisit: true,
+    })).toEqual(expect.objectContaining({
+      payAfterBody: 'Approve now; after you confirm, we send the bait station setup invoice for $99.00 so you can pay before service.',
+      billingSmall: 'No payment is charged on this page. After confirmation, we open the $99.00 setup invoice so you can pay in-flow.',
+    }));
+  });
+
+  test('server-rendered pay-per-application card: card-rail copy under payAfterFirstVisitCopy, today\'s copy otherwise', () => {
+    const estimate = {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    };
+    const estData = {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    };
+    const off = renderPage('pay-after-off', estimate, estData, null, {});
+    const on = renderPage('pay-after-on', estimate, estData, null, { payAfterFirstVisitCopy: true });
+    // Off (gate off / exempt customer): byte-for-byte today's wording.
+    expect(off).toContain('Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.');
+    expect(off).toContain('so you can pay before service');
+    expect(off).toContain('const PAY_AFTER_FIRST_VISIT_COPY = false;');
+    expect(off).not.toContain('nothing is charged today');
+    expect(off).not.toContain('Nothing is charged today');
+    // Server-rendered card body: no card-rail sentence.
+    expect(off).not.toContain('No payment is charged on this page. The first application');
+    expect(off).not.toContain('No payment is charged on this page. The setup plus first application');
+    // On (card rail): nothing charged before the first visit.
+    expect(on).toContain('Next: pick a time, then confirm. Nothing is charged today.');
+    expect(on).toContain('<p class="payment-choice-body">Approve now; nothing is charged today.');
+    expect(on).toContain('const PAY_AFTER_FIRST_VISIT_COPY = true;');
+    expect(on).not.toContain('so you can pay before service');
+    expect(on).not.toContain('so you can pay in-flow');
+    // Annual prepay is unchanged by this gate: still invoiced after confirmation.
+    expect(on).toContain('After confirmation, your annual prepay invoice totals');
   });
 
   test('standalone non-member rodent estimate: displayed invoice totals carry the frozen $99 bait-station setup in BOTH payment modes (codex #3591 r9 P1)', () => {

@@ -97,6 +97,26 @@ function isPrepayCardAndChargeEnabled() {
     && require('../config/feature-gates').gates.autoApplyAccountCredit === true;
 }
 
+// GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30, "customers should save
+// card, and then pay after first visit, throughout"): may the estimate page
+// tell THIS customer that nothing is charged before the first visit? Only a
+// customer on the card rail — a card the accept will capture (policy.required)
+// or one already enrolled (saved_method_consented / autopay_already_active) —
+// qualifies, and only while the recurring card lane itself is on (without
+// it no card is ever saved, so the sentence would be untrue). Every exempt
+// customer (plan member, payer-billed, invoice-mode, commercial manual
+// billing, autopay-paused, one-time, prepay legacy carve-out) keeps today's
+// wording: their accept still follows today's billing path. Copy only — this
+// moves no money. The SETUP-ONLY accept shape and annual prepay keep today's
+// behavior inside the rail and are handled by the callers, not here.
+function payAfterFirstVisitCardRail(policy) {
+  if (!require('../config/feature-gates').payAfterFirstVisitLive()) return false;
+  if (!isRecurringCardOnFileEnabled()) return false;
+  if (!policy || policy.enforced !== true) return false;
+  return policy.required === true
+    || ['saved_method_consented', 'autopay_already_active'].includes(policy.exemptReason || '');
+}
+
 // Grouped multi-property owner (Codex #3492 r25): the accept transaction
 // resolves an unlinked grouped estimate's customer through an accepted
 // SIBLING before any phone matching (a second property's address
@@ -1656,6 +1676,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
 module.exports = {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
+  payAfterFirstVisitCardRail,
   resolveRecurringCardPolicyForEstimate,
   resolveGroupedEstimateOwnerId,
   resolvePrepayChargeMethod,

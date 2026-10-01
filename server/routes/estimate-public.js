@@ -3063,6 +3063,13 @@ function buildStandardPayPerApplicationInvoiceCopy({
   // station setup' (a non-member's rodent plan), or both. The copy must
   // name what the invoice bills (codex #3591 r9 P1).
   setupLabel = 'WaveGuard setup',
+  // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): true only for a
+  // customer on the card rail (card saved, nothing charged or sent before the
+  // first visit). Every other customer keeps today's wording. The SETUP-ONLY
+  // shape never takes the new wording: its invoice is minted unattached and
+  // still delivered as a pay link at accept (see the standard accept mint),
+  // so "billed at your first visit" would be untrue for it.
+  payAfterFirstVisit = false,
 } = {}) {
   const setup = roundPositiveMoney(setupAmount);
   const firstApplication = roundPositiveMoney(firstApplicationAmount);
@@ -3077,9 +3084,13 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; nothing is charged today. The setup + first application total of ${fmtMoney(total)} is billed at your first visit.`,
+      payAfterBody: payAfterFirstVisit
+        ? `Approve now; nothing is charged today. The setup + first application total of ${fmtMoney(total)} is billed at your first visit.`
+        : `Approve now; after you confirm, we send the setup + first application invoice for ${fmtMoney(total)} so you can pay before service.`,
       payPrefCardSub: `Invoice includes ${setupLabel} + first application (${fmtMoney(total)}).`,
-      billingSmall: `No payment is charged on this page. The setup plus first application, totaling ${fmtMoney(total)}, is billed at your first visit.`,
+      billingSmall: payAfterFirstVisit
+        ? `No payment is charged on this page. The setup plus first application, totaling ${fmtMoney(total)}, is billed at your first visit.`
+        : `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${fmtMoney(total)}.`,
     };
   }
 
@@ -3090,9 +3101,9 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; nothing is charged today. The ${setupLabel} fee of ${fmtMoney(setup)} is billed at your first visit.`,
+      payAfterBody: `Approve now; after you confirm, we send the ${setupLabel} invoice for ${fmtMoney(setup)} so you can pay before service.`,
       payPrefCardSub: `Invoice includes ${setupLabel} (${fmtMoney(setup)}).`,
-      billingSmall: `No payment is charged on this page. The ${fmtMoney(setup)} ${setupLabel} fee is billed at your first visit.`,
+      billingSmall: `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
     };
   }
 
@@ -3103,9 +3114,13 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; nothing is charged today. The first application (${fmtMoney(firstApplication)}) is billed at your first visit.`,
+      payAfterBody: payAfterFirstVisit
+        ? `Approve now; nothing is charged today. The first application (${fmtMoney(firstApplication)}) is billed at your first visit.`
+        : `Approve now; after you confirm, we send the first application invoice for ${fmtMoney(firstApplication)} so you can pay before service.`,
       payPrefCardSub: `Invoice includes the first application (${fmtMoney(firstApplication)}).`,
-      billingSmall: `No payment is charged on this page. The first application (${fmtMoney(firstApplication)}) is billed at your first visit.`,
+      billingSmall: payAfterFirstVisit
+        ? `No payment is charged on this page. The first application (${fmtMoney(firstApplication)}) is billed at your first visit.`
+        : `No payment is charged on this page. After confirmation, we open the first application invoice for ${fmtMoney(firstApplication)}.`,
     };
   }
 
@@ -4806,6 +4821,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // "Show your work" payload — built (gate-checked) by the caller; null
   // keeps every byte of the rendered page identical to the pre-gate HTML.
   const showYourWork = opts.showYourWork || null;
+  // GATE_PAY_AFTER_FIRST_VISIT: the caller (handleEstimateView) sets this only
+  // for a customer on the card rail while the gate is live. Everyone else —
+  // gate off, exempt customers — keeps today's wording.
+  const payAfterFirstVisitCopy = opts.payAfterFirstVisitCopy === true;
   const estimateAskToken = signEstimateAskToken(est, token);
   const tier = est.tier || 'Bronze';
   const firstName = escapeHtml((est.customerName || '').split(' ')[0] || 'there');
@@ -4885,7 +4904,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         billingHeading: 'Choose how you want to pay',
         billingLede: null,
         payAfterTitle: 'Pay per application',
-        payAfterBody: 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.',
+        payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
         noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
         bookingTitle: 'Pick your first lawn care visit',
         bookingSubhead: 'Choose a window to get your lawn care plan started.',
@@ -4910,7 +4929,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           billingHeading: 'Choose how you want to pay',
           billingLede: null,
           payAfterTitle: 'Pay per application',
-          payAfterBody: 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.',
+          payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
           noPaymentCopy: 'No payment is charged on this page. Your first mosquito control visit will be billed after completion.',
           bookingTitle: 'Pick your first mosquito control visit',
           bookingSubhead: 'Choose a window to get your mosquito control plan started.',
@@ -4935,7 +4954,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           billingHeading: 'Choose how you want to pay',
           billingLede: null,
           payAfterTitle: 'Pay per application',
-          payAfterBody: 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.',
+          payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
           noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
           bookingTitle: 'Pick your first tree & shrub visit',
           bookingSubhead: 'Choose a window to get your tree & shrub plan started.',
@@ -4960,7 +4979,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
             billingHeading: 'Choose how you want to pay',
             billingLede: null,
             payAfterTitle: 'Pay per application',
-            payAfterBody: 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.',
+            payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
             noPaymentCopy: 'No payment is charged on this page. Your first termite protection visit will be billed after completion.',
             bookingTitle: 'Pick your first termite protection visit',
             bookingSubhead: 'Choose a window to get your termite protection plan started.',
@@ -4985,7 +5004,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
               payAfterTitle: 'Pay per application',
-              payAfterBody: 'Approve now; nothing is charged today. You pay on service day.',
+              payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. You pay on service day.' : 'Approve now; after you confirm, we send the invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. You pay on service day; no card or deposit now.',
               bookingTitle: 'Review your termite trenching quote with Waves',
               bookingSubhead: 'Waves confirms your treatment path — access, exact footage, product, and written service terms — then schedules your visit. You pay on service day; no card or deposit now.',
@@ -5010,7 +5029,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 billingHeading: 'Choose how you want to pay',
                 billingLede: null,
                 payAfterTitle: 'Pay per application',
-                payAfterBody: 'Approve now; nothing is charged today. You pay on service day.',
+                payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. You pay on service day.' : 'Approve now; after you confirm, we send the invoice so you can pay before service.',
                 noPaymentCopy: 'No payment is charged on this page. Your Bora-Care treatment will be billed after completion.',
                 bookingTitle: 'Pick your Bora-Care treatment visit',
                 bookingSubhead: 'Choose a window to get your Bora-Care wood treatment scheduled.',
@@ -5039,7 +5058,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
               payAfterTitle: 'Pay per application',
-              payAfterBody: 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.',
+              payAfterBody: payAfterFirstVisitCopy ? 'Approve now; nothing is charged today. The setup + first application are billed at your first visit.' : 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
               bookingTitle: 'Search by date or time — no calling, no hold music, no back-and-forth',
               bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
@@ -5458,15 +5477,20 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     setupLabel: standardSetupLabel,
     firstApplicationAmount: standardInvoiceFirstApplicationAmount,
     fallbackNoPaymentCopy: pageCopy.noPaymentCopy,
+    payAfterFirstVisit: payAfterFirstVisitCopy,
   });
   const standardInvoiceTotal = standardInvoiceCopy.totalAmount;
   const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
   const standardInvoiceBillingSmallHtml = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
-    ? `No payment is charged on this page. The setup plus first application, totaling ${standardInvoiceDynamicTotalHtml}, is billed at your first visit.`
+    ? (payAfterFirstVisitCopy
+      ? `No payment is charged on this page. The setup plus first application, totaling ${standardInvoiceDynamicTotalHtml}, is billed at your first visit.`
+      : `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`)
     : (standardInvoiceCopy.hasSetup
-        ? `No payment is charged on this page. The ${fmtMoney(standardSetupDue)} ${standardSetupLabel} fee is billed at your first visit.`
+        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`
         : (standardInvoiceCopy.hasFirstApplication
-            ? `No payment is charged on this page. The first application (${standardInvoiceDynamicTotalHtml}) is billed at your first visit.`
+            ? (payAfterFirstVisitCopy
+              ? `No payment is charged on this page. The first application (${standardInvoiceDynamicTotalHtml}) is billed at your first visit.`
+              : `No payment is charged on this page. After confirmation, we open the first application invoice for ${standardInvoiceDynamicTotalHtml}.`)
             : escapeHtml(pageCopy.noPaymentCopy)));
   // Annual prepay shows for ANY recurring estimate with an annual total. The
   // incentive depends on the mix: pest/mosquito waive the WaveGuard setup;
@@ -5599,7 +5623,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ${membershipSetupWaivedForExistingCustomer && !locked ? `<p class="billing-small">Setup waived &mdash; you're already a Waves customer.</p>` : ''}
         <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="pay_at_visit">Choose pay per application</button>
-        <p class="billing-small">Next: pick a time, then confirm. Nothing is charged today.</p>
+        <p class="billing-small">${payAfterFirstVisitCopy && !(standardInvoiceCopy.hasSetup && !standardInvoiceCopy.hasFirstApplication) ? 'Next: pick a time, then confirm. Nothing is charged today.' : 'Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.'}</p>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
@@ -6944,6 +6968,7 @@ ${shellQuestionsBar()}
   const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(standardSetupDue)};
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
+  const PAY_AFTER_FIRST_VISIT_COPY = ${payAfterFirstVisitCopy ? 'true' : 'false'};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
@@ -7240,13 +7265,19 @@ ${shellQuestionsBar()}
     const hasSetup = setupDue > 0;
     const hasFirstApplication = STANDARD_INVOICE_HAS_FIRST_APPLICATION && currentFirstVisitAmount() > 0;
     if (hasSetup && hasFirstApplication) {
-      return 'No payment is charged here. The setup plus first application, totaling ' + standardInvoiceTotalText() + ', is billed at your first visit; choose a service window to continue.';
+      if (PAY_AFTER_FIRST_VISIT_COPY) {
+        return 'No payment is charged here. The setup plus first application, totaling ' + standardInvoiceTotalText() + ', is billed at your first visit; choose a service window to continue.';
+      }
+      return 'No payment is charged here. After confirmation, we open an invoice for setup plus the first application totaling ' + standardInvoiceTotalText() + '; choose a service window to continue.';
     }
     if (hasSetup) {
-      return 'No payment is charged here. The ' + fmt(setupDue) + ' setup is billed at your first visit; choose a service window to continue.';
+      return 'No payment is charged here. After confirmation, we open the setup invoice for ' + fmt(setupDue) + '; choose a service window to continue.';
     }
     if (hasFirstApplication) {
-      return 'No payment is charged here. The first application (' + firstVisitTotalText() + ') is billed at your first visit; choose a service window to continue.';
+      if (PAY_AFTER_FIRST_VISIT_COPY) {
+        return 'No payment is charged here. The first application (' + firstVisitTotalText() + ') is billed at your first visit; choose a service window to continue.';
+      }
+      return 'No payment is charged here. After confirmation, we open the first application invoice for ' + firstVisitTotalText() + '; choose a service window to continue.';
     }
     return STANDARD_NO_PAYMENT_COPY + ' Choose a service window to continue.';
   }
@@ -8929,6 +8960,40 @@ async function handleEstimateView(req, res, next) {
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
 
+    // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): the "nothing is
+    // charged today, billed at your first visit" wording renders only for a
+    // customer on the card rail — the SAME policy the accept resolves, minus
+    // anything the accept exempts (invoice mode, commercial manual billing,
+    // one-time-only). Short-circuits before any lookup while the gate or the
+    // card lane is off, so gate-off pages are byte-identical to today.
+    let payAfterFirstVisitCopy = false;
+    if (require('../config/feature-gates').payAfterFirstVisitLive()
+      && RecurringCards.isRecurringCardOnFileEnabled()
+      && !effectiveInvoiceMode && !depositStructuralOneTime) {
+      try {
+        const lcForPayAfter = commercialLowConfidenceRange(estData);
+        if (!commercialAcceptDepositExempt({
+          isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+          siteConfirmationHold: lcForPayAfter.hasLowConfidence && !lcForPayAfter.forceSiteQuote,
+          treatAsOneTime: false,
+          billByInvoice: effectiveInvoiceMode,
+        })) {
+          const payAfterPolicy = await RecurringCards.resolveRecurringCardPolicyForEstimate({
+            estimate,
+            membership,
+            treatAsOneTime: false,
+            billByInvoice: effectiveInvoiceMode,
+            paymentMethodPreference: null,
+          });
+          payAfterFirstVisitCopy = RecurringCards.payAfterFirstVisitCardRail(payAfterPolicy);
+        }
+      } catch (payAfterErr) {
+        // Fail toward today's wording: never promise "nothing is charged"
+        // on a lookup we could not complete.
+        logger.warn(`[estimate-view] pay-after-first-visit policy check failed, keeping today's wording: ${payAfterErr.message}`);
+      }
+    }
+
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
@@ -8987,7 +9052,7 @@ async function handleEstimateView(req, res, next) {
       // record even with the gate off (codex #3338 r15 sibling) — same
       // committed definition the snapshot reconciler uses.
       committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
-    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate });
+    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate, payAfterFirstVisitCopy });
   } catch (err) { next(err); }
 }
 
