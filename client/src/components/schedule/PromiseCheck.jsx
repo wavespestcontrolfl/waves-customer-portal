@@ -25,17 +25,34 @@ export function promiseSourceLabel(promise) {
   return day ? `${source} · ${day}` : source;
 }
 
+// A mark holds only for the wording it was made against: each mark stores
+// the promise's version when marked, and a promise reworded since (a draft
+// restored after an office edit) reads as unmarked.
+export function currentMark(marks, promise) {
+  const entry = marks?.[promise?.id];
+  return entry && promise?.version && entry.version === promise.version ? entry : null;
+}
+
 // The request's marks: marked, listed promises only, each with the version
-// of the wording the tech saw (the server drops a mark once the promise was
-// reworded), a Partly with its note.
+// of the wording the tech marked (the server drops a mark once the promise
+// was reworded), a Partly with its note.
 export function promiseMarksPayload(marks, promises) {
-  const listed = new Map((Array.isArray(promises) ? promises : []).map((promise) => [promise.id, promise]));
-  return Object.entries(marks || {})
-    .filter(([id, entry]) => listed.get(id)?.version && PROMISE_MARKS.some((option) => option.value === entry?.mark))
-    .map(([id, entry]) => {
-      const stillLeft = entry.mark === "partly" ? String(entry.stillLeft || "").trim().slice(0, STILL_LEFT_MAX) : "";
-      return { id, mark: entry.mark, version: listed.get(id).version, ...(stillLeft ? { stillLeft } : {}) };
-    });
+  return (Array.isArray(promises) ? promises : []).flatMap((promise) => {
+    const entry = currentMark(marks, promise);
+    if (!entry || !PROMISE_MARKS.some((option) => option.value === entry.mark)) return [];
+    const stillLeft = entry.mark === "partly" ? String(entry.stillLeft || "").trim().slice(0, STILL_LEFT_MAX) : "";
+    return [{ id: promise.id, mark: entry.mark, version: entry.version, ...(stillLeft ? { stillLeft } : {}) }];
+  });
+}
+
+// The next marks after a tap: the chosen mark on the promise's current
+// wording, or blank when the same mark is tapped again.
+export function toggledMarks(marks, promise, mark) {
+  const next = { ...(marks || {}) };
+  const current = currentMark(marks, promise);
+  if (current?.mark === mark) delete next[promise.id];
+  else next[promise.id] = { mark, version: promise.version, stillLeft: current?.stillLeft || "" };
+  return next;
 }
 
 // "2 open", or "10 of 14 open" when the list shows only the newest.
@@ -49,7 +66,7 @@ export function promiseCountLabel(shown, total) {
 export function promiseMarksSignature(marks) {
   return Object.entries(marks || {})
     .filter(([, entry]) => PROMISE_MARKS.some((option) => option.value === entry?.mark))
-    .map(([id, entry]) => [id, entry.mark, entry.mark === "partly" ? String(entry.stillLeft || "").trim() : ""])
+    .map(([id, entry]) => [id, entry.mark, entry.version || "", entry.mark === "partly" ? String(entry.stillLeft || "").trim() : ""])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
 
@@ -66,16 +83,10 @@ export default function PromiseCheck({ promises, total = null, marks, onChange, 
   const t = { ...DEFAULT_TOKENS, ...tokens };
   const list = Array.isArray(promises) ? promises : [];
   if (!list.length) return null;
-  const setMark = (id, mark) => {
-    const current = marks?.[id];
-    const next = { ...(marks || {}) };
-    // Tapping the chosen mark again clears it (left blank: no change).
-    if (current?.mark === mark) delete next[id];
-    else next[id] = { mark, stillLeft: current?.stillLeft || "" };
-    onChange(next);
-  };
-  const setStillLeft = (id, stillLeft) => {
-    onChange({ ...(marks || {}), [id]: { ...(marks?.[id] || { mark: "partly" }), stillLeft } });
+  // Tapping the chosen mark again clears it (left blank: no change).
+  const setMark = (promise, mark) => onChange(toggledMarks(marks, promise, mark));
+  const setStillLeft = (promise, stillLeft) => {
+    onChange({ ...(marks || {}), [promise.id]: { ...(currentMark(marks, promise) || { mark: "partly", version: promise.version }), stillLeft } });
   };
   const buttonHeight = compact ? 36 : 44;
   return (
@@ -86,7 +97,7 @@ export default function PromiseCheck({ promises, total = null, marks, onChange, 
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {list.map((promise) => {
-          const entry = marks?.[promise.id];
+          const entry = currentMark(marks, promise);
           return (
             <div
               key={promise.id}
@@ -103,7 +114,7 @@ export default function PromiseCheck({ promises, total = null, marks, onChange, 
                       type="button"
                       disabled={disabled}
                       aria-pressed={selected}
-                      onClick={() => setMark(promise.id, option.value)}
+                      onClick={() => setMark(promise, option.value)}
                       style={{
                         minHeight: buttonHeight,
                         padding: "0 14px",
@@ -131,7 +142,7 @@ export default function PromiseCheck({ promises, total = null, marks, onChange, 
                     value={entry.stillLeft || ""}
                     maxLength={STILL_LEFT_MAX}
                     disabled={disabled}
-                    onChange={(event) => setStillLeft(promise.id, event.target.value)}
+                    onChange={(event) => setStillLeft(promise, event.target.value)}
                     style={{
                       width: "100%",
                       boxSizing: "border-box",

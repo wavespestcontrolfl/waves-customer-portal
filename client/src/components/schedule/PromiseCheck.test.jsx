@@ -40,7 +40,7 @@ describe('PromiseCheck', () => {
     const done = group.querySelector('button');
     fireEvent.click(done);
     expect(done.getAttribute('aria-pressed')).toBe('true');
-    expect(latest).toEqual({ 'p-1': { mark: 'done', stillLeft: '' } });
+    expect(latest).toEqual({ 'p-1': { mark: 'done', version: '1111111111111111', stillLeft: '' } });
     fireEvent.click(done);
     expect(done.getAttribute('aria-pressed')).toBe('false');
     expect(latest).toEqual({});
@@ -55,7 +55,7 @@ describe('PromiseCheck', () => {
     const input = screen.getByLabelText('What’s still left?');
     expect(input.getAttribute('maxLength')).toBe(String(STILL_LEFT_MAX));
     fireEvent.change(input, { target: { value: 'the left side' } });
-    expect(latest).toEqual({ 'p-2': { mark: 'partly', stillLeft: 'the left side' } });
+    expect(latest).toEqual({ 'p-2': { mark: 'partly', version: '2222222222222222', stillLeft: 'the left side' } });
   });
 
   it('shows nothing without promises', () => {
@@ -67,14 +67,22 @@ describe('PromiseCheck', () => {
 describe('promise mark helpers', () => {
   it('the request carries marked, listed promises only, with the wording version seen, a still-left note on Partly only', () => {
     expect(promiseMarksPayload({
-      'p-1': { mark: 'done', stillLeft: 'stale text' },
-      'p-2': { mark: 'partly', stillLeft: '  the left side ' },
-      'p-9': { mark: 'done' }, // no longer listed
-      'p-3': { mark: 'maybe' },
+      'p-1': { mark: 'done', version: '1111111111111111', stillLeft: 'stale text' },
+      'p-2': { mark: 'partly', version: '2222222222222222', stillLeft: '  the left side ' },
+      'p-9': { mark: 'done', version: '9999999999999999' }, // no longer listed
+      'p-3': { mark: 'maybe', version: '3333333333333333' },
     }, [...PROMISES, { id: 'p-3', description: 'x', version: '3333333333333333' }])).toEqual([
       { id: 'p-1', mark: 'done', version: '1111111111111111' },
       { id: 'p-2', mark: 'partly', version: '2222222222222222', stillLeft: 'the left side' },
     ]);
+  });
+
+  it('a mark made against older wording reads as unmarked and is never sent', () => {
+    const marks = { 'p-1': { mark: 'done', version: '0000000000000000', stillLeft: '' } };
+    expect(promiseMarksPayload(marks, PROMISES)).toEqual([]);
+    render(<PromiseCheck promises={PROMISES} marks={marks} onChange={() => {}} />);
+    const group = screen.getByRole('group', { name: 'Mark: Check under the dishwasher and the kitchen sink' });
+    expect([...group.querySelectorAll('button')].some((button) => button.getAttribute('aria-pressed') === 'true')).toBe(false);
   });
 
   it('says when only the newest promises are shown', () => {
@@ -86,8 +94,8 @@ describe('promise mark helpers', () => {
   });
 
   it('the staleness signature ignores whether the list has loaded and the order of entry', () => {
-    const a = promiseMarksSignature({ 'p-2': { mark: 'partly', stillLeft: 'x ' }, 'p-1': { mark: 'done', stillLeft: 'y' } });
-    const b = promiseMarksSignature({ 'p-1': { mark: 'done' }, 'p-2': { mark: 'partly', stillLeft: 'x' } });
+    const a = promiseMarksSignature({ 'p-2': { mark: 'partly', version: 'v2', stillLeft: 'x ' }, 'p-1': { mark: 'done', version: 'v1', stillLeft: 'y' } });
+    const b = promiseMarksSignature({ 'p-1': { mark: 'done', version: 'v1' }, 'p-2': { mark: 'partly', version: 'v2', stillLeft: 'x' } });
     expect(a).toEqual(b);
     expect(promiseMarksSignature({ 'p-1': { mark: 'nope' } })).toEqual([]);
   });

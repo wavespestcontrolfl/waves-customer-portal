@@ -15102,6 +15102,8 @@ export function CompletionPanel({
       recommendationsText.trim() ||
       selectedTipIds.length ||
       customTip.trim() ||
+      // A promise mark is tech input on its own (a mark-only draft saves).
+      promiseMarksSignature(promiseMarks).length ||
       parkedFound.trim() ||
       parkedNext.trim() ||
       nextVisitNote.trim() ||

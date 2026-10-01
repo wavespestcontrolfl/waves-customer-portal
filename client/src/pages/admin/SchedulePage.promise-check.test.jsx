@@ -116,7 +116,17 @@ describe('the promise check on the completion form', () => {
     fireEvent.click(markButton('Check under the dishwasher', 'Done'));
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`) || '{}');
-      expect(saved.promiseMarks).toEqual({ [PROMISES[0].id]: { mark: 'done', stillLeft: '' } });
+      expect(saved.promiseMarks).toEqual({ [PROMISES[0].id]: { mark: 'done', version: PROMISES[0].version, stillLeft: '' } });
+    }, { timeout: 3000 });
+  });
+
+  it('a mark is draft content on its own: with nothing else entered, it still saves', async () => {
+    await renderPanel();
+    await screen.findByText('Promises we made');
+    fireEvent.click(markButton('Look at the gap under the garage door', 'Not yet'));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`) || '{}');
+      expect(saved.promiseMarks).toEqual({ [PROMISES[1].id]: { mark: 'not_yet', version: PROMISES[1].version, stillLeft: '' } });
     }, { timeout: 3000 });
   });
 
