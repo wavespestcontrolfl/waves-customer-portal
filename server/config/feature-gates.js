@@ -139,6 +139,7 @@
  *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires a live read engine (visitPrepPestReadLive() or visitPrepPlantReadLive()). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same dispatchVisitPrepRead (services/visit-prep-read-dispatch.js, which runs only live engines) for at most 10 submissions from the last 14 ET days on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), 'unsupported' where a live engine now reads the stop, and a 'done' or 'failed' read made by the wrong engine or subject for the stop as it is now (released to 'none', then re-read; a row checked and needing nothing is skipped for an hour). Pending rows, and failed rows on the line they failed on, are never retried. One retry per row per case, per settled attempt for a stale read (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP on the ET day it runs, like a first read. A batch with failed retries fails the job run (job_health).)
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
  *   GATE_LEAD_EMAIL_LINKS=true (Activity timeline only: also lists email that was sent to a prospect before they became a customer, matched by the lead / estimate the send recorded (email_messages.lead_id / estimate_id) through leads.customer_id and estimates.customer_id, not by address. Strict opt-in, read at call time via leadEmailLinksLive(). Dark = the timeline lists exactly what it did before. Recording the link on each send is not gated (additive columns).)
+ *   GATE_RATE_REVIEW=true (annual rate review RANKING backend, plan annual-rate-review-2026-09-30 step 2: the monthly 1st-of-month job (scheduler.js, 6:20 AM ET) ranks every active recurring plan line whose anniversary falls in the following month into rate_review_snapshots (current rate per billing lane, today's list rate, treatment-minute median, revenue/hour, band A-D, whole-dollar proposal, exception flags) and sends ONE ACT:/OK: ops email to contact@; admin-only read routes + a recompute POST under /api/admin/rate-review. Strict opt-in, read at call time via rateReviewLive(). Dark = the cron tick returns before any query, the routes answer 404, nothing is written. Never writes a rate, never sends a customer anything — the apply and notice lanes are later PRs.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3336,6 +3337,12 @@ const gates = {
   // off unless exactly 'true'. Read live per call by
   // cancelReseedsRecurringLive(); this entry is for logGateStatus only.
   cancelReseedsRecurring: process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true',
+  // Annual rate review ranking backend (services/rate-review.js): monthly
+  // snapshot batch + ops email + admin read routes. Ships DARK: off unless
+  // exactly 'true'. Read live per call by rateReviewLive(); this entry is
+  // for logGateStatus only. Off = the cron returns before any query, the
+  // admin routes answer 404, nothing is written. Kill = unset the var.
+  rateReview: process.env.GATE_RATE_REVIEW === 'true',
   // Public estimate-page consultation offer ("Want us to come look first?",
   // consultation-first lane, owner ruling 2026-09-23): the same
   // /inspection/:token self-booking link the recurring-lead email offers,
@@ -3772,6 +3779,16 @@ function recurringSeriesTopUpLive() {
 // kill/enable with no redeploy. Kill = unset GATE_CANCEL_RESEEDS_RECURRING.
 function cancelReseedsRecurringLive() {
   return process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true';
+}
+
+// GATE_RATE_REVIEW read at CALL time — strict `=== 'true'`, same convention
+// as cancelReseedsRecurringLive(). The one reader for the monthly cron tick
+// (scheduler.js), the batch builder (services/rate-review.js) and the admin
+// routes (routes/admin-rate-review.js), so a flip is a live kill/enable
+// with no redeploy. The `rateReview` gates-map entry above is for
+// logGateStatus only. Kill = unset GATE_RATE_REVIEW.
+function rateReviewLive() {
+  return process.env.GATE_RATE_REVIEW === 'true';
 }
 
 // GATE_COMMERCIAL_SUITE_SIZING read at CALL time — strict `=== 'true'`,
@@ -4274,7 +4291,7 @@ function zoneRouteDaysLive() {
   return process.env.GATE_ZONE_ROUTE_DAYS === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.

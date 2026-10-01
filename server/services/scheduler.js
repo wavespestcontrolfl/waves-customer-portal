@@ -2200,6 +2200,31 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // MONTHLY 1ST 6:20 AM ET — Annual rate review ranking batch (plan
+  // annual-rate-review-2026-09-30 step 2). Ranks every active recurring plan
+  // line whose anniversary falls in the FOLLOWING month into
+  // rate_review_snapshots and emails ONE ACT:/OK: summary to contact@
+  // (services/rate-review.js). Dark behind GATE_RATE_REVIEW — rateReviewLive()
+  // is read BEFORE the cron lock, so off = no query, no write, no email.
+  // Writes rankings only: never a rate, never a customer message. After the
+  // 6:05 MRR snapshot and before the 8 AM dues run. runExclusive: a deploy-
+  // overlap tick must not build and email the same batch twice (the batch
+  // row's email_sent_at is the second guard).
+  // =========================================================================
+  cron.schedule('20 6 1 * *', async () => {
+    const { rateReviewLive } = require('../config/feature-gates');
+    if (!rateReviewLive()) return;
+    logger.info('Running: rate review monthly batch');
+    try {
+      await runExclusive('rate-review-monthly', async () => {
+        const { runMonthlyRateReview } = require('./rate-review');
+        const result = await runMonthlyRateReview();
+        logger.info(`[rate-review] monthly tick: ${result.skipped ? `skipped (${result.skipped})` : `${result.rows} rows, emailed=${result.emailed}`}`);
+      });
+    } catch (err) { logger.error(`Rate review monthly batch failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // MONTHLY (1st, 4AM) — Competitor keyword gap mining. Pulls tracked
   // competitors' ranked keywords from DataForSEO Labs, diffs against our
   // rankings + live sitemap, enqueues blog gaps the GSC/AEO miners
