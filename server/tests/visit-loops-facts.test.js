@@ -130,6 +130,15 @@ describe('techPosition', () => {
     expect(out.techPosition).toMatchObject({ status: 'en_route', atThisVisit: false });
   });
 
+  test('a started visit (status or tracker) carries no stop count and runs no count query', async () => {
+    for (const visit of [{ status: 'en_route' }, { status: 'on_site' }, { status: 'confirmed', track_state: 'on_property' }]) {
+      const conn = fakeConn(handlers({ visit }));
+      const out = await loadVisitLoops({ customerId: 'c1', now: NOW, conn });
+      expect(out.techPosition.stopsAhead).toBeNull();
+      expect(conn.calls.some((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'where', (a) => a[0] === 'route_order'))).toBe(false);
+    }
+  });
+
   test('a location older than five minutes reads stale but keeps the age', async () => {
     const conn = fakeConn(handlers({ status: { status: 'en_route', current_job_id: null, location_updated_at: minutesAgo(9) } }));
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });

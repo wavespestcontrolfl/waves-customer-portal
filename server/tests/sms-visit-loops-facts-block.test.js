@@ -246,6 +246,8 @@ describe('visitLoopStatus', () => {
     expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toEqual({ position: { visitId: 'v1', techId: 't1', stopsAhead: 2 } });
     expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } })).toEqual({ position: null });
     expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, stopsAhead: null } } })).toEqual({ position: null });
+    // a started visit's position (no count) persists no recount snapshot, so a valid reply stays sendable
+    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'on_site', stopsAhead: null } } })).toEqual({ position: null });
     expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn' } } })).toEqual({ position: null });
     expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1' } } })).toEqual({ position: null });
     expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBeNull(); // commitments have their own recheck

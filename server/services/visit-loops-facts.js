@@ -208,7 +208,11 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
   // future (tech-status.js), so a small negative age is a fresh fix.
   const fresh = ageMs != null && ageMs >= -FUTURE_TIMESTAMP_TOLERANCE_MS && ageMs <= FRESH_LOCATION_MS;
 
-  const stopsAhead = await countStopsAhead(conn, visit, now);
+  // A started visit (by status or tracker) has no stops "before" it — and the send
+  // recount rejects started visits — so only a not-started visit carries a count.
+  const notStarted = NOT_STARTED_STATUSES.includes(visit.status)
+    && !LIVE_TRACK_STATES.includes(visit.track_state) && visit.track_state !== 'complete';
+  const stopsAhead = notStarted ? await countStopsAhead(conn, visit, now) : null;
   return {
     techName: firstName(visit.technician_name),
     status: fresh ? String(status.status) : 'stale',
