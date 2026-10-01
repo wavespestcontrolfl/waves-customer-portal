@@ -451,9 +451,15 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       expect(handoff.payload).toMatchObject({ sourceInvoiceId: String(inv.id), amount: SETUP_FEE });
       expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
 
-      // Un-void while the office has not acted: the handoff is closed.
+      // Un-void while the office has not acted: the handoff is closed (as a system closure).
       await Invoices.retireRodentSetupObligationForReinstatedInvoice(mockPg, inv.id, { strict: true });
-      expect((await mockPg('dispatch_alerts').where({ id: handoff.id }).first('resolved_at')).resolved_at).not.toBeNull();
+      const closed = await mockPg('dispatch_alerts').where({ id: handoff.id }).first('resolved_at', 'payload');
+      expect(closed.resolved_at).not.toBeNull();
+      expect(closed.payload.systemRetired).toBe(true);
+      // A repeated void -> un-void cycle is never mistaken for office action.
+      await Invoices.retireRodentSetupObligationForReinstatedInvoice(mockPg, inv.id, { strict: true });
+      // (Below: the same handoff as if the OFFICE had resolved it.)
+      await mockPg('dispatch_alerts').where({ id: handoff.id }).update({ payload: mockPg.raw("payload - 'systemRetired'") });
 
       // Had the office already acted on it, a strict un-void refuses (no double bill).
       await mockPg('dispatch_alerts').where({ id: handoff.id }).update({ resolved_at: new Date(Date.now() - 1000) });

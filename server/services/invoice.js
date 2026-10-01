@@ -11053,10 +11053,16 @@ const InvoiceService = {
     const handoffs = await conn("dispatch_alerts")
       .where({ type: "setup_fee_office_billing" })
       .whereRaw("payload->>'sourceInvoiceId' = ?", [String(invoiceId)])
-      .select("id", "resolved_at");
+      .select("id", "resolved_at", "payload");
     for (const handoff of handoffs || []) {
+      const handoffPayload = typeof handoff.payload === "string" ? JSON.parse(handoff.payload || "{}") : (handoff.payload || {});
+      // Closed by an earlier reinstatement (not the office): nothing to refuse.
+      if (handoffPayload.systemRetired === true) continue;
       if (!handoff.resolved_at) {
-        await conn("dispatch_alerts").where({ id: handoff.id }).whereNull("resolved_at").update({ resolved_at: new Date() });
+        await conn("dispatch_alerts").where({ id: handoff.id }).whereNull("resolved_at").update({
+          resolved_at: new Date(),
+          payload: conn.raw("coalesce(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ systemRetired: true, retiredBy: `reinstated invoice ${invoiceId}` })]),
+        });
         continue;
       }
       const message = `The setup fee on invoice ${invoiceId} was handed to the office after it was voided and the office already acted on it — check that fee before restoring this invoice`;
