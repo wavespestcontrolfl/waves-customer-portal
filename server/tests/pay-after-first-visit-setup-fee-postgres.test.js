@@ -422,6 +422,37 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // Pre-push audit P0: an invoice linked to a series visit only through its
+  // SERVICE RECORD (no scheduled_service_id) that bills the fee counts too.
+  test('a setup fee billed on an invoice linked through the visit\'s service record is not handed to the office again', async () => {
+    const f = await seed();
+    const Obligation = require('../services/setup-fee-obligation');
+    const { randomUUID } = require('crypto');
+    const recordId = randomUUID();
+    try {
+      const parent = await mockPg('scheduled_services').where({ id: f.parentId }).first();
+      await mockPg('service_records').insert({
+        id: recordId, customer_id: f.customerId, scheduled_service_id: f.parentId, technician_id: parent.technician_id,
+        service_date: parent.scheduled_date, service_type: parent.service_type, status: 'completed',
+      });
+      const viaRecord = await require('../services/invoice').create({
+        customerId: f.customerId, title: 'Office bill',
+        lineItems: [{ description: 'One-time setup fee', quantity: 1, unit_price: SETUP_FEE }],
+      });
+      await mockPg('invoices').where({ id: viaRecord.id }).update({ scheduled_service_id: null, service_record_id: recordId });
+      const parked = await mockPg.transaction((trx) => Obligation.parkSetupFeeStampForOffice(trx, {
+        parentId: f.parentId, rawAmount: SETUP_FEE, customerId: f.customerId, estimateId: f.estimateId, origin: 'test', visit: parent,
+      }));
+      expect(parked).toBeNull();
+      expect(await officeFeeAlerts(f)).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').where({ invoice_id: viaRecord.id })).toHaveLength(1);
+    } finally {
+      await mockPg('invoices').where({ service_record_id: recordId }).del().catch(() => {});
+      await mockPg('service_records').where({ id: recordId }).del().catch(() => {});
+      await cleanup(f);
+    }
+  });
+
   // Pre-push audit P0: a setup line that does not bill the whole fee ($0 or
   // partial) is not the fee billed — the fee goes to the office, no claim.
   test.each([0, 40])('a series invoice whose setup line bills $%s (not the whole fee) does not retire it: only the remainder is parked for the office, no claim', async (lineAmount) => {

@@ -348,10 +348,16 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
   // Only a setup line that actually bills the whole fee counts (pre-push audit
   // P0): a $0 or partial setup line is not the fee billed — the office gets it.
   const feeCents = Math.round(amount * 100);
+  // Linked to a series visit directly OR through its service record (the
+  // same direct-or-service-record linkage completion honors).
+  const seriesVisitIds = trx('scheduled_services').select('id').where(function series() {
+    this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
+  });
   const candidates = await trx('invoices')
-    .whereIn('scheduled_service_id', trx('scheduled_services').select('id').where(function series() {
-      this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
-    }))
+    .where((qb) => {
+      qb.whereIn('scheduled_service_id', seriesVisitIds)
+        .orWhereIn('service_record_id', trx('service_records').select('id').whereIn('scheduled_service_id', seriesVisitIds));
+    })
     .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
     .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
     .select('id', 'line_items');
