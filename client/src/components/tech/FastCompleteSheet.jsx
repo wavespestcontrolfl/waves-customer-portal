@@ -881,10 +881,17 @@ function ReportFlowForm({
 
   const generateMissing = reportFlowMissing({ form, rows, ratingAllowed, dictationPending, perimeterFeet, stage: 'generate' });
   const completeMissing = reportFlowMissing({ form, rows, ratingAllowed, dictationPending, perimeterFeet, stage: 'complete' });
+  // Where product went down decides the customer's re-entry wait (an indoor
+  // treatment keeps its indoor wait), so the visit is sent only once the
+  // note has told where. A failed read is written again; the Full form stays
+  // open for an outage.
   const completeReason = completeMissing.reason
     || (writing ? 'Writing the report…' : '')
     || (!draft ? 'Generate the report first.' : '')
-    || (!draft.text.trim() ? 'The report is empty. Write it again.' : '');
+    || (!draft.text.trim() ? 'The report is empty. Write it again.' : '')
+    || (draft.facts?.status !== 'read' && draft.facts?.status !== 'empty_note'
+      ? 'Write it again: where you treated wasn’t read yet.' : '')
+    || (!draft.facts?.areas?.length ? 'Say where you treated (inside, outside or garage) in your note, then write it again.' : '');
 
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.

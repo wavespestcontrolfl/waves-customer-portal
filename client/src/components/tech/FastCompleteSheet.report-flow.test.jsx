@@ -221,10 +221,42 @@ describe('generate and read', () => {
     expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
   });
 
-  test('a note the facts could not be read from says so', async () => {
-    await openSheet(makeRequest({ facts: { available: true, status: 'failed', areas: [], pests: [] } }));
+  // Where product went down decides the indoor re-entry wait on the
+  // customer's report: nothing is sent until the note has told where.
+  test('a note the facts could not be read from holds the send until written again', async () => {
+    const request = makeRequest({ facts: { available: true, status: 'failed', areas: [], pests: [] } });
+    await openSheet(request);
     await generate();
     expect(screen.getByText('Couldn’t read where you treated from your note. Write again to retry.')).toBeTruthy();
+    expect(screen.getByText('Write it again: where you treated wasn’t read yet.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Write again' }));
+    await waitFor(() => expect(request.bodies('/voice-facts')).toHaveLength(2));
+  });
+
+  test('a note that never says where holds the send until it does', async () => {
+    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: [], pests: ['ants'] } }));
+    await generate();
+    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: where you treated: not heard. Say it, then write again · for ants');
+    expect(screen.getByText('Say where you treated (inside, outside or garage) in your note, then write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
+  test('a voice-facts outage holds the send too', async () => {
+    const request = makeRequest();
+    request.mockImplementation(async (path, options) => {
+      request.calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
+      if (path.endsWith('/voice-facts')) throw Object.assign(new Error('down'), { status: 503 });
+      if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service: REGULAR, products: CATALOG };
+      if (path.endsWith('/tech-rating-allowed')) return { allowed: true, firstVisit: false, scaleLabels: null };
+      if (path === '/admin/schedule/generate-report') return { report: REPORT };
+      if (path.endsWith('/treatment-zone')) return { enabled: true, treatmentZone: null };
+      if (path.endsWith('/photos')) return { photos: [] };
+      return { available: false };
+    });
+    await openSheet(request);
+    await generate();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
   test('a change to the visit after the report makes it stale until it is written again (fresh)', async () => {
