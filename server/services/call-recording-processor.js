@@ -964,6 +964,21 @@ function isOutboundCall(call = {}) {
   return String(call.direction || '').toLowerCase().startsWith('outbound');
 }
 
+// The customer's OWN inbound contact, and recent (owner ruling 2026-09-30: a
+// reply to it is never held to 8 AM). Freshness bound mirrors the dropped-
+// call lane's MAX_CALL_AGE_MS: a retry of a no_transcription row, a 7-day
+// extraction_failed retry, or an admin force-reprocess can book a visit off
+// a call from days ago at 11 PM — that send is NOT answering anything the
+// customer just did, so it keeps the send-window hold (Fable review on
+// #5466). No call start = cannot prove freshness = fenced.
+const INBOUND_REPLY_MAX_CALL_AGE_MS = 24 * 60 * 60 * 1000;
+function isFreshInboundCall(call = {}, now = Date.now()) {
+  if (isOutboundCall(call)) return false;
+  const at = callStartedAt(call) || (call.created_at ? new Date(call.created_at) : null);
+  const ms = at ? now - new Date(at).getTime() : Number.NaN;
+  return Number.isFinite(ms) && ms >= 0 && ms <= INBOUND_REPLY_MAX_CALL_AGE_MS;
+}
+
 // Single source of truth for whether implied SMS/email consent may apply to
 // THIS call (owner ruling 2026-09-26, GATE_CALL_OUTBOUND_RETURN_MESSAGES):
 // inbound always qualifies; outbound qualifies only once the caller's own
@@ -18502,8 +18517,8 @@ const CallRecordingProcessor = {
                 recipientPhone: smsRecipient || null,
                 // Owner ruling 2026-09-30: the caller just phoned us, so the
                 // card ask answering that call goes out now, not at 8 AM.
-                // Outbound dials are OUR contact — those stay fenced.
-                customerInitiated: !isOutboundCall(call),
+                // Outbound dials and stale reprocessed calls stay fenced.
+                customerInitiated: isFreshInboundCall(call),
               });
             } catch (cardErr) {
               logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
@@ -18758,8 +18773,8 @@ const CallRecordingProcessor = {
                       })() : {}),
                       // Owner ruling 2026-09-30: a confirmation answering the
                       // caller's own inbound call is never held to 8 AM.
-                      // Outbound dials are our contact and stay fenced.
-                      ...(!isOutboundCall(call) ? { customerInitiated: true } : {}),
+                      // Outbound dials and stale reprocessed calls stay fenced.
+                      ...(isFreshInboundCall(call) ? { customerInitiated: true } : {}),
                       identityTrustLevel: 'phone_matches_customer',
                       metadata: {
                         original_message_type: 'confirmation',
@@ -18939,8 +18954,11 @@ const CallRecordingProcessor = {
                             ? 'service_contact_authorized'
                             : 'phone_matches_customer',
                           // Same inbound-call provenance as the primary send
-                          // above (owner ruling 2026-09-30).
-                          ...(!isOutboundCall(call) ? { customerInitiated: true } : {}),
+                          // above (owner ruling 2026-09-30). These are the
+                          // booking's consented appointment contacts — the
+                          // on-site person the caller booked for is exactly who
+                          // the ruling wants texted now.
+                          ...(isFreshInboundCall(call) ? { customerInitiated: true } : {}),
                           metadata: {
                             original_message_type: 'confirmation',
                             appointment_contact_role: contact.role,
@@ -21519,6 +21537,7 @@ CallRecordingProcessor._test = {
   rerunAssessmentPreDraftAfterQuarantineClear,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
+  isFreshInboundCall,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
   resolveCallBookingPropertyLinkage,
