@@ -342,14 +342,17 @@ async function loadOpenNoshow({ conn, customerId, deriveWindow }, { today, since
       && (noshow.new_date != null || noshow.status === 'completed' || rowMoved);
     // Otherwise another visit of the same service on or after the missed day
     // (a same-day replacement counts), never the logged row itself.
-    const later = !movedSelf && date && family
+    // No property on the missed row (legacy, or the property was deleted): another
+    // visit cannot be shown to be at the same address, so only the row itself can
+    // resolve it.
+    const later = !movedSelf && date && family && noshow.property_id
       ? await conn('scheduled_services')
         .where({ customer_id: customerId }).where('scheduled_date', '>=', date)
         .whereIn('status', liveOrDone)
         .modify((b) => {
           if (noshow.scheduled_service_id) b.whereNot('id', noshow.scheduled_service_id);
           // the same property: another address's visit does not resolve this miss
-          if (noshow.property_id) b.where('property_id', noshow.property_id);
+          b.where('property_id', noshow.property_id);
         })
         .select('service_type', 'scheduled_date', 'window_start')
       : [];
@@ -415,8 +418,11 @@ async function loadCommitments({ conn, customerId, now }) {
     const smsOn = smsCommitmentsEnabled();
     const emailOn = gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
     if (!smsOn && !emailOn) return null;
-    // only the enabled channels are read, so the limit bounds the rows rendered
-    const listed = await listSmsCommitments(conn, { customerId, limit: 50, now, channels: [smsOn && 'sms', emailOn && 'email'].filter(Boolean) });
+    // only the enabled channels, and each rendered lane on its own page, so a limit
+    // never lets one population crowd the other out
+    const channels = [smsOn && 'sms', emailOn && 'email'].filter(Boolean);
+    const lanes = await Promise.all(['promise', 'request'].map((lane) => listSmsCommitments(conn, { customerId, limit: 50, now, channels, lane })));
+    const listed = lanes.flat();
     const kept = listed.filter((r) => (r.channel === 'email' ? emailOn : smsOn));
     // The reader's select omits sms_context (basis: promise vs request, and the
     // spoken due text); one keyed read supplies it.

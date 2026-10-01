@@ -364,8 +364,8 @@ describe('missedVisit', () => {
   });
 
   test('a same-day replacement visit counts as the follow-up; the logged row itself never does', async () => {
-    const noshow = { scheduled_service_id: 'v9', original_date: '2026-10-01', original_window: '9-11 AM', new_date: null, service_type: 'Pest Control', status: 'no_show' };
-    const conn = fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : [{ service_type: 'Pest Control' }]), reschedule_log: () => [noshow] });
+    const noshow = { scheduled_service_id: 'v9', property_id: 'prop-A', original_date: '2026-10-01', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
+    const conn = fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : [{ service_type: 'Pest Control', scheduled_date: '2026-10-01', window_start: '15:00:00' }]), reschedule_log: () => [noshow] });
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [], now: NOW, deriveWindow, conn });
     expect(out.missedVisit).toBeNull();
     const probe = conn.calls.find((c) => c.table === 'scheduled_services' && c.terminal === 'all' && !isUnfinishedQuery(c.ops) && !hasOp(c.ops, 'leftJoin'));
@@ -404,7 +404,7 @@ describe('missedVisit', () => {
   });
 
   test('a same-day visit counts as the follow-up only when it starts AFTER the missed slot', async () => {
-    const noshow = { scheduled_service_id: 'v9', original_date: '2026-09-30', original_window: '13:00:00-14:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
+    const noshow = { scheduled_service_id: 'v9', property_id: 'prop-A', original_date: '2026-09-30', original_window: '13:00:00-14:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
     const at = (later) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : later), reschedule_log: () => [noshow] }) });
     // a morning pest visit that day preceded the 1 PM no-show: not a replacement
     expect((await at([{ service_type: 'Pest Control', scheduled_date: '2026-09-30', window_start: '09:00:00' }])).missedVisit).toMatchObject({ reason: 'customer_noshow' });
@@ -432,9 +432,17 @@ describe('missedVisit', () => {
   });
 
   test('a no-show already followed by a later visit of the same family is not missed; another family does not cancel it', async () => {
-    const noshow = { original_date: '2026-09-30', service_type: 'Mosquito Control', window_start: null, status: 'no_show' };
-    expect((await run({ noshow, later: [{ service_type: 'Mosquito Barrier Spray' }] })).missedVisit).toBeNull();
-    expect((await run({ noshow, later: [{ service_type: 'Lawn Care' }] })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
+    const noshow = { property_id: 'prop-A', original_date: '2026-09-30', service_type: 'Mosquito Control', window_start: null, status: 'no_show' };
+    expect((await run({ noshow, later: [{ service_type: 'Mosquito Barrier Spray', scheduled_date: '2026-10-03' }] })).missedVisit).toBeNull();
+    expect((await run({ noshow, later: [{ service_type: 'Lawn Care', scheduled_date: '2026-10-03' }] })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
+  });
+
+  test('no property on the missed row: another visit cannot prove the follow-up (fail closed, no probe)', async () => {
+    const noshow = { scheduled_service_id: 'v9', property_id: null, original_date: '2026-09-30', original_window: '09:00:00-10:00:00', service_type: 'Mosquito Control', status: 'no_show' };
+    const conn = fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : [{ service_type: 'Mosquito Control', scheduled_date: '2026-10-03' }]), reschedule_log: () => [noshow] });
+    const out = await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
+    expect(out.missedVisit).toMatchObject({ reason: 'customer_noshow' });
+    expect(conn.calls.some((c) => c.table === 'scheduled_services' && !isUnfinishedQuery(c.ops) && !hasOp(c.ops, 'leftJoin'))).toBe(false);
   });
 
   test('both present: the most recent date wins', async () => {
@@ -519,6 +527,9 @@ describe('weOwe and customerWaiting', () => {
     expect(out.weOwe).toEqual([expect.objectContaining({ description: 'Send the quote', source: 'email' })]);
     // only the enabled channel is read, so the page limit bounds rendered rows
     expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ channels: ['email'] }));
+    // and each rendered lane is its own page: promises can't crowd out requests or vice versa
+    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lane: 'promise' }));
+    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lane: 'request' }));
   });
 
   test('descriptions are redacted BEFORE the 120-char clip (a straddling code never survives)', async () => {

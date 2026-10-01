@@ -1755,3 +1755,43 @@ describe('activation and intake', () => {
     expect(eligibleMessage({ ...source('Please send the estimate'), to_phone: numbers.tollFree.number })).toBe(false);
   });
 });
+
+// PR #5499: lane (additive) narrows BOTH channel subqueries before the bounded
+// union, so one rendered population cannot crowd the other out of the page.
+describe('listSmsCommitments lane option', () => {
+  const { listSmsCommitments } = require('../services/sms-operational-actions');
+  const fakeConn = () => {
+    const parts = [];
+    const builder = () => {
+      const ops = [];
+      const b = new Proxy({}, { get: (_t, prop) => (...args) => { ops.push([prop, args]); if (prop === 'modify') args[0](b); return b; } });
+      parts.push(ops);
+      return b;
+    };
+    const conn = (table) => builder(table);
+    conn.raw = (sql) => ({ raw: sql });
+    const tail = { orderByRaw: () => tail, limit: () => tail, offset: async () => [] };
+    conn.unionAll = (list) => { conn.unioned = list.length; return tail; };
+    conn.parts = parts;
+    return conn;
+  };
+  const rawsOf = (ops) => ops.filter(([p]) => p === 'whereRaw').map(([, a]) => a[0]);
+
+  test("'request' and 'promise' filter both the sms and the email subquery; no lane leaves them unfiltered", async () => {
+    const req = fakeConn();
+    await listSmsCommitments(req, { customerId: 'c1', lane: 'request' });
+    expect(req.parts).toHaveLength(2);
+    for (const ops of req.parts) expect(rawsOf(ops)).toContain("cc.sms_context->>'basis' = 'request'");
+
+    const pro = fakeConn();
+    await listSmsCommitments(pro, { customerId: 'c1', lane: 'promise' });
+    for (const ops of pro.parts) {
+      expect(ops).toContainEqual(['where', ['cc.party', 'waves']]);
+      expect(rawsOf(ops)).toContain("COALESCE(cc.sms_context->>'basis', '') <> 'request'");
+    }
+
+    const none = fakeConn();
+    await listSmsCommitments(none, { customerId: 'c1' });
+    for (const ops of none.parts) expect(rawsOf(ops).some((sql) => /basis/.test(sql))).toBe(false);
+  });
+});
