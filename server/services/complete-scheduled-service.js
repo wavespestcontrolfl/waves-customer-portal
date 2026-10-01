@@ -248,6 +248,34 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   return 'perimeter_spray';
 }
 
+// Cockroach work chips from the SUBMITTED product rows (one row per distinct
+// productId, exactly the rows the completion loop stores), validated against
+// the form field's own option list. Pure over its inputs so it is testable
+// without a completion.
+function deriveCockroachWorkFromSubmittedProducts({ products = [], catalogRowsById = new Map(), serviceLine = 'pest' } = {}) {
+  const { deriveCockroachWorkChips } = require('./service-report/cockroach-work-from-products');
+  const { PROJECT_TYPES } = require('./project-types');
+  const options = new Set((PROJECT_TYPES.cockroach.findingsFields.find((f) => f.key === 'work_completed') || {}).options || []);
+  const seen = new Set();
+  const rows = [];
+  for (const p of products || []) {
+    const id = canonicalProductId(p?.productId);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const catalog = catalogRowsById.get(id);
+    if (!catalog) continue;
+    rows.push({
+      name: catalog.name || p.name,
+      category: catalog.category || p.category || null,
+      productType: catalog.product_type || null,
+      activeIngredient: catalog.active_ingredient || null,
+      method: inferServiceReportApplicationMethod(catalog, p, serviceLine),
+      applicationArea: p.applicationArea || p.area || null,
+    });
+  }
+  return deriveCockroachWorkChips(rows).filter((chip) => options.has(chip));
+}
+
 function requiresLinearFtForReportApplication(method) {
   return normalizeServiceReportApplicationMethod(method) === 'perimeter_spray';
 }
@@ -3327,6 +3355,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           && typeof structuredFindings.values === 'object') {
           delete structuredFindings.values.treatments_completed;
         }
+        // Primary cockroach: work_completed is autoFilled/hidden and derived
+        // from the submitted products just before the snapshot freezes (same
+        // shape as T&S above) — a submitted value is a stale pre-change
+        // draft the tech has no input to change. Strip it before validation;
+        // derivation re-fills it from the recorded products.
+        if (typedFindingsType === 'cockroach' && structuredFindings?.values
+          && typeof structuredFindings.values === 'object') {
+          delete structuredFindings.values.work_completed;
+        }
         const findingsValidation = ActivityIndicators.validateTypedFindings({
           type: structuredFindings?.type,
           values: structuredFindings?.values,
@@ -6240,6 +6277,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 trend: ActivityIndicators.trendDirection(typedActivityScore, priorScore),
                 trendWord: ActivityIndicators.trendWordForScores(typedActivityScore, priorScore),
               };
+            }
+            // Primary cockroach: fill the autoFilled `work_completed` chips
+            // from the SUBMITTED product rows — catalog rows from this trx's
+            // frozen read set, the method the row is stored with — so the
+            // snapshot, Today's Result, treatment evidence, trace eligibility
+            // and the report's "What we did" all read the chip vocabulary they
+            // always did (cockroach-work-from-products.js). An empty derivation
+            // leaves the field absent (no claim without a recorded fact).
+            if (typedFindingsType === 'cockroach' && typedFindings.values
+              && typeof typedFindings.values === 'object') {
+              const derivedWork = deriveCockroachWorkFromSubmittedProducts({
+                products: products || [],
+                catalogRowsById: completionCatalogRowsById,
+                serviceLine: reportServiceLine,
+              });
+              if (derivedWork.length) typedFindings.values.work_completed = derivedWork.join(', ');
+              else delete typedFindings.values.work_completed;
             }
             serviceData.typedReportSnapshot = ActivityIndicators.buildTypedReportSnapshot({
               projectType: typedFindingsType,
@@ -13892,4 +13946,5 @@ module.exports = {
   backfillExpectedMintAtCommit,
   shouldAutoInvoiceCompletion,
   parseCompletionReviewDelayMinutes,
+  deriveCockroachWorkFromSubmittedProducts,
 };
