@@ -62,6 +62,12 @@ function legacySubject(row, meta) {
   return hit ? { type: hit[0], id: String(hit[1]) } : null;
 }
 
+// A digest for the fyi audience is information, never work: severity fyi, left out of the list.
+function legacySeverity(row, meta) {
+  if (row.category === 'ops_digest' && meta.audience === 'fyi') return 'fyi';
+  return meta.kind === 'FIX' ? 'broken' : 'needs-you';
+}
+
 function mapAlertRow(row) {
   const meta = parseMeta(row.metadata);
   const composed = AREAS.includes(meta.area) && SEVERITIES.includes(meta.severity) && WHO.includes(meta.who)
@@ -73,7 +79,7 @@ function mapAlertRow(row) {
     area: composed ? meta.area : areaFrom(AREA_BY_CATEGORY, row.category),
     headline: row.title,
     why: row.body || null,
-    severity: composed ? meta.severity : (meta.kind === 'FIX' ? 'broken' : 'needs-you'),
+    severity: composed ? meta.severity : legacySeverity(row, meta),
     link: row.link || null,
     subject: validSubject(meta.subject) ? { type: meta.subject.type, id: meta.subject.id } : legacySubject(row, meta),
     doneWhen: composed ? meta.doneWhen : null,
@@ -138,7 +144,7 @@ async function listNeedsMe({ who, area, limit, role } = {}) {
 
   const when = (item) => (item.createdAt ? new Date(item.createdAt).getTime() : generatedAt.getTime());
   const matching = items
-    .filter((item) => whoMatches(who, item.who) && (!area || item.area === area))
+    .filter((item) => item.severity !== 'fyi' && whoMatches(who, item.who) && (!area || item.area === area))
     .sort((a, b) => ((SEVERITY_RANK[a.severity] ?? 1) - (SEVERITY_RANK[b.severity] ?? 1)) || (when(b) - when(a)));
   const tally = (key) => matching.reduce((acc, item) => ({ ...acc, [item[key]]: (acc[item[key]] || 0) + 1 }), {});
   const max = Math.min(Math.max(parseInt(limit, 10) || DEFAULT_LIMIT, 1), ROW_CAP);

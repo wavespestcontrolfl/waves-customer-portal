@@ -92,6 +92,17 @@ test('an engineering digest that is Activity-only appears under who=claude, flag
   expect(all.items.map((i) => [i.id, i.activityOnly])).toEqual([['eng', true], ['person-new', false]]);
 });
 
+test('an fyi digest is severity fyi and absent under every who', async () => {
+  mockRows = [row({ id: 'fyi-digest', category: 'ops_digest', metadata: { kind: 'FYI', audience: 'fyi', feed: 'activity' } }), row({ id: 'real' })];
+  expect(mapAlertRow(mockRows[0]).severity).toBe('fyi');
+  for (const who of [undefined, 'claude', 'person', 'either']) {
+    expect((await listNeedsMe({ who })).items.map((i) => i.id)).not.toContain('fyi-digest');
+  }
+  const all = await listNeedsMe();
+  expect(all.items.map((i) => i.id)).toEqual(['real']);
+  expect(all.counts.bySeverity).toEqual({ 'needs-you': 1 });
+});
+
 test('a standing condition is a needs-you count that clears at zero, filed by the page it opens', async () => {
   computeDashboardAlerts.mockResolvedValue({ alerts: [
     { id: 'ar_overdue_60', severity: 'critical', count: 4, label: '4 invoices over 60 days', href: '/admin/invoices?tab=overdue' },

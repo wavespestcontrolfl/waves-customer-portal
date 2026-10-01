@@ -159,6 +159,7 @@ who. Pick the ones a session may fix alone with `who=claude` (that returns `clau
   admin rows that are not done, including Activity-feed rows (the bell never shows those; they
   carry `activityOnly: true`, and engineering `broken` findings are among them), and the
   dashboard's standing counts, which are `needs-you`, `person`, done when the count is zero.
+An `ops_digest` row for the `fyi` audience is severity `fyi` and is never listed.
 
 An item with `derived: true` comes from an older raw `notifyAdmin` call that never stamped
 the eight parts. Its area is inferred from the category, its severity is `broken` only for a
