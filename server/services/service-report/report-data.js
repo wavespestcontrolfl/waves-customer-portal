@@ -5297,11 +5297,29 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // the raw {holdUntil} token either (a null instruction drops it).
         lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);
       }
+      // GATE_LAWN_EXPECTATIONS (P9): the program line steps aside in Jun-Sep
+      // when the visit applied a nitrogen product, which the public
+      // applications[] shape does not carry, so read analysis_n from the
+      // catalog here. Gate off = no query, byte-identical. A failed read is
+      // treated as nitrogen applied (no line beats a wrong line).
+      let nitrogenApplied = null;
+      if (featureGates.lawnExpectationsLive()) {
+        try {
+          const catalogIds = [...new Set((applications || []).map((app) => app?.product?.catalogId).filter(Boolean))];
+          const nRows = catalogIds.length
+            ? await knex('products_catalog').whereIn('id', catalogIds).select('id', 'analysis_n')
+            : [];
+          nitrogenApplied = nRows.some((row) => Number(row.analysis_n || 0) > 0);
+        } catch {
+          nitrogenApplied = true;
+        }
+      }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
         wateringInstruction,
         mowingHeight,
         applications,
+        ...(nitrogenApplied === null ? {} : { nitrogenApplied }),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,

@@ -253,6 +253,35 @@ describe('LawnReportV2Section lead mode', () => {
   });
 });
 
+describe('program line (GATE_LAWN_EXPECTATIONS)', () => {
+  const PROGRAM = 'October gives the final feeding of the year, with iron and a preventive fungicide against fall disease such as large patch.';
+  const programSnapshot = { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program' };
+
+  it('lead mode renders the program line exactly once, beside the trends', () => {
+    const { container } = render(<LawnReportV2Section data={payload({ snapshot: programSnapshot, trends: { overall: [{ date: '2026-04-15', value: 60 }, { date: '2026-10-14', value: 68 }] } })} />);
+    expect(screen.getAllByText(PROGRAM)).toHaveLength(1);
+    expect(container.textContent.match(new RegExp(PROGRAM.slice(0, 30), 'g'))).toHaveLength(1);
+    expect(screen.getByText('This time of year')).toBeInTheDocument();
+  });
+
+  it('lead mode renders it with no trends payload too (a first visit)', () => {
+    render(<LawnReportV2Section data={payload({ snapshot: programSnapshot })} />);
+    expect(screen.getAllByText(PROGRAM)).toHaveLength(1);
+  });
+
+  it('lead mode never renders an unmarked season note (gate off, or a null program line)', () => {
+    render(<LawnReportV2Section data={payload()} />);
+    expect(screen.queryByText('This time of year')).toBeNull();
+    expect(screen.queryByText(SNAPSHOT.seasonalNote)).toBeNull();
+  });
+
+  it('legacy layout renders the line once, in the hero, without the lead block', () => {
+    render(<LawnReportV2Section data={payload({ lead: undefined, snapshot: programSnapshot })} />);
+    expect(screen.getAllByText(PROGRAM)).toHaveLength(1);
+    expect(screen.queryByText('This time of year')).toBeNull();
+  });
+});
+
 describe('legacy layout without a lead', () => {
   it('still renders the hero, the follow-up card and the full findings rows', () => {
     render(<LawnReportV2Section data={payload({ lead: undefined })} />);

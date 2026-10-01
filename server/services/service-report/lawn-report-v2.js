@@ -15,7 +15,8 @@ const { dateOnlyToNoonUtc } = require('./time-format');
 const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-diagnosis');
 const { buildLawnInsightCards, issueRestatesAftercare } =require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
-const { lawnReportLeadLive } = require('../../config/feature-gates');
+const { lawnReportLeadLive, lawnExpectationsLive } = require('../../config/feature-gates');
+const { buildProgramLine } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
@@ -553,7 +554,7 @@ const ISSUE_TOPIC = {
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -730,7 +731,16 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
   const rootCause = aftercareWaterAction ? null : buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
-  const seasonalNote = buildSeasonalNote(lawnAssessment, grassLabel);
+  // GATE_LAWN_EXPECTATIONS (P9): while live, snapshot.seasonalNote is the
+  // month's program line from protocols.json, anchored on the same noon-UTC
+  // visit month the dormancy guard uses (host-timezone safe, stable for a
+  // permanent token). A null line (no honest line for this visit) keeps the old
+  // season note. `seasonalNoteSource` marks the program line so the lead layout
+  // renders it and only it; gate off adds no key (byte-identical payload).
+  const programLine = lawnExpectationsLive()
+    ? buildProgramLine({ grassType: lawnAssessment.turfProfile?.grassType, month: assessMonth, applications, nitrogenApplied })
+    : null;
+  const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
 
   const snapshot = {
     overallScore,
@@ -739,6 +749,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     scoreExplanation,
     rootCause,
     seasonalNote,
+    ...(programLine ? { seasonalNoteSource: 'program' } : {}),
     todaysFocus: treatment ? treatment.focus : [],
     // Plain-language applied-solutions sentence for the hero card (owner
     // 2026-07-21 — the summary must say what was applied, not just tags).
