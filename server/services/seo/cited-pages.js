@@ -156,9 +156,10 @@ function finalizePage({ urlCounts, currentProviderNamed, ...p }) {
     ...p,
     url: displayUrl(topUrl),
     // evidence about the PAGE, not the question that cited it: a directory
-    // listing, a heuristic listicle, or a best/top/near-me page. A cost guide
-    // cited for "who should I hire" is still not a list to be added to.
-    listPage: p.category === 'listing' || p.subtype === 'listicle_candidate' || hasBestToken(topUrl),
+    // listing or a best/top/near-me page. The listicle_candidate subtype is
+    // not enough (a local place name alone earns it), and a cost guide cited
+    // for "who should I hire" is still not a list to be added to.
+    listPage: p.category === 'listing' || hasBestToken(topUrl),
     tier: p.currentMisses > 0 ? 1 : currentProviderNamed > 0 ? 2 : 3,
     priorityCity: questions.some((q) => isPriorityCity(q.city)),
     engines: [...p.engines].sort(),

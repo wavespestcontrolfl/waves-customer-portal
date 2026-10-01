@@ -125,6 +125,9 @@ describe('rankCitedPages', () => {
     const rows = [row({ query: Q1, urls: ['https://www.bobvila.com/articles/pest-control-cost/', 'https://floridist.com/best-pest-control-sarasota', 'https://www.yelp.com/biz/acme'] })];
     const byHost = Object.fromEntries(rankCitedPages(rows, []).map((p) => [p.host, p.listPage]));
     expect(byHost).toEqual({ 'bobvila.com': false, 'floridist.com': true, 'yelp.com': true });
+    // a heuristic listicle candidate on a place name alone is not proof of a list
+    const [guide] = rankCitedPages([row({ query: Q1, urls: ['https://someblog.example/sarasota-pest-guide'] })], []);
+    expect(guide).toMatchObject({ subtype: 'listicle_candidate', listPage: false });
   });
 
   test('one answer citing the same page twice counts once', () => {
