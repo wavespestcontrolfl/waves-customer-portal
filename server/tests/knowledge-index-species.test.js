@@ -61,6 +61,15 @@ describe('species connectors', () => {
     }
   });
 
+  test('verdict and safety sit inside the 500-character search snippet', () => {
+    for (const doc of customer) {
+      const entry = catalog.getEntry(doc.sourceId);
+      const head = doc.content.slice(0, 500);
+      if (entry.verdict) expect(head).toContain(`Verdict: ${entry.verdict}`);
+      if (entry.safety_line) expect(head).toContain(`Safety: ${entry.safety_line}`);
+    }
+  });
+
   test('staff docs carry the tech notes and citations', () => {
     const doc = staff.find((d) => d.sourceId === 'spiraling-whitefly');
     expect(doc.content).toContain(catalog.getEntry('spiraling-whitefly').tech_notes);
@@ -81,6 +90,14 @@ describe('species connectors', () => {
 describe('catalog-first pin', () => {
   test('a query naming one entry pins its docs', () => {
     expect(catalogPinKeys('what do I spray for large patch in October')).toEqual(['species:large-patch', 'species_tech:large-patch']);
+  });
+
+  test('an entry failing its live approval check pins nothing', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../services/species-catalog-approval', () => ({ isApproved: () => false }));
+      const isolated = require('../services/knowledge-index/hybrid-search');
+      expect(isolated.catalogPinKeys('what do I spray for large patch in October')).toEqual([]);
+    });
   });
 
   test('a group-level or unknown name pins nothing', () => {

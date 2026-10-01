@@ -100,9 +100,13 @@ function rrfFuse(lists, { k = RRF_K } = {}) {
 function catalogPinKeys(query) {
   try {
     const catalog = require('../species-catalog');
+    const { isApproved } = require('../species-catalog-approval');
     const resolved = catalog.resolveName(query);
     const slug = resolved && resolved.node && resolved.node.slug;
-    if (!slug || !catalog.getEntry(slug)) return [];
+    const entry = slug && catalog.getEntry(slug);
+    // Approval is re-checked live: an entry edited after approval must not
+    // pin its stale indexed docs before the nightly sync removes them.
+    if (!entry || !isApproved(entry)) return [];
     return [docKey('species', slug), docKey('species_tech', slug)];
   } catch (err) {
     logger.warn(`[knowledge-index] catalog pin skipped: ${err.message}`);

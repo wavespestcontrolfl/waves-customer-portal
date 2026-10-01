@@ -334,17 +334,19 @@ function renderSpeciesCustomer(e) {
   const service = e.service && e.service.label
     ? `${e.service.label}${e.service.inspection_first ? ' (inspection first)' : ''}`
     : '';
+  // Authoritative fields first: search results carry a 500-character
+  // snippet, so verdict, safety and meaning must lead the document.
   return joinParts([
-    names.length ? `Also called: ${names.join(', ')}` : '',
-    e.site_category ? `Category: ${e.site_category}` : '',
-    (e.traits || []).length ? `How to recognize it: ${e.traits.join('; ')}` : '',
-    e.copy && e.copy.what_it_means ? `What it means: ${e.copy.what_it_means}` : '',
-    e.copy && e.copy.fact ? `Fact: ${e.copy.fact}` : '',
     e.verdict ? `Verdict: ${e.verdict}${e.urgency ? ` (urgency ${e.urgency})` : ''}` : '',
     e.safety_line ? `Safety: ${e.safety_line}` : '',
     flags.length ? `Safety flags: ${flags.join(', ')}` : '',
-    monthList(e.active_months) ? `Active: ${monthList(e.active_months)}${monthList(e.peak_months) ? `; peak ${monthList(e.peak_months)}` : ''}` : '',
+    e.copy && e.copy.what_it_means ? `What it means: ${e.copy.what_it_means}` : '',
     service ? `Waves service: ${service}` : '',
+    monthList(e.active_months) ? `Active: ${monthList(e.active_months)}${monthList(e.peak_months) ? `; peak ${monthList(e.peak_months)}` : ''}` : '',
+    names.length ? `Also called: ${names.join(', ')}` : '',
+    e.site_category ? `Category: ${e.site_category}` : '',
+    (e.traits || []).length ? `How to recognize it: ${e.traits.join('; ')}` : '',
+    e.copy && e.copy.fact ? `Fact: ${e.copy.fact}` : '',
     lookAlikes.length ? `Look-alikes: ${lookAlikes.join(' ')}` : '',
     (e.sources || []).length ? `Sources: ${e.sources.join(' ')}` : '',
   ]);
