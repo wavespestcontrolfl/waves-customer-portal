@@ -495,6 +495,9 @@ async function buildCustomerWordsContext({
 module.exports = {
   buildCompletionCommsContext,
   buildCustomerWordsContext,
+  // The same scrub for other customer-typed text the writer reads (why the
+  // customer booked).
+  scrubCustomerText: scrub,
   resolveContextWindow,
   RECURRING_CAP_DAYS,
   ONE_TIME_CAP_DAYS,

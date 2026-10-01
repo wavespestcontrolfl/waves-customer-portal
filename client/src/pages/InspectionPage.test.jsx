@@ -9,7 +9,7 @@
 // ?slot= preselect with its nearest-slot fallback notice.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ScheduleFlowPage from './ScheduleFlowPage';
@@ -805,18 +805,49 @@ describe('InspectionPage availability refresh keeps a held address (P1, round 8)
   });
 });
 
+// The emailed pick renders in EmailPickCard, right under the greeting, with
+// its own Book button — the inline one sits pages down below the search and
+// the day grid (a lead on 2026-09-30 never scrolled to it).
+function emailCard() {
+  return document.querySelector('[data-inspection-email-pick]');
+}
+
+function commitCall(fetchMock) {
+  return fetchMock.mock.calls.find(([url, opts]) => opts?.method === 'POST'
+    && !String(url).includes('find-slots') && !String(url).includes('availability') && !String(url).includes('waitlist'));
+}
+
+const TWO_DAYS = {
+  ...okPayload().availability,
+  days: [
+    { date: '2026-07-12', fullDate: 'Sunday, July 12', nearby: false, slots: [
+      { start_time: '13:00', end_time: '13:30', start_label: '1:00 PM', end_label: '1:30 PM', technician_id: 'tech-1' },
+    ] },
+    { date: '2026-07-13', fullDate: 'Monday, July 13', nearby: false, slots: [
+      { start_time: '10:00', end_time: '10:30', start_label: '10:00 AM', end_label: '10:30 AM', technician_id: 'tech-1' },
+    ] },
+  ],
+};
+
 describe('InspectionPage ?slot= preselect', () => {
-  it('preselects the requested slot without a click', async () => {
+  it('preselects the requested slot without a click and shows it at the top with its own Book button', async () => {
     stubFetch({ get: jsonResponse(okPayload()) });
     renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
-    expect(await screen.findByRole('button', { name: /^Book /i })).toBeInTheDocument();
+    expect(await screen.findByText('Your time')).toBeInTheDocument();
+    const card = within(emailCard());
+    expect(card.getByText('Sunday, July 12')).toBeInTheDocument();
+    expect(card.getByRole('button', { name: /^Book Sun 1:00 PM.3:00 PM$/ })).toBeInTheDocument();
+    // The inline pick below agrees.
+    expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('a requested slot that already filled falls back to the nearest open one, with a notice', async () => {
     stubFetch({ get: jsonResponse(okPayload()) }); // only 13:00 exists
     renderPage('/inspection/deadbeef?slot=2026-07-12|09:00');
-    expect(await screen.findByRole('button', { name: /^Book /i })).toBeInTheDocument();
-    expect(screen.getByText(/moved you to the next open time/i)).toBeInTheDocument();
+    await screen.findByText('Your time');
+    expect(within(emailCard()).getByRole('button', { name: /^Book /i })).toBeInTheDocument();
+    // Once, in the top card — not repeated under the inline pick.
+    expect(screen.getAllByText(/moved you to the next open time/i)).toHaveLength(1);
   });
 
   // Codex #4737 r17 P2: the next opening AFTER the requested time, never an
@@ -833,14 +864,133 @@ describe('InspectionPage ?slot= preselect', () => {
     };
     stubFetch({ get: jsonResponse(okPayload({ availability })) });
     renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
-    expect(await screen.findByRole('button', { name: /^Book .*3:00/i })).toBeInTheDocument();
+    await screen.findByText('Your time');
+    expect(within(emailCard()).getByRole('button', { name: /^Book .*3:00/i })).toBeInTheDocument();
     expect(screen.getByText(/moved you to the next open time/i)).toBeInTheDocument();
   });
 
   it('with nothing after the requested time, falls back to the earliest with wording that says so', async () => {
     stubFetch({ get: jsonResponse(okPayload()) }); // only 13:00 on 07-12
     renderPage('/inspection/deadbeef?slot=2026-07-12|17:00');
-    expect(await screen.findByRole('button', { name: /^Book /i })).toBeInTheDocument();
+    await screen.findByText('Your time');
+    expect(within(emailCard()).getByRole('button', { name: /^Book /i })).toBeInTheDocument();
     expect(screen.getByText(/nothing later/i)).toBeInTheDocument();
+  });
+
+  it('no ?slot=: no top card', async () => {
+    stubFetch();
+    renderPage();
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    expect(emailCard()).toBeNull();
+  });
+});
+
+describe('InspectionPage emailed-time card', () => {
+  const booked = () => jsonResponse({
+    success: true,
+    state: 'ok',
+    visit: { date: '2026-07-12', window: { start: '13:00', end: '13:30' } },
+    startLabel: '1:00 PM',
+    endLabel: '1:30 PM',
+    rescheduleUrl: '/reschedule/feedface',
+  });
+
+  it('its Book button commits the emailed time in one tap', async () => {
+    const fetchMock = stubFetch({ post: booked() });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    await screen.findByText('Your time');
+    fireEvent.click(within(emailCard()).getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(screen.getByText(/you.re on the calendar/i)).toBeInTheDocument());
+    expect(JSON.parse(commitCall(fetchMock)[1].body)).toMatchObject({ date: '2026-07-12', time: '13:00' });
+  });
+
+  it('still books the emailed time after the customer browsed another day', async () => {
+    const fetchMock = stubFetch({ get: jsonResponse(okPayload({ availability: TWO_DAYS })), post: booked() });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    await screen.findByText('Your time');
+    fireEvent.click(screen.getByRole('option', { name: /Monday, July 13/i }));
+    await screen.findByRole('button', { name: /Choose 10:00 AM on Monday, July 13/i });
+    fireEvent.click(within(emailCard()).getByRole('button', { name: /^Book Sun/i }));
+    await waitFor(() => expect(commitCall(fetchMock)).toBeTruthy());
+    expect(JSON.parse(commitCall(fetchMock)[1].body)).toMatchObject({ date: '2026-07-12', time: '13:00' });
+  });
+
+  it('picking a different time removes the card; Book then books the new time', async () => {
+    const fetchMock = stubFetch({ get: jsonResponse(okPayload({ availability: TWO_DAYS })), post: booked() });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    await screen.findByText('Your time');
+    fireEvent.click(screen.getByRole('option', { name: /Monday, July 13/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 10:00 AM on Monday, July 13/i }));
+    expect(emailCard()).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^Book Mon/i }));
+    await waitFor(() => expect(commitCall(fetchMock)).toBeTruthy());
+    expect(JSON.parse(commitCall(fetchMock)[1].body)).toMatchObject({ date: '2026-07-13', time: '10:00' });
+  });
+
+  it('a commit error from the card shows in the card, not only at the bottom of the page', async () => {
+    stubFetch({ post: jsonResponse({ success: false, code: 'SLOT_TAKEN', availability: { ...okPayload().availability, days: [] } }, 409) });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    await screen.findByText('Your time');
+    fireEvent.click(within(emailCard()).getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(within(emailCard()).getByRole('alert')).toHaveTextContent(/just taken/i));
+    expect(within(emailCard()).queryByRole('button', { name: /^Book /i })).toBeNull();
+    expect(within(emailCard()).getByRole('button', { name: /Pick another time/i })).toBeInTheDocument();
+  });
+});
+
+describe('InspectionPage emailed-time card: Codex #5450 r1', () => {
+  it('SLOT_TAKEN with no availability and a failed refresh still drops the card\'s Book button', async () => {
+    let gets = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ success: false, code: 'SLOT_TAKEN', availability: null }, 409));
+      gets += 1;
+      return Promise.resolve(gets === 1 ? jsonResponse(okPayload()) : jsonResponse({ error: 'down' }, 500));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    await screen.findByText('Your time');
+    fireEvent.click(within(emailCard()).getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(within(emailCard()).getByRole('alert')).toHaveTextContent(/just taken/i));
+    expect(within(emailCard()).queryByRole('button', { name: /^Book /i })).toBeNull();
+  });
+
+  it('a search that drops the fallback time also drops its "we moved you" note', async () => {
+    const monday = { ...TWO_DAYS, days: [TWO_DAYS.days[1]] };
+    stubFetch({ get: jsonResponse(okPayload()), findSlots: jsonResponse({ availability: monday, summary: 'Open Monday morning.' }) });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|09:00'); // moved to 13:00
+    await screen.findByText(/moved you to the next open time/i);
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'monday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 10:00 AM on Monday, July 13/i }));
+    expect(screen.getByRole('button', { name: /^Book Mon/i })).toBeInTheDocument();
+    expect(screen.queryByText(/moved you to the next open time/i)).toBeNull();
+  });
+});
+
+describe('InspectionPage: a search keeps a pick it still offers', () => {
+  it('searching for the time already picked keeps it picked, with Book still showing', async () => {
+    stubFetch({ findSlots: jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }) });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    await screen.findByText('Your time');
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'sunday 1pm' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await screen.findByText(/Open Sunday afternoon/i);
+    expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(emailCard()).getByRole('button', { name: /^Book /i })).toBeInTheDocument();
+  });
+
+  it('a search whose results drop the picked time clears the pick and the card', async () => {
+    const monday = { ...TWO_DAYS, days: [TWO_DAYS.days[1]] };
+    stubFetch({ findSlots: jsonResponse({ availability: monday, summary: 'Open Monday morning.' }) });
+    renderPage('/inspection/deadbeef?slot=2026-07-12|13:00');
+    await screen.findByText('Your time');
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'monday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await screen.findByText(/Open Monday morning/i);
+    expect(screen.getByRole('button', { name: /Choose 10:00 AM on Monday, July 13/i })).toHaveAttribute('aria-pressed', 'false');
+    expect(emailCard()).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Book /i })).toBeNull();
   });
 });
