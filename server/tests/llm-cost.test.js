@@ -218,6 +218,12 @@ describe('findSpikes', () => {
     expect(spikes.map((s) => s.laneId)).toEqual(['a', 'd']);
     expect(spikes[0]).toEqual({ laneId: 'a', usd: 12, avgUsd: 2 });
   });
+
+  test('a lane whose baseline has unpriced calls is not checked: its average would read low', () => {
+    const day = new Map([['a', { usd: 12, unpricedCalls: 0 }], ['b', { usd: 12, unpricedCalls: 3 }]]);
+    const baseline = new Map([['a', { usd: 0, unpricedCalls: 40 }], ['b', { usd: 7, unpricedCalls: 0 }]]);
+    expect(llmCost.findSpikes(day, baseline, { minUsd: 5, multiplier: 3, baselineDays: 7 }).map((s) => s.laneId)).toEqual(['b']);
+  });
 });
 
 describe('pullPrices', () => {

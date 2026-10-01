@@ -382,11 +382,15 @@ const usd = (v) => `$${v >= 100 ? v.toFixed(0) : v.toFixed(2)}`;
 /**
  * Lanes whose spend on `day` cleared the spike rule against their average
  * day over the baseline (pure). A lane with no baseline spend at all is a
- * spike once it clears the minimum.
+ * spike once it clears the minimum. A lane with unpriced calls in the
+ * baseline is not checked: its average would read low, so ordinary spend
+ * could look like a spike. (Unpriced calls on the day itself only make its
+ * estimate low, so a spike found there stands.)
  */
 function findSpikes(dayByLane, baselineByLane, { minUsd = alertMinUsd(), multiplier = alertMultiplier(), baselineDays = BASELINE_DAYS } = {}) {
   const spikes = [];
   for (const [laneId, day] of dayByLane) {
+    if (baselineByLane.get(laneId)?.unpricedCalls > 0) continue;
     const avg = (baselineByLane.get(laneId)?.usd || 0) / baselineDays;
     if (day.usd >= minUsd && day.usd >= multiplier * avg) spikes.push({ laneId, usd: day.usd, avgUsd: avg });
   }
