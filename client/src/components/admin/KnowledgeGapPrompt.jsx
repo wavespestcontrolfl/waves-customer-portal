@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import { uuid } from "../../utils/ibSession";
 
 /**
@@ -9,45 +9,66 @@ import { uuid } from "../../utils/ibSession";
  * a customer's name, address or phone. Saved gaps go to the weekly
  * knowledge-gaps email.
  *
+ * Each box's state (its request key, draft, the text locked on the first
+ * tap, and save status) lives in useKnowledgeGaps, owned by the palette, so
+ * closing and reopening the palette never mints a new key or forgets a
+ * locked text: a retry always resends the same text under the same key.
+ *
  * Dual-styled like ToolActivityList: `variant="dark"` matches the desktop
  * palette, `variant="light"` the mobile sheet.
  */
 
 export const KNOWLEDGE_GAP_MAX = 300;
 
-function GapRow({ initial, save, dark }) {
-  const [text, setText] = useState(String(initial || "").slice(0, KNOWLEDGE_GAP_MAX));
-  // One key per box: a retry after a lost response re-sends it, so the
-  // server saves this gap once however many times the button is tapped.
-  const [requestKey] = useState(uuid);
-  const [state, setState] = useState("idle"); // idle | saving | saved | error
-  const [error, setError] = useState("");
-  // The text sent on the first tap. After that the box is locked: a failed
-  // save may still have landed under this key, so a retry resends exactly
-  // this text and the screen never shows other words as saved.
-  const [submitted, setSubmitted] = useState(null);
-  const trimmed = submitted ?? text.replace(/\s+/g, " ").trim();
+const normalize = (text) => String(text || "").replace(/\s+/g, " ").trim();
+
+export function gapsFromMisses(misses) {
+  const list = Array.isArray(misses) ? misses.filter((m) => typeof m === "string" && m.trim()) : [];
+  return list.map((m) => ({
+    // One key per box: a retry after a lost response re-sends it, so the
+    // server saves this gap once however many times the button is tapped.
+    requestKey: uuid(),
+    draft: m.slice(0, KNOWLEDGE_GAP_MAX),
+    // The text sent on the first tap. After that the box is locked: a failed
+    // save may still have landed under this key, so a retry resends exactly
+    // this text and the screen never shows other words as saved.
+    submitted: null,
+    status: "idle", // idle | saving | saved | error
+    error: "",
+  }));
+}
+
+export function useKnowledgeGaps() {
+  const [gaps, setGaps] = useState([]);
+  const load = useCallback((misses) => setGaps(gapsFromMisses(misses)), []);
+  const reset = useCallback(() => setGaps([]), []);
+  const update = useCallback((requestKey, patch) => {
+    setGaps((rows) => rows.map((r) => (r.requestKey === requestKey ? { ...r, ...patch } : r)));
+  }, []);
+  return { gaps, load, reset, update };
+}
+
+function GapRow({ gap, update, save, dark }) {
+  const { requestKey, draft, submitted, status, error } = gap;
+  const text = submitted ?? normalize(draft);
   const muted = dark ? "#64748B" : "#71717A";
   const border = dark ? "#CBD5E1" : "#D4D4D8";
 
   async function onSave() {
-    if (state === "saving" || trimmed.length < 3) return;
-    setSubmitted(trimmed);
-    setState("saving");
-    setError("");
+    if (status === "saving" || text.length < 3) return;
+    update(requestKey, { submitted: text, status: "saving", error: "" });
     try {
-      await save(trimmed, requestKey);
-      setState("saved");
+      await save(text, requestKey);
+      update(requestKey, { status: "saved" });
     } catch (err) {
-      setError(err?.message || "Could not save");
-      setState("error");
+      update(requestKey, { status: "error", error: err?.message || "Could not save" });
     }
   }
 
-  if (state === "saved") {
+  if (status === "saved") {
     return (
       <div role="listitem" style={{ color: muted }}>
-        Added to Monday's knowledge-gaps email: "{trimmed}"
+        Added to Monday's knowledge-gaps email: "{text}"
       </div>
     );
   }
@@ -57,9 +78,9 @@ function GapRow({ initial, save, dark }) {
       <input
         type="text"
         aria-label="Knowledge gap"
-        value={text}
+        value={submitted ?? draft}
         maxLength={KNOWLEDGE_GAP_MAX}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => { if (submitted === null) update(requestKey, { draft: e.target.value }); }}
         readOnly={submitted !== null}
         style={{
           flex: "1 1 220px",
@@ -77,20 +98,20 @@ function GapRow({ initial, save, dark }) {
       <button
         type="button"
         onClick={onSave}
-        disabled={state === "saving" || trimmed.length < 3}
+        disabled={status === "saving" || text.length < 3}
         style={{
           padding: "6px 12px",
           border: `1px solid ${border}`,
           borderRadius: 6,
           font: "inherit",
-          cursor: state === "saving" || trimmed.length < 3 ? "default" : "pointer",
+          cursor: status === "saving" || text.length < 3 ? "default" : "pointer",
           background: "transparent",
           color: "inherit",
         }}
       >
-        {state === "saving" ? "Adding…" : state === "error" ? "Try again" : "Add to knowledge gaps"}
+        {status === "saving" ? "Adding…" : status === "error" ? "Try again" : "Add to knowledge gaps"}
       </button>
-      {state === "error" && (
+      {status === "error" && (
         <div role="alert" style={{ flexBasis: "100%", color: "#B91C1C" }}>
           {error}
         </div>
@@ -99,9 +120,8 @@ function GapRow({ initial, save, dark }) {
   );
 }
 
-export default function KnowledgeGapPrompt({ misses, save, variant = "dark" }) {
-  const list = Array.isArray(misses) ? misses.filter((m) => typeof m === "string" && m.trim()) : [];
-  if (!list.length || typeof save !== "function") return null;
+export default function KnowledgeGapPrompt({ gaps, update, save, variant = "dark" }) {
+  if (!Array.isArray(gaps) || !gaps.length || typeof save !== "function" || typeof update !== "function") return null;
   const dark = variant === "dark";
   const muted = dark ? "#64748B" : "#71717A";
   const text = dark ? "#334155" : "#27272A";
@@ -124,8 +144,8 @@ export default function KnowledgeGapPrompt({ misses, save, variant = "dark" }) {
         The knowledge base had nothing on this. Add it to the weekly gaps list? Edit out any customer details first.
       </div>
       <div role="list" aria-label="Knowledge gaps" style={{ display: "grid", gap: 8 }}>
-        {list.map((m) => (
-          <GapRow key={m} initial={m} save={save} dark={dark} />
+        {gaps.map((g) => (
+          <GapRow key={g.requestKey} gap={g} update={update} save={save} dark={dark} />
         ))}
       </div>
     </div>

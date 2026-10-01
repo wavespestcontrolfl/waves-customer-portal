@@ -1,67 +1,109 @@
 // @vitest-environment jsdom
-import React from "react";
+import React, { useEffect, useState } from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import KnowledgeGapPrompt from "./KnowledgeGapPrompt";
+import KnowledgeGapPrompt, { useKnowledgeGaps } from "./KnowledgeGapPrompt";
 
 afterEach(cleanup);
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+// Mirrors the palette: the gap state lives in the parent, and the prompt
+// unmounts while the palette is closed.
+function Harness({ misses, save, variant }) {
+  const gaps = useKnowledgeGaps();
+  const [open, setOpen] = useState(true);
+  useEffect(() => { gaps.load(misses); }, [misses]);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen((o) => !o)}>toggle palette</button>
+      {open && <KnowledgeGapPrompt gaps={gaps.gaps} update={gaps.update} save={save} variant={variant} />}
+    </>
+  );
+}
+
+const box = () => screen.getByRole("textbox", { name: "Knowledge gap" });
+const togglePalette = () => fireEvent.click(screen.getByRole("button", { name: "toggle palette" }));
+
 describe("KnowledgeGapPrompt", () => {
   it("renders nothing without misses (the payload omits knowledgeMisses)", () => {
-    const { container } = render(<KnowledgeGapPrompt misses={undefined} save={vi.fn()} />);
-    expect(container).toBeEmptyDOMElement();
-    const empty = render(<KnowledgeGapPrompt misses={[]} save={vi.fn()} variant="light" />);
-    expect(empty.container).toBeEmptyDOMElement();
+    render(<Harness misses={undefined} save={vi.fn()} />);
+    expect(screen.queryByRole("list", { name: "Knowledge gaps" })).toBeNull();
+    cleanup();
+    render(<Harness misses={[]} save={vi.fn()} variant="light" />);
+    expect(screen.queryByRole("list", { name: "Knowledge gaps" })).toBeNull();
   });
 
   it("saves nothing until the operator taps, then saves the edited text", async () => {
     const save = vi.fn(async () => ({ success: true }));
-    render(<KnowledgeGapPrompt misses={["Smith chinch bugs zoysia"]} save={save} />);
+    render(<Harness misses={["Smith chinch bugs zoysia"]} save={save} />);
     expect(save).not.toHaveBeenCalled();
-    const box = screen.getByRole("textbox", { name: "Knowledge gap" });
-    expect(box).toHaveValue("Smith chinch bugs zoysia");
-    fireEvent.change(box, { target: { value: "  chinch bugs   zoysia " } });
+    expect(box()).toHaveValue("Smith chinch bugs zoysia");
+    fireEvent.change(box(), { target: { value: "  chinch bugs   zoysia " } });
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
     await waitFor(() => expect(screen.getByText(/Added to Monday's knowledge-gaps email/)).toBeInTheDocument());
     expect(save).toHaveBeenCalledTimes(1);
-    expect(save).toHaveBeenCalledWith("chinch bugs zoysia", expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/));
+    expect(save).toHaveBeenCalledWith("chinch bugs zoysia", expect.stringMatching(UUID));
   });
 
-  it("a retry after a failed save sends the same request key", async () => {
+  it("shows the error and locks the submitted text when the save fails", async () => {
+    const save = vi.fn(async () => { throw new Error("Admin access required"); });
+    render(<Harness misses={["chinch bugs"]} save={save} variant="light" />);
+    fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Admin access required");
+    expect(box()).toHaveValue("chinch bugs");
+    expect(box()).toHaveAttribute("readonly");
+  });
+
+  it("a retry resends the same text under the same key, even after an edit attempt", async () => {
     const save = vi.fn()
       .mockRejectedValueOnce(new Error("Network error"))
       .mockResolvedValueOnce({ success: true });
-    render(<KnowledgeGapPrompt misses={["chinch bugs"]} save={save} />);
+    render(<Harness misses={["chinch bugs"]} save={save} />);
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
     await screen.findByRole("alert");
     // The first save may have landed under this key, so an edit after it
     // must not change what the retry sends (or what the screen says saved).
-    fireEvent.change(screen.getByRole("textbox", { name: "Knowledge gap" }), { target: { value: "something else" } });
+    fireEvent.change(box(), { target: { value: "something else" } });
+    expect(box()).toHaveValue("chinch bugs");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
     expect(save.mock.calls[1]).toEqual(save.mock.calls[0]);
     expect(await screen.findByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/)).toBeInTheDocument();
   });
 
-  it("the mobile box is 16px so Safari does not zoom on focus", () => {
-    render(<KnowledgeGapPrompt misses={["chinch bugs"]} save={vi.fn()} variant="light" />);
-    expect(screen.getByRole("textbox", { name: "Knowledge gap" }).style.fontSize).toBe("16px");
-  });
-
-  it("shows the error and locks the submitted text when the save fails", async () => {
-    const save = vi.fn(async () => { throw new Error("Admin access required"); });
-    render(<KnowledgeGapPrompt misses={["chinch bugs"]} save={save} variant="light" />);
+  it("closing and reopening the palette keeps the key, the locked text and the status", async () => {
+    const save = vi.fn()
+      .mockRejectedValueOnce(new Error("Network error"))
+      .mockResolvedValueOnce({ success: true });
+    render(<Harness misses={["Smith chinch bugs"]} save={save} />);
+    fireEvent.change(box(), { target: { value: "chinch bugs" } });
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Admin access required");
-    const box = screen.getByRole("textbox", { name: "Knowledge gap" });
-    expect(box).toHaveValue("chinch bugs");
-    expect(box).toHaveAttribute("readonly");
+    await screen.findByRole("alert");
+    togglePalette();
+    expect(screen.queryByRole("textbox", { name: "Knowledge gap" })).toBeNull();
+    togglePalette();
+    expect(box()).toHaveValue("chinch bugs");
+    expect(box()).toHaveAttribute("readonly");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[1]).toEqual(["chinch bugs", save.mock.calls[0][1]]);
+    await screen.findByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/);
+    togglePalette();
+    togglePalette();
+    expect(screen.getByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add to knowledge gaps|Try again/ })).toBeNull();
   });
 
   it("disables the button when the text is under 3 characters", () => {
-    render(<KnowledgeGapPrompt misses={["chinch bugs"]} save={vi.fn()} />);
-    fireEvent.change(screen.getByRole("textbox", { name: "Knowledge gap" }), { target: { value: " a " } });
+    render(<Harness misses={["chinch bugs"]} save={vi.fn()} />);
+    fireEvent.change(box(), { target: { value: " a " } });
     expect(screen.getByRole("button", { name: "Add to knowledge gaps" })).toBeDisabled();
+  });
+
+  it("the mobile box is 16px so Safari does not zoom on focus", () => {
+    render(<Harness misses={["chinch bugs"]} save={vi.fn()} variant="light" />);
+    expect(box().style.fontSize).toBe("16px");
   });
 });
