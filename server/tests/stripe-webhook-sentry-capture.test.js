@@ -636,6 +636,30 @@ describe('unstamped recurring-card backstop re-reads the intent live', () => {
     expect(ConsentService.refuseDeferredConsentRecording).toHaveBeenCalledWith(expect.objectContaining({ intentId: 'seti_old', stampedVersion: null }));
   });
 
+  test('an accept that persisted the exact authorized snapshot (#5481) enrolls from it even with no version stamp or ledger row', async () => {
+    // Pre-push Codex on the merge: the snapshot bound to the accepted intent
+    // IS the authorization — recovery must not refuse it for lacking the
+    // newer acceptedRecurringCardConsentVersion stamp or a prior ledger row.
+    const update = jest.fn().mockResolvedValue(1);
+    const ledger = ledgerBuilder({ update });
+    db.schema = { hasTable: jest.fn(async () => false) };
+    const snapshot = { text: 'By checking this box, I authorize Waves Pest Control, LLC to save this card…', version: 'v11_2026-08-25' };
+    db.mockImplementation((table) => {
+      if (table === 'stripe_webhook_events') return ledger;
+      const row = table === 'estimates'
+        ? { id: 'estimate_test', customer_id: 'customer_test', status: 'accepted', estimate_data: { acceptedRecurringCardSetupIntentId: 'seti_old', acceptedRecurringCardConsent: snapshot } }
+        : { billing_mode: 'per_application' };
+      return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => row) };
+    });
+    RecurringCards.completeRecurringCardEnrollment.mockResolvedValueOnce({ enrolled: true });
+    event();
+    expect((await postWebhook()).status).toBe(200);
+    expect(ConsentService.refuseDeferredConsentRecording).not.toHaveBeenCalled();
+    expect(ConsentService.hasConsentSnapshotForVariant).not.toHaveBeenCalled();
+    expect(ConsentService.hasEnrollmentScopedConsent).not.toHaveBeenCalled();
+    expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledWith(expect.objectContaining({ renderedConsent: snapshot }));
+  });
+
   test('an unreadable intent rethrows for Stripe retry with a safe reason code', async () => {
     const update = legacyAcceptedDb();
     StripeService.retrieveSetupIntent.mockRejectedValueOnce(new Error('PrivateStripeWord'));

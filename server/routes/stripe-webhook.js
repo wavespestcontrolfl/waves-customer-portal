@@ -5161,7 +5161,17 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       const { renderedConsentVersionIsCurrent } = require('../services/payment-method-consent-text');
       const acceptedConsentVersion = typeof estimateData?.acceptedRecurringCardConsentVersion === 'string' && estimateData.acceptedRecurringCardConsentVersion
         ? estimateData.acceptedRecurringCardConsentVersion : null;
-      if (!renderedConsentVersionIsCurrent(acceptedConsentVersion)) {
+      // The accept may have persisted the EXACT authorized text + version
+      // bound to this intent (#5481 acceptedRecurringCardConsent, passed to
+      // the enrollment routine below and recorded verbatim). That snapshot
+      // is the customer's authorization itself — recovery needs neither the
+      // current copy nor a prior ledger row for it (pre-push Codex on the
+      // merge: an accept from before the version stamp, or across any later
+      // bump, must keep its enrollment backstop).
+      const persistedSnapshot = boundToAccept
+        && typeof estimateData?.acceptedRecurringCardConsent?.text === 'string' && estimateData.acceptedRecurringCardConsent.text
+        && /^v\d+(?:[_-]|$)/.test(String(estimateData.acceptedRecurringCardConsent.version || ''));
+      if (!persistedSnapshot && !renderedConsentVersionIsCurrent(acceptedConsentVersion)) {
         const onRecord = acceptedConsentVersion
           ? await ConsentService.hasConsentSnapshotForVariant(estimate.customer_id, stripePmId, { version: acceptedConsentVersion, source: 'estimate_accept' })
           : await ConsentService.hasEnrollmentScopedConsent(estimate.customer_id, stripePmId);
