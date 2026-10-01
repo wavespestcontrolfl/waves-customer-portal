@@ -1007,3 +1007,57 @@ describe('prices said as words ground like digit prices (codex #5377 r12 P2)', (
     expect(verdict('a hundred forty nine dollars', 149, { between: ['Agent: One of our technicians will come out.'] }).ok).toBe(true);
   });
 });
+
+// Non-price numbers in the offer turn / between offer and acceptance (codex #5377 r13 P2).
+describe('only price-like figures count for the "no other figure" rules (codex #5377 r13 P2)', () => {
+  const run = (offerTalk, { between = [], amount = 150, quoteText = null } = {}) => {
+    const ex = extraction({
+      service: { quoted_price_usd: amount },
+      priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', quoteText || offerTalk.replace(/[,?.].*$/, '')), PRICE_EVIDENCE[1]],
+    });
+    const t = [OPENING, `Agent: ${offerTalk}`, ...between, `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
+    return grounded(ex, t);
+  };
+
+  test('times, dates, quantities, addresses and phone numbers in the offer turn do not block a grounded price', () => {
+    for (const talk of [
+      'The service is $150 and we can start Thursday at 2:30 PM.',
+      'The service is $150, we come out at 2 pm.',
+      'The service is $150 for the 3 buildings.',
+      'The service is $150 per visit, 4 visits a year.',
+      'The service is $150 and the first visit is October 8.',
+      'The service is $150, starting the 24th.',
+      'The service is $150 for 123 Main Street.',
+      'The service is $150, call us at 941-555-0123 with questions.',
+      'The service is $150 and it takes about thirty minutes.',
+      'The service is $150, we can be there at two thirty in the afternoon.',
+      'The service is a hundred fifty dollars, two visits a year.',
+    ]) expect([talk, run(talk, { quoteText: talk.includes('hundred') ? 'The service is a hundred fifty dollars' : 'The service is $150' }).ok]).toEqual([talk, true]);
+  });
+
+  test('another PRICE in the offer turn still blocks, digits or words', () => {
+    expect(run('The service is $150, or $200 if you add the garage.').ok).toBe(false);
+    expect(run('The service is $150, or two hundred dollars with the garage.').ok).toBe(false);
+    expect(run('The service is $150 or 200.').ok).toBe(false); // a bare 200 is a possible price: fail closed
+    expect(run('The service is one fifty.', { quoteText: 'The service is one fifty' }).ok).toBe(false); // ambiguous
+  });
+
+  test('a price correction between the offer and the yes is still caught; time/quantity chatter is not', () => {
+    expect(run('The service is $150.', { between: ['Agent: Correction, it is $250.'] })).toEqual({ ok: false, reason: 'price_not_accepted_by_caller' });
+    expect(run('The service is $150.', { between: ['Agent: Actually two hundred fifty dollars.'] }).ok).toBe(false);
+    expect(run('The service is $150.', { between: ['Agent: Actually 250.'] }).ok).toBe(false);
+    expect(run('The service is $150.', { between: ['Agent: We can come Thursday at 2 pm, 3 technicians, October 8.'] }).ok).toBe(true);
+  });
+});
+
+describe('the embedded schemas let the staff price quote be words (codex #5377 r13 P2)', () => {
+  test('model-output and persisted schema descriptions match the prompt', () => {
+    for (const f of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
+      const s = JSON.parse(fs.readFileSync(path.join(__dirname, '../schemas', f), 'utf8'));
+      const d = s.properties?.service_request?.properties?.price_offered_by_staff?.description
+        || JSON.stringify(s).match(/"price_offered_by_staff":\{[^}]*"description":"([^"]*(?:\\"[^"]*)*)"/)?.[1] || '';
+      expect(d).toMatch(/digits or words/);
+      expect(d).not.toMatch(/the digits of the amount must appear/);
+    }
+  });
+});

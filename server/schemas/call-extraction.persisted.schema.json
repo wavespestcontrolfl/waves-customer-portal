@@ -934,7 +934,7 @@
             "boolean",
             "null"
           ],
-          "description": "1.21.0, additive/optional (never `required`): true ONLY when a Waves staff member (speaker \"agent\") OFFERED the amount in service_request.quoted_price_usd as Waves' OWN quote for this service: a statement of the price (\"that runs $150\", \"it's $150 a visit\"), never a question about a price (\"did another company quote you $150?\"), never a competitor's or the caller's number, never a hypothetical or a range. Pin the staff's price sentence to /service_request/price_offered_by_staff with speaker \"agent\"; the digits of the amount must appear in that quote. false when the amount was not offered that way; null when no price was discussed."
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when a Waves staff member (speaker \"agent\") OFFERED the amount in service_request.quoted_price_usd as Waves' OWN quote for this service: a statement of the price (\"that runs $150\", \"it's $150 a visit\"), never a question about a price (\"did another company quote you $150?\"), never a competitor's or the caller's number, never a hypothetical or a range. Pin the staff's price sentence to /service_request/price_offered_by_staff with speaker \"agent\"; the amount must appear in that quote exactly as spoken, digits or words (\"$149\" or \"one hundred forty-nine dollars\"); never rewrite words as digits. false when the amount was not offered that way; null when no price was discussed."
         },
         "price_accepted_by_caller": {
           "type": [

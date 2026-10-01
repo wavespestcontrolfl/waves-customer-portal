@@ -54,19 +54,66 @@ const { resolveCallAgreedPrice } = require('../utils/call-agreed-price');
 // catalog price or none): reuse it, never copy the bounds.
 const { sanitizeQuotedCallPrice } = require('./call-booking-catalog');
 
-const { parseTurns, turnsHolding, spokenFiguresIn } = groundingTools;
+const { parseTurns, turnsHolding, spokenFigureRuns } = groundingTools;
 
-// Dollar figures said in a text, as numbers ("$1,500", "150", "150.00", or in
-// words).
+// PRICE-LIKE figures said in a text: "$1,500", "150", "150.00", or in words ("a hundred
+// forty nine dollars"). A number is NOT a price when its own context says it is a
+// time ("at 2:30", "2 PM", "two o'clock", "in the afternoon"), a date ("October 8",
+// "the 24th"), a quantity ("2 visits", "three bedrooms") or part of an address or a
+// phone number — those must not trip the "no other figure" rules. A dollar-marked
+// figure ("$", "dollars", "bucks", "USD") is always a price; any other number with no
+// such context counts (fail closed: a bare "250" in a staff turn is a possible
+// correction). An ambiguous spoken run ("one fifty") is NaN, never equal to the
+// amount, so the offer is not grounded and the office books it (codex #5377 r12 + r13).
+const MONTHS = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+const MONTH_RE = new RegExp(`^${MONTHS}$`, 'i');
+const DOLLAR_WORDS = new Set(['dollar', 'dollars', 'buck', 'bucks', 'usd']);
+const TIME_AFTER = new Set(['am', 'pm', 'oclock', 'clock', 'morning', 'afternoon', 'evening', 'noon', 'tonight']);
+const TIME_BEFORE = new Set(['at', 'by', 'around', 'until', 'till', 'before', 'after', 'about']);
+const QUANTITY_AFTER = new Set(['visit', 'visits', 'time', 'times', 'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
+  'minute', 'minutes', 'hour', 'hours', 'treatment', 'treatments', 'unit', 'units', 'bedroom', 'bedrooms', 'bathroom', 'bathrooms',
+  'building', 'buildings', 'property', 'properties', 'location', 'locations', 'room', 'rooms', 'story', 'stories', 'floor', 'floors',
+  'foot', 'feet', 'ft', 'square', 'sq', 'acre', 'acres', 'people', 'person', 'technician', 'technicians', 'truck', 'trucks',
+  'percent', 'employee', 'employees', 'tenant', 'tenants', 'door', 'doors', 'window', 'windows', 'service', 'services', 'application', 'applications']);
+const STREET_WORDS = new Set(['st', 'street', 'ave', 'avenue', 'rd', 'road', 'dr', 'drive', 'blvd', 'boulevard', 'ln', 'lane', 'way', 'ct', 'court', 'pkwy', 'parkway', 'hwy', 'highway', 'circle', 'cir', 'trail', 'trl', 'place', 'pl', 'terrace']);
+
+function nonPriceContext(prev, next) {
+  const n0 = next[0];
+  if (TIME_AFTER.has(n0)) return true;
+  if (n0 === 'in' && ['the', 'a'].includes(next[1]) && TIME_AFTER.has(next[2])) return true;
+  if (TIME_BEFORE.has(prev[prev.length - 1])) return true;
+  if (['st', 'nd', 'rd', 'th'].includes(n0)) return true;
+  if (MONTH_RE.test(prev[prev.length - 1] || '') || MONTH_RE.test(n0 || '')) return true;
+  if (prev[prev.length - 1] === 'of' && MONTH_RE.test(next[0] || '')) return true;
+  if (QUANTITY_AFTER.has(n0) && !(next[1] && DOLLAR_WORDS.has(next[1]))) return true;
+  if (STREET_WORDS.has(n0) || STREET_WORDS.has(next[1])) return true;
+  return false;
+}
+
 function figuresIn(text) {
-  return [
-    ...[...String(text || '').matchAll(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g)]
-      .map((m) => Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`)),
-    // Amounts SAID as words ("a hundred forty nine dollars"): the shared closed-set
-    // parser. An ambiguous run ("one fifty") is NaN and so never equals the amount:
-    // the offer is not grounded and the office books it (codex #5377 r12 P2).
-    ...spokenFiguresIn(text),
-  ];
+  const src = String(text || '');
+  const figures = [];
+  for (const m of src.matchAll(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g)) {
+    const before = src.slice(Math.max(0, m.index - 14), m.index);
+    const after = src.slice(m.index + m[0].length, m.index + m[0].length + 40);
+    const words = (str) => str.toLowerCase().replace(/[^a-z\s']/g, ' ').replace(/'/g, '').split(/\s+/).filter(Boolean);
+    const next = words(after).slice(0, 3);
+    const prev = words(before).slice(-3);
+    const marked = /\$\s*$/.test(before) || DOLLAR_WORDS.has(next[0]) || /^\s*(?:dollars?|bucks?|usd)\b/i.test(after);
+    if (!marked) {
+      // clock "2:30", a number glued to a suffix ("24th", "2pm") or a phone-number group
+      if (/:\s*$/.test(before) || /^\s*:\d/.test(after) || /^(?:st|nd|rd|th|am|pm|a\.m|p\.m)\b/i.test(after)) continue;
+      if (/\d-$/.test(before) || /^-\d/.test(after)) continue;
+      if (nonPriceContext(prev, next)) continue;
+    }
+    figures.push(Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`));
+  }
+  for (const run of spokenFigureRuns(src)) {
+    const marked = DOLLAR_WORDS.has(run.next[0]);
+    if (!marked && nonPriceContext(run.prev, run.next)) continue;
+    figures.push(run.value);
+  }
+  return figures;
 }
 
 // The agreed price is real. The extraction JUDGES the language (schema 1.21.0:
