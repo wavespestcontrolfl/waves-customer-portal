@@ -1878,6 +1878,18 @@ describe('lawn PDF lead diet', () => {
     expect(out).toContain(STOCK);
   });
 
+  it('a lead "why" the web dropped falls back to the score explanation in the PDF', () => {
+    const out = text(lawn(lawnV2({ lead: { headline: 'x', why: null, yourPart: [], next: null } })));
+    expect(out).toContain('Score explanation sentence.');
+  });
+
+  it('the mowing step still prints when the gauge line is dropped', () => {
+    const mowCard = { category: 'mowing', status: 'watch', headline: 'Lawn is being mowed a bit short', whatWeSaw: 'Height is below the band.', customerAction: 'Raise the mower one setting.' };
+    const v2 = lawnV2({ lead: { headline: 'x', why: 'Lead why.', yourPart: [], next: null }, mowing: { status: 'too_short', measuredHeightInches: 2, recommendation: null } });
+    const out = text(lawn({ ...v2, insights: [...v2.insights, mowCard] }));
+    expect(out).toContain('Raise the mower one setting.');
+  });
+
   it('tree & shrub ignores a lead and prints the full bullets', () => {
     const data = { ...BASE_DATA, serviceLine: 'tree_shrub', typedReport: null, reportV2: lawnV2({ lead: { headline: 'x', why: 'Lead why should not print.', yourPart: [], next: null } }) };
     const out = text(data);

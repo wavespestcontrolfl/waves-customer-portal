@@ -863,7 +863,7 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
 }
 
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────
-export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null, lead = false }) {
+export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null, lead = false, coverageCardShown = false }) {
   const mounted = useMounted();
   const print = usePrint();
   // The browser print pass (Report Tools "Print", Cmd+P) over the live page
@@ -1000,8 +1000,9 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       <WeekPlanCallout weekPlan={water.weekPlan} aftercare={aftercare} />
       {/* Lead mode: the reading, the plan and the label note fold into one
           expander (opened in print/PDF) under the plan. The static "Coverage
-          watch" callout is gone there: the coverage finding and the balanced
-          explanation already say it. */}
+          watch" callout is dropped there only when the coverage finding card
+          says it; a surplus week with a dry photo read has no coverage card,
+          so the callout stays as the one place that says it (Fable P2 #5517). */}
       {lead && (explanationShown || afterNote) ? (
         <details open={printOpen} style={{ marginTop: 12 }}>
           <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Why this reading</summary>
@@ -1015,7 +1016,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
         </details>
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
-      {!lead && water.coverageWatch ? (
+      {(!lead || !coverageCardShown) && water.coverageWatch ? (
         <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>Coverage watch:</strong> total weekly water looks adequate, but a few areas may not be getting even coverage — worth checking that your sprinklers reach those spots rather than watering the whole lawn more.
         </div>

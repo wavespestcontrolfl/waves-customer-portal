@@ -138,8 +138,23 @@ const REVIEW_AFTERCARE = { watering: 'Confirm the label directions with your tec
 const PLAN = { title: 'This week: 25 minutes per turf zone', detail: 'Run the zones on your allowed days.', action: 'run', prescribesRun: true };
 
 describe('water card in lead mode', () => {
+  it('keeps the coverage callout when no coverage finding card says it (surplus week, dry photo read)', () => {
+    render(<WaterIntakeBar water={{ ...WATER, status: 'surplus' }} aftercare={AFTERCARE} lead />);
+    expect(screen.getByText(/Coverage watch/)).toBeInTheDocument();
+  });
+
+  it('the section passes whether the sprinkler-coverage card is on the page', () => {
+    const coverageCard = { category: 'water', status: 'watch', priority: 1, headline: 'Water coverage is the main thing to watch', whatWeSaw: 'One area reads drier than the rest.' };
+    const base = { snapshot: { overallScore: 70, status: 'watch' }, lead: LEAD, water: WATER, aftercare: AFTERCARE };
+    const { unmount } = render(<LawnReportV2Section data={{ ...base, insights: [coverageCard] }} />);
+    expect(screen.queryByText(/Coverage watch:/)).toBeNull();
+    unmount();
+    render(<LawnReportV2Section data={{ ...base, insights: [{ ...WATCH, category: 'coverage' }] }} />);
+    expect(screen.getByText(/Coverage watch:/)).toBeInTheDocument();
+  });
+
   it('puts the reading, label note and re-entry note in one "Why this reading" expander and drops the coverage callout', () => {
-    const { container } = render(<WaterIntakeBar water={WATER} aftercare={AFTERCARE} lead />);
+    const { container } = render(<WaterIntakeBar water={WATER} aftercare={AFTERCARE} lead coverageCardShown />);
     expect(container.querySelector('.lawn-callout-watch')).toBeNull();
     expect(screen.queryByText(/Coverage watch/)).toBeNull();
     const details = container.querySelectorAll('details');

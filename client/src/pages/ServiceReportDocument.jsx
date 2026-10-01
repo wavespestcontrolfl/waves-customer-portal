@@ -680,7 +680,10 @@ export default function ServiceReportDocument({ data, token }) {
       return {
         label: 'Overall',
         value: v2.snapshot.statusHeadline,
-        detail: v2Lead ? v2Lead.why : (v2.snapshot.rootCause || v2.snapshot.scoreExplanation),
+        // The PDF has no word budget: a lead "why" the web dropped for its
+        // budget or watering wording falls back to the score explanation
+        // (Fable P2 #5517).
+        detail: v2Lead ? (v2Lead.why || v2.snapshot.scoreExplanation) : (v2.snapshot.rootCause || v2.snapshot.scoreExplanation),
         score: v2.snapshot.overallScore,
       };
     }
