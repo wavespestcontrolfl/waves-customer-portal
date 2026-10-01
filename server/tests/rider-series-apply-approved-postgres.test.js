@@ -198,7 +198,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
   test('apply moves exactly the approved rows onto the host window and tech, inserts nothing, groups nothing, messages nothing', async () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);
-    const rowsBefore = await trx('scheduled_services').select('id');
+    const rowsBefore = await trx('scheduled_services').select('id').orderBy('id');
     const silentBefore = await silentCounts();
     const out = rollbackPath();
     const res = await applyApproved(trx, approved, { apply: true, rollbackOut: out });
@@ -217,7 +217,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
       expect(Number(after.estimated_price)).toBe(100);
     }
     // No insert (the approved file has two), no other row touched.
-    expect(await trx('scheduled_services').select('id')).toEqual(rowsBefore);
+    expect(await trx('scheduled_services').select('id').orderBy('id')).toEqual(rowsBefore);
     const moved = new Set(approved.results[0].move.map((m) => m.id));
     const untouched = await trx('scheduled_services').whereNotIn('id', [...moved]).whereNotNull('visit_id');
     expect(untouched).toEqual([]);
