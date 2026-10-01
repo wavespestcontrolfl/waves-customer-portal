@@ -93,7 +93,11 @@ async function appointmentEvidence(conn, call, ctx, end, now) {
   const rescheduled = created ? true : await seen(base()
     .join('job_status_history as h', 'h.job_id', 's.id')
     .where('h.to_status', 'rescheduled').where('h.transitioned_at', '>', end).where('h.transitioned_at', '<=', until), 's.id');
-  return settle({ source, window, found: created || rescheduled, end, now });
+  // reschedule_log is the canonical record of a move (the same table the text
+  // evidence reads); a move logged there without a status row still counts.
+  const filed = created || rescheduled ? true : await seen(conn('reschedule_log')
+    .where('customer_id', ctx.customerId).where('created_at', '>', end).where('created_at', '<=', until));
+  return settle({ source, window, found: created || rescheduled || filed, end, now });
 }
 
 async function quoteEvidence(conn, call, ctx, end, now) {
@@ -175,10 +179,16 @@ async function courtesyEvidence(conn, sms, at, now) {
   const window = OUTCOME_SOURCES[source];
   if (!sms.customer_id || !at) return unknown(source, window, now);
   const until = new Date(at.getTime() + WINDOWS[window]);
-  const texts = (direction) => conn('sms_log').where({ customer_id: sms.customer_id, direction })
-    .where('created_at', '>', at).where('created_at', '<=', until)
-    .whereNotIn('status', ['failed', 'undelivered', 'blocked'])
-    .whereRaw("COALESCE(message_type, '') <> 'internal_alert'");
+  // The source text itself is never "a later contact": `at` may come back to
+  // JS at millisecond precision while the row keeps microseconds, so the time
+  // bound alone can let it through.
+  const texts = (direction) => {
+    const q = conn('sms_log').where({ customer_id: sms.customer_id, direction })
+      .where('created_at', '>', at).where('created_at', '<=', until)
+      .whereNotIn('status', ['failed', 'undelivered', 'blocked'])
+      .whereRaw("COALESCE(message_type, '') <> 'internal_alert'");
+    return sms.id ? q.whereNot('id', sms.id) : q;
+  };
   let found = await seen(texts('outbound')) || await seen(texts('inbound'));
   if (!found) {
     found = await seen(conn('call_log').where('customer_id', sms.customer_id)

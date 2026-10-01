@@ -74,6 +74,12 @@ describe('callEvidence', () => {
     expect(out.appointment_agreed.value).toBe(true);
   });
 
+  test('a move filed in reschedule_log (no status row) also counts', async () => {
+    mockCallEndFor.mockReturnValue(ago(5));
+    const out = await callEvidence(call(), { now: NOW, conn: fakeConn({ first: { scheduled_services: [undefined], job_status_history: [undefined], reschedule_log: [{ id: 'r1' }] } }) });
+    expect(out.appointment_agreed.value).toBe(true);
+  });
+
   test('a visit RESCHEDULED in the window counts when nothing was created', async () => {
     mockCallEndFor.mockReturnValue(ago(5));
     const out = await callEvidence(call(), { now: NOW, conn: fakeConn({ first: { scheduled_services: [undefined], job_status_history: [{ id: 'h1' }] } }) });
@@ -165,6 +171,14 @@ describe('smsEvidence', () => {
   test('visit change: a logged move, cancel or skip within 7d is true', async () => {
     const out = await smsEvidence(sms({ created_at: ago(5) }), { now: NOW, conn: fakeConn({ first: { job_status_history: [{ id: 'h1' }] } }) });
     expect(out.wants_visit_change).toMatchObject({ source: 'job_status_history', window: '7d', value: true });
+  });
+
+  test('courtesy: the source text itself is excluded from "a later contact"', async () => {
+    const conn = fakeConn();
+    await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn });
+    const smsQueries = conn.log.filter((q) => q.table === 'sms_log');
+    expect(smsQueries.length).toBeGreaterThan(0);
+    for (const q of smsQueries) expect(q.calls).toContainEqual(['whereNot', ['id', sms().id]]);
   });
 
   test('visit change: a reschedule_log row also counts', async () => {
