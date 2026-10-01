@@ -9163,6 +9163,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 payAfterFirstVisit={payAfterFirstVisitEffective}
+                paymentTimingDenied={afterVisitDeniedKey === afterVisitSelectionKey}
                 autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
                 autopayOff={data?.recurringCardPolicy?.afterVisitAutopayOff === true}
               />
@@ -9515,6 +9516,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 payAfterFirstVisit={payAfterFirstVisitEffective}
+                paymentTimingDenied={afterVisitDeniedKey === afterVisitSelectionKey}
                 autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
                 autopayOff={data?.recurringCardPolicy?.afterVisitAutopayOff === true}
               />

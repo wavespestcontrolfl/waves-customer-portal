@@ -137,6 +137,9 @@ export default function PaymentPreferenceButtons({
   // a BANK account, is charged directly with no save step, so the copy must
   // stay tender-neutral and not instruct a card save (Codex #3492 r10).
   prepayCardCapture = false,
+  // The accept told this page (PAYMENT_TIMING_REFRESH) that this selection's
+  // first invoice goes out payable at accept: no deferred-payment claim.
+  paymentTimingDenied = false,
   // GATE_PAF_EXISTING_CUSTOMERS (server /data recurringCardPolicy
   // .afterVisitExisting): an existing customer on the pay-after-first-visit
   // card rail — the accept sends NO invoice or pay link, the card on file is
@@ -300,7 +303,7 @@ export default function PaymentPreferenceButtons({
     // Same first-visit-invoice predicate (GitHub Codex #5481 r5 P1): a
     // setup-only invoice goes out with a pay link at accept, so "nothing due
     // today" would be the opposite timing.
-    : (prepayCardCapture && hasFirstVisitInvoice ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
+    : (prepayCardCapture && hasFirstVisitInvoice && !paymentTimingDenied ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
     : invoiceRows.length > 0

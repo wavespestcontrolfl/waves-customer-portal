@@ -415,6 +415,16 @@ describe('PaymentPreferenceButtons', () => {
         expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
       });
 
+      it('r6: after the server denied after-visit timing for this selection, the capture customer sees no deferred-payment claim', () => {
+        const props = { payAfterFirstVisit: false, prepayCardCapture: true };
+        const { unmount } = renderButtons(props);
+        expect(screen.getByText(AUTO_PAY_LINE)).toBeInTheDocument();
+        unmount();
+        renderButtons({ ...props, paymentTimingDenied: true });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
+      });
+
       it('r5: a NOT-held capture customer with a setup-only invoice gets no Auto Pay line either (its pay link goes out at accept)', () => {
         renderButtons({
           payAfterFirstVisit: true,
