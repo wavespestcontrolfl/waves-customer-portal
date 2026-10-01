@@ -1526,3 +1526,27 @@ describe('ReportViewPage — four-section report (writer rules)', () => {
     expect(screen.getByText('Ants that find the bait carry it back to the colony.')).toBeInTheDocument();
   });
 });
+
+describe('ReportViewPage — four-section report in the termite dashboard', () => {
+  const sections = [
+    { key: 'whatWeFound', title: 'What we found', paragraphs: ['Station 7 had live termites and light feeding.'] },
+    { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We replaced the bait in station 7.'] },
+    { key: 'whatToExpect', title: 'What to expect', paragraphs: ['Termite bait works slowly on purpose.'] },
+    { key: 'whatsNext', title: 'What’s next', paragraphs: ['Mud tubes on walls are worth telling us about.'] },
+  ];
+  const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+
+  it('shows the property-scoped next visit in "What’s next" and drops the dashboard’s own label', async () => {
+    renderReport({
+      ...termiteReportV2,
+      summary: body,
+      summarySource: 'technician_report',
+      reportSections: sections,
+      nextSameServiceAppointment: { serviceType: 'Termite Bait Station Monitoring', scheduledDate: '2026-12-29', windowStart: '09:00:00' },
+      termiteReportV2: { ...termiteReportV2.termiteReportV2, aiSummary: { headline: null, body } },
+    });
+    expect(await screen.findByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText(/^Next visit: Termite Bait Station Monitoring · /)).toBeInTheDocument();
+    expect(screen.queryByText('Next monitoring visit')).toBeNull();
+  });
+});

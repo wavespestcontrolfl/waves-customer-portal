@@ -5,6 +5,7 @@ import {
   buildPhotoRetryFormBody,
   completionAutoCloseDelay,
   reportShapedNotes,
+  shouldCaptureHandwrittenNotes,
 } from "./SchedulePage";
 
 const photo = (n, extra = {}) => ({ data: `data:image/jpeg;base64,${"QUJD".repeat(n)}`, name: `p${n}.jpg`, ...extra });
@@ -100,5 +101,19 @@ describe("reportShapedNotes", () => {
     expect(reportShapedNotes("Ants by the sink. Baited the cabinet base.")).toBe(false);
     expect(reportShapedNotes("What we found: ants\nwhat we did: bait")).toBe(false);
     expect(reportShapedNotes("WHAT WE DIDN'T GET TO\nWHAT WE FOUND\nAnts.")).toBe(false);
+  });
+});
+
+describe("shouldCaptureHandwrittenNotes", () => {
+  const draft = "WHAT WE FOUND\nAnts.\nWHAT WE DID AND WHY\nBait.\nWHAT TO EXPECT\nA few days.\nWHAT'S NEXT\nCall us.";
+  it("saves notes typed under the report headings before any draft was installed", () => {
+    expect(shouldCaptureHandwrittenNotes({ notes: draft, installedText: null, draftInstalled: false })).toBe(true);
+  });
+  it("never saves the untouched installed draft or an edited one", () => {
+    expect(shouldCaptureHandwrittenNotes({ notes: draft, installedText: draft, draftInstalled: true })).toBe(false);
+    expect(shouldCaptureHandwrittenNotes({ notes: draft.replace("Bait.", "Bait at the sink."), installedText: null, draftInstalled: true })).toBe(false);
+  });
+  it("saves plain handwritten notes", () => {
+    expect(shouldCaptureHandwrittenNotes({ notes: "Ants by the sink.", installedText: draft, draftInstalled: true })).toBe(true);
   });
 });

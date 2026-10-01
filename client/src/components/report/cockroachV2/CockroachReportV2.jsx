@@ -63,7 +63,7 @@ export function activityTrendLine(activity) {
 }
 
 // ── 1. Today's result ─────────────────────────────────────────────────────────
-export function CockroachStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, program = null, reportSections = null }) {
+export function CockroachStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, program = null, reportSections = null, reportNextVisitLabel = null }) {
   if (!status) return null;
   const t = tone(status.tone);
   // The headline already carries the comparison on a trend visit
@@ -84,6 +84,7 @@ export function CockroachStatusHero({ status, statusSummary, metrics, narrative 
         <ReportText
           text={narrative}
           sections={reportSections}
+          nextVisitLabel={reportNextVisitLabel}
           className="ai-summary-body"
           style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}
           titleStyle={{ color: TEXT }}

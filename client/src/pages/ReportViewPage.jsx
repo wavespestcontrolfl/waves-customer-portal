@@ -14,7 +14,7 @@ import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap'
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
-import ReportText from '../components/report/ReportSections';
+import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication, reportHasRodenticide } from '../lib/product-application';
@@ -5975,6 +5975,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // it from every other render).
   const reportSections = Array.isArray(data.reportSections) ? data.reportSections : null;
   const nextSameServiceLabel = formatNextAppointmentLabel(data.nextSameServiceAppointment);
+  // When the four-section report is what a termite or cockroach dashboard
+  // shows, its next visit is the property-scoped one opening "What's next";
+  // the dashboard's own customer-wide label stays off (Codex #5500).
+  const termiteSectionsShown = Boolean(data.termiteReportV2
+    && reportSectionsForText(reportSections, cleanVisitSummary(data.termiteReportV2.aiSummary?.body || '')));
+  const cockroachSectionsShown = Boolean(data.cockroachReportV2
+    && reportSectionsForText(reportSections, cleanVisitSummary(data.cockroachReportV2.aiSummary?.body || '')));
   // Bed bug also folds its cross-visit activity history into the Visit
   // Timeline card (one chronological story) — the standalone "Visit
   // history" card is suppressed only when the merged rows actually render.
@@ -9210,7 +9217,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               stationPins={Boolean(data.termiteStationPins)}
               /* Same-line next visit only — the builder scopes it; the
                  top-level nextAppointment may be ANY service line. */
-              nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              nextVisitLabel={termiteSectionsShown ? null : formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              reportNextVisitLabel={termiteSectionsShown ? nextSameServiceLabel : null}
               narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
               reportSections={reportSections}
               /* Cross-visit trend from the activity gauge payload OF THE
@@ -9240,7 +9248,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mode={mode}
               /* Same-line next visit only — the builder scopes it to the
                  next ROACH-FAMILY appointment (live view only). */
-              nextVisitLabel={formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              nextVisitLabel={cockroachSectionsShown ? null : formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              reportNextVisitLabel={cockroachSectionsShown ? nextSameServiceLabel : null}
               narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
               reportSections={reportSections}
               /* the gauge trend describes the frozen select; when the status

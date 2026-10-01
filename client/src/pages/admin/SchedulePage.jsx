@@ -1098,6 +1098,18 @@ export function reportShapedNotes(notes) {
     && /^\s*WHAT WE FOUND(?::.*)?$/m.test(text);
 }
 
+// Whether a Generate should save the current notes as the tech's own
+// handwritten notes (the grounding a later regeneration or invalidation
+// restores). Never the untouched installed draft; never an edited draft
+// (report-shaped notes while a draft is installed, codex r54); but notes a
+// tech typed under the report's headings before any draft was installed
+// are theirs and are saved.
+export function shouldCaptureHandwrittenNotes({ notes, installedText = null, draftInstalled = false } = {}) {
+  const text = String(notes || '');
+  if (draftInstalled && reportShapedNotes(text)) return false;
+  return text.trim() !== String(installedText || '').trim();
+}
+
 // Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
 // "2 hr 15 min"). Minutes only — the steppers clamp to 0..1440.
 export function formatReentryStepperMinutes(min) {
@@ -13122,6 +13134,11 @@ export function CompletionPanel({
   // stale AI prose can't publish beside contradicting structured findings
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
+  // True while the notes hold (or were edited from) an installed generated
+  // report; false again once the handwritten notes come back. Saved with
+  // the draft. Lets a regeneration tell an edited draft from handwritten
+  // notes that merely use the report's headings (Codex #5500).
+  const reportDraftInstalledRef = useRef(false);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
   // Whether the CURRENTLY INSTALLED draft was actually generated with photo
   // grounding — the server's own photoGroundingUsed flag on its response
@@ -15192,6 +15209,7 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        reportDraftInstalled: reportDraftInstalledRef.current,
         // Whether that installed report was actually generated WITH photo
         // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
         // a reload/billing-detour doesn't forget a grounded draft is
@@ -15601,6 +15619,9 @@ export function CompletionPanel({
     generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
       ? savedDraft.generatedReportText
       : null;
+    // Older drafts lack the field: a restored installed report counts.
+    reportDraftInstalledRef.current = savedDraft.reportDraftInstalled === true
+      || Boolean(generatedReportTextRef.current);
     // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
     // field, which defaults to false (byte-identical to this fix not
     // existing yet: nothing tracked, nothing invalidates).
@@ -15793,6 +15814,7 @@ export function CompletionPanel({
         setChipLinesDetached(preGenerationChipDetachedRef.current === true);
         preGenerationNotesRef.current = null;
         preGenerationChipDetachedRef.current = false;
+        reportDraftInstalledRef.current = false;
         setGeneratedReportCleared(true);
       }
     }
@@ -16040,13 +16062,16 @@ export function CompletionPanel({
     // that predates the final findings (codex r54). Only genuinely
     // handwritten notes ground a regeneration; the previous handwritten
     // capture is kept otherwise.
-    const notesLookGenerated = reportShapedNotes(notes);
-    if (!notesLookGenerated
-      && notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
+    if (shouldCaptureHandwrittenNotes({
+      notes,
+      installedText: generatedReportTextRef.current,
+      draftInstalled: reportDraftInstalledRef.current,
+    })) {
       preGenerationNotesRef.current = notes;
       preGenerationChipDetachedRef.current = chipLinesDetached;
     }
     generatedReportTextRef.current = String(reportText || "").trim();
+    reportDraftInstalledRef.current = true;
     setGeneratedReportCleared(false);
     if (!chipLinesDetached) {
       setSelectedProtocolActionLabels(
@@ -18538,6 +18563,7 @@ export function CompletionPanel({
       setChipLinesDetached(restoredDetached);
       preGenerationNotesRef.current = null;
       preGenerationChipDetachedRef.current = false;
+      reportDraftInstalledRef.current = false;
       setAiReportUsed(false);
       setGeneratedReportCleared(true);
       return restoredDetached;

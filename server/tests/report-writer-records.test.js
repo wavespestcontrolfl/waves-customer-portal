@@ -2,7 +2,7 @@
 // expectations and how-it-works wording, the next booked visit, the service
 // type and the reach-out date, plus the phrases the screen then allows.
 const {
-  SERVICE_EXPECTATIONS, writerExpectations, howItWorksLines, reachOutDate, loadNextSameLineVisit, buildWriterRecords,
+  SERVICE_EXPECTATIONS, writerExpectations, howItWorksLines, reachOutDate, buildWriterRecords,
 } = require('../services/service-report/report-writer-records');
 
 const TAURUS = { name: 'Taurus SC', epaReg: '53883-279', role: 'insect-control application', method: 'perimeter_spray', methodLabel: 'perimeter spray', applicationArea: 'Exterior perimeter', targets: ['Ghost ants'] };
@@ -67,134 +67,31 @@ describe('reach-out date', () => {
   });
 });
 
-// The visit's own row (first) and the bookings list (await) answer
-// separately; whereNot({ id }) leaves the visit out of the list.
-const HOME = { service_address_line1: '123 Main St', service_address_city: 'Bradenton', service_address_zip: '34209' };
-const RENTAL = { service_address_line1: '456 Oak Ave', service_address_city: 'Bradenton', service_address_zip: '34209' };
-function knexFor({ reportVisit = { id: 's1', ...HOME }, rows = [], services = [], fail = false } = {}) {
-  const calls = [];
-  const knex = jest.fn((table) => {
-    let excluded = null;
-    const answer = () => {
-      if (fail) return Promise.reject(new Error('lookup down'));
-      if (table === 'services') return Promise.resolve(services);
-      return Promise.resolve(rows.filter((row) => row.id !== excluded));
-    };
-    const builder = new Proxy({}, {
-      get(_, prop) {
-        if (prop === 'then') return (resolve, reject) => answer().then(resolve, reject);
-        if (prop === 'first') return () => (fail ? Promise.reject(new Error('lookup down')) : Promise.resolve(reportVisit));
-        return (...args) => {
-          calls.push([prop, ...args]);
-          if (prop === 'whereNot') excluded = args[0]?.id ?? null;
-          if (prop === 'modify') args[0](builder);
-          return builder;
-        };
-      },
-    });
-    return builder;
-  });
-  knex.calls = calls;
-  return knex;
-}
-
-describe('next visit on the same line', () => {
-  test('is the first booked visit after this one on the same line, at this property', async () => {
-    const knex = knexFor({ rows: [
-      { id: 'n1', service_type: 'Lawn Care Visit', ...HOME },
-      { id: 'n2', service_type: 'Quarterly Pest Control', ...HOME },
-    ] });
-    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
-      .resolves.toEqual({ state: 'scheduled', serviceType: 'Quarterly Pest Control' });
-    expect(knex.calls).toEqual(expect.arrayContaining([
-      ['where', 'scheduled_date', '>=', '2026-09-30'],
-      ['whereIn', 'status', ['pending', 'confirmed', 'en_route', 'on_site']],
-      ['whereNot', { id: 's1' }],
-    ]));
-  });
-
-  test("a booking at another of the customer's properties never counts", async () => {
-    const knex = knexFor({ rows: [{ id: 'n1', service_type: 'Quarterly Pest Control', ...RENTAL }] });
-    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
-      .resolves.toEqual({ state: 'none' });
-  });
-
-  test('an earlier same-line booking with no property, or a visit with none, is unknown', async () => {
-    const unplaced = knexFor({ rows: [
-      { id: 'n1', service_type: 'Quarterly Pest Control' },
-      { id: 'n2', service_type: 'Quarterly Pest Control', ...HOME },
-    ] });
-    await expect(loadNextSameLineVisit({ knex: unplaced, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
-      .resolves.toEqual({ state: 'unknown' });
-    const unplacedVisit = knexFor({ reportVisit: { id: 's1' }, rows: [{ id: 'n2', service_type: 'Quarterly Pest Control', ...HOME }] });
-    await expect(loadNextSameLineVisit({ knex: unplacedVisit, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' }))
-      .resolves.toEqual({ state: 'unknown' });
-  });
-
-  test('none booked on the line', async () => {
-    const knex = knexFor({ rows: [{ id: 'n1', service_type: 'Lawn Care Visit', ...HOME }] });
-    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' })).resolves.toEqual({ state: 'none' });
-  });
-
-  test('a failed lookup is unknown, never "none booked"', async () => {
-    const knex = knexFor({ fail: true });
-    await expect(loadNextSameLineVisit({ knex, customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest' })).resolves.toEqual({ state: 'unknown' });
-  });
-});
-
 describe('writer records', () => {
-  test('a re-service gets its booked visit, its type and a reach-out date the screen allows', async () => {
-    const { sections, allowedPhrases } = await buildWriterRecords({
-      knex: knexFor({ rows: [{ id: 'n1', service_type: 'Quarterly Pest Control', ...HOME }] }), customerId: 'c1', scheduledServiceId: 's1',
+  test('a re-service gets its type and a reach-out date the screen allows', () => {
+    const { sections, allowedPhrases } = buildWriterRecords({
       serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS, ADVION],
     });
     const text = sections.join('\n\n');
     expect(text).toContain('EXPECTATIONS (approved wording');
     expect(text).toContain('HOW IT WORKS (approved product wording');
-    expect(text).toContain('NEXT VISIT FOR THIS SERVICE: Quarterly Pest Control is booked.');
     expect(text).toContain('SERVICE TYPE: re-service');
     expect(text).toContain('REACH-OUT DATE: Wednesday, October 14');
-    expect(allowedPhrases).toEqual(expect.arrayContaining(['a few days', '1–2 weeks', 'Wednesday, October 14', 'October 14']));
+    expect(allowedPhrases).toEqual(expect.arrayContaining(['a few days', 'about 1–2 weeks', 'Wednesday, October 14', 'October 14']));
   });
 
-  test('a recurring plan visit gets no reach-out date', async () => {
-    const { sections, allowedPhrases } = await buildWriterRecords({
-      knex: knexFor(), customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'recurring', applications: [TAURUS],
+  test('a recurring plan visit gets no reach-out date', () => {
+    const { sections, allowedPhrases } = buildWriterRecords({
+      serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'recurring', applications: [TAURUS],
     });
     expect(sections.join('\n')).not.toContain('REACH-OUT DATE');
-    expect(sections.join('\n')).toContain('NEXT VISIT FOR THIS SERVICE: none booked.');
     expect(allowedPhrases).not.toContain('October 14');
   });
 
-  test('a failed next-visit lookup says nothing about booking', async () => {
-    const { sections } = await buildWriterRecords({
-      knex: knexFor({ fail: true }), customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'one_time', applications: [TAURUS],
+  test('carries no booking state: the report shows the next visit live', () => {
+    const { sections } = buildWriterRecords({
+      serviceYmd: '2026-09-30', line: 'pest', serviceKind: 'one_time', applications: [TAURUS],
     });
-    expect(sections.join('\n')).not.toContain('NEXT VISIT');
-    expect(sections.join('\n')).toContain('REACH-OUT DATE: Wednesday, October 14');
-  });
-});
-
-describe('next visit on a rodent report (shared catalog rule)', () => {
-  const ORIGINAL = process.env.GATE_RODENT_REPORT_REFRESH;
-  afterEach(() => {
-    if (ORIGINAL === undefined) delete process.env.GATE_RODENT_REPORT_REFRESH;
-    else process.env.GATE_RODENT_REPORT_REFRESH = ORIGINAL;
-  });
-  const exclusion = { id: 'n1', service_type: 'Exclusion Service', service_id: 'svc-excl', ...HOME };
-  const catalog = [{ id: 'svc-excl', name: 'Rodent Exclusion', category: 'rodent' }];
-
-  test('an exclusion visit linked to a rodent catalog service counts, as on the report', async () => {
-    process.env.GATE_RODENT_REPORT_REFRESH = 'true';
-    await expect(loadNextSameLineVisit({
-      knex: knexFor({ rows: [exclusion], services: catalog }), customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'rodent',
-    })).resolves.toEqual({ state: 'scheduled', serviceType: 'Exclusion Service' });
-  });
-
-  test('without the refresh gate the strict line match stands', async () => {
-    delete process.env.GATE_RODENT_REPORT_REFRESH;
-    await expect(loadNextSameLineVisit({
-      knex: knexFor({ rows: [exclusion], services: catalog }), customerId: 'c1', scheduledServiceId: 's1', serviceYmd: '2026-09-30', line: 'rodent',
-    })).resolves.toEqual({ state: 'none' });
+    expect(sections.join('\n')).not.toMatch(/NEXT VISIT|booked|scheduled/i);
   });
 });

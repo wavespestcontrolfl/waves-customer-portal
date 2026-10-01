@@ -468,8 +468,14 @@ describe('four-section report: supplied timeframes and dates', () => {
   ];
   const allowedPhrases = groundedTimeframePhrases(lines);
 
-  test('the timeframes are the duration phrases inside the approved lines', () => {
-    expect(allowedPhrases).toEqual(['a few days', '1–2 weeks', 'a week']);
+  test('the timeframes are the whole phrases inside the approved lines, hedge and range kept', () => {
+    expect(allowedPhrases).toEqual(['a few days', 'about 1–2 weeks', 'a week or two']);
+  });
+
+  test('an approved window never passes shortened or without its hedge', () => {
+    expect(writerRulesRejection('Dead roaches may show up for a week or two.', { allowedPhrases })).toBeNull();
+    expect(writerRulesRejection('Dead roaches may show up for a week.', { allowedPhrases })).toBe('timeframe');
+    expect(writerRulesRejection('Activity should drop off over 1–2 weeks.', { allowedPhrases })).toBe('timeframe');
   });
 
   test('a supplied timeframe passes, with either dash; an invented or stretched one does not', () => {

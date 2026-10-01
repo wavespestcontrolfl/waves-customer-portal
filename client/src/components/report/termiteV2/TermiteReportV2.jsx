@@ -82,7 +82,7 @@ export function activityTrendLine(activity) {
   return null;
 }
 
-export function TermiteStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, visitSequence = 1, reportSections = null }) {
+export function TermiteStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, visitSequence = 1, reportSections = null, reportNextVisitLabel = null }) {
   if (!status) return null;
   const t = tone(status.tone);
   const trendLine = activityTrendLine(activityTrend);
@@ -100,6 +100,7 @@ export function TermiteStatusHero({ status, statusSummary, metrics, narrative = 
         <ReportText
           text={narrative}
           sections={reportSections}
+          nextVisitLabel={reportNextVisitLabel}
           className="ai-summary-body"
           style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}
           titleStyle={{ color: TEXT }}

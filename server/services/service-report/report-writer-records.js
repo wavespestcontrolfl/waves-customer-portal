@@ -5,11 +5,13 @@
  * see, and what comes next, plus the phrases and dates the output screen
  * then allows. The route builds these only for writers in scope, never lawn
  * or tree/shrub/palm (another lane owns those, owner 2026-09-30).
+ *
+ * No booking state: whether a visit is booked changes after the report is
+ * written, so the next visit renders live on the report itself
+ * (nextSameServiceAppointment) and never enters this text (Codex #5500).
  */
-const logger = require('../logger');
 const { buildWhatToExpect, toExpectationProduct, whatToExpectClasses } = require('./pest-report-expectations');
 const { findReportProductCopyEntry } = require('../../config/report-product-copy');
-const { PROPERTY_SCOPE_COLUMNS, nextSameLineVisitAtProperty } = require('./same-line-visit');
 const { validateCustomerCopy } = require('./premium-experience');
 const { groundedTimeframePhrases } = require('./report-writer-rules');
 
@@ -55,11 +57,6 @@ const EXPECTATION_WINDOW_DAYS = Object.freeze({
   roach_gel_bait: 14,
   pyrethroid: 14,
 });
-
-// Disclosable statuses for an upcoming visit, the same set the report's own
-// next-appointment cell uses; 'rescheduled' rows are placeholders holding
-// an old date.
-const NEXT_VISIT_STATUSES = Object.freeze(['pending', 'confirmed', 'en_route', 'on_site']);
 
 const SERVICE_KIND_LABELS = Object.freeze({
   one_time: 'one-time service',
@@ -111,39 +108,6 @@ function howItWorksLines(applications) {
   });
 }
 
-// The first booked visit after this one on the same service line at this
-// visit's property, by the report's own rules (same-line-visit.js: the
-// rodent program matches by catalog category; a booking at another of the
-// customer's properties never counts). Fails soft to 'unknown', which the
-// writer is never told about: a lookup error, or a booking whose property
-// can't be resolved, must not read as "nothing is booked".
-async function loadNextSameLineVisit({ knex, customerId, scheduledServiceId = null, serviceYmd, line }) {
-  if (!knex || !customerId || !scheduledServiceId || !line || !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceYmd || ''))) {
-    return { state: 'unknown' };
-  }
-  try {
-    const reportVisit = await knex('scheduled_services')
-      .where({ id: scheduledServiceId })
-      .first(...PROPERTY_SCOPE_COLUMNS);
-    const rows = await knex('scheduled_services')
-      .where({ customer_id: customerId })
-      .where('scheduled_date', '>=', serviceYmd)
-      .whereIn('status', NEXT_VISIT_STATUSES)
-      .whereNot({ id: scheduledServiceId })
-      .orderBy('scheduled_date', 'asc')
-      .orderBy('window_start', 'asc')
-      .limit(200)
-      .select('service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS);
-    const next = await nextSameLineVisitAtProperty({ knex, rows, reportVisit, serviceLine: line });
-    return next.state === 'scheduled'
-      ? { state: 'scheduled', serviceType: cleanText(next.row.service_type) }
-      : { state: next.state };
-  } catch (err) {
-    logger.warn(`[report-writer-records] next-visit lookup failed: ${err.message}`);
-    return { state: 'unknown' };
-  }
-}
-
 // "Wednesday, October 14": the service date plus the window, as a calendar
 // day (noon UTC, so no zone shifts the day).
 function reachOutDate(serviceYmd, days) {
@@ -156,9 +120,8 @@ function reachOutDate(serviceYmd, days) {
   return { full: `${weekday}, ${monthDay}`, monthDay };
 }
 
-async function buildWriterRecords({
-  knex, customerId = null, scheduledServiceId = null, serviceYmd, line = null,
-  findingsType = null, serviceKind = null, applications = [],
+function buildWriterRecords({
+  serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [],
 } = {}) {
   const sections = [];
   const expectations = writerExpectations({ line, findingsType, applications });
@@ -168,12 +131,6 @@ async function buildWriterRecords({
   const howItWorks = howItWorksLines(applications);
   if (howItWorks.length) {
     sections.push(`HOW IT WORKS (approved product wording for the work recorded today; use it only to say why the work fits what was found, never for where or how anything was applied):\n${howItWorks.join('\n')}`);
-  }
-  const next = await loadNextSameLineVisit({ knex, customerId, scheduledServiceId, serviceYmd, line });
-  if (next.state === 'scheduled') {
-    sections.push(`NEXT VISIT FOR THIS SERVICE: ${next.serviceType} is booked. The report prints its date and arrival window at the top of WHAT'S NEXT; call it "your next visit" and never restate a date.`);
-  } else if (next.state === 'none') {
-    sections.push('NEXT VISIT FOR THIS SERVICE: none booked.');
   }
   if (SERVICE_KIND_LABELS[serviceKind]) sections.push(`SERVICE TYPE: ${SERVICE_KIND_LABELS[serviceKind]}.`);
   const reach = (serviceKind === 'one_time' || serviceKind === 're_service')
@@ -194,10 +151,8 @@ async function buildWriterRecords({
 module.exports = {
   SERVICE_EXPECTATIONS,
   EXPECTATION_WINDOW_DAYS,
-  NEXT_VISIT_STATUSES,
   writerExpectations,
   howItWorksLines,
-  loadNextSameLineVisit,
   reachOutDate,
   buildWriterRecords,
 };

@@ -273,7 +273,7 @@ describe('buildReportCopyContext — writer rules', () => {
     // This fixture's EPA number matches no approved product wording, so no
     // HOW IT WORKS line: unmatched products fail closed.
     expect(contextText).not.toContain('HOW IT WORKS');
-    expect(writerAllowedPhrases).toEqual(expect.arrayContaining(['a few days', '1–2 weeks']));
+    expect(writerAllowedPhrases).toEqual(expect.arrayContaining(['a few days', 'about 1–2 weeks']));
   });
 
   it('gives the writer the approved wording even while the expectations card is off', async () => {

@@ -545,7 +545,7 @@ async function buildReportCopyContext({
   // (never lawn or tree/shrub/palm): no footage, no product-safety or
   // household block, no automatic no-activity prior finding, and the
   // writer records (approved expectations and how-it-works wording, the
-  // next booked visit, the service type, the reach-out date).
+  // service type, the reach-out date).
   writerRules = false,
   // Writer-rules inputs from the route's resolved service profile.
   findingsType = null,
@@ -767,10 +767,7 @@ async function buildReportCopyContext({
   // screen allows exactly the timeframes and dates it supplies.
   let writerAllowedPhrases = [];
   if (writerRules) {
-    const records = await buildWriterRecords({
-      knex,
-      customerId,
-      scheduledServiceId,
+    const records = buildWriterRecords({
       serviceYmd,
       line,
       findingsType,

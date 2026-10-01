@@ -25,7 +25,7 @@ WHAT TO EXPECT: how today's work should change what the customer sees, from the 
 WHAT'S NEXT: what we will check or do next, what the customer can do, and when to contact us.
 
 1. Shape. Exactly the four titles above, in that order, each on its own line and followed by exactly ONE line of plain text (one to four sentences, no line breaks inside a section). No bullets, no greeting, no sign-off, no customer-name header. Length follows the record: a visit with history, several treatments or open questions gets more; a thin record gets a sentence or two per section. Never pad, and never make the same point in two sections. If a section has nothing grounded to say, write one honest sentence (with no EXPECTATIONS lines, say what the technician will look for next time).
-2. Only what was recorded. Every statement must trace to the technician note, a recorded field, a structured finding line, a technician-reviewed photo caption, or a supplied record (EXPECTATIONS, HOW IT WORKS, NEXT VISIT, SERVICE TYPE, REACH-OUT DATE, prior visits). Keep the technician's own words and hedges: never upgrade a general word to a species ("roaches" stays "roaches"), a suspicion to a diagnosis, or one room to the whole house. Keep conditions the technician recorded ("dry and calm") when they bear on the work. If a dictated word looks like a transcription error, leave it out rather than guess.
+2. Only what was recorded. Every statement must trace to the technician note, a recorded field, a structured finding line, a technician-reviewed photo caption, or a supplied record (EXPECTATIONS, HOW IT WORKS, SERVICE TYPE, REACH-OUT DATE, prior visits). Keep the technician's own words and hedges: never upgrade a general word to a species ("roaches" stays "roaches"), a suspicion to a diagnosis, or one room to the whole house. Keep conditions the technician recorded ("dry and calm") when they bear on the work. If a dictated word looks like a transcription error, leave it out rather than guess.
 3. The customer's words. The booked reason, the customer's concern, and any calls, texts or emails are what the customer said, never a finding. Attribute them ("You mentioned…") and keep each remark with its own place and time: never merge two remarks into one. Never quote their messages, never say we read them, and never state that the technician confirmed something only the customer reported.
 4. Every "none" stays local. State an absence only for the place and day the technician checked ("none were seen at the dishwasher today"). Never "all clear", "no problems", "nothing to worry about", or no activity for the whole property.
 5. Products by job, and why. Never name a product, brand, trade name or active ingredient, and never use the word "chemical". Describe each product by its job (bait, an insect-control treatment, an insect growth regulator, a larvicide). For each piece of work, give one plain clause on why it fits what was found, taken from HOW IT WORKS or EXPECTATIONS; when neither covers it, describe the work without a reason. Those lines explain how a product works, never where or how it was applied today: the place and method come only from the record. Never add a mechanism, pest, residual period or effect they do not state.
@@ -34,12 +34,12 @@ WHAT'S NEXT: what we will check or do next, what the customer can do, and when t
 8. Say nothing about EPA registration. If it ever must appear, only "EPA-registered" or "EPA-exempt", never "EPA-approved".
 9. No prices, "free", "included", "covered", warranty, guarantee, bond, or "per visit". If a cadence must be named, say "per application".
 10. The company is "Waves Pest Control", or "we". Never "Waves Pest Control & Lawn Care", "Waves Lawn Care" or "Waves Lawn & Pest".
-11. Timeframes and dates. A timeframe ("a few days", "about 1–2 weeks") may appear only in WHAT TO EXPECT and WHAT'S NEXT, and only in the words of an EXPECTATIONS line: never invent, stretch, convert or combine one. Never write a calendar date, weekday or arrival window, except an earlier visit's date and the REACH-OUT DATE when one is supplied, written exactly as supplied. The report prints the next visit's date and arrival window at the top of WHAT'S NEXT: call it "your next visit" and never restate its date.
+11. Timeframes and dates. A timeframe ("a few days", "about 1–2 weeks") may appear only in WHAT TO EXPECT and WHAT'S NEXT, and only in the words of an EXPECTATIONS line: never invent, stretch, convert or combine one. Never write a calendar date, weekday or arrival window, except an earlier visit's date and the REACH-OUT DATE when one is supplied, written exactly as supplied. Never say whether a visit is booked, scheduled or coming: the report shows the next visit itself, as it stands when the customer opens it.
 12. Do not repeat what the report prints on its own: the product list, each product's "How it works" line word for word, re-entry and aftercare guidance, the next visit's date and window, the technician's tip, the rain and spider cards, the "What you flagged" card, and the activity gauge's number or scale. A short clause on why a treatment fits this problem is not repetition. The activity level in words ("light activity along the fence") is what the technician saw and belongs in WHAT WE FOUND.
 13. The report refuses these words, so never use them: infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, "all clear", "is clear", "clear of pests", pest-free, any "-proof" word, guarantee, guaranteed, toxic, poison, poisonous, dangerous, deadly, unsafe.
 14. Never mention a treatment map, a traced route or a treated outline.
 15. History. Prior visits, season, weather and labels are background. Mention an earlier visit only when it bears on today's problem (the same pest or the same spot), always marked as past with its date, and skip visits with nothing to add. Absences in history stay local too. Never present history as something found today, and never say things are better or worse unless the records show both sides.
-16. Next time. Say what we will check or do at the next visit only when the technician note or a recorded recommendation says so; otherwise just point to the next visit. Never promise a visit, a return trip, a result, or more checks than the record shows.
+16. Next time. Say what we will check or do at a next visit only when the technician note or a recorded recommendation says so. Never promise a visit, a return trip, a result, or more checks than the record shows.
 17. When to reach out. End WHAT'S NEXT with when to contact us: tie it to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe or a sign the customer can notice. Never ask the customer to watch something only the technician tracks.
 
 STYLE (the owner's prose rules; they never override the rules above)
@@ -128,7 +128,7 @@ const PROMPT_REWRITES = Object.freeze([
   ],
   [
     'State the recorded next program check or approved review plan without inventing a date. Use the existing approved device-handling instructions; do not encourage',
-    'Name the next program check without its date, day or window (the report prints them at the top of WHAT\'S NEXT). Leave device-handling instructions to the report\'s own sections; do not encourage',
+    'Name a recorded next program check without a date, day or window, and never say whether it is booked (the report shows the next visit itself). Leave device-handling instructions to the report\'s own sections; do not encourage',
   ],
   ['Relay only the approved site-specific precautions or referral.', 'Name a recorded referral; leave site precautions to the report\'s own sections.'],
   [
@@ -325,9 +325,15 @@ const TIMEFRAME_RE = new RegExp(
   + '|\\bnext\\s+(?:month|year|season|quarter)\\b',
   'i',
 );
-// The duration phrases inside supplied EXPECTATIONS lines ("a few days",
-// "1–2 weeks", "a week"): the only timeframes the writer may use (rule 11).
-const DURATION_PHRASE_RE = new RegExp(`\\b(?:\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}|${DURATION_NUMBER}\\s+${DURATION_UNIT})\\b`, 'gi');
+// The timeframe phrases inside supplied EXPECTATIONS lines, whole: the only
+// timeframes the writer may use (rule 11). A hedge ("about", "within") and a
+// range ("1–2 weeks", "a week or two") stay part of the phrase, so an
+// approved window can't pass shortened ("a week or two" never as "a week").
+const DURATION_PHRASE_RE = new RegExp(
+  '\\b(?:(?:about|around|roughly|approximately|up\\s+to|within)\\s+)?'
+  + `(?:\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}|${DURATION_NUMBER}\\s+${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?)\\b`,
+  'gi',
+);
 function groundedTimeframePhrases(lines) {
   return [...new Set((Array.isArray(lines) ? lines : [])
     .flatMap((line) => String(line || '').match(DURATION_PHRASE_RE) || [])
@@ -517,7 +523,10 @@ function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [
   // reach-out date) pass exactly as supplied; anything else still trips the
   // timeframe and date screens.
   let copy = String(text || '');
-  for (const phrase of Array.isArray(allowedPhrases) ? allowedPhrases : []) {
+  // Longest first, so a whole phrase is matched before any part of it.
+  const phrases = (Array.isArray(allowedPhrases) ? [...allowedPhrases] : [])
+    .sort((a, b) => String(b || '').length - String(a || '').length);
+  for (const phrase of phrases) {
     const pattern = allowedPhrasePattern(phrase);
     if (String(phrase || '').trim().length < 3 || !pattern) continue;
     copy = copy.replace(new RegExp(`(?<![\\w-])${pattern}(?![\\w-])`, 'gi'), 'X');
