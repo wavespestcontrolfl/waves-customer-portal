@@ -3823,6 +3823,14 @@ function tsFastCompleteLive() {
   return process.env.GATE_TS_FAST_COMPLETE === 'true';
 }
 
+// GATE_LLM_COST_TRACKING read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for estimated AI spend (services/llm-cost.js: the
+// price pull and the daily spend check; agent-control/hub-read.js: the
+// Control center's cost numbers). Off = no price fetch, no cost on the hub.
+function llmCostTrackingLive() {
+  return process.env.GATE_LLM_COST_TRACKING === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -4604,14 +4612,6 @@ function zoneRouteDaysLive() {
 // (routes/feed.js); the portal client learns the gate from that endpoint's
 // {available} answer, like the property-score card. Off = the endpoint answers
 // {available:false} and the Learn tab's Local Conditions card is untouched.
-// GATE_LLM_COST_TRACKING read at CALL time — ships DARK, off unless exactly
-// 'true'. The one reader for estimated AI spend (services/llm-cost.js: the
-// price pull and the daily spend check; agent-control/hub-read.js: the
-// Control center's cost numbers). Off = no price fetch, no cost on the hub.
-function llmCostTrackingLive() {
-  return process.env.GATE_LLM_COST_TRACKING === 'true';
-}
-
 function portalYardCalendarLive() {
   return process.env.GATE_PORTAL_YARD_CALENDAR === 'true';
 }
