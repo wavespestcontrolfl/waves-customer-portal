@@ -10,8 +10,8 @@ const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane'
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
 
-function office(reason, serviceId = null) {
-  return { state: 'office_required', reason, serviceId, invoiceId: null };
+function office(reason, serviceId = null, extra = null) {
+  return { state: 'office_required', reason, serviceId, invoiceId: null, ...(extra || {}) };
 }
 
 function visitBusy(error) {
@@ -118,20 +118,42 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
   return built;
 }
 
-// True when the member's series parent still carries ANY live setup-fee claim
-// (scheduled_services.pending_setup_fee — positive = queued, negative = a
-// completion mid-mint). Keyed on the stamp itself, never on how it got there:
-// the pay-after-first-visit accept (estimate_data.setupFeeDeferredToFirstVisit)
+// The member's series parent's LIVE setup-fee claim, or null: scheduled_services.
+// pending_setup_fee (positive = queued, negative = a completion mid-mint) on
+// the parent. Keyed on the stamp itself, never on how it got there: the
+// pay-after-first-visit accept (estimate_data.setupFeeDeferredToFirstVisit)
 // and the secure plan-choice lane write the SAME claim, and the secure lane's
 // stamps exist with GATE_PAF_SETUP_FEE (and the marker) absent entirely. The
 // claim is consumed only by the single-visit completion mint, so a packet mint
 // that carries no setup line must never run past it.
-async function deferredSetupClaimStillQueued(trx, member) {
-  const parent = await trx('scheduled_services')
-    .where({ id: member.recurring_parent_id || member.id })
-    .first('pending_setup_fee');
+async function liveSetupClaim(trx, member) {
+  const parentId = member.recurring_parent_id || member.id;
+  const parent = await trx('scheduled_services').where({ id: parentId }).first('pending_setup_fee');
   const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : 0;
-  return Number.isFinite(stamp) && stamp !== 0;
+  return Number.isFinite(stamp) && stamp !== 0
+    ? { parentId, raw: parent.pending_setup_fee, amount: Math.round(Math.abs(stamp) * 100) / 100, queued: stamp > 0 }
+    : null;
+}
+
+async function deferredSetupClaimStillQueued(trx, member) {
+  return !!(await liveSetupClaim(trx, member));
+}
+
+// The packet hands this closeout to the office, who bill the visit (and the fee)
+// by hand. A QUEUED claim must not stay armed behind that manual bill — an
+// ordinary invoice never consumes it, so a later single-visit completion would
+// mint and charge the setup fee a second time. Retire it in this transaction
+// (compare-and-swap on the exact value; a rollback restores it) so the manual
+// bill is the ONLY place the fee is billed; the obligation detector keeps the
+// fee visible (a later completion parks for it unless the manual bill landed).
+// A NEGATIVE stamp is a single-visit completion mid-mint that will bill the fee
+// itself — left alone.
+async function retireQueuedSetupClaimForOffice(trx, claim) {
+  if (!claim?.queued) return null;
+  const rows = await trx('scheduled_services')
+    .where({ id: claim.parentId, pending_setup_fee: claim.raw })
+    .update({ pending_setup_fee: null, updated_at: new Date() });
+  return rows === 1 ? claim.amount : null;
 }
 
 async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
@@ -257,8 +279,10 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
     // mint. This combined-packet mint carries no setup line, so letting it
     // proceed would silently push the fee to a later visit — send the closeout
     // to the office instead, never "deferred, therefore fine".
-    if (await deferredSetupClaimStillQueued(trx, member)) {
-      return office('setup_fee_deferred_claim', member.id);
+    const queuedClaim = await liveSetupClaim(trx, member);
+    if (queuedClaim) {
+      const retired = await retireQueuedSetupClaimForOffice(trx, queuedClaim);
+      return office('setup_fee_deferred_claim', member.id, retired ? { setupFeeRetiredAmount: retired } : null);
     }
     // A canceled fee is treated as covered with completing-visit context only
     // because the billed application's prior-invoice lane parks that case.

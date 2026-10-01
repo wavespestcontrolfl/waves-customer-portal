@@ -529,13 +529,54 @@ postgres('visit completion packet records on PostgreSQL', () => {
   // mint carries no setup line, so it must route to the office instead of
   // minting the visit without the fee (and silently deferring it again).
   test.each([['positive', 99], ['negative in-progress marker', -99]])('a grouped closeout whose series carries a live %s setup-fee stamp goes to the office, never minting without the fee (gates off)', async (kind, stamp) => {
-    const estimateId = await linkFixtureEstimate();
+    await linkFixtureEstimate();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: stamp });
     const saved = await saveVisitCompletionPacket(submission());
     expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim' });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
-    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee)).toBe(stamp);
-    expect(estimateId).toBeTruthy();
+    const after = Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee);
+    if (stamp > 0) {
+      // The office now bills the fee by hand: the QUEUED claim is retired in the
+      // same transaction so a later single-visit completion cannot consume it and
+      // charge the fee a second time on top of that manual bill.
+      expect(after).toBe(0);
+      expect(saved.body.billing).toMatchObject({ setupFeeRetiredAmount: 99 });
+      expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    } else {
+      // A completion mid-mint bills the fee itself — left alone.
+      expect(after).toBe(stamp);
+      expect(saved.body.billing.setupFeeRetiredAmount).toBeUndefined();
+    }
+  });
+
+  test('grouped closeout -> manual fee invoice -> later child completion: the setup fee is billed exactly once (the retired claim cannot auto-bill on top)', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim', setupFeeRetiredAmount: 99 });
+    // The office bills the fee by hand (stamped so the detector recognizes it).
+    const manual = await createPaidSetupFee(estimateId);
+    // A later visit of the same series completes on its own.
+    const childId = randomUUID();
+    try {
+      await mockPg('scheduled_services').insert({ id: childId, customer_id: fixture.customerId, technician_id: fixture.techId,
+        service_id: fixture.catalogId, service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+        window_start: '14:00', window_end: '15:00', status: 'confirmed', estimated_price: 60, estimated_duration_minutes: 60,
+        source_estimate_id: estimateId, is_recurring: true, recurring_parent_id: fixture.serviceIds[0] });
+      const result = await completeScheduledService({ serviceId: childId, idempotencyKey: randomUUID(),
+        actor: submission().actor, body: { ...submission().items[0].body, sendCompletionSms: false, requestReview: false } });
+      expect(result.status).toBeLessThan(300);
+      const feeLines = (await mockPg('invoices').where({ customer_id: fixture.customerId }))
+        .flatMap((inv) => (typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : inv.line_items) || [])
+        .filter((line) => /one-time setup fee/i.test(String(line.description || '')));
+      expect(feeLines).toHaveLength(1);
+      expect(manual.id).toBeTruthy();
+      expect(await mockPg('setup_fee_claims').where({ scheduled_service_id: fixture.serviceIds[0] })).toHaveLength(0);
+    } finally {
+      await mockPg('service_records').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('invoices').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('scheduled_services').where({ id: childId }).del().catch(() => {});
+    }
   });
 
   test.each(['uncovered', 'paid', 'canceled sibling'])('a performed recurring application adjusted to zero still reviews its accepted setup fee (%s)', async (coverage) => {
