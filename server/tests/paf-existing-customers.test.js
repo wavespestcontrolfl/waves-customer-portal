@@ -34,6 +34,18 @@ describe('accept notification copy (existing customer on the card rail)', () => 
     expect(payload.adminBody).not.toMatch(/Invoice follow-up needed/);
   });
 
+  test('afterVisitBilling + afterVisitPaused: card kept, nothing charged, a pay link follows the visit (never promises an automatic charge)', () => {
+    const payload = buildAcceptNotificationPayload({ ...base, afterVisitBilling: true, afterVisitPaused: true });
+    expect(payload.customerBody).toBe('Your Silver WaveGuard plan is confirmed. Nothing is charged today. Your Auto Pay is paused, so we\'ll send you a link to pay after your first visit.');
+    expect(payload.customerBody).not.toMatch(/card on file is billed|charged after/i);
+    expect(payload.adminBody).toContain('Auto Pay paused');
+    expect(payload.adminBody).toContain('no auto-charge');
+  });
+
+  test('afterVisitPaused alone (no rail accept) changes nothing', () => {
+    expect(buildAcceptNotificationPayload({ ...base, afterVisitPaused: true })).toEqual(buildAcceptNotificationPayload(base));
+  });
+
   test('afterVisitBilling never overrides a branch that really sent a pay link (payer fallback re-opened delivery)', () => {
     const payload = buildAcceptNotificationPayload({
       ...base, afterVisitBilling: true, invoiceMode: true, invoiceLinkDelivered: true, invoicePayUrl: '/pay/tok',
@@ -45,9 +57,9 @@ describe('accept notification copy (existing customer on the card rail)', () => 
 describe('accept route wiring (source pins)', () => {
   const src = read('routes/estimate-public.js');
 
-  test('the card enrollment records after_visit_card (v12) for a moved existing customer, with prepay_card still winning for in-lane prepay', () => {
+  test('the card enrollment records after_visit_card (v12) for a moved existing customer (NOT a paused one: never auto-charged), with prepay_card still winning for in-lane prepay', () => {
     expect(src).toMatch(
-      /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'\s*: \(recurringCardPolicy\.afterVisitCard === true \? 'after_visit_card' : null\)/,
+      /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'[\s\S]{0,400}: \(recurringCardPolicy\.afterVisitCard === true && recurringCardPolicy\.autopayPaused !== true\s*\? 'after_visit_card' : null\)/,
     );
   });
 

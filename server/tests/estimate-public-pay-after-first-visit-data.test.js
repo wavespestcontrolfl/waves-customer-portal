@@ -180,9 +180,14 @@ describe('GET /:token/data — recurringCardPolicy.payAfterFirstVisit', () => {
     const saved = await policyFor({ enforced: true, required: false, exemptReason: 'saved_method_consented', afterVisitCard: true });
     expect(saved.afterVisitExisting).toBe(true);
     expect(saved).not.toHaveProperty('afterVisitConsent');
-    // The paused cohort rides the same flags (card kept, pay link after the visit).
+    // The paused cohort (owner R5: card kept, never auto-charged, pay link after
+    // the visit) is on the rail but must NOT be shown the charged-after-the-
+    // visit authorization or copy: afterVisitPaused instead of afterVisitConsent.
     const paused = await policyFor({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayPaused: true });
     expect(paused.afterVisitExisting).toBe(true);
+    expect(paused.afterVisitPaused).toBe(true);
+    expect(paused).not.toHaveProperty('afterVisitConsent');
+    expect(captured).not.toHaveProperty('afterVisitPaused');
   });
 
   test('PR-B: a new customer on the rail and every exempt customer carry neither flag', async () => {
@@ -198,6 +203,7 @@ describe('GET /:token/data — recurringCardPolicy.payAfterFirstVisit', () => {
       const p = await policyFor(policy);
       expect(p).not.toHaveProperty('afterVisitExisting');
       expect(p).not.toHaveProperty('afterVisitConsent');
+      expect(p).not.toHaveProperty('afterVisitPaused');
     }
   });
 

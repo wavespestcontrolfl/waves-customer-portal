@@ -1335,6 +1335,42 @@ the after-first-visit promise on the annual-prepay option on the strength of thi
 Informational only for now: no client reads it, and it moves no money and sends no
 message.
 
+Existing customers adding a service (owner ruling 2026-09-30/10-01, PR-B,
+`GATE_PAF_EXISTING_CUSTOMERS`, dark). The sentence above that excludes plan members NOT on
+Auto Pay (`existing_plan_customer`) and paused-Auto-Pay (`autopay_paused`) holds ONLY while
+the sub-gate is off. The sub-gate is live only when BOTH `GATE_PAY_AFTER_FIRST_VISIT` and
+`GATE_PAF_EXISTING_CUSTOMERS` are exactly `'true'` and the card lane is on. Then the policy
+resolver (`resolveRecurringCardPolicyForEstimate`) no longer returns those two exemptions
+for an ELIGIBLE customer: per-application / per-visit / one-time-lane customers and
+non-member profiles whose customer row loaded. Monthly-membership-lane customers
+(`billing_mode` `monthly_membership`, or NULL with a positive `monthly_rate`) and
+annual-prepay-lane customers stay on `existing_plan_customer` / `autopay_paused`: their add-on
+joins `monthly_rate` (billed by the monthly cron) or is covered by the prepay term. An
+eligible customer follows the new-customer card rail: a saved consented card auto-satisfies
+(`saved_method_consented`), otherwise `POST /:token/accept` returns `402
+RECURRING_CARD_REQUIRED` until a live-verified SetupIntent is supplied. The accept's
+first-application invoice is attached to the visit with NO pay link and NO invoice message
+at accept, and completion charges it after the visit. Payer-billed (`payer_billed`,
+`payer_check_uncertain`), `invoice_mode`, commercial manual billing, one-time and the legacy
+prepay carve-out are unchanged, and a customer already on Auto Pay is still
+`autopay_already_active`. The policy carries an internal `afterVisitCard: true` marker (and
+`autopayPaused: true` for the paused cohort). A paused-Auto-Pay customer (owner R5) keeps a
+card on file but the pause is never lifted and nothing is auto-charged: completion skips the
+charge (`customerOnAutopay` is false while paused) and the normal pay link goes out in the
+completion text after the visit. `GET /api/estimates/:token/data` `recurringCardPolicy` gains
+three keys, each OMITTED (never `false`) unless it applies, so gate-off responses are
+byte-identical: `afterVisitExisting: true` (an existing customer moved onto the rail by this
+sub-gate, any lane state), `afterVisitConsent: true` (that customer must capture a card and is
+shown the `after_visit_card` v12 authorization, which the accept then records; never set for a
+paused customer), and `afterVisitPaused: true` (the paused cohort: the page says the card is
+kept and a pay link follows each service; the base consent is recorded, not `after_visit_card`).
+The estimate-accepted notification for this cohort says nothing is charged today and the card
+is billed after the first visit (a pay link follows the visit when Auto Pay is paused) instead of
+"our team will follow up with the invoice details". A setup-only first invoice (no
+first-application amount) is still minted unattached with its pay link at accept, as before.
+Owner R4 (a monthly-membership member's add-on must not be billed before its first performed
+visit) is NOT part of this change.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the

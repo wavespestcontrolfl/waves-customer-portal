@@ -12910,7 +12910,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           consentVariant: annualPrepaySelected && recurringCardLaneActive
             && RecurringCards.isPrepayCardAndChargeEnabled()
             ? 'prepay_card'
-            : (recurringCardPolicy.afterVisitCard === true ? 'after_visit_card' : null),
+            // Paused Auto Pay (owner R5) keeps the card but is never charged
+            // automatically, so the "charged after your first visit"
+            // authorization is NOT what that customer was shown or agreed to.
+            : (recurringCardPolicy.afterVisitCard === true && recurringCardPolicy.autopayPaused !== true
+              ? 'after_visit_card' : null),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
@@ -14631,6 +14635,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         afterVisitBilling: recurringCardPolicy.afterVisitCard === true
           && recurringCardLaneActive
           && require('../config/feature-gates').pafExistingCustomersLive(),
+        afterVisitPaused: recurringCardPolicy.autopayPaused === true,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -19995,6 +20000,9 @@ function buildAcceptNotificationPayload({
   // not coming — say what actually happens instead. False/omitted = today's
   // copy byte for byte.
   afterVisitBilling = false,
+  // ...and the customer's Auto Pay is paused: the card is kept but never
+  // auto-charged, so the copy says a pay link follows the first visit.
+  afterVisitPaused = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -20254,6 +20262,15 @@ function buildAcceptNotificationPayload({
     };
   }
 
+  if (afterVisitBilling && afterVisitPaused) {
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer, Auto Pay paused: card kept on file, no auto-charge, pay link goes out after the first visit.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today. Your Auto Pay is paused, so we'll send you a link to pay after your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
   if (afterVisitBilling) {
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
@@ -28099,7 +28116,13 @@ async function composeEstimateDataPayload(estimate, {
         // byte-identical.
         ...(recurringCardPolicyForData.afterVisitCard === true && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
           ? { afterVisitExisting: true } : {}),
+        // Paused Auto Pay (owner R5): card kept, never auto-charged, the normal
+        // pay link goes out after the visit — copy must NOT promise a charge.
+        ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.autopayPaused === true
+          && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
+          ? { afterVisitPaused: true } : {}),
         ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.required === true
+          && recurringCardPolicyForData.autopayPaused !== true
           ? { afterVisitConsent: true } : {}),
       },
       estimate: {

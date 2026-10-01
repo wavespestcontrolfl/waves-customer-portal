@@ -129,6 +129,9 @@ export default function PaymentPreferenceButtons({
   // billed after the first visit, so the "we send the invoice after you
   // approve" copy below must not render.
   payAfterFirstVisit = false,
+  // ...and their Auto Pay is paused (server afterVisitPaused): the card is
+  // kept but never auto-charged, so the copy says a pay link follows the visit.
+  autopayPaused = false,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const oneTimeBooking = isOneTime && !invoiceOnly;
@@ -251,8 +254,13 @@ export default function PaymentPreferenceButtons({
         : heldRecurring
           ? 'No payment now — we confirm your exact price on a quick site visit, then bill each application after service.'
           : invoiceRows.length > 0
-            ? (payAfterFirstVisit
-              ? 'Choose pay per application. Nothing is charged today — your card on file is billed for your first visit after it is completed.'
+            ? (payAfterFirstVisit && hasFirstVisitInvoice
+              // Only a first-application invoice rides the card rail: a
+              // setup-only invoice is unattached and its pay link goes out at
+              // accept, so it keeps the existing disclosure.
+              ? (autopayPaused
+                ? 'Choose pay per application. Nothing is charged today. Your Auto Pay is paused, so we send you a pay link after your first visit.'
+                : 'Choose pay per application. Nothing is charged today — your card on file is billed for your first visit after it is completed.')
               : `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`)
             : 'Choose pay per application. Your first service visit will be billed after completion.';
   const payPerApplicationOptionNote = heldRecurring

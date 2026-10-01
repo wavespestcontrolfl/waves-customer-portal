@@ -3051,7 +3051,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // afterVisit (GATE_PAF_EXISTING_CUSTOMERS): existing customer on the
 // pay-after-first-visit card rail — the checkbox renders the after_visit_card
 // (v12) authorization, the variant the accept records.
-function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false }) {
+function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false, paused = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
   const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
@@ -3234,9 +3234,13 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
               ? (bank
                 ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
                 : 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
-              : (bank
-                ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
-                : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`)}
+              : (paused
+                // Paused Auto Pay: the method is kept on file but never charged
+                // automatically — a pay link follows each visit.
+                ? `Save your ${bankOffered ? 'card or bank account' : 'card'} on file to confirm your plan — nothing is charged today. Your Auto Pay is paused, so we send you a pay link after each completed service.`
+                : (bank
+                  ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
+                  : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`))}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -9038,6 +9042,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 payAfterFirstVisit={data?.recurringCardPolicy?.afterVisitExisting === true}
+                autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
               />
             </>
           ) : null}
@@ -9193,7 +9198,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                       ? (inlineCardState.methodType === 'us_bank_account'
                         ? 'Bank transfers have no added card surcharge.'
                         : CARD_SURCHARGE_DISCLOSURE)
-                      : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`))
+                      : (data?.recurringCardPolicy?.afterVisitPaused === true
+                        ? `Nothing is charged today. Your Auto Pay is paused, so we keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`
+                        : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`)))
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
               <InlineAutoPayCapture
@@ -9212,6 +9219,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}
                 afterVisit={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true}
+                paused={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitPaused === true}
               />
             ) : null}
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
@@ -9308,6 +9316,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               onReplace={handleReplacePaymentMethod}
               prepay={paymentPreference === 'prepay_annual'}
               afterVisit={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true}
+              paused={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitPaused === true}
             />
           ) : null}
           {websiteMode ? null : aiPanelBlock}
@@ -9380,6 +9389,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 payAfterFirstVisit={data?.recurringCardPolicy?.afterVisitExisting === true}
+                autopayPaused={data?.recurringCardPolicy?.afterVisitPaused === true}
               />
             </div>
           ) : null

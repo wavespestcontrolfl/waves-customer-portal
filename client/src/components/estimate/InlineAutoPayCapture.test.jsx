@@ -291,6 +291,19 @@ describe('InlineAutoPayCapture afterVisit consent', () => {
     expect(getByText(/Nothing is charged today\./)).toBeInTheDocument();
   });
 
+  it('paused Auto Pay: says the card is kept and a pay link follows each service, and never promises a charge', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card'] }} loadStripeSdk={loadStripeSdk} paused />,
+    );
+    await flush();
+    expect(getByText('Card on file — nothing charged today')).toBeInTheDocument();
+    expect(getByText(/Your Auto Pay is paused, so we keep this card on file and send you a pay link after each completed service\./)).toBeInTheDocument();
+    expect(getByText('I authorize Waves to save this card on file — cancel anytime.')).toBeInTheDocument();
+    expect(queryByText(/is charged that service/)).toBeNull();
+  });
+
   it('keeps the base card terms when afterVisit is not set (gate off byte-identical)', async () => {
     const { StripeCtor } = makeStripeStub();
     const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));

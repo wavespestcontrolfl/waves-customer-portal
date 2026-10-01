@@ -347,6 +347,22 @@ describe('PaymentPreferenceButtons', () => {
       expect(screen.getByText(/we will send the first application invoice after confirmation/)).toBeInTheDocument();
     });
 
+    it('flag on + Auto Pay paused: card kept but never charged automatically — says a pay link follows the visit', () => {
+      renderButtons({ payAfterFirstVisit: true, autopayPaused: true });
+      expect(screen.getByText(/Your Auto Pay is paused, so we send you a pay link after your first visit\./)).toBeInTheDocument();
+      expect(screen.queryByText(/your card on file is billed/)).not.toBeInTheDocument();
+    });
+
+    it('flag on but a SETUP-ONLY invoice (no first-application amount): keeps the existing disclosure (its pay link goes out at accept)', () => {
+      renderButtons({
+        payAfterFirstVisit: true,
+        selectedFrequency: { key: 'monthly', billingFrequencyKey: 'monthly', monthly: 49 },
+        extraInvoiceRows: [{ label: 'Rodent bait-station setup', amount: 99 }],
+      });
+      expect(screen.queryByText(/Nothing is charged today/)).not.toBeInTheDocument();
+      expect(screen.getByText(/we will send the setup invoice after confirmation/)).toBeInTheDocument();
+    });
+
     it('flag on: says nothing is charged today and the card on file is billed after the first visit', () => {
       renderButtons({ payAfterFirstVisit: true });
       expect(screen.getByText(/Nothing is charged today — your card on file is billed for your first visit after it is completed\./)).toBeInTheDocument();
