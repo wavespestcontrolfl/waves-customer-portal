@@ -1166,7 +1166,7 @@ router.put('/:id', async (req, res, next) => {
       // `seen_status`: the status the client SHOWED when staff acted (its page may be
       // hours old). No fallback (codex #5477 r14): a caller that does not say it saw
       // 'handled' (an older Leads tab, any other client) never moves a lead off it.
-      const refusal = handledStatusRefusal(updates.status, req.body.seen_status, current.status);
+      const refusal = handledStatusRefusal(updates.status, req.body.seen_status, current.status, req.body.seen_updated_at, current.updated_at);
       if (refusal) return { refusal };
       previousStatus = current.status;
       // Email-specific correction provenance (Codex round-4 P1 on the
@@ -1294,7 +1294,7 @@ router.post('/:id/convert', async (req, res, next) => {
     // customer's booking closed after staff loaded it is not won from that view.
     // Judged on the status the client showed, and re-asserted in the win's own UPDATE.
     const seen = req.body.seen_status;
-    const refusal = handledStatusRefusal('won', seen, lead.status);
+    const refusal = handledStatusRefusal('won', seen, lead.status, req.body.seen_updated_at, lead.updated_at);
     if (refusal) return res.status(refusal.code).json({ error: refusal.error });
     const won = await leadAttribution.markConverted(req.params.id, {
       customerId,
@@ -1319,7 +1319,7 @@ router.post('/:id/lost', async (req, res, next) => {
     // theirs to mark lost from that stale view (codex #5477 r13): judged on the status
     // the client showed, and re-asserted in the write itself.
     const seen = req.body.seen_status; // explicit only (see the PUT)
-    const refusal = handledStatusRefusal('lost', seen, existing.status);
+    const refusal = handledStatusRefusal('lost', seen, existing.status, req.body.seen_updated_at, existing.updated_at);
     if (refusal) return res.status(refusal.code).json({ error: refusal.error });
     const marked = await leadAttribution.markLost(req.params.id, { reason, competitor, notes, notIfStatusIn: seen === 'handled' ? [] : ['handled'] });
     if (marked === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online, or been deleted). Reload to see it.' });

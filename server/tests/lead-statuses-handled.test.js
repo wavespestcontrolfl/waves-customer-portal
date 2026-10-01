@@ -98,29 +98,33 @@ describe("lead status 'handled'", () => {
     for (const t of tools) expect(t.input_schema.properties.new_status.enum).not.toContain('handled');
     const route = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
     // judged on the status the CLIENT showed (its page may be hours old), else the one read on arrival
-    expect(route).toMatch(/const refusal = handledStatusRefusal\(updates\.status, req\.body\.seen_status, current\.status\);\s*if \(refusal\) return \{ refusal \};/);
+    expect(route).toMatch(/const refusal = handledStatusRefusal\(updates\.status, req\.body\.seen_status, current\.status, req\.body\.seen_updated_at, current\.updated_at\);\s*if \(refusal\) return \{ refusal \};/);
     expect(route).toMatch(/const seen = req\.body\.seen_status; \/\/ explicit only/);
     // no seen status (an older tab): a handled lead never moves off handled (codex #5477 r14)
     expect(require('../services/lead-statuses').handledStatusRefusal('contacted', undefined, 'handled')).toMatchObject({ code: 409 });
     // mark-lost: the same refusal, re-asserted in markLost's UPDATE (notIfStatusIn)
-    expect(route).toMatch(/const refusal = handledStatusRefusal\('lost', seen, existing\.status\);/);
+    expect(route).toMatch(/const refusal = handledStatusRefusal\('lost', seen, existing\.status, req\.body\.seen_updated_at, existing\.updated_at\);/);
     expect(route).toMatch(/notIfStatusIn: seen === 'handled' \? \[\] : \['handled'\]/);
     // manual convert (won): the same refusal, re-asserted in markConverted's claim (codex #5477 r14)
-    expect(route).toMatch(/const refusal = handledStatusRefusal\('won', seen, lead\.status\);/);
+    expect(route).toMatch(/const refusal = handledStatusRefusal\('won', seen, lead\.status, req\.body\.seen_updated_at, lead\.updated_at\);/);
     expect(route).toMatch(/\.\.\.\(seen === 'handled' \? \{\} : \{ onlyIfStatusIn: LEAD_STATUSES\.filter\(\(s\) => s !== 'handled'\) \}\)/);
     const la = fs.readFileSync(path.join(__dirname, '../services/lead-attribution.js'), 'utf8');
     expect(la).toMatch(/\.whereNotIn\('status', notIfStatusIn\)\.update\(\{\s*status: 'lost',/);
     const ui = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
-    expect(ui).toMatch(/body: \{ status, seen_status: seenStatus \}/);
-    expect(ui).toMatch(/updateLeadStatus\(lead\.id, stage, lead\.status\)/);
-    expect(ui).toMatch(/updateLeadStatus\(lead\.id, e\.target\.value, lead\.status\)/);
-    expect(ui).toMatch(/openLostModal\(lead\.id, lead\.status\)/);
-    expect(ui).toMatch(/leadId: lead\.id,\s*seen_status: lead\.status,\s*\}\);\s*setShowModal\("convert"\)/);
+    expect(ui).toMatch(/body: \{ status, seen_status: seenStatus, seen_updated_at: seenUpdatedAt \}/);
+    expect(ui).toMatch(/updateLeadStatus\(lead\.id, stage, lead\.status, lead\.updated_at\)/);
+    expect(ui).toMatch(/updateLeadStatus\(lead\.id, e\.target\.value, lead\.status, lead\.updated_at\)/);
+    expect(ui).toMatch(/openLostModal\(lead\.id, lead\.status, lead\.updated_at\)/);
+    expect(ui).toMatch(/leadId: lead\.id,\s*seen_status: lead\.status,\s*seen_updated_at: lead\.updated_at,\s*\}\);\s*setShowModal\("convert"\)/);
     expect(route).toMatch(/if \(responseLead\.refusal\) return res\.status\(responseLead\.refusal\.code\)/);
     const { handledStatusRefusal } = require('../services/lead-statuses');
     expect(handledStatusRefusal('handled', 'new', 'new')).toMatchObject({ code: 400 }); // staff never set it
     expect(handledStatusRefusal('contacted', 'new', 'handled')).toMatchObject({ code: 409 }); // the booking closed it after staff loaded it (codex #5477 r13)
-    expect(handledStatusRefusal('new', 'handled', 'handled')).toBeNull(); // reopening a request staff saw handled
+    const at = '2026-10-01T10:00:00.123Z';
+    expect(handledStatusRefusal('new', 'handled', 'handled', at, new Date(at))).toBeNull(); // reopening the close staff saw
+    // the same status, but a LATER close (reopened, then closed again by another booking): refused (codex #5477 r16)
+    expect(handledStatusRefusal('new', 'handled', 'handled', at, new Date('2026-10-01T10:05:00.000Z'))).toMatchObject({ code: 409 });
+    expect(handledStatusRefusal('new', 'handled', 'handled')).toMatchObject({ code: 409 }); // no version sent
     expect(handledStatusRefusal(undefined, 'new', 'handled')).toBeNull(); // a notes-only edit
     expect(handledStatusRefusal('contacted', 'new', 'new')).toBeNull();
     // a client claiming it saw 'handled' can never use that to SET it on an open lead

@@ -373,7 +373,22 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
 
   if (outcome.created) {
     try {
-      await db('leads').where({ id: lead.id }).update({ estimate_id: outcome.estimateId });
+      // Only onto a lead that is still open (codex #5477 r16): the customer's own
+      // /book booking may have closed this request ('handled') since the match, and
+      // an estimate linked behind that close would vanish from open work. The draft
+      // that lost the claim is archived the way a superseded unsent draft is.
+      const { OPEN_LEAD_STATUSES } = require('../lead-statuses');
+      const linked = await db('leads').where({ id: lead.id })
+        .whereIn('status', OPEN_LEAD_STATUSES).whereNull('deleted_at')
+        .update({ estimate_id: outcome.estimateId });
+      if (!linked) {
+        const { lockSupersededDraftInTx, archiveSupersededDraftInTx } = require('../estimate-automation-duplicates');
+        await db.transaction(async (trx) => {
+          const stale = await lockSupersededDraftInTx(trx, { estimateId: outcome.estimateId });
+          await archiveSupersededDraftInTx(trx, stale, { reason: 'lead_closed_before_link' });
+        });
+        outcome = { ...outcome, created: false, archived: true };
+      }
     } catch (e) {
       logger.warn(`[email-actions] lead→estimate link failed (non-blocking): ${e.message}`);
     }

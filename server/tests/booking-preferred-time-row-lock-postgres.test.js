@@ -721,6 +721,27 @@ jest.setTimeout(60000);
       expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
     });
 
+    test('a merge in flight during the close (codex #5477 r16): the final owner read waits it out and the winner\'s request closes', async () => {
+      const loser = randomUUID();
+      const winner = randomUUID();
+      await database('customers').insert([
+        { id: loser, phone: '+19415550177', first_name: 'Pat', last_name: 'Sample' }, // no requests on the loser's phone
+        { id: winner, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' },
+      ]);
+      const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+      const sba = await database('self_booked_appointments').insert({ customer_id: loser, created_at: new Date() }).returning(['id', 'created_at']);
+      const [{ id: visitId }] = await database('scheduled_services').insert({ self_booking_id: sba[0].id, customer_id: loser }).returning(['id']);
+      // the merge: customer rows locked FOR UPDATE first, the visit repointed later, then commit
+      const mergeTrx = await database.transaction();
+      await mergeTrx('customers').whereIn('id', [winner, loser]).forUpdate().select('id');
+      const closing = closeBookedPreferredLeads(database, { customerId: loser, booking: sba[0] });
+      await new Promise((r) => setTimeout(r, 400));
+      await mergeTrx('scheduled_services').where({ id: visitId }).update({ customer_id: winner });
+      await mergeTrx.commit();
+      expect((await closing).closed).toBe(1);
+      expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
+    });
+
     describe('a booking settles only the request for the same property (terminal Codex pass 3)', () => {
       const setupHomes = async ({ visitAddress, visitZip, visitUnit = null, requestUnit = null }) => {
         const cust = randomUUID();

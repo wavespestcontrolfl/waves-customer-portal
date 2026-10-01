@@ -153,16 +153,22 @@ function scopeToProspects(qb, alias = 'leads') {
 // booking closed the request after staff loaded it, so a change made from that stale
 // open view would reopen it (codex #5477 r13). Reopening a request staff SAW handled
 // stays possible, but only when the caller says so (`seen` = the status its page
-// showed; absent counts as not handled). `now` = the status under the row lock.
+// showed; absent counts as not handled) AND it is the same close the page showed:
+// `seenAt` / `nowAt` = the lead's updated_at then and now (codex #5477 r16), so a
+// request reopened and closed again by a later booking is not overwritten from a
+// view of the earlier close. `now` = the status under the row lock.
 // Returns the refusal (status code + message) or null.
-function handledStatusRefusal(requested, seen, now) {
+const sameInstant = (a, b) => !!a && !!b && new Date(a).getTime() === new Date(b).getTime();
+function handledStatusRefusal(requested, seen, now, seenAt = null, nowAt = null) {
   if (requested === undefined) return null;
   // Setting it is judged on the LOCKED status only (a client-supplied `seen` must
   // never unlock it): allowed solely as a no-op re-save of a lead already handled.
   if (requested === 'handled') {
     return now === 'handled' ? null : { code: 400, error: "'handled' is set automatically when the customer books online" };
   }
-  if (now === 'handled' && seen !== 'handled') return { code: 409, error: 'This request closed on its own: the customer booked online. Reload to see it.' };
+  if (now === 'handled' && (seen !== 'handled' || !sameInstant(seenAt, nowAt))) {
+    return { code: 409, error: 'This request closed on its own: the customer booked online. Reload to see it.' };
+  }
   return null;
 }
 

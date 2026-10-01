@@ -1395,19 +1395,21 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   };
   // `seenStatus`: the status this page SHOWED when staff acted, so the server never
   // lets a stale view reopen a request the customer's booking closed meanwhile.
-  const openLostModal = useCallback((leadId, seenStatus) => {
-    setFormData({ leadId, seen_status: seenStatus });
+  const openLostModal = useCallback((leadId, seenStatus, seenUpdatedAt) => {
+    setFormData({ leadId, seen_status: seenStatus, seen_updated_at: seenUpdatedAt });
     setShowModal("lost");
   }, []);
-  const updateLeadStatus = async (leadId, status, seenStatus) => {
+  // `seenUpdatedAt`: the lead's updated_at as shown, so a close that landed again
+  // after a reopen is told apart from the one this page showed.
+  const updateLeadStatus = async (leadId, status, seenStatus, seenUpdatedAt) => {
     if (status === "lost") {
-      openLostModal(leadId, seenStatus);
+      openLostModal(leadId, seenStatus, seenUpdatedAt);
       return;
     }
     try {
       await adminFetch(`/admin/leads/${leadId}`, {
         method: "PUT",
-        body: { status, seen_status: seenStatus },
+        body: { status, seen_status: seenStatus, seen_updated_at: seenUpdatedAt },
       });
       loadLeads();
     } catch (e) {
@@ -1536,7 +1538,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       event.preventDefault();
       const droppedId = event.dataTransfer.getData("text/plain");
       const lead = leads.find((item) => String(item.id) === droppedId);
-      if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage, lead.status);
+      if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage, lead.status, lead.updated_at);
       setDraggingLeadId(null);
     };
     return (
@@ -1867,7 +1869,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                               aria-label={`Stage for ${[lead.first_name, lead.last_name].filter(Boolean).join(" ") || "lead"}`}
                               value={lead.status}
                               onChange={(e) =>
-                                updateLeadStatus(lead.id, e.target.value, lead.status)
+                                updateLeadStatus(lead.id, e.target.value, lead.status, lead.updated_at)
                               }
                               className={statusSelectClass(lead.status)}
                             >
@@ -2653,6 +2655,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           setFormData({
                                             leadId: lead.id,
                                             seen_status: lead.status,
+                                            seen_updated_at: lead.updated_at,
                                           });
                                           setShowModal("convert");
                                         }}
@@ -2661,7 +2664,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       </Button>{" "}
                                       <Button
                                         variant={"danger"}
-                                        onClick={() => openLostModal(lead.id, lead.status)}
+                                        onClick={() => openLostModal(lead.id, lead.status, lead.updated_at)}
                                       >
                                         Mark Lost
                                       </Button>{" "}

@@ -734,7 +734,13 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
     const firstOwner = visit.customer_id || customerId;
     const ctx = { customerId, visit, booking, bookedMs, convertedIds };
     let closed = await closeRequestsForOwner(db, { ...ctx, ownerId: firstOwner });
-    const now = await db('scheduled_services').where({ id: visit.id }).first('customer_id');
+    // Read under a share lock on the first owner (codex #5477 r16): a merge locks the
+    // loser's customer row FOR UPDATE before it repoints the visit, so an in-flight
+    // merge is waited out here and its committed repoint is what this read sees.
+    const now = await db.transaction(async (trx) => {
+      await trx('customers').where({ id: firstOwner }).forShare().first('id');
+      return trx('scheduled_services').where({ id: visit.id }).first('customer_id');
+    });
     if (now?.customer_id && String(now.customer_id) !== String(firstOwner)) {
       closed += await closeRequestsForOwner(db, { ...ctx, ownerId: now.customer_id });
     }
