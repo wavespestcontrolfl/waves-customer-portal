@@ -1752,6 +1752,40 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'))).toHaveLength(1);
   });
 
+  test('a whole-blob preference write preserves served evidence recorded since its read (codex local review on #5434)', async () => {
+    // PUT /preferences rewrites estimate_data from the row it read; the marker
+    // never moves updated_at, so the route's guard cannot catch a download
+    // that recorded the disclosure in between — the SQL merge must keep it.
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    seed({ id: 'est-pref-1', token: 'tok-pref-1-x0123456789' });
+    let touches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      touches += 1;
+      // A download lands right after the route's read: the stored row gains
+      // the marker before the route's whole-blob UPDATE.
+      if (touches === 2) {
+        const row = storedEstimate();
+        row.estimate_data = JSON.stringify({ ...JSON.parse(row.estimate_data), rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+      }
+    };
+    const res = await fetch(`${base}/api/estimates/tok-pref-1-x0123456789/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interior_spray: false }),
+    });
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    expect(stored.preferences.interior_spray).toBe(false);
+    // The route's own snapshot (built from its pre-download read) lacked the
+    // marker; the SQL-side merge is what carried it through.
+    const mergeOps = db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).startsWith("?::jsonb || jsonb_strip_nulls(jsonb_build_object('rateReviewTermsServed'"));
+    expect(mergeOps).toHaveLength(1);
+    expect(JSON.parse(mergeOps[0].bindings[0]).rateReviewTermsServed).toBeUndefined();
+  });
+
   test("gate on: the recorded 'plan' drawer snapshot is evidence on its own (no served marker)", async () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-stamp-d', token: 'tok-stamp-d-x0123456789' });
