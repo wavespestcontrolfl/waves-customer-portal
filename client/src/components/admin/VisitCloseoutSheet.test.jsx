@@ -12,6 +12,7 @@ vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
 vi.mock('../../pages/admin/SchedulePage', () => ({
   createCompletionIdempotencyKey: (id) => `fixture_${id}`,
   completionReconcilePrompt: (error) => error.code === 'report_reconcile' ? 'Confirm recorded values' : null,
+  completionReportRulesPrompt: (error) => error.code === 'report_rules_review' ? 'Send report as is' : null,
   CompletionPanel: ({ service, onPrepared }) => <button onClick={() => onPrepared(service.id, {
     visitOutcome: service.fixtureOutcome || (service.id === 'one' ? 'completed' : 'incomplete'),
     completionPhotos: [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', capturedAt: '2020-01-01T12:00:00Z' }],
@@ -158,6 +159,31 @@ it.each([true, false])('preserves member reconciliation confirmation (confirmed=
   expect(posts).toHaveLength(confirmed ? 2 : 1);
   expect(posts.every(([, options]) => options.headers['Idempotency-Key'] === saved.key)).toBe(true);
   if (!confirmed) expect(await getVisitCompletionDraft('visit', scope)).toEqual(saved);
+});
+
+it.each([true, false])('preserves the member edit heads-up confirmation (confirmed=%s)', async (confirmed) => {
+  vi.spyOn(window, 'confirm').mockReturnValue(confirmed);
+  mount();
+  await prepareBoth();
+  const saved = await getVisitCompletionDraft('visit', scope);
+  const original = adminFetch.getMockImplementation();
+  adminFetch.mockImplementation(async (path, options) => {
+    if (options?.method !== 'POST') return original(path);
+    const items = JSON.parse(options.body).items;
+    if (!items[0].body.reportRulesConfirmed) throw Object.assign(new Error('An amount or measurement'), {
+      code: 'report_rules_review', details: { serviceId: 'one' },
+    });
+    expect(await getVisitCompletionDraft('visit', scope)).toMatchObject({ key: saved.key,
+      forms: { one: { body: { ...saved.forms.one.body, reportRulesConfirmed: true } }, two: saved.forms.two } });
+    return { packetId: 'packet', state: 'effects_pending' };
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Complete visit' }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalledWith('Send report as is'));
+  if (confirmed) await screen.findByRole('button', { name: 'Resume closeout' });
+  else await waitFor(() => expect(screen.getByRole('button', { name: 'Complete visit' })).toBeEnabled());
+  const posts = adminFetch.mock.calls.filter(([, options]) => options?.method === 'POST');
+  expect(posts).toHaveLength(confirmed ? 2 : 1);
+  expect(posts.every(([, options]) => options.headers['Idempotency-Key'] === saved.key)).toBe(true);
 });
 
 it('clears photo drafts when reopening a packet already finished by the server', async () => {

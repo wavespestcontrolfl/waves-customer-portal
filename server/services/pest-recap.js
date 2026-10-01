@@ -813,7 +813,12 @@ async function submitRecap({
     completionSmsAlreadySent = existingNotes.completionSmsStatus === 'sent'
       || !!existingNotes.sentSmsBody
       || completionSmsSendingFresh;
-    const alreadyTexted = !!existing?.recap_sms_sent_at || completionSmsAlreadySent;
+    // Fast Complete's fixed re-service text is frozen onto the record at
+    // insert (completionSmsRecapMode), before /complete writes 'sending':
+    // that record's one completion text belongs to /complete, so a recap
+    // landing in between must not claim and send a second wording.
+    const fixedReserviceText = existingNotes.completionSmsRecapMode === require('./reservice-fixed-recap').MODE;
+    const alreadyTexted = !!existing?.recap_sms_sent_at || completionSmsAlreadySent || fixedReserviceText;
     willSendSms = wantSms && !alreadyTexted;
     const smsClaim = willSendSms ? { recap_sms_sent_at: new Date() } : {};
 
