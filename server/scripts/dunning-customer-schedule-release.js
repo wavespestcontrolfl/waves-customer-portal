@@ -114,7 +114,7 @@ function printPlan({
 // Refusals that released nothing and need a person (or another run).
 const NOT_RELEASED = Object.freeze({
   evidence_unreadable: 'its current step\'s delivery could not be read; run again',
-  step_changed: 'its step kept changing; run again',
+  schedule_changed: 'it kept changing while it was read (reminders sending); run again',
   outcome_unconfirmed: 'a reminder for its current step may already have gone out (outcome unconfirmed); check it before releasing',
 });
 

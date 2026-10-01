@@ -568,6 +568,32 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
       expect(await seqRow(b.seq.id)).toMatchObject({ status: 'active', step_index: 3 });
     });
 
+    test('a same-step TOLD delivery that commits between the evidence read and the release lock is seen: members land AFTER it, never on it', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 40, step: 3, due: false });
+      const b = await member(c, { sentDaysAgo: 20, step: 1, due: false });
+      const schedule = await openSchedule(c, { step_index: 3 });
+      // the release reads its snapshot + evidence (nothing delivered yet), then waits at its advisory lock
+      const gate = pauseAt(/pg_advisory_xact_lock\(/);
+      const releasing = Schedule.release(schedule, 'released_admin', new Date());
+      await gate.reached;
+      // a sender (holding the customer's key, which the release has not taken yet) delivers one leg of the
+      // SAME step, marks it TOLD (no advance) and clears its claim, all committed before the release resumes
+      const stamp = new Date();
+      await app('customer_dunning_schedules').where({ id: schedule.id }).update({ touch_claimed_at: stamp });
+      await delivered(schedule, 3, [a.invoiceId, b.invoiceId]);
+      expect(await Schedule.markTold(schedule, { claimStamp: stamp, deliveredAt: new Date(), database: app })).toBe(true);
+      await Schedule.releaseClaim({ schedule, claimStamp: stamp, memberSeqIds: [] }, { database: app });
+      expect(await app('customer_dunning_schedules').where({ id: schedule.id }).first()).toMatchObject({ step_index: 3, touch_claimed_at: null });
+      gate.release();
+      const out = await releasing;
+      expect(deadlocks()).toEqual([]);
+      expect(out.closed).toBe(true);
+      // Day 30 reached both: B (whose own Day 30 is still ahead) never gets it again
+      expect(await seqRow(a.seq.id)).toMatchObject({ status: 'active', step_index: 4 });
+      expect(await seqRow(b.seq.id)).toMatchObject({ status: 'active', step_index: 4 });
+    });
+
     test('a PAUSED schedule\'s members stay paused on their own ladder, carrying the office\'s reason and admin', async () => {
       const c = await customer();
       const a = await member(c, { sentDaysAgo: 40, step: 3, due: false });

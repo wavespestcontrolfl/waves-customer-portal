@@ -555,8 +555,16 @@ async function alertPastFinal(schedule, landed) {
   }
 }
 
-// One attempt at close: the landings use the delivery evidence read for `at` (the step the caller saw). A
-// row found at another step under the lock is returned as `restep` and the caller reads that step's evidence.
+// The schedule row's version: PostgreSQL's xmin, which EVERY write to the row changes (a claim, markTold,
+// markHeld, advance, releaseClaim, a control write), including a same-step send that only stamps
+// last_touch_at. No column a writer might forget to stamp is trusted for it.
+const ROW_VERSION = 'xmin as row_version'; // xid: node-pg hands it back as a string
+const rowSnapshot = (database, id) => database(TABLE).where({ id }).whereIn('status', OPEN_STATUSES)
+  .first('step_index', 'episode', ROW_VERSION);
+
+// One attempt at close: the landings use the delivery evidence read against `at` (the row version read
+// BEFORE that evidence). A row whose version moved since is returned as `changed`: a send may have
+// delivered in between, so the caller reads the evidence again.
 async function closeOnce(schedule, reason, now, at, delivery, { database, extra, claimStamp, expectedStepIndex }) {
   return database.transaction(async (trx) => {
     await takeLock(trx, schedule.customer_id);
@@ -571,7 +579,8 @@ async function closeOnce(schedule, reason, now, at, delivery, { database, extra,
     // it), the schedule must still be active or held (never an admin's pause),
     // and still at the step the runner judged. Anything else is `claim_lost` and
     // closes nothing — a slow worker never overrides a control action.
-    const row = await trx(TABLE).where({ id: schedule.id }).whereIn('status', OPEN_STATUSES).forUpdate().first();
+    const row = await trx(TABLE).where({ id: schedule.id }).whereIn('status', OPEN_STATUSES).forUpdate()
+      .first('*', ROW_VERSION);
     if (!row) return { closed: false, landed: [] };
     if (claimStamp) {
       const ownsClaim = sameStamp(row.touch_claimed_at, claimStamp)
@@ -580,9 +589,9 @@ async function closeOnce(schedule, reason, now, at, delivery, { database, extra,
     } else if (claimIsFresh(row, now)) {
       return { closed: false, landed: [], reason: 'in_flight' };
     }
-    if (Number(row.step_index) !== Number(at.step_index) || Number(row.episode) !== Number(at.episode)) {
-      return { closed: false, landed: [], restep: { step_index: row.step_index, episode: row.episode } };
-    }
+    // The evidence fence: any write since the snapshot the evidence was read against (a same-step TOLD
+    // delivery that cleared its claim included) makes that evidence stale.
+    if (row.row_version !== at.row_version) return { closed: false, landed: [], changed: true };
     // A leg of the current step whose outcome is unconfirmed: handing members back could send that step
     // again on their own ladders, so nothing is released while one remains to land (judged after the
     // in-flight check: a send in flight right now is the next run's, not an unconfirmed outcome).
@@ -602,22 +611,32 @@ async function closeOnce(schedule, reason, now, at, delivery, { database, extra,
  * members in ONE transaction. Returns { closed, landed, reason? }.
  *
  * The current step's delivery evidence (currentStepDelivery) is read BEFORE the
- * transaction (nothing slow runs under the advisory lock or row locks), for the
- * step the caller saw; when the locked row is at another step, that step's
- * evidence is read and the close tried once more. Evidence that cannot be read
+ * transaction (nothing slow runs under the advisory lock or row locks), against
+ * a snapshot of the row's version taken just before it. Under the lock the row
+ * must still be that version: any write in between (a send that delivered a leg
+ * and marked the step TOLD, an advance, a claim) means the evidence may be stale,
+ * so it is read again and the close retried (`schedule_changed` after
+ * CLOSE_ATTEMPTS). A send records its delivery in the ledger before the row writes
+ * that end it (markTold / advance / completeFinal, then releaseClaim), so an
+ * unchanged version means no send finished in between; one still running holds a
+ * fresh claim (`in_flight`) or left an unstamped reservation (`outcome_unconfirmed`).
+ * Evidence that cannot be read
  * closes nothing (`evidence_unreadable`): handing members back blind could send
  * a step that already went out. Nor does a current step with a leg whose outcome
  * is unconfirmed while members remain to land (`outcome_unconfirmed`).
  */
+const CLOSE_ATTEMPTS = 3;
+
 async function close(schedule, reason, now = new Date(), {
   database = db, extra = {}, claimStamp = null, expectedStepIndex = schedule.step_index,
 } = {}) {
-  let at = schedule;
   let out = null;
-  for (let attempt = 0; attempt < 2 && !out; attempt += 1) {
+  for (let attempt = 0; attempt < CLOSE_ATTEMPTS && !out; attempt += 1) {
+    const at = await rowSnapshot(database, schedule.id);
+    if (!at) return { closed: false, landed: [] }; // already closed
     let delivery;
     try {
-      delivery = await currentStepDelivery(at);
+      delivery = await currentStepDelivery({ ...schedule, step_index: at.step_index, episode: at.episode });
     } catch (err) {
       logger.error(`[customer-dunning] schedule ${schedule.id} not closed (${reason}): delivery evidence unreadable: ${redactContact(err.message)}`);
       return { closed: false, landed: [], reason: 'evidence_unreadable' };
@@ -625,10 +644,9 @@ async function close(schedule, reason, now = new Date(), {
     const attemptOut = await closeOnce(schedule, reason, now, at, delivery, {
       database, extra, claimStamp, expectedStepIndex,
     });
-    if (attemptOut.restep) at = { ...at, ...attemptOut.restep };
-    else out = attemptOut;
+    if (!attemptOut.changed) out = attemptOut;
   }
-  if (!out) return { closed: false, landed: [], reason: 'step_changed' };
+  if (!out) return { closed: false, landed: [], reason: 'schedule_changed' };
   // Only a close that happened is reported: a refused one (claim_lost / in_flight / already closed) changed nothing.
   if (out.closed) {
     await alertPastFinal(schedule, out.landed);
