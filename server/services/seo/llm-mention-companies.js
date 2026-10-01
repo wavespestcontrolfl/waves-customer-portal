@@ -11,6 +11,8 @@
  * Pure functions, no I/O: everything here is unit-testable on plain text.
  */
 
+const { asJsonArray } = require('./aeo-measurement');
+
 const RANK_METHOD_ALL_NAMED = 'all_named_v2';
 const RANK_METHOD_KNOWN_LIST = 'known_list_v1';
 
@@ -107,7 +109,7 @@ const GENERIC_WORDS = new Set([
   'expertise', 'reputation', 'highlights', 'summary', 'bottom', 'line', 'florida', 'fl', 'local',
   'regional', 'national', 'best', 'top', 'general', 'residential', 'commercial', 'free',
   'protection', 'prevention', 'management', 'integrated', 'targeted', 'identify', 'your', 'safe',
-  'natural', 'organic', 'eco-friendly',
+  'natural', 'organic', 'eco-friendly', 'maintenance',
 ]);
 const STOP_START = new Set([
   'best', 'top', 'how', 'why', 'what', 'when', 'where', 'which', 'who', 'for', 'get', 'ask', 'call', 'check',
@@ -120,13 +122,24 @@ const CONNECTORS = new Set(['of', 'and', 'the', 'in', 'for', 'to', 'a', 'an', 'o
 const LEGAL_SUFFIX_RE = /,?\s*\b(?:inc|llc|co|corp)\.?$/i;
 const BUSINESS_RE = /pest|termite|lawn|mosquito|rodent|exterminat|\bbug|wildlife|environmental|fumigat|turf|insect|critter|\b(?:inc|llc|co|corp|company)\b\.?/i;
 
-function looksLikeCompany(rawName) {
+// A sentence, a trailing-period phrase ("Provides mosquito treatments."), or a
+// comma list of names is not one company name.
+const NOT_A_NAME_RE = /\b(?:listings?|rankings?|directory|reviews?|companies|providers|top-rated)\b/i;
+
+function isSentenceOrList(name) {
+  if (NOT_A_NAME_RE.test(name)) return true; // a directory page title, not a business
+  if (/[!?]/.test(name) || /\.\s+[A-Za-z]/.test(name)) return true;
+  if (/\.$/.test(name) && !LEGAL_SUFFIX_RE.test(name)) return true;
+  return /,\s*(?!(?:inc|llc|co|corp)\b)/i.test(name);
+}
+
+// `strong` = the span is a business card (name followed by a star rating and
+// review count), so it needs no pest/lawn keyword.
+function looksLikeCompany(rawName, { strong = false } = {}) {
   let name = String(rawName || '').replace(/[*_`#]+/g, ' ').replace(/\s+/g, ' ').trim();
   name = name.replace(/^[\s\-–—:;,.]+|[\s\-–—:;,]+$/g, '').replace(/^the\s+/i, '');
   if (name.length < 3 || name.length > 70) return false;
-  if (/[!?]/.test(name) || /\.\s+[A-Za-z]/.test(name)) return false; // a sentence, not a name
-  if (/\.$/.test(name) && !LEGAL_SUFFIX_RE.test(name)) return false; // "Provides mosquito treatments."
-  if (/,\s*(?!(?:inc|llc|co|corp)\b)/i.test(name)) return false; // a list of names, not one
+  if (isSentenceOrList(name)) return false;
   const words = name.split(/\s+/);
   if (words.length > 8) return false;
   if (!/^[A-Z0-9]/.test(name)) return false;
@@ -141,11 +154,21 @@ function looksLikeCompany(rawName) {
   if (!proper.length) return false;
   // "Pest Control in Sarasota": a service phrase wearing a city, not a company.
   if (GENERIC_WORDS.has(first) && /\b(?:in|for|near)\b/i.test(name)) return false;
-  return BUSINESS_RE.test(name);
+  return strong || BUSINESS_RE.test(name);
 }
 
 // Gemini glues a Maps card's domain onto the name: "**Name[name.com](url)**".
 const DOMAIN_LINK_RE = /\[(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:\/[^\]\s]*)?\]\([^)]*\)/gi;
+
+// Google's AI Mode and Overview list businesses as cards:
+// "Example Bug Control 4.8 (1.4K)" then a category line.
+const RATING_CARD_RE = /^\s*([^\n|]{3,70}?)\s+\d\.\d\s+\(\d[\d.,]*K?\)/gm;
+
+function ratingCardNames(text) {
+  const out = [];
+  for (const m of String(text || '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').matchAll(RATING_CARD_RE)) out.push(m[1]);
+  return out;
+}
 
 function cleanCandidate(raw) {
   return String(raw || '')
@@ -153,6 +176,7 @@ function cleanCandidate(raw) {
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/[*_`#]+/g, '')
     .replace(/\s+/g, ' ')
+    .replace(/\s+Website$/i, '') // a Maps card's "<name> Website" link
     .replace(/^[\s\-–—:;,.]+|[\s\-–—:;,]+$/g, '')
     .trim();
 }
@@ -240,6 +264,10 @@ function buildCompaniesNamed(text, { entities = null } = {}) {
         if (looksLikeCompany(part)) add(part, positionOf(lowerProse, cleanCandidate(part)));
       }
     }
+    for (const raw of ratingCardNames(text)) {
+      const name = cleanCandidate(raw);
+      if (looksLikeCompany(name, { strong: true })) add(name, positionOf(lowerProse, name));
+    }
   }
   for (const { key, re } of COMPETITOR_RES) {
     const idx = lowerProse.search(re);
@@ -252,7 +280,7 @@ function buildCompaniesNamed(text, { entities = null } = {}) {
   const seen = new Set();
   const names = [];
   for (const entry of found) {
-    const key = entry.name.toLowerCase().replace(LEGAL_SUFFIX_RE, '').replace(/[^a-z0-9]+/g, '');
+    const key = entry.name.toLowerCase().replace(LEGAL_SUFFIX_RE, '').replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '');
     if (!key || seen.has(key)) continue;
     seen.add(key);
     names.push({ name: entry.name });
@@ -267,7 +295,36 @@ function rankAmong(companiesNamed) {
   return idx >= 0 ? idx + 1 : null;
 }
 
+// The other companies an observation says it named, canonicalised, Waves
+// excluded. New rows carry the full ordered list (companies_named); rows from
+// before fall back to the known-list hits (competitors_mentioned, whose stored
+// meaning is unchanged). "turner pest" (old rows) and "Turner Pest Control"
+// (new) collapse to one company. Every reader of the competitor columns goes
+// through here so the dashboard and the gap tools see the same rivals.
+function rivalEntries(row) {
+  const legacy = asJsonArray(row?.competitors_mentioned);
+  const named = row?.companies_named == null ? null : asJsonArray(row.companies_named);
+  const seen = new Map();
+  for (const entry of (named || legacy)) {
+    const name = canonicalCompany(entry?.name);
+    if (!name || name === WAVES_NAME || seen.has(name)) continue;
+    seen.set(name, entry?.context ?? null);
+  }
+  if (named) { // keep the known-list context a rival's stored hit carries
+    for (const entry of legacy) {
+      const name = canonicalCompany(entry?.name);
+      if (seen.has(name) && seen.get(name) == null && entry?.context) seen.set(name, entry.context);
+    }
+  }
+  return [...seen].map(([name, context]) => ({ name, context }));
+}
+
+function rivalsOf(row) {
+  return rivalEntries(row).map(entry => entry.name);
+}
+
 module.exports = {
+  rivalsOf, rivalEntries,
   RANK_METHOD_ALL_NAMED, RANK_METHOD_KNOWN_LIST, WAVES_RE, WAVES_NAME, URL_RE, COMPETITORS,
   proseOf, knownCompetitorHits, knownCompetitorKey, canonicalCompany, looksLikeCompany, candidateNames,
   buildCompaniesNamed, rankAmong,

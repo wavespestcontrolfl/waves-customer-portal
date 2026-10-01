@@ -337,3 +337,116 @@ describe('dashboard handling', () => {
     expect(dashboard.byPlatform.map(g => g.rankMethods)).toEqual([['all_named_v2'], ['known_list_v1']]);
   });
 });
+
+const aiModeResponse = (overrides = {}) => ({
+  status_code: 20000,
+  tasks: [{
+    status_code: 20000,
+    cost: 0.004,
+    result: [{
+      keyword: 'best pest control Exampleville', type: 'ai_mode', location_code: 1015192,
+      items: [{
+        type: 'ai_overview',
+        markdown: 'Top-rated options include:\n\n---\n\n![](https://api.dataforseo.com/cdn/i/x:8)\nProdigy Pest Solutions 4.8 (1.4K)  \nPest control service  \n\n---\nExample Bug Control 4.9 (85)  \nPest control service  \n\nWaves Pest Control 5.0 (48)  \nPest control service',
+        items: [
+          { type: 'ai_overview_element', text: 'Top-rated options include:', markdown: 'Top-rated options include:', links: null, references: null },
+          { type: 'ai_overview_element', text: 'Example Bug Control 4.9 (85)', markdown: 'Example Bug Control 4.9 (85)', links: [{ type: 'link_element', url: 'https://bugcontrol.example.test/' }], references: null },
+        ],
+        references: [{ type: 'ai_overview_reference', url: 'https://www.wavespestcontrol.com/pest-control-exampleville-fl/' }],
+      }],
+      ...overrides,
+    }],
+  }],
+});
+
+describe('Google AI Mode probe', () => {
+  test('request: city location_name from the row, then the question; Parrish rides its coordinate; default Sarasota', () => {
+    expect(scraper.aiModeRequestBody('q', 'Venice')).toEqual([{ keyword: 'q', language_code: 'en', location_name: 'Venice,Florida,United States' }]);
+    expect(scraper.aiModeRequestBody('best lawn care in Lakewood Ranch FL', null)[0].location_name).toBe('Lakewood Ranch,Florida,United States');
+    expect(scraper.aiModeRequestBody('who serves Parrish FL', null)[0]).toEqual({ keyword: 'who serves Parrish FL', language_code: 'en', location_coordinate: '27.5870,-82.4248,10' });
+    expect(scraper.aiModeRequestBody('best pest control in Southwest Florida', null)[0].location_name).toBe('Sarasota,Florida,United States');
+    expect(scraper.AI_MODE_PATH).toBe('/serp/google/ai_mode/live/advanced');
+  });
+
+  test('parses the answer text, linked citations, sources and the model label', async () => {
+    dataforseo.request.mockResolvedValue(aiModeResponse());
+    const probe = await new LLMMentionProber().probeGoogleAIMode('best pest control Exampleville', { city: 'Sarasota' });
+    expect(dataforseo.request).toHaveBeenCalledWith('/serp/google/ai_mode/live/advanced',
+      [{ keyword: 'best pest control Exampleville', language_code: 'en', location_name: 'Sarasota,Florida,United States' }]);
+    expect(probe).toMatchObject({
+      model: 'dataforseo:google_ai_mode', grounded: true, citedUrls: ['https://bugcontrol.example.test/'],
+      sourceUrls: ['https://www.wavespestcontrol.com/pest-control-exampleville-fl/'], citationsComplete: true, costUsd: 0.004,
+    });
+    const parsed = new LLMMentionProber().parse(probe);
+    expect(names(parsed.companiesNamed)).toEqual(['Prodigy Pest Solutions', 'Example Bug Control', 'Waves Pest Control']);
+    expect(parsed).toMatchObject({ rankPosition: 3, rankMethod: 'all_named_v2', wavesMentioned: true, answerAvailable: true });
+  });
+
+  test('no answer item is an empty observation; a request or task error is null (no row)', async () => {
+    const prober = new LLMMentionProber();
+    dataforseo.request.mockResolvedValueOnce(aiModeResponse({ items: [] }));
+    expect(await prober.probeGoogleAIMode('q')).toMatchObject({ text: '', model: 'dataforseo:google_ai_mode' });
+    dataforseo.request.mockResolvedValueOnce(null);
+    expect(await prober.probeGoogleAIMode('q')).toBeNull();
+    dataforseo.request.mockResolvedValueOnce({ tasks: [{ status_code: 40501, status_message: 'Invalid Field', result: null }] });
+    expect(await prober.probeGoogleAIMode('q')).toBeNull();
+    dataforseo.request.mockRejectedValueOnce(new Error('network'));
+    expect(await prober.probeGoogleAIMode('q')).toBeNull();
+  });
+
+  test('registered next to AI Overview when configured; follows the LLM_MENTIONS_APP_SCRAPER switch; absent without credentials', () => {
+    delete process.env.LLM_MENTIONS_APP_SCRAPER;
+    let keys = Object.keys(new LLMMentionProber().providers);
+    expect(keys).toEqual(expect.arrayContaining(['google_ai_overview', 'google_ai_mode']));
+    process.env.LLM_MENTIONS_APP_SCRAPER = 'false';
+    keys = Object.keys(new LLMMentionProber().providers);
+    expect(keys).toContain('google_ai_overview');
+    expect(keys).not.toContain('google_ai_mode');
+    delete process.env.LLM_MENTIONS_APP_SCRAPER;
+    dataforseo.configured = false;
+    keys = Object.keys(new LLMMentionProber().providers);
+    expect(keys).not.toContain('google_ai_mode');
+    expect(keys).not.toContain('google_ai_overview');
+  });
+
+  test('the AI Overview probe keeps its own platform and model label', async () => {
+    dataforseo.request.mockResolvedValue({ tasks: [{ status_code: 20000, result: [{ items: [{ type: 'ai_overview', markdown: 'Inspect first.' }] }] }] });
+    expect(await new LLMMentionProber().probeGoogleAIOverview('q')).toMatchObject({ model: 'dataforseo:ai_overview' });
+  });
+
+  test('runDaily writes the row under platform google_ai_mode with all_named_v2, and the dashboard counts it as a configured engine', async () => {
+    const prober = new LLMMentionProber();
+    const queries = [{ query: 'best pest control Exampleville', city: 'Sarasota' }];
+    jest.spyOn(prober, 'getQueries').mockResolvedValue(queries);
+    dataforseo.request.mockResolvedValue(aiModeResponse());
+    Object.defineProperty(prober, 'providers', { value: { google_ai_mode: (q, row) => prober.probeGoogleAIMode(q, row) } });
+    jest.spyOn(prober, 'classifySentiment').mockResolvedValue('positive');
+    const inserted = [];
+    db.mockReturnValue({
+      where: () => ({ select: async () => [] }),
+      insert: row => { inserted.push(row); return { onConflict: () => ({ ignore: async () => ({ rowCount: 1 }) }) }; },
+    });
+    await prober.runDaily();
+    expect(inserted[0]).toMatchObject({ llm_platform: 'google_ai_mode', model_version: 'dataforseo:google_ai_mode', rank_method: 'all_named_v2', rank_position: 3, answer_available: true });
+
+    const dashboard = buildDashboard([{ ...inserted[0], measurement_version: 2, check_date: '2026-10-01', waves_cited_urls: '[]' }], queries,
+      { configuredPlatforms: ['chatgpt', 'google_ai_overview', 'google_ai_mode'] });
+    expect(dashboard.summary).toMatchObject({ platforms: ['google_ai_mode'], configuredPlatforms: ['chatgpt', 'google_ai_overview', 'google_ai_mode'] });
+    expect(dashboard.byPlatform.map(g => g.key)).toEqual(['google_ai_mode · dataforseo:google_ai_mode']);
+  });
+});
+
+describe('rivalsOf', () => {
+  test('companies_named when present, else competitors_mentioned; canonicalised, Waves excluded, de-duplicated', () => {
+    expect(companies.rivalsOf({ companies_named: JSON.stringify([{ name: 'Waves Pest Control' }, { name: 'Example Bug Control' }, { name: 'turner pest' }, { name: 'Turner Pest Control' }]) }))
+      .toEqual(['Example Bug Control', 'Turner Pest Control']);
+    expect(companies.rivalsOf({ companies_named: null, competitors_mentioned: [{ name: 'orkin' }, { name: 'ORKIN' }] })).toEqual(['Orkin']);
+    expect(companies.rivalsOf({ companies_named: [], competitors_mentioned: [{ name: 'orkin' }] })).toEqual([]);
+    expect(companies.rivalsOf({})).toEqual([]);
+  });
+
+  test('rivalEntries keeps a known-list hit\'s stored context', () => {
+    expect(companies.rivalEntries({ companies_named: [{ name: 'Orkin' }, { name: 'Example Bug Control' }], competitors_mentioned: [{ name: 'orkin', context: 'Orkin is national' }] }))
+      .toEqual([{ name: 'Orkin', context: 'Orkin is national' }, { name: 'Example Bug Control', context: null }]);
+  });
+});

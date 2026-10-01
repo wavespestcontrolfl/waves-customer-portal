@@ -28,7 +28,7 @@ const dataforseo = require('./dataforseo');
 const appScraper = require('./llm-app-scraper');
 const {
   RANK_METHOD_ALL_NAMED, RANK_METHOD_KNOWN_LIST, WAVES_RE, URL_RE, COMPETITORS,
-  knownCompetitorHits, canonicalCompany, buildCompaniesNamed, rankAmong, WAVES_NAME,
+  knownCompetitorHits, buildCompaniesNamed, rankAmong, rivalsOf,
 } = require('./llm-mention-companies');
 const MODELS = require('../../config/models');
 const { stripThinkingBlocks } = require('../llm/deep');
@@ -90,18 +90,6 @@ function observationGroups(rows, keyFor) {
   return [...groups].map(([key, observations]) => ({
     key, ...summarizeObservations(observations), rankMethods: rankMethodsOf(observations),
   }));
-}
-
-// Names of the other companies an observation says it named. New rows carry
-// the full ordered list (companies_named); rows from before fall back to the
-// known-list hits (competitors_mentioned). Both pass through canonicalCompany
-// so "turner pest" (old rows) and "Turner Pest Control" (new) count as one.
-function rivalsOf(row) {
-  const named = row.companies_named == null ? null : asJsonArray(row.companies_named);
-  const names = named
-    ? named.map(c => c?.name)
-    : asJsonArray(row.competitors_mentioned).map(c => c?.name);
-  return [...new Set(names.map(canonicalCompany).filter(name => name && name !== WAVES_NAME))];
 }
 
 function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
@@ -383,22 +371,51 @@ class LLMMentionProber {
       // idempotency fires — otherwise the same paid miss re-runs every day,
       // blowing past MAX_PROBES_PER_RUN.
       const items = task?.result?.[0]?.items || [];
-      const aio = items.find(i => i.type === 'ai_overview');
-      if (!aio) return { text: '', citedUrls: [], model: 'dataforseo:ai_overview', grounded: true };
-      // Never scan a serialized result object as prose: source titles/URLs can
-      // name Waves even when the actual overview does not.
-      const text = aio.markdown || (aio.items || []).map(item => item.text || '').join('\n');
-      // Top-level references are pages that MAY have been used. Only links
-      // and references attached to a textual answer element prove usage.
-      const elements = asJsonArray(aio.items).filter(item => item.type === 'ai_overview_element' && (item.text || item.markdown));
-      const citedUrls = elements.flatMap(item => [...asJsonArray(item.references), ...asJsonArray(item.links)]).map(r => r?.url).filter(Boolean);
-      const sourceUrls = asJsonArray(aio.references).map(r => r?.url).filter(Boolean);
-      return { text, citedUrls, sourceUrls, citationsComplete: citedUrls.length > 0 || sourceUrls.length === 0,
-        model: 'dataforseo:ai_overview', grounded: true };
+      return this.googleAnswerProbe(items.find(i => i.type === 'ai_overview'), 'dataforseo:ai_overview');
     } catch (err) {
       logger.warn(`[llm-mentions] AI Overview probe failed: ${err.message}`);
       return null;
     }
+  }
+
+  /**
+   * Google AI Mode (a different Google surface from the AI Overview, kept as
+   * its own platform). The scraper answers with the same `ai_overview` item
+   * shape, so it reads through the same parser. No answer item is recorded as
+   * an empty observation (idempotency); a request or task error is not.
+   */
+  async probeGoogleAIMode(query, queryRow = null) {
+    try {
+      const data = await dataforseo.request(appScraper.AI_MODE_PATH, appScraper.aiModeRequestBody(query, queryRow?.city));
+      if (data == null) return null;
+      const task = data?.tasks?.[0];
+      if (task?.status_code !== 20000) {
+        logger.warn(`[llm-mentions] AI Mode task error ${task?.status_code} (${task?.status_message}) for "${query}"`);
+        return null;
+      }
+      const probe = this.googleAnswerProbe(task?.result?.[0]?.items?.find(i => i.type === 'ai_overview'), 'dataforseo:google_ai_mode');
+      probe.costUsd = Number(task.cost) || 0;
+      if (probe.costUsd > 0) logger.info(`[llm-mentions] AI Mode cost $${probe.costUsd}`);
+      return probe;
+    } catch (err) {
+      logger.warn(`[llm-mentions] AI Mode probe failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  // The ai_overview item of a Google SERP / AI Mode response → probe shape.
+  googleAnswerProbe(aio, model) {
+    if (!aio) return { text: '', citedUrls: [], model, grounded: true };
+    // Never scan a serialized result object as prose: source titles/URLs can
+    // name Waves even when the actual overview does not.
+    const text = aio.markdown || (aio.items || []).map(item => item.text || '').join('\n');
+    // Top-level references are pages that MAY have been used. Only links
+    // and references attached to a textual answer element prove usage.
+    const elements = asJsonArray(aio.items).filter(item => item.type === 'ai_overview_element' && (item.text || item.markdown));
+    const citedUrls = elements.flatMap(item => [...asJsonArray(item.references), ...asJsonArray(item.links)]).map(r => r?.url).filter(Boolean);
+    const sourceUrls = asJsonArray(aio.references).map(r => r?.url).filter(Boolean);
+    return { text, citedUrls, sourceUrls, citationsComplete: citedUrls.length > 0 || sourceUrls.length === 0,
+      model, grounded: true };
   }
 
   async probePerplexity(query) {
@@ -472,6 +489,9 @@ class LLMMentionProber {
     if (appScraper.appScraperEnabled(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured)) {
       providers.chatgpt = q => this.probeChatGPTApp(q);
       providers.gemini = (q, queryRow) => this.probeGeminiApp(q, queryRow);
+      // AI Mode has no API-probe equivalent, so it rides the same switch and
+      // simply disappears when the switch is off.
+      providers.google_ai_mode = (q, queryRow) => this.probeGoogleAIMode(q, queryRow);
     } else {
       if (process.env.OPENAI_API_KEY) providers.chatgpt = q => this.probeOpenAI(q);
       if (process.env.GEMINI_API_KEY) providers.gemini = q => this.probeGemini(q);

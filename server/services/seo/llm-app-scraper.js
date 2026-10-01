@@ -10,6 +10,9 @@
  *            (US-level only: location_code 2840)
  *   Gemini:  POST /ai_optimization/gemini/llm_scraper/live/advanced
  *            (city location_code)
+ *   AI Mode: POST /serp/google/ai_mode/live/advanced
+ *            (city location_name; Google's AI Mode, a different feature
+ *            from the AI Overview the organic SERP carries)
  *
  * Pure request/response shaping lives here so tests feed it fixtures; the
  * prober owns the network call (dataforseo.request) and the env switch.
@@ -17,6 +20,7 @@
 
 const CHATGPT_PATH = '/ai_optimization/chat_gpt/llm_scraper/live/advanced';
 const GEMINI_PATH = '/ai_optimization/gemini/llm_scraper/live/advanced';
+const AI_MODE_PATH = '/serp/google/ai_mode/live/advanced';
 const US_LOCATION_CODE = 2840;
 
 // DataForSEO Gemini llm_scraper location codes (its /locations listing).
@@ -30,13 +34,31 @@ const GEMINI_CITY_LOCATIONS = {
 };
 const DEFAULT_GEMINI_LOCATION = GEMINI_CITY_LOCATIONS.sarasota;
 
-/** City on the managed query row, else a city named in the question, else Sarasota. */
-function geminiLocationCode(city, query) {
+// The city on the managed query row, else a city named in the question, else
+// Sarasota. One rule for every engine that takes a city.
+function resolveCity(city, query) {
   const wanted = String(city || '').trim().toLowerCase();
-  if (GEMINI_CITY_LOCATIONS[wanted]) return GEMINI_CITY_LOCATIONS[wanted];
+  if (GEMINI_CITY_LOCATIONS[wanted]) return wanted;
   const text = String(query || '').toLowerCase();
-  const named = Object.keys(GEMINI_CITY_LOCATIONS).find(name => text.includes(name));
-  return named ? GEMINI_CITY_LOCATIONS[named] : DEFAULT_GEMINI_LOCATION;
+  return Object.keys(GEMINI_CITY_LOCATIONS).find(name => text.includes(name)) || 'sarasota';
+}
+
+function geminiLocationCode(city, query) {
+  return GEMINI_CITY_LOCATIONS[resolveCity(city, query)];
+}
+
+// AI Mode's SERP location. DataForSEO has no named location for Parrish (the
+// 2026-09-30 check got a location error on it), but accepts its coordinate,
+// so Parrish rides a coordinate; every other city is a named location.
+const AI_MODE_CITY_NAMES = {
+  sarasota: 'Sarasota', bradenton: 'Bradenton', venice: 'Venice', 'lakewood ranch': 'Lakewood Ranch',
+};
+const PARRISH_COORDINATE = '27.5870,-82.4248,10';
+
+function aiModeLocation(city, query) {
+  const key = resolveCity(city, query);
+  if (key === 'parrish') return { location_coordinate: PARRISH_COORDINATE };
+  return { location_name: `${AI_MODE_CITY_NAMES[key]},Florida,United States` };
 }
 
 /**
@@ -121,6 +143,10 @@ function parseGeminiScraper(data) {
   };
 }
 
+function aiModeRequestBody(query, city) {
+  return [{ keyword: query, language_code: 'en', ...aiModeLocation(city, query) }];
+}
+
 function chatGPTRequestBody(query) {
   return [{ keyword: query, location_code: US_LOCATION_CODE, language_code: 'en' }];
 }
@@ -130,7 +156,7 @@ function geminiRequestBody(query, city) {
 }
 
 module.exports = {
-  CHATGPT_PATH, GEMINI_PATH, US_LOCATION_CODE, GEMINI_CITY_LOCATIONS, DEFAULT_GEMINI_LOCATION,
-  geminiLocationCode, appScraperEnabled, parseChatGPTScraper, parseGeminiScraper,
-  chatGPTRequestBody, geminiRequestBody,
+  CHATGPT_PATH, GEMINI_PATH, AI_MODE_PATH, US_LOCATION_CODE, GEMINI_CITY_LOCATIONS, DEFAULT_GEMINI_LOCATION,
+  geminiLocationCode, aiModeLocation, appScraperEnabled, parseChatGPTScraper, parseGeminiScraper,
+  chatGPTRequestBody, geminiRequestBody, aiModeRequestBody,
 };
