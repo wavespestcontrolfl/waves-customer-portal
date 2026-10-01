@@ -2969,25 +2969,24 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     if (!smsConsentExplicit || customer.service_contacts_consent_at) return null;
     const phone10 = last10(contact.phone);
     const slotPhones = SERVICE_CONTACT_SLOTS.map((s) => last10(customer[s.phone])).filter(Boolean);
-    if (!slotPhones.length) return null;
-    if (slotPhones.some((p) => p !== phone10)) {
-      if (!slotPhones.includes(phone10)) return null;
-      // Stamp withheld (another unconsented slot phone) — but this phone IS
-      // consented and already filed, so claim its opt-in now: a later portal
-      // attestation of the row must not find it rowless.
-      if (typeof beforeStamp === 'function') await beforeStamp();
-      return 'withheld';
-    }
-    // Same cross-customer guard as the fresh write (pre-push codex P1): a
-    // slot phone that is ANOTHER customer's primary number must never be
-    // upgraded into a texting target here — the office adjudicates the
-    // collision via its own review flag instead.
+    if (!slotPhones.length || !slotPhones.includes(phone10)) return null;
+    // Same cross-customer guard as the fresh write (pre-push codex P1), and
+    // BEFORE any opt-in claim: a slot phone that is ANOTHER customer's primary
+    // number must never be upgraded into a texting target nor asked to opt in
+    // here — the office adjudicates the collision via its own review flag.
     const otherOwner = await db('customers')
       .whereNull('deleted_at')
       .whereNot('id', customerId)
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone10])
       .first('id');
     if (otherOwner) return 'other_customer';
+    if (slotPhones.some((p) => p !== phone10)) {
+      // Stamp withheld (another unconsented slot phone) — but this phone IS
+      // consented and already filed, so claim its opt-in now: a later portal
+      // attestation of the row must not find it rowless.
+      if (typeof beforeStamp === 'function') await beforeStamp();
+      return 'withheld';
+    }
     let upgrade = db('customers').where({ id: customerId }).whereNull('service_contacts_consent_at');
     for (const s of SERVICE_CONTACT_SLOTS) {
       upgrade = upgrade.whereRaw('?? IS NOT DISTINCT FROM ?', [s.phone, customer[s.phone] ?? null]);
@@ -13348,7 +13347,8 @@ const CallRecordingProcessor = {
               requested_at: new Date(),
             }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
           }
-          logger.warn(`[call-proc] secondary contact persist aborted before stamp for ${maskSid(callSid)}: ${persistErr.message}`);
+          // Token only — never the raw DB/driver message (house PII-in-logs rule).
+          logger.warn(`[call-proc] secondary contact persist aborted before stamp for ${maskSid(callSid)}: ${safeErrorToken(persistErr)}`);
           continue;
         }
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);

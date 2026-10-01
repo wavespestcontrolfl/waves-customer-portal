@@ -208,6 +208,11 @@ function sameV2Person(a, b) {
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
   const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const nameOf = (c) => norm(c.name_full) || norm([c.first_name, c.last_name].filter(Boolean).join(' '));
+  // CONFLICTS veto first (pre-push codex P1): two shapes that both state a
+  // phone or an email and DISAGREE are different people even when the names
+  // coincide ("Sample Spouse" with two different numbers never shares).
+  if (a.phone_e164 && b.phone_e164 && last10(a.phone_e164) !== last10(b.phone_e164)) return false;
+  if (a.email && b.email && norm(a.email) !== norm(b.email)) return false;
   if (a.phone_e164 && b.phone_e164 && last10(a.phone_e164) === last10(b.phone_e164)) return true;
   if (a.email && b.email && norm(a.email) === norm(b.email)) return true;
   const an = nameOf(a); const bn = nameOf(b);

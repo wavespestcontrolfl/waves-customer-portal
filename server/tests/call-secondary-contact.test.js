@@ -1460,6 +1460,13 @@ describe('singleton / entry-0 evidence sharing requires the same person', () => 
     expect(mapMany([spouse], singletonEv, lender)[0].on_site_quote).toBeNull();
   });
 
+  test('conflicting phone or email vetoes sharing even when the full name matches (pre-push codex P1)', () => {
+    expect(sameV2Person(spouse, { ...spouse, phone_e164: '+15550100777' })).toBe(false);
+    expect(sameV2Person({ ...spouse, email: 'a@example.com' }, { ...spouse, phone_e164: null, email: 'b@example.com' })).toBe(false);
+    const single = mapOne({ ...spouse, phone_e164: '+15550100777' }, { evidence, counterpart: spouse });
+    expect(single.on_site_quote).toBeNull();
+  });
+
   test('same person (phone / email / full name): quotes are shared both ways', () => {
     expect(sameV2Person(spouse, { ...lender, phone_e164: spouse.phone_e164 })).toBe(true);
     expect(sameV2Person({ ...spouse, phone_e164: null, email: 'a@example.com' }, { ...lender, email: 'A@example.com' })).toBe(true);
@@ -1498,6 +1505,23 @@ describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => 
     expect(res).toBe('written');
     expect(called).toBe(1);
     expect(state.updates.some((u) => u.service_contacts_consent_at)).toBe(false);
+  });
+
+  test('withheld-on-record path: the cross-customer guard runs BEFORE the hook (no claim for another customer\'s number)', async () => {
+    let called = 0;
+    statefulDb({ ...emptyRow, service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123', service_contact2_name: 'Other Lender', service_contact2_phone: '+15550100777' });
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = base(table);
+      if (table === 'customers') {
+        const origFirst = b.first;
+        b.first = jest.fn(async (...a) => (b.whereRaw.mock.calls.length ? { id: 'cust-2' } : origFirst(...a)));
+      }
+      return b;
+    });
+    const res = await persistCallSecondaryContact('cust-1', spouse, { ...onSite, beforeStamp: async () => { called += 1; } });
+    expect(res).toBe('skipped_phone_belongs_to_other_customer');
+    expect(called).toBe(0);
   });
 
   test('phone-on-record with the upgrade withheld still runs the hook', async () => {
