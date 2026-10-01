@@ -24,6 +24,7 @@ function providerOf(id) {
   if (id.startsWith('claude')) return 'anthropic';
   if (id.startsWith('gpt') || id.startsWith('text-embedding') || /^o\d/.test(id)) return 'openai';
   if (id.startsWith('gemini') || id.startsWith('veo')) return 'gemini';
+  if (id.startsWith('jev')) return 'typesafe';
   if (id === 'sonar' || id.startsWith('sonar')) return 'perplexity';
   return 'unknown';
 }
@@ -63,6 +64,11 @@ const SELECTORS = [
   // the same thinking floor deep.js does and reads past thinking blocks and
   // refusals, so the Opus 5.5 default and the models like it are pickable.
   { key: 'NEWSLETTER', env: 'MODEL_NEWSLETTER', description: 'Newsletter writer + event curation scoring (owner ruling 2026-09-27: Opus 5.5, effort max)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  // lock: the picker's discovery/probing (model-discovery.js) speaks only
+  // Anthropic / OpenAI / Gemini text+vision, and Jev is a decision-only model
+  // with one pinned catalog version, so the row is read-only here: moving it
+  // is the env change below after a replay on the new pinned version.
+  { key: 'TYPESAFE_JEV', env: 'MODEL_TYPESAFE_JEV', description: 'Typed decisions (TypeSafe Jev, pinned; dark behind GATE_TYPED_DECISIONS)', accepts: { providers: ['typesafe'], cap: 'decision' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'decision-only model; pin a new jev-N.N.N via MODEL_TYPESAFE_JEV after a replay, no picker discovery' } },
   // deep: true — same rationale as NEWSLETTER above: its only call site
   // (plant-engine.js's runReferee, ROUTES.plantIdReferee) reaches the model
   // through llm/call.js#dispatch, which already floors max_tokens for
@@ -116,6 +122,7 @@ const ROUTE_SELECTOR = {
   smsToneRewrite: 'SMS_SONNET',
   plantIdReferee: 'PLANT_ID_REFEREE',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
+  typedDecision: 'TYPESAFE_JEV',
 };
 const POLICY_SELECTOR = {
   report: { primary: 'OPENAI_REPORT_WRITER', fallback: 'FLAGSHIP' },
@@ -379,6 +386,7 @@ const LANES = [
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
   // not a fan-out: Gemini live, then the prior Gemini model, then Claude
   // VISION only when both Gemini rungs miss.
+  L('typed_decisions', 'Typed yes/no/choice decisions (shadow)', 'typed-decisions/jev.js', 'fastText', R('typedDecision'), null, { inbound: true, note: 'GATE_TYPED_DECISIONS dark' }),
   L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
   // The gated name tie-break (owner ruling 2026-09-29): Sol re-reads an unsure
@@ -608,6 +616,9 @@ const LANE_AREA = {
   contact_pass: 'calls',
   call_sentiment: 'calls',
   call_self_audit: 'calls',
+  // Shadow typed decisions ride the nightly call self-audit (and inbound texts
+  // in PR 2); one area per lane, so it sits with the audit it is scored against.
+  typed_decisions: 'calls',
   lead_synopsis: 'calls',
   call_commitments: 'calls',
   csr_coach: 'calls',
@@ -771,6 +782,7 @@ const LANE_DESCRIBE = {
   pest_id: 'Identifies the pest in a customer photo',
   plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
   plant_id_referee: 'Breaks a tie when the two photo models name different plants (dark)',
+  typed_decisions: 'Answers fixed yes/no questions about a call or text, recorded for review only (dark)',
   lawn_assessment_referee: 'Breaks a tie when the two photo models name a different grass or lawn problem (dark)',
   lawn_assess: 'Assesses lawn health from a customer photo',
   lawn_visit_assessment: 'Assesses all lawn visit photos for technician review',
