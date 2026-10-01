@@ -43,7 +43,7 @@ const MAX_BATCH_TOOL_CALLS = 5;
 const EMBED_TIMEOUT_MS = 8000;
 const CHUNK_FETCH_LIMIT = 100;
 const MIN_VECTOR_SIMILARITY = 0.30;
-const KNOWN_SOURCES = ['wiki', 'kb', 'service', 'protocol', 'lawn_module', 'jurisdiction', 'product_label', 'prep_guide', 'ops_rule', 'resolution'];
+const KNOWN_SOURCES = ['wiki', 'kb', 'service', 'protocol', 'lawn_module', 'jurisdiction', 'product_label', 'prep_guide', 'ops_rule', 'resolution', 'species', 'species_tech'];
 
 function mcpAuth(req, res, next) {
   if (!isEnabled('mcpReadTools')) return res.status(403).json({ error: 'mcp read tools disabled' });

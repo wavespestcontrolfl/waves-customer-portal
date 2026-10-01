@@ -290,6 +290,85 @@ function loadOpsRules() {
   return docs;
 }
 
+// ── species / species_tech: the owner-approved species catalog ─────
+// server/data/species-catalog-v1 is the fact-checked, UF/IFAS-cited store
+// that wins every species disagreement (owner ruling 2026-09-28). Two
+// sources split it by audience so a customer-facing reader can allowlist
+// `species` alone: `species` carries only the customer copy (traits, what
+// it means, verdict, safety, season, look-alikes, citations);
+// `species_tech` carries tech_notes (products, methods) for staff readers.
+// Approved entries only — isApproved() re-checks the approval hash, so a
+// draft or an entry edited after approval never reaches an agent.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function monthList(months) {
+  const valid = [...new Set((Array.isArray(months) ? months : []).filter((m) => Number.isInteger(m) && m >= 1 && m <= 12))];
+  if (valid.length === 12) return 'year-round';
+  return valid.sort((a, b) => a - b).map((m) => MONTHS[m - 1]).join(', ');
+}
+
+function approvedSpeciesEntries() {
+  const catalog = require('../species-catalog');
+  const { isApproved } = require('../species-catalog-approval');
+  return catalog.listEntries().filter(isApproved);
+}
+
+const speciesTitle = (e) => (e.scientific_name ? `${e.common_name} (${e.scientific_name})` : e.common_name);
+
+function speciesMetadata(e) {
+  return { slug: e.slug, kind: e.kind, group: e.group, verdict: e.verdict || null, sources: Array.isArray(e.sources) ? e.sources : [] };
+}
+
+function renderSpeciesCustomer(e) {
+  const catalog = require('../species-catalog');
+  const names = [...new Set([...(e.aliases || []), ...(e.aka || [])].map(clean).filter(Boolean))];
+  const flags = Object.entries(e.safety || {}).filter(([, v]) => v === true).map(([k]) => k.replace(/_/g, ' '));
+  const lookAlikes = (e.look_alikes || [])
+    .map((l) => {
+      const other = catalog.getEntry(l.slug);
+      return l.difference ? `${other ? other.common_name : l.slug}: ${l.difference}` : '';
+    })
+    .filter(Boolean);
+  const service = e.service && e.service.label
+    ? `${e.service.label}${e.service.inspection_first ? ' (inspection first)' : ''}`
+    : '';
+  return joinParts([
+    names.length ? `Also called: ${names.join(', ')}` : '',
+    e.site_category ? `Category: ${e.site_category}` : '',
+    (e.traits || []).length ? `How to recognize it: ${e.traits.join('; ')}` : '',
+    e.copy && e.copy.what_it_means ? `What it means: ${e.copy.what_it_means}` : '',
+    e.copy && e.copy.fact ? `Fact: ${e.copy.fact}` : '',
+    e.verdict ? `Verdict: ${e.verdict}${e.urgency ? ` (urgency ${e.urgency})` : ''}` : '',
+    e.safety_line ? `Safety: ${e.safety_line}` : '',
+    flags.length ? `Safety flags: ${flags.join(', ')}` : '',
+    monthList(e.active_months) ? `Active: ${monthList(e.active_months)}${monthList(e.peak_months) ? `; peak ${monthList(e.peak_months)}` : ''}` : '',
+    service ? `Waves service: ${service}` : '',
+    lookAlikes.length ? `Look-alikes: ${lookAlikes.join(' ')}` : '',
+    (e.sources || []).length ? `Sources: ${e.sources.join(' ')}` : '',
+  ]);
+}
+
+function loadSpeciesCatalog() {
+  return approvedSpeciesEntries().map((e) => ({
+    sourceId: e.slug,
+    title: speciesTitle(e),
+    content: renderSpeciesCustomer(e),
+    metadata: { ...speciesMetadata(e), audience: 'customer' },
+    sourceUpdatedAt: null,
+  }));
+}
+
+function loadSpeciesTechNotes() {
+  return approvedSpeciesEntries()
+    .filter((e) => clean(e.tech_notes))
+    .map((e) => ({
+      sourceId: e.slug,
+      title: `${speciesTitle(e)} — tech notes`,
+      content: joinParts([`Tech notes: ${e.tech_notes}`, (e.sources || []).length ? `Sources: ${e.sources.join(' ')}` : '']),
+      metadata: { ...speciesMetadata(e), audience: 'staff' },
+      sourceUpdatedAt: null,
+    }));
+}
+
 const CONNECTORS = [
   { source: 'wiki', load: loadWiki },
   { source: 'kb', load: loadKb },
@@ -302,6 +381,8 @@ const CONNECTORS = [
   { source: 'ops_rule', load: loadOpsRules },
   { source: 'resolution', load: loadResolutions },
   { source: 'call_research', load: loadCallResearch },
+  { source: 'species', load: loadSpeciesCatalog },
+  { source: 'species_tech', load: loadSpeciesTechNotes },
 ];
 
 async function loadCorpus(connector) {
