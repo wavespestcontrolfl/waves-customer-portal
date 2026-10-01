@@ -48,6 +48,7 @@ const tail10 = (phone) => {
 const isOutbound = (row) => String(row?.direction || '').startsWith('outbound');
 const lazyBooking = () => require('../call-booking-link-text');
 const { OUTCOME_SOURCES } = require('./packages');
+const { LOGGED_MOVE_SQL } = require('../../utils/reschedule-log-sql');
 
 // Every source is registered in OUTCOME_SOURCES with its one window: the fixture
 // exporter keeps only registered pairs, so an unregistered one is a code bug.
@@ -87,12 +88,14 @@ async function callContext(conn, call) {
 // A visit MOVED to a new date in [from, until], from reschedule_log. A missed
 // appointment is logged there too (workflows/missed-appointment.js, reason
 // customer_noshow) but carries no new_date: it is neither a booking nor a
-// change the customer asked for, so only rows with a new date count.
+// change the customer asked for, so only rows that really moved the slot count.
 // `existedAt`: count only moves of a visit that already existed and had not
 // yet happened at that moment (the text evidence: a later booking that is then
 // moved says nothing about what the customer's text asked).
 function movedTo(conn, customerId, from, until, { existedAt = null } = {}) {
-  const q = conn('reschedule_log as r').where('r.customer_id', customerId).whereNotNull('r.new_date')
+  // A real change of date or window (the fulfillment checker's predicate): a
+  // bulk reschedule onto the visit's own slot still writes a row.
+  const q = conn('reschedule_log as r').where('r.customer_id', customerId).whereRaw(LOGGED_MOVE_SQL('r'))
     .where('r.created_at', '>=', from).where('r.created_at', '<=', until);
   if (!existedAt) return q;
   return q.join('scheduled_services as s', 's.id', 'r.scheduled_service_id')
@@ -226,8 +229,12 @@ async function courtesyEvidence(conn, sms, at, now) {
   };
   let found = await seen(texts('outbound')) || await seen(texts('inbound'));
   if (!found) {
+    // Only a call that reached the customer: outbound calls are staff bridge
+    // calls (call-bridge.js), and bridged_at is set once the customer leg
+    // connects. A rejected create or a staff leg nobody bridged is not contact.
     found = await seen(conn('call_log').where('customer_id', sms.customer_id)
-      .whereRaw("COALESCE(direction, '') LIKE 'outbound%'").where('created_at', '>', at).where('created_at', '<=', until));
+      .whereRaw("COALESCE(direction, '') LIKE 'outbound%'").whereNotNull('bridged_at')
+      .where('created_at', '>', at).where('created_at', '<=', until));
   }
   // A later contact means the conversation went on: false is final at once.
   return settle({ source, window, found, end: at, now, foundMeans: false });

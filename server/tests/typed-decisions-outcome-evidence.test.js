@@ -2,6 +2,7 @@
 // unknown (missing linkage or window not elapsed), never a negative.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+const { LOGGED_MOVE_SQL } = require('../utils/reschedule-log-sql');
 const mockCallEndFor = jest.fn();
 const mockResolveLead = jest.fn();
 jest.mock('../services/call-booking-link-text', () => ({
@@ -92,14 +93,15 @@ describe('callEvidence', () => {
     expect(out.appointment_agreed.value).toBe(true);
   });
 
-  test('reschedule_log counts only rows with a new date (a missed appointment has none)', async () => {
+  test('reschedule_log counts only real moves (a no-show or a same-slot bulk reschedule is not one)', async () => {
     mockCallEndFor.mockReturnValue(ago(5));
     const conn = fakeConn({ first: { scheduled_services: [undefined], job_status_history: [undefined], reschedule_log: [undefined] } });
     await callEvidence(call(), { now: NOW, conn });
     await smsEvidence({ id: 'sms-1', customer_id: 'cust-1', created_at: ago(30) }, { now: NOW, conn });
     const logs = conn.log.filter((q) => q.table === 'reschedule_log');
     expect(logs.length).toBe(2);
-    for (const q of logs) expect(q.calls).toContainEqual(['whereNotNull', ['r.new_date']]);
+    // the fulfillment checker's real-move predicate: a changed date or window
+    for (const q of logs) expect(q.calls).toContainEqual(['whereRaw', [LOGGED_MOVE_SQL('r')]]);
     // the text's move must be of a visit that already existed and was upcoming
     expect(logs[1].calls).toContainEqual(['join', ['scheduled_services as s', 's.id', 'r.scheduled_service_id']]);
     expect(logs[1].calls).toContainEqual(['where', ['s.created_at', '<=', ago(30)]]);
@@ -200,6 +202,13 @@ describe('smsEvidence', () => {
     const [outbound, inbound] = conn.log.filter((q) => q.table === 'sms_log');
     expect(outbound.calls[0]).toEqual(['where', [{ customer_id: 'cust-1', direction: 'outbound', to_phone: '+15550000001', from_phone: '+15550000002' }]]);
     expect(inbound.calls[0]).toEqual(['where', [{ customer_id: 'cust-1', direction: 'inbound', from_phone: '+15550000001', to_phone: '+15550000002' }]]);
+  });
+
+  test('courtesy: an outbound call counts only once the customer leg was bridged', async () => {
+    const conn = fakeConn();
+    await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn });
+    const calls = conn.log.find((q) => q.table === 'call_log');
+    expect(calls.calls).toContainEqual(['whereNotNull', ['bridged_at']]);
   });
 
   test('courtesy: an outbound row counts only once it went out (queued/sent/delivered)', async () => {

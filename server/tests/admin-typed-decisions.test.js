@@ -16,6 +16,8 @@ jest.mock('../middleware/admin-auth', () => ({
   },
 }));
 const mockAudit = jest.fn(async () => 'audit-1');
+const mockCloseIfEmpty = jest.fn(async () => 0);
+jest.mock('../services/typed-decisions/daily-review-item', () => ({ closeIfQueueEmpty: (...a) => mockCloseIfEmpty(...a) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudit(...a) }));
 
 const express = require('express');
@@ -64,7 +66,7 @@ beforeAll(() => {
 });
 afterAll(() => new Promise((resolve) => server.close(resolve)));
 const gateBefore = process.env.GATE_TYPED_DECISIONS;
-beforeEach(() => { db.mockReset(); mockAudit.mockClear(); process.env.GATE_TYPED_DECISIONS = 'true'; });
+beforeEach(() => { db.mockReset(); mockAudit.mockClear(); mockCloseIfEmpty.mockClear(); process.env.GATE_TYPED_DECISIONS = 'true'; });
 afterAll(() => { if (gateBefore === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = gateBefore; });
 
 describe('GATE_TYPED_DECISIONS off', () => {
@@ -171,6 +173,8 @@ describe('POST /reviews/:id/label', () => {
       metadata: expect.objectContaining({ verdict, label_status: status, forced: false }),
     }));
     expect(JSON.stringify(mockAudit.mock.calls)).not.toMatch(/checked the call/);
+    // a label may finish the queue: the daily review item is closed when it does
+    expect(mockCloseIfEmpty).toHaveBeenCalledTimes(1);
   });
 
   test('refuses to re-label a confirmed row without force (409), and says which status it holds', async () => {

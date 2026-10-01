@@ -5,6 +5,9 @@ jest.mock('../models/db', () => jest.fn());
 const mockRefresh = jest.fn();
 jest.mock('../services/typed-decisions/outcome-evidence', () => ({ refreshOutcomeEvidence: (...a) => mockRefresh(...a) }));
 const mockNotify = jest.fn();
+const mockOpenKeys = jest.fn(async () => []);
+const mockCloseKeys = jest.fn(async () => 1);
+jest.mock('../services/admin-alert-episodes', () => ({ openAdminAlertKeys: (...a) => mockOpenKeys(...a), closeAdminAlertKeys: (...a) => mockCloseKeys(...a) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
 
 const { runDailyReviewItem, describeRow, LINK } = require('../services/typed-decisions/daily-review-item');
@@ -102,6 +105,19 @@ test('a notification that was not persisted is a failed run, not "raised"', asyn
   mockNotify.mockResolvedValue(null);
   const out = await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: conn({ disagreements: [review()] }) });
   expect(out).toMatchObject({ raised: false, reason: 'alert_not_persisted', disagreements: 1 });
+});
+
+test('no rows: every standing review item is closed as labeled', async () => {
+  mockOpenKeys.mockResolvedValueOnce(['typed-decisions-review:2026-09-30']);
+  const out = await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: conn({}) });
+  expect(out).toEqual({ raised: false, reason: 'no_rows' });
+  expect(mockCloseKeys).toHaveBeenCalledWith(expect.anything(), ['typed-decisions-review:2026-09-30'], 'reviews_labeled', expect.objectContaining({ resolution: 'All queued AI decisions are labeled' }));
+});
+
+test('raising today\'s item closes earlier days\' items, never today\'s', async () => {
+  mockOpenKeys.mockResolvedValueOnce(['typed-decisions-review:2026-09-30', 'typed-decisions-review:2026-10-01']);
+  await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: conn({ disagreements: [review()] }) });
+  expect(mockCloseKeys).toHaveBeenCalledWith(expect.anything(), ['typed-decisions-review:2026-09-30'], 'superseded', expect.anything());
 });
 
 test('the dedupe key is per ET day, so each day raises its own item', async () => {

@@ -19,6 +19,8 @@ const { refreshOutcomeEvidence } = require('./outcome-evidence');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const CATEGORY = 'typed_decisions';
+const KEY_PREFIX = 'typed-decisions-review:';
+const SAMPLED = ['disagreement', 'random_audit'];
 // The Typed tab of the Agents hub (client/src/pages/admin/TypedDecisionsReviewPage.jsx).
 const LINK = '/admin/agents?tab=typed';
 const MAX_DISAGREEMENTS = 8;
@@ -64,6 +66,25 @@ function windowStart(now) {
   return parseETDateTime(`${etDateString(addETDays(now, -REVIEW_WINDOW_DAYS))}T00:00:00`);
 }
 
+// Close standing review items (docs/admin-notifications.md: the emitter clears
+// completed work). `keep` is today's key when a fresh item was just raised.
+async function closeReviewItems(conn, now, reason, keep = null) {
+  const episodes = require('../admin-alert-episodes');
+  const keys = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((k) => k !== keep);
+  if (!keys.length) return 0;
+  return Number(await episodes.closeAdminAlertKeys(conn, keys, reason, { now, resolution: reason === 'reviews_labeled' ? 'All queued AI decisions are labeled' : 'Replaced by a newer review item' })) || 0;
+}
+
+// After a label: when nothing sampled is still waiting in the review window,
+// the standing item is done (doneWhen reviews_labeled).
+async function closeIfQueueEmpty({ now = new Date(), conn = db } = {}) {
+  const waiting = await conn('decision_reviews')
+    .where({ label_status: 'unreviewed' }).whereIn('sampled_for', SAMPLED)
+    .where('created_at', '>=', windowStart(now)).first('id');
+  if (waiting) return 0;
+  return closeReviewItems(conn, now, 'reviews_labeled');
+}
+
 async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
   if (!typedDecisionsLive()) return { raised: false, reason: 'gate_off' };
   try {
@@ -80,7 +101,10 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
   const disagreements = await pick('disagreement', MAX_DISAGREEMENTS);
   const spotChecks = await pick('random_audit', MAX_SPOT_CHECKS);
   const total = disagreements.length + spotChecks.length;
-  if (!total) return { raised: false, reason: 'no_rows' };
+  if (!total) {
+    await closeReviewItems(conn, now, 'reviews_labeled').catch((err) => logger.warn(`[typed-decisions] review item close failed: ${err.message}`));
+    return { raised: false, reason: 'no_rows' };
+  }
 
   const day = etDateString(now);
   const detail = [
@@ -101,7 +125,7 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
     who: 'person',
   }, {
     detail,
-    dedupeKey: `typed-decisions-review:${day}`,
+    dedupeKey: `${KEY_PREFIX}${day}`,
     refreshOnDedupe: true,
     metadata: { lane: 'typed_decisions', disagreements: disagreements.length, spotChecks: spotChecks.length },
   });
@@ -112,7 +136,9 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
     logger.warn('[typed-decisions] daily review item was not persisted; the rows stay queued for the next run');
     return { raised: false, reason: 'alert_not_persisted', disagreements: disagreements.length, spotChecks: spotChecks.length };
   }
-  return { raised: true, disagreements: disagreements.length, spotChecks: spotChecks.length, dedupeKey: `typed-decisions-review:${day}`, alert };
+  // Today's item lists everything still waiting; earlier days' items are done.
+  await closeReviewItems(conn, now, 'superseded', `${KEY_PREFIX}${day}`).catch((err) => logger.warn(`[typed-decisions] review item close failed: ${err.message}`));
+  return { raised: true, disagreements: disagreements.length, spotChecks: spotChecks.length, dedupeKey: `${KEY_PREFIX}${day}`, alert };
 }
 
-module.exports = { runDailyReviewItem, describeRow, CATEGORY, LINK, REVIEW_WINDOW_DAYS };
+module.exports = { runDailyReviewItem, closeIfQueueEmpty, describeRow, CATEGORY, LINK, REVIEW_WINDOW_DAYS, KEY_PREFIX };
