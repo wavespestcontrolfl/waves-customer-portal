@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 // the LIVE payer verdict (services/invoice-payer-ownership -> services/payer.resolveForInvoice), Codex round-41 P1
 const mockResolve = jest.fn();
-jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolve(...a) }));
+jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolve(...a), scheduledServicesHasSelfPay: async () => true }));
 beforeEach(() => { mockResolve.mockReset(); mockResolve.mockResolvedValue({ payerId: null }); });
 // The two invoices reads of services/payer-linkage.loadLivePayerLinkage: 1st = stamped payer invoices, 2nd = the remaining
 // (payer_id NULL) invoices the live resolver judges.
@@ -23,6 +23,19 @@ function invoicesChains({ payerInvoices = [], linkageFails = false, liveInvoices
     };
     return inv;
   };
+}
+
+// The batched candidate-payer reads (invoice-payer-ownership byCandidatePayer, Codex round-47 P2): no customer default payer; the
+// scheduled service svc-ap bills payer-1 (the same picture the resolver mock gives).
+function routeTables(invoices) {
+  return jest.fn((table) => {
+    if (table === 'customers') return { where: () => ({ first: async () => ({ payer_id: null }) }) };
+    if (table === 'scheduled_services') {
+      const q = { where: () => q, whereIn: () => q, select: async () => [{ id: 'svc-ap', payer_id: 'payer-1' }] };
+      return q;
+    }
+    return invoices();
+  });
 }
 
 describe('Codex round-12 P0: the aggregator\'s Recent payments read excludes payer-owned rows in SQL too', () => {
@@ -41,7 +54,7 @@ describe('hasInFlightMoney', () => {
   // dbh: the shared payer-linkage lookup (invoices query chain) + two raw reads (candidate payments, processing invoice)
   function flightDb({ candidates = [], invoiceRows = [], payerInvoices = [], linkageFails = false, rawThrows = false, liveInvoices = [] } = {}) {
     const invoices = invoicesChains({ payerInvoices, linkageFails, liveInvoices });
-    const dbh = jest.fn(() => invoices());
+    const dbh = routeTables(invoices);
     dbh.raw = jest.fn(async (sql) => {
       if (rawThrows) throw new Error('db down');
       return { rows: sql === IN_FLIGHT_PAYMENTS_SQL ? candidates : invoiceRows };
@@ -129,12 +142,14 @@ describe('live payer ownership (round-41)', () => {
   });
   test('hasInFlightMoney: unverifiable live ownership => null (the aggregator reads it as in flight)', async () => {
     mockResolve.mockRejectedValue(new Error('resolver down'));
-    expect(await hasInFlightMoney('c1', flightFor({ liveInvoices: [OWN] }))).toBeNull();
+    // (a service with NO candidate payer is self-pay without a resolver lookup - the batched reads decide it; one WITH a candidate
+    // payer still asks the resolver, and its failure is unknown)
+    expect(await hasInFlightMoney('c1', flightFor({ liveInvoices: [OWN, LIVE_AP] }))).toBeNull();
   });
 
   function flightFor({ candidates = [], invoiceRows = [], liveInvoices = [] }) {
     const invoices = invoicesChains({ liveInvoices });
-    const dbh = jest.fn(() => invoices());
+    const dbh = routeTables(invoices);
     dbh.raw = jest.fn(async (sql) => ({ rows: sql === IN_FLIGHT_PAYMENTS_SQL ? candidates : invoiceRows }));
     return dbh;
   }

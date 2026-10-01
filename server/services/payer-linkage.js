@@ -78,6 +78,8 @@ async function loadPayerLinkage(customerId, dbh = db) {
 // resolver named (payer_id NULL, not stamped), so SQL can drop their payments BEFORE a row cap.
 // Codex round-43 P1: the scan is BOUNDED. At most LIVE_SCAN_MAX_INVOICES unstamped invoices are read (newest first) and at most
 // LIVE_SCAN_MAX_RESOLUTIONS live resolver lookups are made; an account with more is UNVERIFIABLE (`failed`, callers fail closed).
+// Codex round-47 P2: lookups are memoized per CANDIDATE PAYER (byCandidatePayer), not per visit, so a long monthly history costs two
+// batched reads plus one lookup per distinct payer - the cap now bounds distinct payers, which no ordinary account approaches.
 const LIVE_SCAN_MAX_INVOICES = 120;
 const LIVE_SCAN_MAX_RESOLUTIONS = 30;
 async function loadLivePayerLinkage(customerId, dbh = db) {
@@ -99,7 +101,7 @@ async function loadLivePayerLinkage(customerId, dbh = db) {
   if (failed) return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
   let verdict;
   try {
-    verdict = await require('./invoice-payer-ownership').liveInvoiceOwnership(customerId, rows, dbh, { maxResolutions: LIVE_SCAN_MAX_RESOLUTIONS });
+    verdict = await require('./invoice-payer-ownership').liveInvoiceOwnership(customerId, rows, dbh, { maxResolutions: LIVE_SCAN_MAX_RESOLUTIONS, byCandidatePayer: true });
   } catch {
     return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
   }

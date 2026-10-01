@@ -45,28 +45,18 @@ const dueCentsOf = (inv) => Math.round(Number(inv.amountDue) * 100);
 // every invoice-scoped amount the customer named is THIS invoice's amount due (Codex round-39 P2)
 const namedAmountsAllMatch = (named, inv) => named.every((a) => a === dueCentsOf(inv));
 
-function resolveZelleTargetInvoice(billing, inboundMessage) {
-  const open = Array.isArray(billing?.openInvoices) && billing.openInvoices.length
-    ? billing.openInvoices
-    : (billing?.openInvoice?.id ? [billing.openInvoice] : []);
-  // An own partially_paid invoice with an amount due is open to the customer (the pay page collects it and may show Zelle for it), but
-  // its amount due is NOT knowable here: the paid portions live in payments, not in the invoice row. It is therefore never a target,
-  // and its existence means "no open invoice" can never be concluded: the target is unresolved (abstain / ask which invoice), so a
-  // denial cannot stand on its absence and an offer cannot be grounded on a figure that is not the invoice's.
-  const partialDue = billing?.hasUncountedPartialDue === true;
-  if (open.length === 0) return { invoiceId: null, reason: partialDue ? 'partially_paid_invoice' : 'no_open_invoice' };
+// Codex round-47 P2: the resolver runs in separate PHASES (number -> lone invoice -> amount), each a small function returning a
+// verdict or null (= "this phase does not decide"), so an eligibility change touches one phase without bypassing another's checks.
 
-  // Explicit references are parsed FIRST — even with a single open invoice, a message that names a
-  // DIFFERENT (or already settled) invoice is not about the open one (Codex round-20 P1).
-  const named = invoiceNumbersNamed(inboundMessage);
-  const namesNumber = named.full.length > 0 || named.tail.length > 0;
-  const namedAmounts = invoiceAmountsNamed(inboundMessage);
-  // Codex round-36 P1: EVERY explicit reference is resolved on its own against the open list and they must all land on the
-  // SAME single open invoice — a second (or third) number that is not open, ambiguous, or a different invoice makes the
-  // target unresolved (abstain), never "the one that happened to match". A tail that is just the tail of a named full
-  // number is the same reference.
+// The open list: every own open invoice, else the newest (older context shape).
+const openInvoicesOf = (billing) => (Array.isArray(billing?.openInvoices) && billing.openInvoices.length
+  ? billing.openInvoices
+  : (billing?.openInvoice?.id ? [billing.openInvoice] : []));
+
+// One test per explicit invoice-number reference. A tail that is just the tail of a named full number is the same reference.
+function numberReferenceTests(named, billing) {
   const fullTailSet = new Set(named.full.map((f) => stripZeros(f.split('-').pop())));
-  const refs = [
+  return [
     ...named.full.map((f) => (inv) => String(inv.invoiceNumber || '').toUpperCase() === f),
     // Codex round-37 P2: when the open list was CUT, a bare tail ("#0123") could match the wrong invoice (same tail, another
     // year, one the list dropped) — it never resolves; only a FULL invoice number does.
@@ -76,67 +66,79 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
       return !!num && stripZeros(t) === stripZeros(num.split('-').pop());
     }),
   ];
-  let byNumber = [];
+}
+
+// PHASE 1 - invoice numbers. Explicit references are parsed FIRST: even with a single open invoice, a message that names a
+// DIFFERENT (or already settled) invoice is not about the open one (Codex round-20 P1). Codex round-36 P1: EVERY reference is
+// resolved on its own and they must all land on the SAME single open invoice - a second number that is not open, ambiguous,
+// or a different invoice leaves the target unresolved (abstain), never "the one that happened to match".
+function resolveByNumber(open, billing, named, namedAmounts) {
+  if (!(named.full.length > 0 || named.tail.length > 0)) return null;
+  const resolved = new Map();
   let missing = false;
   let ambiguous = false;
-  if (namesNumber) {
-    const resolved = new Map();
-    for (const matches of refs.map((test) => open.filter(test))) {
-      if (matches.length === 0) missing = true;
-      else if (matches.length > 1) ambiguous = true;
-      else resolved.set(String(matches[0].id), matches[0]);
-    }
-    byNumber = [...resolved.values()];
-    if (!missing && !ambiguous && byNumber.length > 1) return { invoiceId: null, reason: 'reference_conflict' }; // different invoices named
+  for (const matches of numberReferenceTests(named, billing).map((test) => open.filter(test))) {
+    if (matches.length === 0) missing = true;
+    else if (matches.length > 1) ambiguous = true;
+    else resolved.set(String(matches[0].id), matches[0]);
   }
+  const byNumber = [...resolved.values()];
+  if (!missing && !ambiguous && byNumber.length > 1) return { invoiceId: null, reason: 'reference_conflict' }; // different invoices named
   // the open list was CUT (more open invoices than the context lists): absence from it proves nothing — do not declare
   // a conflict, treat the target as unresolved (Codex round-28 P2)
-  if (namesNumber && missing && billing?.openInvoicesTruncated) return { invoiceId: null, reason: 'open_list_truncated' };
-  if (namesNumber && missing) return { invoiceId: null, reason: 'named_invoice_not_open' };
-  if (namesNumber && ambiguous) return { invoiceId: null, reason: 'ambiguous_invoice_number' };
-  if (byNumber.length === 1) {
-    const inv = byNumber[0];
-    if (namedAmounts.length && !namedAmountsAllMatch(namedAmounts, inv)) return { invoiceId: null, reason: 'reference_conflict' };
-    return { invoiceId: inv.id, reason: 'invoice_number' };
-  }
+  if (missing) return { invoiceId: null, reason: billing?.openInvoicesTruncated ? 'open_list_truncated' : 'named_invoice_not_open' };
+  if (ambiguous) return { invoiceId: null, reason: 'ambiguous_invoice_number' };
+  if (byNumber.length !== 1) return null;
+  if (namedAmounts.length && !namedAmountsAllMatch(namedAmounts, byNumber[0])) return { invoiceId: null, reason: 'reference_conflict' };
+  return { invoiceId: byNumber[0].id, reason: 'invoice_number' };
+}
 
-  // (a lone open invoice is the target only when no partially paid invoice could be the one the customer means)
-  if (open.length === 1 && !partialDue) {
-    if (namedAmounts.length && !namedAmountsAllMatch(namedAmounts, open[0])) return { invoiceId: null, reason: 'named_amount_differs' };
-    // The shortcut skips the amount logic below, so SEVERAL distinct bare amounts ("Can I Zelle $100 or $200?") are checked here too:
-    // they are explicit alternatives, and every one must be this invoice's amount (Codex round-44 P2).
-    const bare = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
-    if (!namedAmounts.length && bare.length > 1 && bare.some((a) => a !== dueCentsOf(open[0]))) return { invoiceId: null, reason: 'ambiguous_amount' };
-    return { invoiceId: open[0].id, reason: 'single_open' };
-  }
+// PHASE 2 - the lone open invoice (only when no partially paid invoice could be the one the customer means).
+function resolveLoneOpen(inv, namedAmounts, bareAmounts) {
+  if (namedAmounts.length && !namedAmountsAllMatch(namedAmounts, inv)) return { invoiceId: null, reason: 'named_amount_differs' };
+  // SEVERAL distinct bare amounts ("Can I Zelle $100 or $200?") are explicit alternatives: every one must be this invoice's
+  // amount (Codex round-44 P2).
+  if (!namedAmounts.length && bareAmounts.length > 1 && bareAmounts.some((a) => a !== dueCentsOf(inv))) return { invoiceId: null, reason: 'ambiguous_amount' };
+  return { invoiceId: inv.id, reason: 'single_open' };
+}
 
-  // Codex round-31 P2: an amount the customer ties to an INVOICE / BILL ("my $200 invoice") identifies the target; a bare
-  // amount elsewhere in the message ("…did you receive my $100 payment?") does not. Scoped amounts win; bare amounts
-  // are the fallback ONLY when the message has no invoice-scoped amount.
-  // Codex round-43 P2: the open list was CUT, so a unique-looking amount match proves nothing (an omitted invoice may carry the
-  // same amount due): an amount-only identity NEVER resolves from a truncated list - the target stays unresolved.
-  const bareAmountsNamed = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
-  if (billing?.openInvoicesTruncated && (namedAmounts.length || bareAmountsNamed.length)) return { invoiceId: null, reason: 'open_list_truncated' };
+// The open invoices whose amount due is one of `amounts`: exactly one resolves; several are ambiguous; none = `noneReason`.
+function uniqueByAmount(open, amounts, noneReason) {
+  const hits = open.filter((inv) => amounts.includes(dueCentsOf(inv)));
+  if (hits.length === 1) return { invoiceId: hits[0].id, reason: 'unique_amount' };
+  if (hits.length > 1) return { invoiceId: null, reason: 'ambiguous_amount' };
+  return noneReason ? { invoiceId: null, reason: noneReason } : null;
+}
+const everyAmountOpen = (open, amounts) => amounts.every((a) => open.some((inv) => dueCentsOf(inv) === a));
+
+// PHASE 3 - amounts. Codex round-31 P2: an amount the customer ties to an INVOICE / BILL ("my $200 invoice") identifies the
+// target; a bare amount elsewhere ("...did you receive my $100 payment?") is the fallback ONLY when no invoice-scoped amount
+// was named. Codex round-43 P2: from a CUT open list an amount-only identity never resolves (an omitted invoice may carry the
+// same amount due). Codex round-39 / round-41 P2: EVERY named figure must resolve to an open invoice - one that matches
+// nothing leaves the target unresolved, never silently dropped because a sibling matched.
+function resolveByAmount(open, billing, namedAmounts, bareAmounts) {
+  if (billing?.openInvoicesTruncated && (namedAmounts.length || bareAmounts.length)) return { invoiceId: null, reason: 'open_list_truncated' };
   if (namedAmounts.length) {
-    // Codex round-39 P2: EVERY invoice-scoped amount must resolve to an open invoice - one that matches nothing is an unresolved
-    // explicit target, never ignored because a sibling amount matched.
-    if (namedAmounts.some((a) => !open.some((inv) => dueCentsOf(inv) === a))) return { invoiceId: null, reason: 'named_amount_differs' };
-    const byScoped = open.filter((inv) => namedAmounts.includes(dueCentsOf(inv)));
-    if (byScoped.length === 1) return { invoiceId: byScoped[0].id, reason: 'unique_amount' };
-    if (byScoped.length > 1) return { invoiceId: null, reason: 'ambiguous_amount' };
-    return { invoiceId: null, reason: 'named_amount_differs' }; // the invoice-scoped amount matches no open invoice
+    if (!everyAmountOpen(open, namedAmounts)) return { invoiceId: null, reason: 'named_amount_differs' };
+    return uniqueByAmount(open, namedAmounts, 'named_amount_differs');
   }
-  const amounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
-  // Codex round-41 P2: SEVERAL distinct bare amounts ("Can I Zelle $100 or $200?") are several explicit alternatives — the same
-  // "every named figure resolves" rule as the invoice-scoped amounts above: one that matches no open invoice leaves the target
-  // unresolved (abstain), never silently dropped because a sibling happened to match.
-  if (amounts.length > 1 && amounts.some((a) => !open.some((inv) => dueCentsOf(inv) === a))) return { invoiceId: null, reason: 'ambiguous_amount' };
-  if (amounts.length) {
-    const byAmount = open.filter((inv) => amounts.includes(Math.round(Number(inv.amountDue) * 100)));
-    if (byAmount.length === 1) return { invoiceId: byAmount[0].id, reason: 'unique_amount' };
-    if (byAmount.length > 1) return { invoiceId: null, reason: 'ambiguous_amount' };
-  }
-  return { invoiceId: null, reason: 'multiple_open_unreferenced' };
+  if (bareAmounts.length > 1 && !everyAmountOpen(open, bareAmounts)) return { invoiceId: null, reason: 'ambiguous_amount' };
+  return (bareAmounts.length && uniqueByAmount(open, bareAmounts, null)) || { invoiceId: null, reason: 'multiple_open_unreferenced' };
+}
+
+function resolveZelleTargetInvoice(billing, inboundMessage) {
+  const open = openInvoicesOf(billing);
+  // An own partially_paid invoice with an amount due is open to the customer (the pay page collects it and may show Zelle for it), but
+  // its amount due is NOT knowable here: the paid portions live in payments, not in the invoice row. It is therefore never a target,
+  // and its existence means "no open invoice" can never be concluded: the target is unresolved (abstain / ask which invoice), so a
+  // denial cannot stand on its absence and an offer cannot be grounded on a figure that is not the invoice's.
+  const partialDue = billing?.hasUncountedPartialDue === true;
+  if (open.length === 0) return { invoiceId: null, reason: partialDue ? 'partially_paid_invoice' : 'no_open_invoice' };
+  const namedAmounts = invoiceAmountsNamed(inboundMessage);
+  const bareAmounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
+  return resolveByNumber(open, billing, invoiceNumbersNamed(inboundMessage), namedAmounts)
+    || (open.length === 1 && !partialDue ? resolveLoneOpen(open[0], namedAmounts, bareAmounts) : null)
+    || resolveByAmount(open, billing, namedAmounts, bareAmounts);
 }
 
 // Does this text name a specific INVOICE (a number, or an amount tied to an invoice / bill)? Used to tell whether an

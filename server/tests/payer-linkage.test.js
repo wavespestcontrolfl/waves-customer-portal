@@ -102,7 +102,7 @@ describe('loadLivePayerLinkage is bounded', () => {
     const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(scan);
     liveInvoiceOwnership.mockResolvedValueOnce({ ownedIds: new Set(), unverifiable: true });
     const out = await loadLivePayerLinkage('c1', dbh);
-    expect(liveInvoiceOwnership).toHaveBeenCalledWith('c1', expect.any(Array), dbh, { maxResolutions: 30 });
+    expect(liveInvoiceOwnership).toHaveBeenCalledWith('c1', expect.any(Array), dbh, { maxResolutions: 30, byCandidatePayer: true });
     expect(out.failed).toBe(true);
   });
 

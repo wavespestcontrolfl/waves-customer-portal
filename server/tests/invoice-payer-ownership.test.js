@@ -5,7 +5,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 const mockResolve = jest.fn();
-jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolve(...a) }));
+jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolve(...a), scheduledServicesHasSelfPay: async () => true }));
 
 const { invoicePayerOwnership, liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
 
@@ -51,5 +51,44 @@ describe('liveInvoiceOwnership', () => {
   test('any unverifiable row marks the batch unverifiable', async () => {
     mockResolve.mockRejectedValue(new Error('down'));
     expect((await liveInvoiceOwnership('c1', [{ id: 'a' }])).unverifiable).toBe(true);
+  });
+});
+
+// Codex round-47 P2: a long monthly history (one scheduled service per visit) must not hit the lookup cap and lose billing
+describe('liveInvoiceOwnership byCandidatePayer', () => {
+  const fakeDb = ({ cust = { payer_id: null }, services = [], fail = false } = {}) => {
+    const dbh = jest.fn((table) => {
+      const q = { where: () => q, whereIn: () => q,
+        first: async () => { if (fail) throw new Error('down'); return table === 'customers' ? cust : undefined; },
+        select: async () => { if (fail) throw new Error('down'); return table === 'scheduled_services' ? services : []; } };
+      return q;
+    });
+    return dbh;
+  };
+  const visits = (n) => Array.from({ length: n }, (_, i) => ({ id: `i${i}`, scheduled_service_id: `ss${i}` }));
+  test('200 self-pay visits: no resolver lookups, verifiable, nothing owned', async () => {
+    const out = await liveInvoiceOwnership('c1', visits(200), fakeDb(), { maxResolutions: 30, byCandidatePayer: true });
+    expect(out).toEqual({ ownedIds: new Set(), unverifiable: false });
+    expect(mockResolve).not.toHaveBeenCalled();
+  });
+  test('a default payer on 200 visits: ONE lookup through the real resolver; a pinned self-pay visit stays the homeowner\'s', async () => {
+    mockResolve.mockResolvedValue({ payerId: 'p9' });
+    const services = [{ id: 'ss3', payer_id: null, self_pay_override: true }, { id: 'ss4', payer_id: 'p2' }];
+    mockResolve.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss4' ? 'p2' : 'p9' }));
+    const out = await liveInvoiceOwnership('c1', visits(200), fakeDb({ cust: { payer_id: 'p9' }, services }), { maxResolutions: 30, byCandidatePayer: true });
+    expect(out.unverifiable).toBe(false);
+    expect(out.ownedIds.has('i3')).toBe(false);
+    expect(out.ownedIds.has('i4')).toBe(true);
+    expect(out.ownedIds.size).toBe(199);
+    expect(mockResolve).toHaveBeenCalledTimes(2); // p9 once, p2 once
+  });
+  test('an inactive candidate payer (resolver says self-pay) owns nothing', async () => {
+    mockResolve.mockResolvedValue({ payerId: null });
+    const out = await liveInvoiceOwnership('c1', visits(50), fakeDb({ cust: { payer_id: 'gone' } }), { maxResolutions: 30, byCandidatePayer: true });
+    expect(out).toEqual({ ownedIds: new Set(), unverifiable: false });
+    expect(mockResolve).toHaveBeenCalledTimes(1);
+  });
+  test('a failed batched read is unverifiable', async () => {
+    expect((await liveInvoiceOwnership('c1', visits(3), fakeDb({ fail: true }), { byCandidatePayer: true })).unverifiable).toBe(true);
   });
 });

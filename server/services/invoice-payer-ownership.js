@@ -38,16 +38,45 @@ async function invoicePayerOwnership(inv, dbh = db) {
 // however far down the list it sits — the display cap is for the status LIST only).
 // `maxResolutions` (Codex round-43 P1): a hard cap on the number of LIVE resolver lookups one call may make (distinct scheduled
 // services). Past it the verdict is UNVERIFIABLE (fail closed) - never an unbounded serial walk of a mature account's history.
-async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Infinity, alwaysJudge = null, maxResolutions = Infinity } = {}) {
+// `byCandidatePayer` (Codex round-47 P2): for a LONG history (every visit its own scheduled service), memoize by the payer each
+// service WOULD bill instead of by service. resolveForInvoice's candidate is the service's payer_id, else - unless the visit is
+// pinned self-pay - the customer's default payer; with no candidate it is self-pay. Two batched reads give every service's candidate,
+// then the real resolver runs ONCE per distinct candidate payer (it alone decides active / inactive). A failed read => unverifiable.
+async function candidatePayerKeys(customerId, rows, dbh) {
+  const payer = require('./payer');
+  const ssIds = [...new Set(rows.filter((r) => !(r.payer_id || r.payer_statement_id) && r.scheduled_service_id).map((r) => String(r.scheduled_service_id)))];
+  const cust = await dbh('customers').where({ id: customerId }).first('payer_id');
+  const cols = ['id', 'payer_id'];
+  if (ssIds.length && await payer.scheduledServicesHasSelfPay(dbh)) cols.push('self_pay_override');
+  const services = ssIds.length ? await dbh('scheduled_services').where({ customer_id: customerId }).whereIn('id', ssIds).select(cols) : [];
+  const byId = new Map((services || []).map((ss) => [String(ss.id), ss]));
+  return (inv) => {
+    const ss = inv.scheduled_service_id ? byId.get(String(inv.scheduled_service_id)) : null;
+    const candidate = ss?.payer_id || (ss?.self_pay_override === true ? null : cust?.payer_id) || null;
+    return candidate == null ? 'self' : `payer:${candidate}`;
+  };
+}
+
+async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Infinity, alwaysJudge = null, maxResolutions = Infinity, byCandidatePayer = false } = {}) {
   const ownedIds = new Set();
   let unverifiable = false;
   let own = 0;
   let resolutions = 0;
   const memo = new Map();
+  let candidateKey = null;
+  if (byCandidatePayer) {
+    try {
+      candidateKey = await candidatePayerKeys(customerId, rows, dbh);
+    } catch (err) {
+      logger.warn(`[invoice-payer-ownership] batched payer read failed for customer ${customerId}: ${err.message}; treating as unverifiable`);
+      return { ownedIds, unverifiable: true };
+    }
+    memo.set('self', null); // no candidate payer anywhere => resolveForInvoice returns self-pay without a payer lookup
+  }
   for (const inv of rows) {
     if (own >= ownLimit && !(typeof alwaysJudge === 'function' && alwaysJudge(inv))) continue;
     const keyed = !(inv.payer_id || inv.payer_statement_id);
-    const key = keyed ? String(inv.scheduled_service_id || '') : null;
+    const key = keyed ? (candidateKey ? candidateKey(inv) : String(inv.scheduled_service_id || '')) : null;
     let verdict;
     if (keyed && memo.has(key)) verdict = memo.get(key);
     else {
