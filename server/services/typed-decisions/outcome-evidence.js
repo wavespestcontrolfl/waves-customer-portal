@@ -229,12 +229,20 @@ async function courtesyEvidence(conn, sms, at, now) {
   };
   let found = await seen(texts('outbound')) || await seen(texts('inbound'));
   if (!found) {
-    // Only a call that reached the customer: outbound calls are staff bridge
-    // calls (call-bridge.js), and bridged_at is set once the customer leg
-    // connects. A rejected create or a staff leg nobody bridged is not contact.
-    found = await seen(conn('call_log').where('customer_id', sms.customer_id)
+    // Only a call that reached the customer. Outbound calls are staff bridge
+    // calls (call-bridge.js); bridged_at is stamped when staff press 1, BEFORE
+    // the customer is dialed, so it proves nothing. The customer leg's own
+    // result is metadata.customer_leg (/outbound-dial-complete): completed
+    // with talk time = contact. A bridged call with no customer_leg record
+    // (that capture covers callback calls only) could have gone either way:
+    // the reading stays unknown rather than settling.
+    const outboundCalls = () => conn('call_log').where('customer_id', sms.customer_id)
       .whereRaw("COALESCE(direction, '') LIKE 'outbound%'").whereNotNull('bridged_at')
-      .where('created_at', '>', at).where('created_at', '<=', until));
+      .where('created_at', '>', at).where('created_at', '<=', until);
+    found = await seen(outboundCalls()
+      .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+      .whereRaw("COALESCE((metadata->'customer_leg'->>'duration_seconds')::numeric, 0) > 0"));
+    if (!found && await seen(outboundCalls().whereRaw("metadata->'customer_leg' IS NULL"))) return unknown(source, window, now);
   }
   // A later contact means the conversation went on: false is final at once.
   return settle({ source, window, found, end: at, now, foundMeans: false });

@@ -204,11 +204,16 @@ describe('smsEvidence', () => {
     expect(inbound.calls[0]).toEqual(['where', [{ customer_id: 'cust-1', direction: 'inbound', from_phone: '+15550000001', to_phone: '+15550000002' }]]);
   });
 
-  test('courtesy: an outbound call counts only once the customer leg was bridged', async () => {
+  test('courtesy: a call counts only when the customer leg completed with talk time; an unproven bridged call is unknown', async () => {
     const conn = fakeConn();
     await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn });
-    const calls = conn.log.find((q) => q.table === 'call_log');
-    expect(calls.calls).toContainEqual(['whereNotNull', ['bridged_at']]);
+    const [reached, ambiguous] = conn.log.filter((q) => q.table === 'call_log');
+    expect(reached.calls).toContainEqual(['whereRaw', ["metadata->'customer_leg'->>'status' = 'completed'"]]);
+    expect(reached.calls).toContainEqual(['whereNotNull', ['bridged_at']]);
+    expect(ambiguous.calls).toContainEqual(['whereRaw', ["metadata->'customer_leg' IS NULL"]]);
+    // a bridged call with no customer-leg record keeps it unknown, even after the window
+    const out = await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn: fakeConn({ first: { call_log: [undefined, { id: 'c-unproven' }] } }) });
+    expect(out.is_courtesy_only.value).toBeNull();
   });
 
   test('courtesy: an outbound row counts only once it went out (queued/sent/delivered)', async () => {
