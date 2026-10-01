@@ -3143,11 +3143,16 @@ was open: that same recorded 'plan' drawer snapshot, or
 `RATE_REVIEW_TERMS_VERSION`, which the `/pdf` download (either renderer) and
 the legacy page's plan-terms card write when they print the disclosure
 (idempotent; never on a frozen estimate; never fatal to the download or the
-page; written BEFORE the document or page is sent). The marker never moves
-`updated_at`, so an accept racing from another tab merges the row's current
-marker through its own `estimate_data` write and decides the stamp from the
-row under its lock, not from its pre-transaction snapshot — evidence
-persisted after that read is still honored. Plan eligibility alone never stamps: an accept from a tab that rendered
+page; made durable BEFORE either renderer runs, and before the legacy page
+is sent). The marker never moves `updated_at`, so an accept racing from
+another tab merges the row's current marker through its own `estimate_data`
+write and decides the stamp from the row under its lock, not from its
+pre-transaction snapshot — evidence persisted after that read is still
+honored. The other order — the accept lands first — turns the marker write
+into a zero-row no-op (the row is frozen): the `/pdf` download then renders
+the row as it is now (frozen, no line unless that accept stamped it) and the
+legacy page re-renders from the current row instead of sending HTML that
+shows a term the accept never recorded. Plan eligibility alone never stamps: an accept from a tab that rendered
 no rate copy (a bundle that predates the line with the gate off, the
 terms-neutral annual prepay lane with nothing downloaded) leaves the frozen
 document without the line rather than claiming a disclosure that was never

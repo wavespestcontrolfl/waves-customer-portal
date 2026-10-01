@@ -1381,7 +1381,18 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         body: JSON.stringify({ quoteToken: quoteData.quoteToken, saveCard: !!saveCard, ...consentAttestation() }),
       });
       const result = await finalRes.json().catch(() => ({}));
-      if (!finalRes.ok) throw serverReportedError(result.error || (isConsentVersionStale(result) ? CONSENT_VERSION_STALE_MESSAGE : 'Payment failed'));
+      if (!finalRes.ok) {
+        // The server's consent-stamp fence (or combined-balance drift): the
+        // PaymentIntent no longer matches this tab's session — reload to a
+        // fresh /setup (which replaces the intent on a stamp change) instead
+        // of re-quoting into the same 409 (codex #5434 r7 P2). Same contract
+        // as the /setup and /update-amount staleBalance paths.
+        if (result.staleBalance) {
+          window.location.reload();
+          return new Promise(() => {});
+        }
+        throw serverReportedError(result.error || (isConsentVersionStale(result) ? CONSENT_VERSION_STALE_MESSAGE : 'Payment failed'));
+      }
 
       if (result.requiresAction && result.clientSecret) {
         const { error: actionError, paymentIntent: actionPI } = await stripeRef.current.handleNextAction({ clientSecret: result.clientSecret });

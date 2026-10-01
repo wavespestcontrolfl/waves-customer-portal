@@ -261,14 +261,31 @@ async function documentPrintsRateReviewTerms(estimate, { billing = null } = {}) 
   });
   return proposalRateReviewTermsEligible(proposal, estimate.id, { estimate, acceptance: null });
 }
-async function recordRateReviewTermsServedByDocument(estimate, { billing = null, database = db } = {}) {
+// The /pdf route's pre-render step (GH Codex r7 P1): the evidence must be
+// durable BEFORE a document carrying the line exists. When this server
+// would print the line for the (open) row the route read, write the marker
+// first; a zero-row write means the row froze (accepted / declined) between
+// that read and this write — the accept it lost to recorded no evidence —
+// so the document is rendered from the row as it is NOW (frozen: no line
+// unless the accept stamped it) rather than from the stale open snapshot.
+// Returns the estimate row the renderer must use. Never throws.
+async function ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing = null, database = db } = {}) {
   try {
-    if (!(await documentPrintsRateReviewTerms(estimate, { billing }))) return false;
+    if (!(await documentPrintsRateReviewTerms(estimate, { billing }))) return estimate;
   } catch (err) {
     logger.warn(`[estimate-proposal] rate review document check failed for estimate ${estimate?.id || 'unknown'}: ${err.message}`);
-    return false;
+    return estimate;
   }
-  return recordRateReviewTermsServed(estimate, { database });
+  const marked = await recordRateReviewTermsServed(estimate, { database });
+  if (marked || rateReviewTermsServedIsCurrent(estimate.estimate_data)) return estimate;
+  try {
+    const fresh = await database('estimates').where({ id: estimate.id }).first();
+    if (fresh) logger.info(`[estimate-proposal] estimate ${estimate.id} froze before its rate review evidence could be written — rendering the document from the current row`);
+    return fresh || estimate;
+  } catch (err) {
+    logger.warn(`[estimate-proposal] could not re-read estimate ${estimate.id} after a zero-row evidence write: ${err.message}`);
+    return estimate;
+  }
 }
 
 // An estimate with no customer_id still links at accept through the SAME
@@ -473,7 +490,7 @@ module.exports = {
   documentPrintsRateReviewTerms,
   rateReviewTermsServedIsCurrent,
   recordRateReviewTermsServed,
-  recordRateReviewTermsServedByDocument,
+  ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,
   resolveLivePricing,
   resolveProposalBillingContext,

@@ -9137,8 +9137,17 @@ async function handleEstimateView(req, res, next) {
       // Served-disclosure evidence (pre-push Codex on #5434's merge head):
       // the page about to be sent shows the customer the annual rate review
       // item, so persist it BEFORE the response (GH Codex r5 P1) —
-      // idempotent, never fatal.
-      await require('../services/estimate-proposal-billing').recordRateReviewTermsServed(estimate);
+      // idempotent, never fatal. A zero-row write means the row froze
+      // (accepted / declined) between this handler's read and now (GH Codex
+      // r7 P1): the HTML in hand shows a term that accept never recorded, so
+      // re-render from the row as it is NOW instead of sending it (a frozen
+      // page has no plan-terms card, so this cannot loop).
+      const billingMod = require('../services/estimate-proposal-billing');
+      const marked = await billingMod.recordRateReviewTermsServed(estimate);
+      if (!marked && !billingMod.rateReviewTermsServedIsCurrent(estimate.estimate_data)) {
+        const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'price_locked_at');
+        if (fresh && billingMod.estimateIsPriceLocked(fresh)) return res.redirect(303, req.originalUrl);
+      }
     }
     sendEstimatePageHtml(res, pageHtml);
   } catch (err) { next(err); }
@@ -26735,26 +26744,33 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // EstimateProposalDocument, rendered through the headless pipeline. Any
     // failure falls through to the legacy pdfkit proposal below — the
     // download must never 500 on a browser hiccup.
-    // Served-disclosure evidence (pre-push Codex on #5434's merge head):
-    // whichever renderer serves it, a document that prints the annual rate
-    // review line for an OPEN estimate marks estimate_data.rateReviewTermsServed
-    // — the accept's frozen-document stamp keys on that marker (or the
-    // recorded drawer snapshot), never on plan eligibility alone. Written
-    // BEFORE the bytes go out (GH Codex r5 P1): an accept racing from
-    // another tab re-reads the marker under its row lock and merges it
-    // through its own estimate_data write, so evidence persisted before the
-    // response can never be lost to that accept. Never throws; a missed
-    // marker never fails the download.
-    const { recordRateReviewTermsServedByDocument, resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    // Served-disclosure evidence (pre-push Codex on #5434's merge head; GH
+    // Codex r5 + r7 P1s): a document that prints the annual rate review line
+    // for an OPEN estimate marks estimate_data.rateReviewTermsServed — the
+    // accept's frozen-document stamp keys on that marker (or the recorded
+    // drawer snapshot), never on plan eligibility alone. The marker is made
+    // durable BEFORE either renderer runs, so no PDF carrying the line can
+    // exist without it: an accept that lands after this write merges the
+    // marker through its own estimate_data write and re-reads it under its
+    // lock; an accept that landed first makes this write a zero-row no-op,
+    // and the document is then rendered from the row as it is NOW (frozen —
+    // no line unless that accept stamped it). Never throws; a missed marker
+    // never fails the download.
+    const { ensureRateReviewTermsEvidenceBeforeRender, resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    // Resolve the LIVE billing lane, exactly like the page's pricing bundle —
+    // persisted snapshot flags freeze at send time and would let this document
+    // contradict the estimate the customer is looking at.
+    const billing = await resolveProposalBillingContext(estimate);
+    const documentEstimate = await ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing });
     if (featureGates.isEnabled('estimateDocPdf')) {
       let browserDocument = null;
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
         const { normalizeProposal } = require('../services/estimate-proposal');
-        const buffer = await renderEstimateDocumentPdf(estimate);
+        const buffer = await renderEstimateDocumentPdf(documentEstimate);
         // Same filename the pdfkit generator sets, so the customer's saved
         // file is named identically whichever renderer served it.
-        const preparedFor = normalizeProposal(estimate).preparedFor || estimate.id;
+        const preparedFor = normalizeProposal(documentEstimate).preparedFor || documentEstimate.id;
         const fileName = `proposal-${String(preparedFor).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves'}.pdf`;
         browserDocument = { buffer, fileName };
       } catch (e) {
@@ -26762,7 +26778,6 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
         logger.warn(`[estimate-pdf] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${sanitizeRenderError(e)}`);
       }
       if (browserDocument) {
-        await recordRateReviewTermsServedByDocument(estimate);
         res.set('Content-Type', 'application/pdf');
         res.set('Content-Disposition', `inline; filename="${browserDocument.fileName}"`);
         return res.send(browserDocument.buffer);
@@ -26770,16 +26785,11 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
-    // Resolve the LIVE billing lane, exactly like the page's pricing bundle —
-    // persisted snapshot flags freeze at send time and would let this document
-    // contradict the estimate the customer is looking at.
-    const billing = await resolveProposalBillingContext(estimate);
-    await recordRateReviewTermsServedByDocument(estimate, { billing });
-    generateEstimateProposalPDF(estimate, res, {
+    generateEstimateProposalPDF(documentEstimate, res, {
       ...billing,
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
-      acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),
+      acceptance: await acceptanceRecordForEstimate(documentEstimate, { strict: true }),
     });
   } catch (err) { next(err); }
 });

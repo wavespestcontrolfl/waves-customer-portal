@@ -1793,6 +1793,43 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(servedOps()).toHaveLength(0);
   });
 
+  test('GET /:token/pdf: when the row freezes between the read and the evidence write, the document is rendered from the frozen row (no line, no marker)', async () => {
+    // GH Codex r7 P1: the marker must be durable BEFORE a document carrying
+    // the line exists. An accept that lands first turns the write into a
+    // zero-row no-op; the route must then render the CURRENT (frozen) row
+    // rather than the stale open snapshot it read.
+    const generate = require('../services/pdf/estimate-pdf').generateEstimateProposalPDF;
+    generate.mockClear();
+    const documentData = JSON.stringify({
+      lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+    });
+    seed({ id: 'est-pdf-race', token: 'tok-pdf-race-x0123456789', estimate_data: documentData });
+    let estimateTouches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      estimateTouches += 1;
+      // Second touch = the evidence UPDATE; the accept from another tab
+      // committed just before it.
+      if (estimateTouches === 2) {
+        const row = storedEstimate();
+        row.status = 'accepted';
+        row.price_locked_at = '2026-10-01T06:00:00.000Z';
+      }
+    };
+    const res = await fetch(`${base}/api/estimates/tok-pdf-race-x0123456789/pdf`);
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(estimateTouches).toBeGreaterThanOrEqual(3);
+    // The evidence UPDATE was issued but matched zero rows (frozen-status
+    // guards): the stored row carries no marker.
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    // The renderer received the frozen row, not the open snapshot.
+    const [renderedEstimate] = generate.mock.calls.at(-1);
+    expect(renderedEstimate.status).toBe('accepted');
+    expect(renderedEstimate.price_locked_at).toBe('2026-10-01T06:00:00.000Z');
+  });
+
   test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {
     const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
     const est = (extra = {}) => ({ id: 'e', monthly_total: 60, annual_total: 720, onetime_total: 0, ...extra });
