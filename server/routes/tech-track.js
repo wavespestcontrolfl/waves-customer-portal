@@ -233,7 +233,7 @@ async function guardAdvance(trx, req, svc) {
   const fresh = await trx('scheduled_services')
     .where({ id: svc.id })
     .forUpdate()
-    .first('technician_id', 'scheduled_date');
+    .first('technician_id', 'scheduled_date', 'source_action', 'customer_confirmed');
   if (!fresh || fresh.technician_id !== req.technicianId) {
     const e = new Error('Not assigned to this service');
     e.code = 'TECH_OWNERSHIP_LOST';
@@ -242,6 +242,16 @@ async function guardAdvance(trx, req, svc) {
   if (trackTransitions.isFutureScheduledDate(fresh.scheduled_date)) {
     const e = new Error('Rescheduled to a future date');
     e.code = 'FUTURE_SCHEDULED_DATE';
+    throw e;
+  }
+  // A street-level address hold never advances on a field tap, whatever its status: a move
+  // (SmartRebooker) leaves it 'confirmed' but still unconfirmed, and the office has not yet
+  // confirmed the address. Only an unconfirmed voice_agent row can be one, so nothing else
+  // pays for the lookup. Fails closed.
+  if (fresh.source_action === 'voice_agent' && fresh.customer_confirmed !== true
+    && await isStreetLevelHoldVisit(svc.id, trx)) {
+    const e = new Error('Street-level address hold');
+    e.code = 'STREET_LEVEL_HOLD';
     throw e;
   }
 }
@@ -1697,4 +1707,4 @@ router.post('/:id/dictation', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports.__private = { autoConfirmOutboundReviewBooking, respondToTransitionConflict };
+module.exports.__private = { autoConfirmOutboundReviewBooking, respondToTransitionConflict, guardAdvance };

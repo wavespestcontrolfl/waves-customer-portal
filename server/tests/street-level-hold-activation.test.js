@@ -179,3 +179,29 @@ describe('the admin status routes: a technician token cannot confirm or run a st
     }
   });
 });
+
+describe('tech-track: the row-locked advance guard also refuses a confirmed-but-unconfirmed hold (a moved hold)', () => {
+  const { guardAdvance } = require('../routes/tech-track').__private;
+  const run = async (visit, held) => {
+    const calls = { hold: 0, updates: [] };
+    const handle = makeHandle({ visit, held, calls });
+    let err = null;
+    try { await guardAdvance(handle, { technicianId: 'tech-1' }, { id: 'v1' }); } catch (e) { err = e; }
+    return { err, calls };
+  };
+  test('en route / on site on a moved hold (status confirmed, customer_confirmed false) is refused before any transition', async () => {
+    const { err } = await run(baseVisit({ status: 'confirmed' }), true);
+    expect(err && err.code).toBe('STREET_LEVEL_HOLD');
+  });
+  test('an activated hold, a non-hold voice row and every other source skip it (no lookup for other sources)', async () => {
+    expect((await run(baseVisit({ status: 'confirmed', customer_confirmed: true }), true)).err).toBeNull();
+    expect((await run(baseVisit({ status: 'confirmed' }), false)).err).toBeNull();
+    const other = await run(baseVisit({ source_action: 'ai_call_pipeline' }), true);
+    expect(other.err).toBeNull();
+    expect(other.calls.hold).toBe(0);
+  });
+  test('both routes call the guard inside their advance transaction', () => {
+    const s = fs.readFileSync(require.resolve('../routes/tech-track.js'), 'utf8');
+    expect(s.split('await guardAdvance(trx, req, svc);').length - 1).toBeGreaterThanOrEqual(2);
+  });
+});
