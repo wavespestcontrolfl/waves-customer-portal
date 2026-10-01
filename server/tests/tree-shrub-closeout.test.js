@@ -275,7 +275,9 @@ describe('injection record against the product label', () => {
     expect(injectionCodes(IMA_JET, {})).toEqual(['tree_shrub_injection_band_required']);
     expect(injectionCodes(IMA_JET, { labelBand: { product: 'Other', key: 'sap_feeders' } })).toEqual(['tree_shrub_injection_band_required']);
     expect(injectionCodes(IMA_JET, { labelBand: { product: IMA_JET.name, key: 'low' } })).toEqual(['tree_shrub_injection_band_required']);
-    expect(injectionCodes(IMA_JET, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' } })).toEqual([]);
+    expect(injectionCodes(IMA_JET, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' }, targetIssue: 'Aphids, scales, whiteflies and other sap feeders' })).toEqual([]);
+    // IMA-jet's group is the target pest: a typed target that disagrees is refused.
+    expect(injectionCodes(IMA_JET, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' }, targetIssue: 'Borers' })).toEqual(['tree_shrub_injection_band_mismatch']);
     // Trunk size settles PHOSPHO-jet's band: nothing to pick.
     expect(injectionCodes(PHOSPHO, {})).toEqual([]);
     // A label not read in full (IMA-jet 10) has no band table to pick from.
@@ -292,7 +294,11 @@ describe('injection record against the product label', () => {
     const PALM_JET = { id: 'pm-1', name: 'Arborjet Palm-Jet Palm Nutrition', category: 'fertilizer', default_rate: '5-30', default_unit: 'ml/palm', application_method: 'trunk_injection' };
     const band = { product: PALM_JET.name, key: 'small' };
     expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' })).toEqual([]);
-    expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Large palm (24 to 48 ft spread)' })).toEqual(['tree_shrub_injection_palm_size_mismatch']);
+    expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Large palm (24 to 48 ft spread)' })).toEqual(['tree_shrub_injection_band_mismatch']);
+  });
+
+  test('matches the label by the catalog id the form recorded, even after a rename', () => {
+    expect(injectionCodes(PHOSPHO, { product: 'PHOSPHO old name', productId: PHOSPHO.id, sizeClassOrDbh: '30 cm DBH' })).toEqual(['tree_shrub_injection_dbh_inches']);
   });
 
   test('a per-inch label needs the trunk in inches above zero', () => {

@@ -47,8 +47,8 @@ export function injectionLabelRate(product) {
   const [low, high = low] = bounds.sort((a, b) => a - b);
   const name = String(product?.name ?? "");
   const table = INJECTION_LABEL_BANDS.find((row) => row.match.test(name) && row.basis === basis) || null;
-  const { bands = null, pick = null, note = null } = table || {};
-  return { low, high, basis, bands, pick, note };
+  const { bands = null, pick = null, note = null, recordsAs = null } = table || {};
+  return { low, high, basis, bands, pick, note, recordsAs };
 }
 
 const isSizeBand = (band) => ["below", "from", "through", "above"].some((edge) => band[edge] != null);
@@ -128,6 +128,23 @@ export function injectionDoseText(rate, trunkInches, pickKey) {
   return rangeText(band.low * inches, band.high * inches);
 }
 
+// A dose this far under the band's low end is still the band's rounded-down
+// suggestion (fixedDoseText reads at most 5% under), never an under-dose.
+const UNDER_LABEL_TOLERANCE = 0.05;
+
+/**
+ * Whether a dose entered is less than the settled band's lowest dose for
+ * this tree (or one palm), allowing for the 5% the suggestion rounds down.
+ */
+export function doseUnderLabel(rate, trunkInches, amount, unit, pickKey) {
+  const band = injectionBand(rate, trunkInches, pickKey);
+  const inches = rate.basis === "palm" ? 1 : Number(trunkInches);
+  const n = Number(amount);
+  if (!band || !(inches > 0) || !(n > 0)) return false;
+  const flOz = unit === "tsp" ? n / TSP_PER_FL_OZ : n;
+  return flOz * ML_PER_FL_OZ < band.low * inches * (1 - UNDER_LABEL_TOLERANCE) * (1 - 1e-9);
+}
+
 /**
  * Whether a dose entered is more than the label allows for this tree (or one
  * palm), against the exact limit rather than the rounded range shown: the
@@ -202,7 +219,10 @@ export function trunkInchesText(sizeClassOrDbh) {
  * for the tree, the dose entered, and the saved values the form cannot read.
  */
 export function injectionRecordView(record = {}, injectionProducts = []) {
-  const chosen = injectionProducts.find((product) => product.name === record.product) || null;
+  const chosen =
+    (record.productId && injectionProducts.find((product) => product.productId && String(product.productId) === String(record.productId))) ||
+    injectionProducts.find((product) => product.name === record.product) ||
+    null;
   const rate = chosen?.rate || null;
   const pickKey = record.labelBand?.product === record.product ? record.labelBand?.key || "" : "";
   const sizeText = String(record.sizeClassOrDbh || "").trim();
@@ -222,23 +242,26 @@ export function injectionRecordView(record = {}, injectionProducts = []) {
     unreadableTrunk: rate?.basis === "inch" && sizeText && !trunkInches ? sizeText : "",
     unreadableDose: doseSaved && !dose.amount ? doseSaved : "",
     overLabel: (unit) => Boolean(rate) && doseOverLabel(rate, trunkInches, dose.amount, unit, pickKey),
+    underLabel: (unit) => Boolean(rate) && doseUnderLabel(rate, trunkInches, dose.amount, unit, pickKey),
   };
 }
 
 /**
- * The record naming another product. A dose, band, or band-set palm size
+ * The record naming another product. A dose, a band, or a field the band
+ * set (clearField: the palm size or target pest the old label's band wrote)
  * belongs to the product it was worked out for, so a new product starts
  * without them; the trunk measured stays.
  */
-export function recordForProduct(record = {}, product, { productAuto = false, palmSizeFromBand = false } = {}) {
-  if (product === record.product) return { ...record, productAuto };
+export function recordForProduct(record = {}, product, { productAuto = false, productId = null, clearField = null } = {}) {
+  if (product === record.product) return { ...record, productAuto, productId: productId ?? record.productId ?? null };
   return {
     ...record,
     product,
+    productId,
     productAuto,
     dose: "",
     labelBand: null,
-    ...(palmSizeFromBand ? { sizeClassOrDbh: "" } : {}),
+    ...(clearField ? { [clearField]: "" } : {}),
   };
 }
 
@@ -248,12 +271,15 @@ export function typedDraft(typed, saved) {
 }
 
 /**
- * The record with the band the tech picked. A palm label's band is the
- * palm's size, so it is also the record's size: never a second answer that
- * can disagree.
+ * The record with the band the tech picked. A band that answers one of the
+ * record's own fields (recordsAs: Palm-jet's palm size, IMA-jet's target
+ * pest) writes that field too: never a second answer that can disagree.
  */
 export function recordWithBand(record = {}, rate, key) {
   const labelBand = { product: record.product, key };
-  const palmSize = rate?.basis === "palm" ? rate.bands?.find((band) => band.key === key)?.label : null;
-  return { ...record, labelBand, ...(palmSize ? { sizeClassOrDbh: palmSize } : {}) };
+  const answer = rate?.recordsAs ? rate.bands?.find((band) => band.key === key)?.label : null;
+  return { ...record, labelBand, ...(answer ? { [rate.recordsAs]: answer } : {}) };
 }
+
+/** The record field a label's band answers, and how the form names it. */
+export const BAND_FIELD_NAMES = { sizeClassOrDbh: "Palm size", targetIssue: "Target issue" };

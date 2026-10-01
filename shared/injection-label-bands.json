@@ -67,7 +67,8 @@
         "low": 8,
         "high": 8
       }
-    ]
+    ],
+    "recordsAs": "targetIssue"
   },
   {
     "product": "PHOSPHO-jet",
@@ -146,6 +147,7 @@
         "high": 30
       }
     ],
-    "note": "Label: palm size is the canopy spread, measured across the fronds."
+    "note": "Label: palm size is the canopy spread, measured across the fronds.",
+    "recordsAs": "sizeClassOrDbh"
   }
 ]

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DOSE_UNITS, doseOverLabel, doseText, injectionBand, injectionDoseText, injectionLabelRate, injectionLabelText,
+  DOSE_UNITS, doseOverLabel, doseText, doseUnderLabel, injectionBand, injectionDoseText, injectionLabelRate, injectionLabelText,
   injectionRecordView, parseDose, recordForProduct, recordWithBand, trunkInchesText,
 } from './injection-dose';
 
@@ -185,6 +185,25 @@ describe('the shown dose stays inside the label band', () => {
   });
 });
 
+describe('doseUnderLabel', () => {
+  it('notes a dose under the band, allowing the 5% the suggestion rounds down', () => {
+    const phospho = injectionLabelRate(PHOSPHO_JET);
+    // 10 in: 35 mL. 1 tsp (4.9 mL) is far under; the suggested 1.18 fl oz is not.
+    expect(doseUnderLabel(phospho, 10, 1, 'tsp', '')).toBe(true);
+    expect(doseUnderLabel(phospho, 10, 1.18, 'fl_oz', '')).toBe(false);
+    // Nothing to say until the band is settled.
+    expect(doseUnderLabel(injectionLabelRate(IMA_JET), 10, 1, 'tsp', '')).toBe(false);
+  });
+
+  it('never notes the bottom of the dose it suggests', () => {
+    everyDose(({ product, rate, pick, inches, text }) => {
+      const [, ends, unit] = /^(.+) (tsp|fl oz)$/.exec(text);
+      const bottom = readAmount(ends.split(' – ')[0]);
+      expect(doseUnderLabel(rate, inches, bottom, unit === 'tsp' ? 'tsp' : 'fl_oz', pick), `${product.name} ${pick} ${inches} in: ${text}`).toBe(false);
+    });
+  });
+});
+
 describe('doseOverLabel', () => {
   const imaJet = injectionLabelRate(IMA_JET);
 
@@ -232,12 +251,12 @@ describe('the record and its product', () => {
 
   it('starts a new product without the old dose and band, keeping the trunk', () => {
     const record = { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH', dose: '1 fl oz', labelBand: { product: IMA_JET.name, key: 'sap_feeders' } };
-    expect(recordForProduct(record, PHOSPHO_JET.name)).toEqual({
-      product: PHOSPHO_JET.name, productAuto: false, sizeClassOrDbh: '10 in DBH', dose: '', labelBand: null,
+    expect(recordForProduct(record, PHOSPHO_JET.name, { productId: 'pj-1' })).toEqual({
+      product: PHOSPHO_JET.name, productId: 'pj-1', productAuto: false, sizeClassOrDbh: '10 in DBH', dose: '', labelBand: null,
     });
-    expect(recordForProduct(record, IMA_JET.name, { productAuto: true })).toEqual({ ...record, productAuto: true });
-    // A palm size set by the old palm band goes with it.
-    expect(recordForProduct({ product: PALM_JET.name, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' }, '', { palmSizeFromBand: true }).sizeClassOrDbh).toBe('');
+    expect(recordForProduct(record, IMA_JET.name, { productAuto: true })).toEqual({ ...record, productAuto: true, productId: null });
+    // A field the old label's band answered (palm size, target pest) goes with it.
+    expect(recordForProduct({ product: PALM_JET.name, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' }, '', { clearField: 'sizeClassOrDbh' }).sizeClassOrDbh).toBe('');
   });
 
   it("makes a palm band the record's palm size", () => {
@@ -245,7 +264,9 @@ describe('the record and its product', () => {
     expect(recordWithBand({ product: PALM_JET.name }, palm, 'medium')).toEqual({
       product: PALM_JET.name, labelBand: { product: PALM_JET.name, key: 'medium' }, sizeClassOrDbh: 'Medium palm (12 to 24 ft spread)',
     });
-    expect(recordWithBand({ product: IMA_JET.name, sizeClassOrDbh: '10 in DBH' }, injectionLabelRate(IMA_JET), 'sap_feeders').sizeClassOrDbh).toBe('10 in DBH');
+    // IMA-jet's group is the record's target pest; the trunk stays.
+    const ima = recordWithBand({ product: IMA_JET.name, sizeClassOrDbh: '10 in DBH' }, injectionLabelRate(IMA_JET), 'sap_feeders');
+    expect(ima).toMatchObject({ sizeClassOrDbh: '10 in DBH', targetIssue: 'Aphids, scales, whiteflies and other sap feeders' });
   });
 });
 

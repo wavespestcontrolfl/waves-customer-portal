@@ -77,7 +77,7 @@ import {
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import { productDimension } from "../../lib/fast-complete-products";
-import { DOSE_UNITS, doseText, injectionBand, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
+import { BAND_FIELD_NAMES, DOSE_UNITS, doseText, injectionBand, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -10953,16 +10953,19 @@ export function treeShrubCloseoutBlocksClient({
     // The record's product, when it is one of this visit's injection products,
     // brings its label: a per-inch label needs the trunk in inches, and a label
     // split by the tech's pick needs that band (the server checks the same).
-    const labelRate = injectionProducts.find((product) => product.name === injection.product)?.rate || null;
+    const labelRate = injectionRecordView(injection, injectionProducts).rate;
     const inches = trunkInchesText(injection.sizeClassOrDbh);
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
     else if (labelRate?.basis === "inch" && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
     const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand?.key || "" : "";
-    const pickedBand = labelRate?.pick ? injectionBand(labelRate, inches, bandKey) : null;
-    if (labelRate?.pick && !labelRate.bands.some((option) => option.key === bandKey)) {
+    const pickedBand = labelRate?.pick ? labelRate.bands.find((option) => option.key === bandKey) : null;
+    const answered = labelRate?.recordsAs ? String(injection[labelRate.recordsAs] || "").trim().toLowerCase() : "";
+    if (labelRate?.pick && !pickedBand) {
       push(`Pick the ${labelRate.pick.toLowerCase()} for the injection dose.`, "injectionRecord.labelBand");
-    } else if (labelRate?.basis === "palm" && pickedBand && String(injection.sizeClassOrDbh || "").trim().toLowerCase() !== pickedBand.label.toLowerCase()) {
-      push(`Palm size must match the picked band (${pickedBand.label}).`, "injectionRecord.sizeClassOrDbh");
+    } else if (pickedBand && labelRate.recordsAs && answered !== pickedBand.label.toLowerCase()) {
+      // A band that answers a record field (palm size, target pest) is that
+      // field's answer: never two that disagree (the server checks the same).
+      push(`${BAND_FIELD_NAMES[labelRate.recordsAs]} must match the picked band (${pickedBand.label}).`, `injectionRecord.${labelRate.recordsAs}`);
     }
     if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
     if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
@@ -11025,6 +11028,8 @@ function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
   const doseDraft = typedDraft(doseTyped, record.dose);
   const doseUnit = dose.unit || doseUnitPick;
   const overLabel = view.overLabel(doseUnit);
+  const underLabel = view.underLabel(doseUnit);
+  const forWhat = labelRate?.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`;
   const doseTypingUnreadable = Boolean(doseDraft?.trim()) && !quantityOf(doseDraft);
   const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
   const hint = { fontSize: 14, color: colors.muted };
@@ -11081,7 +11086,12 @@ function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
       )}
       {overLabel && (
         <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
-          {`${doseText(dose.amount, doseUnit)} is more than the label allows ${perPalm ? "per palm" : `for a ${trunkInches}-inch trunk`}${doseRange ? ` (${doseRange})` : ""}. Check the label before you inject.`}
+          {`${doseText(dose.amount, doseUnit)} is more than the label allows ${forWhat}${doseRange ? ` (${doseRange})` : ""}. Check the label before you inject.`}
+        </div>
+      )}
+      {underLabel && (
+        <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
+          {`${doseText(dose.amount, doseUnit)} is less than the label's dose ${forWhat} (${doseRange}). Check the label before you inject.`}
         </div>
       )}
     </>
@@ -11118,7 +11128,7 @@ function InjectionSizeFields({ record, view, onSize, input, colors }) {
             style={input}
           />
         </label>
-      ) : labelRate?.basis === "palm" && labelRate.bands ? null : (
+      ) : labelRate?.recordsAs === "sizeClassOrDbh" ? null : (
         <input
           value={record.sizeClassOrDbh || ""}
           onChange={(e) => onSize(e.target.value)}
@@ -11151,9 +11161,15 @@ function TreeShrubInjectionRecord({ value, onChange, injectionProducts, input, s
   const view = injectionRecordView(record, injectionProducts);
   const { chosen: chosenInjection, rate: labelRate, pickKey, band } = view;
   // A banded palm label's pick is the palm's size (the record's size).
-  const palmSizeFromBand = labelRate?.basis === "palm" && Boolean(labelRate.bands);
-  const setProduct = (product, productAuto) =>
-    onChange({ ...value, injectionRecord: recordForProduct(record, product, { productAuto, palmSizeFromBand }) });
+  // A field the label's band answers (palm size, target pest) is set by the
+  // band pick, with no field of its own.
+  const bandField = labelRate?.recordsAs || null;
+  // The record keeps the catalog id of one of this visit's products, so the
+  // server matches its label by id even if the product is renamed.
+  const setProduct = (product, productAuto) => {
+    const productId = injectionProducts.find((option) => option.name === product)?.productId ?? null;
+    onChange({ ...value, injectionRecord: recordForProduct(record, product, { productAuto, productId, clearField: bandField }) });
+  };
   // One injection product on this visit: the record names it, until the tech
   // chooses or types a product of their own (then it is never put back). A
   // product the form named itself follows the visit: when that product leaves
@@ -11249,12 +11265,14 @@ function TreeShrubInjectionRecord({ value, onChange, injectionProducts, input, s
           placeholder="Plant species"
           style={input}
         />
-        <input
-          value={record.targetIssue || ""}
-          onChange={(e) => setInjectionField("targetIssue", e.target.value)}
-          placeholder="Injection target issue"
-          style={input}
-        />
+        {bandField !== "targetIssue" && (
+          <input
+            value={record.targetIssue || ""}
+            onChange={(e) => setInjectionField("targetIssue", e.target.value)}
+            placeholder="Injection target issue"
+            style={input}
+          />
+        )}
       </div>
     </div>
   );
@@ -14804,7 +14822,7 @@ export function CompletionPanel({
   // label rate in mL per inch of trunk or per palm for the dose helper.
   const injectionProducts = treeShrubProductFlags.injectionRows.map((row) => {
     const catalogRow = (products || []).find((p) => String(p.id) === String(row.productId));
-    return { name: row.name, rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }) };
+    return { name: row.name, productId: row.productId ?? null, rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }) };
   });
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({

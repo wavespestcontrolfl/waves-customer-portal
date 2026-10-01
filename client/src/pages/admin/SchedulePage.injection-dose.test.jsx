@@ -78,10 +78,10 @@ describe('the injection record', () => {
     // Under 12 in, the label's lower rate for sap feeders: 2 mL per inch.
     expect(screen.getByText(injectionLabelText(IMA_RATE, injectionBand(IMA_RATE, 10, 'sap_feeders')))).toBeTruthy();
 
-    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1' } });
-    expect(record().dose).toBe('1 fl oz');
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '4' } });
+    expect(record().dose).toBe('4 fl oz');
     fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'tsp' } });
-    expect(record().dose).toBe('1 tsp');
+    expect(record().dose).toBe('4 tsp');
     expect([...screen.getByLabelText('Dose unit').options].map((option) => option.value)).toEqual(['tsp', 'fl_oz']);
     expect(screen.queryByRole('note')).toBeNull();
     expect(document.body.textContent).not.toMatch(/\bml\b/i);
@@ -179,6 +179,29 @@ describe('the injection record', () => {
     render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} initial={{ injectionRecord: { ...saved, dose: '2 fl oz' } }} />);
     expect(screen.getByLabelText('Target pest').value).toBe('sap_feeders');
     expect(screen.getByRole('note').textContent).toMatch(/^2 fl oz is more than the label allows/);
+  });
+
+  it("records IMA-jet's target group as the target issue, with no second field", async () => {
+    render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(IMA_JET.name));
+    expect(screen.queryByPlaceholderText('Injection target issue')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Target pest'), { target: { value: 'borers' } });
+    expect(record().targetIssue).toBe(IMA_RATE.bands.find((band) => band.key === 'borers').label);
+  });
+
+  it('notes a dose under the label for that trunk', () => {
+    render(
+      <Block
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '10 in DBH' } }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'tsp' } });
+    expect(screen.getByRole('note').textContent).toMatch(/^1 tsp is less than the label's dose for a 10-inch trunk/);
+    fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'fl_oz' } });
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1.18' } });
+    expect(screen.queryByRole('note')).toBeNull();
   });
 
   it('stores no trunk of zero', async () => {
@@ -366,7 +389,9 @@ describe('the closeout check against the product label', () => {
   it('needs the band a label is split by, picked for this product', () => {
     expect(blocksFor(IMA_JET.name, IMA_RATE, {})).toEqual(['Pick the target pest for the injection dose.']);
     expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: 'Other', key: 'sap_feeders' } })).toEqual(['Pick the target pest for the injection dose.']);
-    expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' } })).toEqual([]);
+    expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' }, targetIssue: 'Aphids, scales, whiteflies and other sap feeders' })).toEqual([]);
+    expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' }, targetIssue: 'Borers' }))
+      .toEqual(['Target issue must match the picked band (Aphids, scales, whiteflies and other sap feeders).']);
     expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, {})).toEqual([]);
   });
 
