@@ -46,6 +46,10 @@ const FIELD_GROUPS = {
     'definite_commitment',
     'relative_date_used',
     'moved_appointment_relative_date_used',
+    // On-site consent inputs (schema 1.21.0): together they gate the SMS
+    // consent stamp for a spouse/buyer/tenant/family member, so drift must show.
+    'secondary_wants_appointment_texts',
+    'secondary_on_site',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -462,7 +466,8 @@ function normalizeField(field, value) {
   // means "not committed", identical to false — collapse them so replays
   // don't report a spurious high-severity delta on every pre-1.8.0 row
   // (codex P2). A genuine true↔false disagreement still surfaces.
-  if (field === 'agent_committed_booking' || field === 'caller_accepted_slot') return normalizeBool(value) === true;
+  if (field === 'agent_committed_booking' || field === 'caller_accepted_slot'
+    || field === 'secondary_wants_appointment_texts' || field === 'secondary_on_site') return normalizeBool(value) === true;
   if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
   return normalizeString(value);
 }

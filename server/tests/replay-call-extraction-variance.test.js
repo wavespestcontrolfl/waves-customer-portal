@@ -904,6 +904,17 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
+  describe('on-site consent input variance coverage (schema 1.21.0)', () => {
+    test('both flat mirrors are high-severity replay fields that collapse absent to false', () => {
+      for (const field of ['secondary_wants_appointment_texts', 'secondary_on_site']) {
+        expect(FIELD_GROUPS.high).toContain(field);
+        expect(normalizeField(field, null)).toBe(false);
+        expect(normalizeField(field, true)).toBe(true);
+        expect(compareFlatFields({ [field]: false }, { [field]: true }, true).find((v) => v.field === field).severity).toBe('high');
+      }
+    });
+  });
+
   describe('consent.sms_declined variance coverage', () => {
     test('sms_declined is registered in FIELD_GROUPS', () => {
       const allFields = new Set(Object.values(FIELD_GROUPS).flat());

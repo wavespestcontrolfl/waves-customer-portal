@@ -138,8 +138,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.20.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.20.0');
+  test('schema version is 1.21.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.21.0');
   });
 
   describe('model-output schema', () => {

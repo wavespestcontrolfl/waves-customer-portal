@@ -131,7 +131,17 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // moved_appointment_date. call-reschedule-agreement.js only verifies the
 // flags, the quotes and the resolved date's weekday; a missing flag fails
 // closed there.
-const SCHEMA_VERSION = '1.20.0';
+// 1.21.0: additive — secondary_contact(s).wants_appointment_texts and
+// .on_site (optional booleans in both schemas, never `required`). Owner ruling
+// 2026-09-30 "on-site person is the contact point" (codex P1 on #5467):
+// wants_notifications is channel-neutral — it is also set for "email him the
+// report/invoice" — and a relationship does not prove presence, so the call
+// pipeline needs the extraction to separately record that the caller agreed
+// THIS person gets the appointment TEXTS and that the call says they will be
+// AT the property (each with an evidence quote) before it stamps the
+// service-contact SMS consent artifact. Older payloads, which lack both, still
+// validate and simply never qualify.
+const SCHEMA_VERSION = '1.21.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

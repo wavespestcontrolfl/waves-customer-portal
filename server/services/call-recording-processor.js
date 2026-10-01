@@ -2688,11 +2688,18 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
     || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
       && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name));
-  // On-site text consent is V1's statement about V1's person. It may ride a
-  // phone V2 supplied ONLY when V2 is positively the same person — otherwise
-  // a name-only V1 "he'll be there, text him" would authorize texting whatever
-  // number V2 attached to a possibly different contact (pre-push codex P1).
-  const groundingCarries = !!v1.phone || samePerson;
+  // On-site text consent (wants_appointment_texts + on_site) is each
+  // extractor's statement about ITS OWN person, so a flag may only authorize
+  // the merged phone when that phone is the flagging extractor's own, or the
+  // two are positively the same person. Otherwise a name-only V1 "he'll be
+  // there, text him" would authorize texting whatever number V2 attached to a
+  // possibly different contact (pre-push codex P1) — and the mirror: a V2 flag
+  // must never authorize V1's phone.
+  // The merged phone is V1's when V1 has one, else V2's.
+  const v1GroundingCarries = !!v1.phone || samePerson;
+  const v2GroundingCarries = !v1.phone || samePerson;
+  const grounded = (field) => (v1[field] === true && v1GroundingCarries)
+    || (v2[field] === true && v2GroundingCarries);
 
   return {
     first_name: v1.first_name || v2.first_name,
@@ -2703,12 +2710,12 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
-    // Appointment-text intent and on-site presence come ONLY from V1 (V2 has
-    // no such fields — it fails closed). The identity-conflict check above
-    // already returned V1 unmerged for a different person, so a V2 partner
-    // can never inherit them.
-    wants_appointment_texts: v1.wants_appointment_texts === true && groundingCarries,
-    on_site: v1.on_site === true && groundingCarries,
+    // Appointment-text intent and on-site presence (schema 1.21.0 in V2): a
+    // flag from either extractor, gated by the carry rules above. The
+    // identity-conflict check already returned V1 unmerged for a different
+    // person, so a conflicting V2 partner's flags never arrive here.
+    wants_appointment_texts: grounded('wants_appointment_texts'),
+    on_site: grounded('on_site'),
     // Billing flag: V1's own flag always stands. A V2 flag is only inherited
     // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
     // full name. The identity-conflict check above can't see this gap: if V1
@@ -3259,11 +3266,12 @@ const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'tenant', 
 // unstamped and every text went to the out-of-state caller.
 // wants_notifications is channel-neutral (it is also set for "email him the
 // report/invoice") and a relationship does not prove presence, so the rule
-// needs BOTH grounded fields from the V1 extraction: wants_appointment_texts
-// (the caller agreed to appointment TEXTS) and on_site (the call says they
-// will be at the property). V2 contacts carry neither and fail closed. Pure:
-// callers decide what to stamp; the recipient opt-in confirmation ask still
-// runs for the phone.
+// needs BOTH grounded fields (V1 prompt, and V2 schema 1.21.0 / prompt v20,
+// where each needs an evidence quote): wants_appointment_texts (the caller
+// agreed to appointment TEXTS) and on_site (the call says they will be at the
+// property). A contact from an extraction that lacks the fields (older V2
+// rows, V2 without them) fails closed. Pure: callers decide what to stamp; the
+// recipient opt-in confirmation ask still runs for the phone.
 function onSiteNotifyConsent(contact) {
   if (!contact || contact.wants_appointment_texts !== true || contact.on_site !== true) return false;
   if (!String(contact.phone || '').trim()) return false;

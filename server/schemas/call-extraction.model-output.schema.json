@@ -257,6 +257,14 @@
           "type": "boolean",
           "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to this person. A merely-mentioned or explicitly-excluded person is false."
         },
+        "wants_appointment_texts": {
+          "type": "boolean",
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
+        },
+        "on_site": {
+          "type": "boolean",
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
+        },
         "notes": {
           "type": [
             "string",
@@ -341,6 +349,14 @@
           "wants_notifications": {
             "type": "boolean",
             "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to THIS person."
+          },
+          "wants_appointment_texts": {
+            "type": "boolean",
+            "description": "1.21.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
+          },
+          "on_site": {
+            "type": "boolean",
+            "description": "1.21.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
           },
           "notes": {
             "type": [

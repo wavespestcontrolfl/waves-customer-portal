@@ -26,6 +26,7 @@ const { _test } = require('../services/call-recording-processor');
 const {
   normalizeCallExtraction,
   resolveCallSecondaryContact,
+  resolveCallSecondaryContacts,
   persistCallSecondaryContact,
   onSiteNotifyConsent,
   resolveSecondaryConsent,
@@ -274,8 +275,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.20.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.20.0');
+  test('current SCHEMA_VERSION is 1.21.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.21.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {
@@ -318,6 +319,27 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     expect(model.errors).toBeNull();
     expect(model.valid).toBe(true);
     expect(validatePersisted(persistedMeta({ ...validModelOutput(), secondary_contact: lenderContact, secondary_contacts: [lenderContact] }, '1.7.0')).valid).toBe(true);
+  });
+
+  test('1.21.0: wants_appointment_texts / on_site are optional booleans in both schemas, non-boolean rejected', () => {
+    const base = { ...secondaryContact };
+    // Absent (older payloads) still validates.
+    expect(validateModelOutput({ ...validModelOutput(), secondary_contact: base }).valid).toBe(true);
+    const flagged = { ...base, wants_appointment_texts: true, on_site: true };
+    const withFlags = { ...validModelOutput(), secondary_contact: flagged, secondary_contacts: [flagged] };
+    const model = validateModelOutput(withFlags);
+    expect(model.errors).toBeNull();
+    expect(model.valid).toBe(true);
+    const persisted = validatePersisted(persistedMeta({ ...validModelOutput(), secondary_contact: flagged, secondary_contacts: [flagged] }, SCHEMA_VERSION));
+    expect(persisted.errors).toBeNull();
+    expect(persisted.valid).toBe(true);
+    // Non-boolean fails both schemas (additionalProperties stays false elsewhere).
+    for (const bad of [{ ...base, wants_appointment_texts: 'yes' }, { ...base, on_site: null }]) {
+      expect(validateModelOutput({ ...validModelOutput(), secondary_contact: bad }).valid).toBe(false);
+      expect(validatePersisted(persistedMeta({ ...validModelOutput(), secondary_contact: bad }, SCHEMA_VERSION)).valid).toBe(false);
+      expect(validateModelOutput({ ...validModelOutput(), secondary_contacts: [bad] }).valid).toBe(false);
+    }
+    expect(validateModelOutput({ ...validModelOutput(), secondary_contact: { ...base, bogus_field: true } }).valid).toBe(false);
   });
 
   test('model-output tolerates a non-E.164 secondary phone (server normalizes; must not schema-fail the extraction)', () => {
@@ -840,7 +862,7 @@ describe('secondary-contact grounding fields through the compat mappers', () => 
     wants_notifications: true, notes: null,
   };
 
-  test('mapSecondaryContactToLegacy defaults both fields to false when absent (V2 fails closed)', () => {
+  test('mapSecondaryContactToLegacy defaults both fields to false when absent (a V2 contact without them fails closed)', () => {
     const mapped = mapSecondaryContactToLegacy(v2Base);
     expect(mapped.wants_appointment_texts).toBe(false);
     expect(mapped.on_site).toBe(false);
@@ -855,6 +877,58 @@ describe('secondary-contact grounding fields through the compat mappers', () => 
     expect(mapSecondaryContactToLegacy({ ...v2Base, on_site: 'yes' }).on_site).toBe(false);
   });
 
+  test('a V2-shaped contact carrying both fields true qualifies through the mapper (schema 1.21.0)', () => {
+    const mapped = mapSecondaryContactToLegacy({ ...v2Base, wants_appointment_texts: true, on_site: true });
+    expect(onSiteNotifyConsent(mapped)).toBe(true);
+    // Report-only V2 contact: wants_notifications true, no appointment-text intent.
+    expect(onSiteNotifyConsent(mapSecondaryContactToLegacy({ ...v2Base, wants_appointment_texts: false, on_site: true }))).toBe(false);
+    expect(onSiteNotifyConsent(mapSecondaryContactToLegacy({ ...v2Base, wants_appointment_texts: true, on_site: false }))).toBe(false);
+  });
+
+  test('V2 normalizer keeps strict booleans and defaults absent/garbled fields to false', () => {
+    expect(normalizeSecondaryContactV2(v2Base)).toMatchObject({ wants_appointment_texts: false, on_site: false });
+    expect(normalizeSecondaryContactV2({ ...v2Base, wants_appointment_texts: true, on_site: true }))
+      .toMatchObject({ wants_appointment_texts: true, on_site: true });
+    expect(normalizeSecondaryContactV2({ ...v2Base, wants_appointment_texts: 'true', on_site: 1 }))
+      .toMatchObject({ wants_appointment_texts: false, on_site: false });
+  });
+
+  test('V2 grounding flags follow the carry rules: own phone or same person, never the other extractor\'s number', () => {
+    const v2Flagged = { ...v2Base, wants_appointment_texts: true, on_site: true };
+    // V1 has no phone and is name-only (no flags); V2's own phone carries V2's flags.
+    const v1NameOnly = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', role: 'spouse_partner', wants_notifications: true });
+    const ownPhone = resolveCallSecondaryContact({ secondary_contact: v1NameOnly }, { secondary_contact: v2Flagged });
+    expect(ownPhone.phone).toBe('+15550100123');
+    expect(onSiteNotifyConsent(ownPhone)).toBe(true);
+
+    // V1 has its OWN phone and V2 is a name-only entry with flags (no shared
+    // identifier): the merged phone is V1's, so V2's flags must not authorize it.
+    const v1PhoneOnly = normalizeV1({ phone: '+15550100777', role: 'spouse_partner', wants_notifications: true });
+    const v2NameOnly = { ...v2Flagged, phone_e164: null, email: null };
+    const otherNumber = resolveCallSecondaryContact({ secondary_contact: v1PhoneOnly }, { secondary_contact: v2NameOnly });
+    expect(otherNumber.phone).toBe('+15550100777');
+    expect(otherNumber.wants_appointment_texts).toBe(false);
+    expect(otherNumber.on_site).toBe(false);
+    expect(onSiteNotifyConsent(otherNumber)).toBe(false);
+
+    // Same phone on both sides = positively the same person: V2's flags carry.
+    const samePhone = resolveCallSecondaryContact({ secondary_contact: v1PhoneOnly }, { secondary_contact: { ...v2Flagged, phone_e164: '+15550100777' } });
+    expect(onSiteNotifyConsent(samePhone)).toBe(true);
+
+    // A conflicting identity returns V1 unmerged — V2's flags never arrive.
+    const conflict = resolveCallSecondaryContact({ secondary_contact: v1PhoneOnly }, { secondary_contact: v2Flagged });
+    expect(conflict.phone).toBe('+15550100777');
+    expect(onSiteNotifyConsent(conflict)).toBe(false);
+  });
+
+  test('entries 2+ (V2 array only) take the fields straight from V2', () => {
+    const second = { ...v2Base, name_full: 'Sample Tenant', first_name: 'Sample', last_name: 'Tenant', phone_e164: '+15550100888', role: 'tenant', wants_appointment_texts: true, on_site: true };
+    const list = resolveCallSecondaryContacts({}, { secondary_contact: v2Base, secondary_contacts: [v2Base, second] });
+    expect(list).toHaveLength(2);
+    expect(onSiteNotifyConsent(list[0])).toBe(false);
+    expect(onSiteNotifyConsent(list[1])).toBe(true);
+  });
+
   test('V1 normalizer keeps strict booleans and defaults absent fields to false', () => {
     const base = { first_name: 'Sample', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true };
     const absent = normalizeV1(base);
@@ -865,7 +939,7 @@ describe('secondary-contact grounding fields through the compat mappers', () => 
     expect(present.on_site).toBe(true);
   });
 
-  test('resolveCallSecondaryContact keeps V1 grounding fields, and a V2-only partner never gets them', () => {
+  test('resolveCallSecondaryContact keeps V1 grounding fields, and a V2-only partner WITHOUT the fields never qualifies', () => {
     const v1 = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true });
     const merged = resolveCallSecondaryContact({ secondary_contact: v1 }, { secondary_contact: v2Base });
     expect(merged.wants_appointment_texts).toBe(true);

@@ -52,6 +52,7 @@ function flatView(extraction) {
   const sentiment = extraction.sentiment_and_lead || {};
   const history = extraction.customer_history || {};
   const consent = extraction.consent || {};
+  const secondary = mapSecondaryContactToLegacy(extraction.secondary_contact);
 
   return {
     first_name: caller.first_name || null,
@@ -124,8 +125,13 @@ function flatView(extraction) {
     // Caller-stated unit bedroom count (schema 1.10.0) — the bedroom-band
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
-    secondary_contact: mapSecondaryContactToLegacy(extraction.secondary_contact),
+    secondary_contact: secondary,
     secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
+    // Flat mirrors of the first other party's on-site consent inputs (schema
+    // 1.21.0) so replay variance watches them (FIELD_GROUPS high — they gate
+    // an SMS consent stamp). False when absent, like agent_committed_booking.
+    secondary_wants_appointment_texts: secondary?.wants_appointment_texts === true,
+    secondary_on_site: secondary?.on_site === true,
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
@@ -205,9 +211,9 @@ function mapSecondaryContactToLegacy(contact) {
     email: contact.email || null,
     role: contact.role || 'unknown',
     wants_notifications: contact.wants_notifications === true,
-    // V2 contacts carry neither field (strict schema), so they map to false and
-    // never qualify for the on-site consent rule; passed through so a contact
-    // that does carry them keeps them.
+    // On-site consent inputs (schema 1.21.0): strict booleans, false when the
+    // extraction lacks them (older V2 rows), so such a contact never qualifies
+    // for the on-site consent rule (onSiteNotifyConsent).
     wants_appointment_texts: contact.wants_appointment_texts === true,
     on_site: contact.on_site === true,
     is_billing_party: contact.is_billing_party === true,
