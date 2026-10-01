@@ -219,8 +219,8 @@ async function estimateSetupSeries(conn, estimate) {
 // waits, and a performed visit bills it once no prepay covers it. No switch,
 // refund or revival bookkeeping, so the prepay lifecycle cannot drift from it.
 // Rodent (bait-station) setup is NOT waived by prepay and never matches here.
-async function prepayWaivesDeferredSetupFee(conn, { seriesId, customerId, date = null } = {}) {
-  if (!seriesId || !customerId) return false;
+async function prepayWaivesDeferredSetupFee(conn, { seriesId, visit } = {}) {
+  if (!seriesId || !visit) return false;
   const series = await conn('scheduled_services').where({ id: seriesId }).first('source_estimate_id');
   const estimateIds = new Set([series?.source_estimate_id].filter(Boolean).map(String));
   for (const child of rows(await conn('scheduled_services').where({ recurring_parent_id: seriesId })
@@ -233,13 +233,11 @@ async function prepayWaivesDeferredSetupFee(conn, { seriesId, customerId, date =
     if (parseEstimateData(estimate?.estimate_data).setupFeeDeferredToFirstVisit === true) { deferred = true; break; }
   }
   if (!deferred) return false;
-  const day = date || require('../utils/datetime-et').etDateString();
-  const { annualPrepayOverlapStatusClause } = require('./secure-appointment-plans');
-  const covering = await conn('annual_prepay_terms').where({ customer_id: customerId })
-    .where(annualPrepayOverlapStatusClause())
-    .where('term_start', '<=', day).where('term_end', '>=', day)
-    .first('id');
-  return !!covering;
+  // The ONE coverage authority for a visit (term status, plan scope, termite
+  // grace): judged on the PERFORMED visit itself, strict — an unverifiable
+  // coverage throws, so every caller fails closed (nothing billed, nothing
+  // parked) instead of guessing.
+  return require('./annual-prepay-renewals').annualPrepayCoversVisit(visit, conn, { throwOnError: true });
 }
 
 async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null, completingParentId = null } = {}) {
@@ -257,6 +255,7 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
   // queued is consumed by THIS child, whatever status the row reads mid-
   // completion.
   const completingIds = new Set([completingVisitId, completingParentId].filter(Boolean).map(String));
+  const completingVisit = completingVisitId ? await conn('scheduled_services').where({ id: completingVisitId }).first() : null;
   const unconsumableStamps = [];
   for (const root of rootRows) {
     // No stamp, an unreadable one or a zero carries no fee (Number(null) is 0).
@@ -264,7 +263,7 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
     if (!stamp) continue;
     // A negative stamp is a completion mid-mint: deferred by definition; a
     // stamp an annual prepay waives right now is not owed either.
-    if (stamp < 0 || await prepayWaivesDeferredSetupFee(conn, { seriesId: root.id, customerId: estimate.customer_id })) return covered;
+    if (stamp < 0 || await prepayWaivesDeferredSetupFee(conn, { seriesId: root.id, visit: completingVisit })) return covered;
     if (lanePaysAtCompletion && (completingIds.has(String(root.id)) || await seriesCanStillConsume(conn, root))) return covered;
     unconsumableStamps.push({ parentId: root.id, rawAmount: root.pending_setup_fee, amount: Math.round(stamp * 100) / 100 });
   }
@@ -299,10 +298,11 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
 // is left alone and null is returned); a negative stamp is a completion
 // mid-mint that bills the fee itself and is never touched here. Failures
 // propagate so the stamp clear and the alert commit or roll back together.
-async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId, estimateId = null, origin = '', alertContext = null, billToScheduledServiceId = null } = {}) {
+async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId, estimateId = null, origin = '', alertContext = null, billToScheduledServiceId = null, visit = null } = {}) {
   if (!parentId || !customerId || !(Number(rawAmount) > 0)) return null;
-  // Annual prepay waives this fee right now: it waits, it is not the office's.
-  if (await prepayWaivesDeferredSetupFee(trx, { seriesId: parentId, customerId })) return null;
+  // An annual prepay covering the PERFORMED visit waives this fee: it waits,
+  // it is not the office's.
+  if (await prepayWaivesDeferredSetupFee(trx, { seriesId: parentId, visit })) return null;
   const amount = Math.round(Number(rawAmount) * 100) / 100;
   const updated = await trx('scheduled_services')
     .where({ id: parentId, pending_setup_fee: rawAmount })

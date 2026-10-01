@@ -183,6 +183,7 @@ async function parkQueuedSetupClaimsForOffice(trx, members, { packet, visit }) {
       estimateId: member.source_estimate_id || null, origin: 'grouped closeout handed to the office',
       alertContext: { visitId: visit.id, packetId: packet.id, serviceId: member.id },
       billToScheduledServiceId: member.id,
+      visit: member,
     });
     if (result) parked.push({ amount: result.amount, seriesId: result.parentId, alertId: result.alertId });
   }
@@ -552,8 +553,8 @@ async function createVisitCompletionInvoice(packetId, database = db) {
         .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
         .join('service_records as r', 'r.id', 'i.service_record_id')
         .where('i.packet_id', packet.id).orderBy('s.id')
-        .select('s.id', 's.customer_id', 's.source_estimate_id', 's.recurring_parent_id', 's.is_callback',
-          's.is_recurring', 's.service_type', 'r.status as record_status', 'r.structured_notes as record_notes');
+        // The whole visit row: the prepay waiver judges coverage on it.
+        .select('s.*', 'r.status as record_status', 'r.structured_notes as record_notes');
       const parked = await parkQueuedSetupClaimsForOffice(trx, heldMembers, { packet, visit });
       if (parked.length) {
         await trx('visit_completion_packets').where({ id: packet.id }).update({

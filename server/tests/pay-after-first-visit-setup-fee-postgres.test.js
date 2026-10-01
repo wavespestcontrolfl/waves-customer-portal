@@ -287,12 +287,17 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     const [term] = await mockPg('annual_prepay_terms')
       .insert({ customer_id: f.customerId, term_start: termStart, term_end: termEnd, status: 'active' }).returning('id');
     const termId = term.id || term;
+    // The term's coverage is stamped on the visits it covers (applyPrepaidCoverageForTerm).
+    await mockPg('scheduled_services').whereIn('id', [f.parentId, ...f.childIds])
+      .update({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100, annual_prepay_term_id: termId });
+    const visitRow = () => mockPg('scheduled_services').where({ id: f.parentId }).first();
     try {
       const Obligation = require('../services/setup-fee-obligation');
-      expect(await Obligation.prepayWaivesDeferredSetupFee(mockPg, { seriesId: f.parentId, customerId: f.customerId })).toBe(true);
+      expect(await Obligation.prepayWaivesDeferredSetupFee(mockPg, { seriesId: f.parentId, visit: await visitRow() })).toBe(true);
       // The office is never handed a waived fee, and the stamp is left waiting.
+      const performed = await visitRow();
       const parked = await mockPg.transaction((trx) => Obligation.parkSetupFeeStampForOffice(trx, {
-        parentId: f.parentId, rawAmount: SETUP_FEE, customerId: f.customerId, estimateId: f.estimateId, origin: 'test',
+        parentId: f.parentId, rawAmount: SETUP_FEE, customerId: f.customerId, estimateId: f.estimateId, origin: 'test', visit: performed,
       }));
       expect(parked).toBeNull();
       expect(await officeFeeAlerts(f)).toHaveLength(0);
@@ -307,12 +312,29 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
 
       // Coverage ends (the prepay was refunded): the next performed visit bills it.
       await mockPg('annual_prepay_terms').where({ id: termId }).update({ status: 'cancelled', renewal_decision: null });
-      expect(await Obligation.prepayWaivesDeferredSetupFee(mockPg, { seriesId: f.parentId, customerId: f.customerId })).toBe(false);
       await makeDue(f.childIds[0]);
+      const child = await mockPg('scheduled_services').where({ id: f.childIds[0] }).first();
+      expect(await Obligation.prepayWaivesDeferredSetupFee(mockPg, { seriesId: f.parentId, visit: child })).toBe(false);
       expect(await complete(f, f.childIds[0])).toMatchObject({ status: 200 });
       expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(1);
     } finally {
       await mockPg('annual_prepay_terms').where({ id: termId }).del().catch(() => {});
+      await cleanup(f);
+    }
+  });
+
+  test('an UNPAID prepay quote (payment_pending, no coverage stamp on the visit) does not waive the deferred fee', async () => {
+    const f = await seed();
+    const { etDateString } = require('../utils/datetime-et');
+    const [term] = await mockPg('annual_prepay_terms').insert({
+      customer_id: f.customerId, term_start: etDateString(new Date(Date.now() - 86400000)),
+      term_end: etDateString(new Date(Date.now() + 300 * 86400000)), status: 'payment_pending',
+    }).returning('id');
+    try {
+      const visit = await mockPg('scheduled_services').where({ id: f.parentId }).first();
+      expect(await require('../services/setup-fee-obligation').prepayWaivesDeferredSetupFee(mockPg, { seriesId: f.parentId, visit })).toBe(false);
+    } finally {
+      await mockPg('annual_prepay_terms').where({ id: term.id || term }).del().catch(() => {});
       await cleanup(f);
     }
   });
@@ -325,7 +347,10 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       term_end: etDateString(new Date(Date.now() + 300 * 86400000)), status: 'active',
     }).returning('id');
     try {
-      expect(await require('../services/setup-fee-obligation').prepayWaivesDeferredSetupFee(mockPg, { seriesId: f.parentId, customerId: f.customerId })).toBe(false);
+      await mockPg('scheduled_services').where({ id: f.parentId })
+        .update({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100, annual_prepay_term_id: term.id || term });
+      const visit = await mockPg('scheduled_services').where({ id: f.parentId }).first();
+      expect(await require('../services/setup-fee-obligation').prepayWaivesDeferredSetupFee(mockPg, { seriesId: f.parentId, visit })).toBe(false);
     } finally {
       await mockPg('annual_prepay_terms').where({ id: term.id || term }).del().catch(() => {});
       await cleanup(f);
