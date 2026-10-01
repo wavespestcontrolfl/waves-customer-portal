@@ -920,6 +920,16 @@ function confirmationDisplayParams(toolName, params, preview) {
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
   }
+  if (toolName === 'update_lead_contact' && preview?.changes) {
+    // The card shows the resolved lead and only the fields that change,
+    // as before → after — never the raw lead_name search string.
+    return {
+      lead: `${preview.lead_name} (${preview.lead_status})`,
+      ...Object.fromEntries(Object.entries(preview.changes).map(([field, c]) => [
+        field, `${c.from == null ? '(empty)' : c.from} → ${c.to == null ? '(cleared)' : c.to}`,
+      ])),
+    };
+  }
   if (toolName === 'bulk_update_leads') {
     // Curated card: the pinned id list is authoritative but unreadable —
     // show the count + sample the operator is approving, never a raw array.
@@ -1023,6 +1033,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // card; the model relays the existing match to the operator.
     if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
+    }
+    if (toolUse.name === 'update_lead_contact' && preview?.lead_id) {
+      // Pin the resolved lead: a lead_name proposal must never re-resolve to
+      // a different row at Confirm (the preview fingerprint also binds it).
+      params.lead_id = String(preview.lead_id);
+      delete params.lead_name;
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no
@@ -2062,6 +2078,7 @@ LEADS CAPABILITIES:
 - Response time distribution and its correlation with conversion
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
+- Fix a lead's contact details — first/last name, phone, email (update_lead_contact; shows before → after, then the confirmation card)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost

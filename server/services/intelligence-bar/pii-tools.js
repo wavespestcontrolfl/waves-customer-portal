@@ -38,6 +38,9 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   // redacted like the comms tools (codex P1 on the pinning round).
   'update_lead_status',
   'bulk_update_leads',
+  // update_lead_contact accepts and echoes a lead's name, phone and email
+  // (before → after on the preview) — same PII class.
+  'update_lead_contact',
   // block_sender inputs/results carry the full sender address (pre-push
   // P1) — redact its telemetry like the comms tools.
   'block_sender',

@@ -157,6 +157,7 @@ const ACTION_LABELS = {
   optimize_all_routes: 'Re-optimize all routes',
   optimize_tech_route: 'Re-optimize a technician route',
   update_lead_status: 'Change a lead status',
+  update_lead_contact: 'Update lead contact details',
   bulk_update_leads: 'Change status on multiple leads',
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
@@ -362,6 +363,17 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       before: preview.pinned_lead.current_status, after: params?.new_status,
     });
     pushLeadStatusDerivedEffects(push, params?.new_status);
+  }
+  // Lead contact edit: one before/after line per changed field, from the
+  // executor's preview diff (only fields that actually differ are written).
+  if (toolName === 'update_lead_contact' && preview?.changes && typeof preview.changes === 'object') {
+    const who = preview.lead_name ? `Lead ${preview.lead_name}` : 'Lead';
+    for (const [field, change] of Object.entries(preview.changes)) {
+      const from = change?.from == null ? '(empty)' : String(change.from);
+      const to = change?.to == null ? '(cleared)' : String(change.to);
+      push('customer', `${who}: ${humanKey(field)} ${from} → ${to}`, { before: from, after: to });
+    }
+    push('operational', "A contact-updated entry is appended to the lead's activity history; a linked customer account is NOT changed");
   }
   // Pinned recipient (send_sms, reply_via_sms, trigger_review_request pin a
   // phone; send_email_reply pins the email the reply goes to).

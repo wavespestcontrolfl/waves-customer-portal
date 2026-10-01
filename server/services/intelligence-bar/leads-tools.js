@@ -10,6 +10,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
+const { toE164, isLikelyE164 } = require('../../utils/phone');
+const { cleanValidEmailOrNull } = require('../../utils/intake-normalize');
 const leadAttribution = require('../lead-attribution');
 
 const LEAD_STATUSES = [
@@ -143,6 +145,23 @@ Use for: "move all unresponsive leads older than 30 days to lost", "mark all no-
       required: ['current_status', 'new_status'],
     },
   },
+  {
+    name: 'update_lead_contact',
+    description: `Correct a lead's contact details: first name, last name, phone, or email (the lead record only — a linked customer account is NOT changed). Pass ONLY the fields to change. A blank last_name / phone / email clears that field; first_name cannot be cleared.
+Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email"
+ALWAYS show the operator the before → after values and get approval before saving.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        lead_id: { type: 'string' },
+        lead_name: { type: 'string', description: 'Find the lead by name (partial match, active leads only) when lead_id is unknown' },
+        first_name: { type: 'string' },
+        last_name: { type: 'string' },
+        phone: { type: 'string', description: 'Any US format; stored as E.164' },
+        email: { type: 'string' },
+      },
+    },
+  },
 ];
 
 
@@ -160,6 +179,7 @@ async function executeLeadsTool(toolName, input, actionContext = {}) {
       case 'get_response_times': return await getResponseTimes(input.days || 30);
       case 'update_lead_status': return await updateLeadStatus(input);
       case 'bulk_update_leads': return await bulkUpdateLeads(input);
+      case 'update_lead_contact': return await updateLeadContact(input);
       default: return { error: `Unknown leads tool: ${toolName}` };
     }
   } catch (err) {
@@ -607,6 +627,133 @@ async function matchBulkLeads(input) {
 
 // Read-only preview of a bulk update — the route runs this at proposal time
 // to pin the matched ids into the stored pending-action params.
+// ─── CONTACT DETAILS (two-step write) ───────────────────────────
+//
+// Preview→confirmed executor (write-gates WRITE_TWO_STEP): without
+// `confirmed` it resolves the lead, validates the requested fields and
+// returns the before → after diff for the card; nothing is written. The
+// route pins that preview's fingerprint and re-runs it at Confirm, so a
+// lead edited in the pending window refuses with preview_changed instead
+// of overwriting a value the card never showed. The UPDATE's own WHERE
+// re-asserts every old value as well (same atomic guard as the status
+// write) — the fingerprint check and the commit are not one statement.
+
+const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email'];
+
+// Normalize one requested contact field. Returns { value } (null = clear)
+// or { error }.
+function normalizeLeadContactField(field, raw) {
+  const text = raw === null || raw === undefined ? '' : String(raw).trim();
+  if (field === 'first_name') {
+    if (!text) return { error: 'first_name cannot be blank — a lead needs a first name.' };
+    return { value: text.slice(0, 255) };
+  }
+  if (field === 'last_name') return { value: text ? text.slice(0, 255) : null };
+  if (field === 'phone') {
+    if (!text) return { value: null };
+    const e164 = toE164(text);
+    if (!e164 || !isLikelyE164(e164)) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
+    return { value: e164 };
+  }
+  if (field === 'email') {
+    if (!text) return { value: null };
+    const email = cleanValidEmailOrNull(text);
+    if (!email) return { error: 'email is not a valid email address.' };
+    return { value: email };
+  }
+  return { error: `Unknown contact field: ${field}` };
+}
+
+// { field: { from, to } } for every requested field whose stored value
+// differs (empty string and NULL both read as "empty").
+function diffLeadContact(lead, requested) {
+  const changes = {};
+  for (const [field, next] of Object.entries(requested)) {
+    const current = lead[field] === undefined || lead[field] === null || lead[field] === '' ? null : String(lead[field]);
+    if (current !== next) changes[field] = { from: current, to: next };
+  }
+  return changes;
+}
+
+async function updateLeadContact(input) {
+  const requested = {};
+  for (const field of LEAD_CONTACT_FIELDS) {
+    if (input[field] === undefined) continue;
+    const norm = normalizeLeadContactField(field, input[field]);
+    if (norm.error) return { error: norm.error };
+    requested[field] = norm.value;
+  }
+  if (Object.keys(requested).length === 0) {
+    return { error: 'Nothing to update — pass at least one of first_name, last_name, phone, email.' };
+  }
+
+  const lead = await resolveLeadForUpdate(input);
+  if (!lead) return { error: input.lead_id ? 'Lead not found' : 'No active lead matches that name.' };
+  if (lead.error) return lead;
+
+  // Only fields whose stored value actually differs are written (and shown).
+  const changes = diffLeadContact(lead, requested);
+  const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim();
+  if (Object.keys(changes).length === 0) {
+    return { error: `Lead ${leadName} already has those contact details — nothing to change.` };
+  }
+
+  const preview = {
+    lead_id: lead.id,
+    lead_name: leadName,
+    lead_status: lead.status,
+    changes,
+    ...(lead.customer_id ? { linked_customer_unchanged: true } : {}),
+  };
+
+  if (input.confirmed !== true) {
+    return {
+      preview: true,
+      ...preview,
+      note: 'PREVIEW ONLY — nothing was saved. Updates the lead record only'
+        + (lead.customer_id ? ' (the linked customer account is NOT changed)' : '')
+        + '. After the operator approves, this commits via the confirmation card.',
+    };
+  }
+
+  const updates = { updated_at: new Date() };
+  for (const [field, { to }] of Object.entries(changes)) updates[field] = to;
+
+  const updatedRows = await db.transaction(async (trx) => {
+    let q = trx('leads').where('id', lead.id).whereNull('deleted_at');
+    // Re-assert every value the card showed as "from" — a concurrent edit
+    // matches zero rows instead of being overwritten.
+    for (const [field, { from }] of Object.entries(changes)) {
+      q = from === null ? q.where(function () { this.whereNull(field).orWhere(field, ''); }) : q.where(field, from);
+    }
+    const rows = await q.update(updates, ['id']);
+    if (!rows || rows.length === 0) return rows;
+    await trx('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'updated',
+      description: `Contact updated: ${Object.keys(changes).join(', ')}`,
+      performed_by: 'Intelligence Bar',
+      metadata: JSON.stringify(changes),
+    });
+    return rows;
+  });
+  if (!updatedRows || updatedRows.length === 0) {
+    return {
+      error: 'Lead changed while the update was being applied. Re-check the lead and rebuild the confirmation card.',
+      preview_changed: true,
+    };
+  }
+
+  // Log which fields changed only — the values are contact PII.
+  logger.info(`[intelligence-bar:leads] Updated lead ${lead.id} contact: ${Object.keys(changes).join(', ')}`);
+
+  return {
+    success: true,
+    ...preview,
+    updated_fields: Object.keys(changes),
+  };
+}
+
 async function previewBulkLeadUpdate(input) {
   return bulkUpdateLeads({ ...input, dry_run: true });
 }
