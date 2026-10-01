@@ -12849,10 +12849,27 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // whose series already exists gets an UNATTACHED first invoice (pay
           // link at accept) that /data cannot predict, and without this the
           // customer would 409 on every confirm.
-          err.collectionPromise = { variant: expectedPromise.variant, tender: expectedPromise.tender };
+          err.collectionPromise = { variant: expectedPromise.variant, tender: expectedPromise.tender, version: expectedPromise.version };
           throw err;
         }
-        acceptedCollectionPromise = expectedPromise;
+        acceptedCollectionPromise = {
+          ...expectedPromise,
+          // The exact authorization recorded as shown (verified against the
+          // tab's attested version above), persisted below for the webhook
+          // recovery so it never re-derives copy that may have changed since.
+          text: require('../services/payment-method-consent-text').getConsentText(expectedPromise.tender, { variant: expectedPromise.variant }),
+        };
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardConsent}', ?::jsonb)",
+            [JSON.stringify({
+              variant: acceptedCollectionPromise.variant,
+              version: acceptedCollectionPromise.version,
+              tender: acceptedCollectionPromise.tender,
+              text: acceptedCollectionPromise.text,
+            })],
+          ),
+        });
         // Persist the variant with the accepted intent so the
         // setup_intent.succeeded recovery (stripe-webhook.js) records the SAME
         // authorization — read from the persisted promise, never recomputed.
@@ -13134,6 +13151,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // automatically, so the "charged after your first visit"
             // authorization is NOT what that customer was shown or agreed to.
             : (acceptedCollectionPromise?.variant || null),
+          ...(!annualPrepaySelected && acceptedCollectionPromise?.text
+            ? { renderedConsent: { text: acceptedCollectionPromise.text, version: acceptedCollectionPromise.version } }
+            : {}),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'

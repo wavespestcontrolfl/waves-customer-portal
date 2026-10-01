@@ -54,7 +54,7 @@ import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimat
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, CONSENT_VERSION, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -5792,7 +5792,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     recurringCardRenderedConsentRef.current = {
       tender: t,
       variant: afterVisit ? 'after_visit_card' : null,
-      version: afterVisit ? cur.version : null,
+      // The base card / ACH text this bundle rendered carries its own version
+      // (GitHub Codex #5481 r5 P1), attested like the after-visit one.
+      version: afterVisit ? cur.version : CONSENT_VERSION,
     };
   }, []);
   // Server said RECURRING_CARD_REQUIRED but our /data snapshot predates the
@@ -7237,10 +7239,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             const cur = afterVisitRenderedRef.current;
             const tender = rendered ? rendered.tender : 'card';
             const afterVisit = rendered ? rendered.variant === 'after_visit_card' : cur.afterVisit === true;
-            const version = rendered ? rendered.version : cur.version;
+            const version = rendered ? rendered.version : (afterVisit ? cur.version : CONSENT_VERSION);
             return {
               recurringCardConsentVariant: afterVisit ? 'after_visit_card' : undefined,
-              recurringCardConsentVersion: afterVisit ? version : undefined,
+              // Sent with every attested capture, the base text's version too.
+              recurringCardConsentVersion: (afterVisit || recurringCardSetupIntentIdRef.current) ? version : undefined,
               recurringCardConsentTender: recurringCardSetupIntentIdRef.current ? tender : undefined,
             };
           })(),
@@ -7340,6 +7343,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         }
         if (r.status === 409) {
           if (body.code === 'CONSENT_VARIANT_STALE' || body.code === 'ACCEPT_BILLING_CHANGED') {
+            // The base card / ACH copy lives in this bundle: when the server
+            // would record a newer version of it, only a full reload shows
+            // that text (a /data refetch would re-render the old wording).
+            if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise
+              && !body.collectionPromise.variant && body.collectionPromise.version
+              && body.collectionPromise.version !== CONSENT_VERSION) {
+              recurringCardSetupIntentIdRef.current = null;
+              window.location.reload();
+              throw new Error(body.error || 'Your payment terms were updated — reloading the page.');
+            }
             if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise?.tender === 'card') {
               setAfterVisitDeniedKey(body.collectionPromise.variant ? null : afterVisitSelectionKeyRef.current);
             }

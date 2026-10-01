@@ -301,7 +301,17 @@ async function pafExistingDriftUnderLock(trx, { customerId, policy }) {
     const { isPaused } = require('./autopay-eligibility');
     if (isPaused(row) !== (policy.autopayPaused === true)) return true;
     const disabled = await explicitAutopayDisable(row, trx);
-    return disabled !== (policy.autopayDisabled === true);
+    if (disabled !== (policy.autopayDisabled === true)) return true;
+    // GitHub Codex #5481 r5 P1: this policy was resolved with NO active Auto
+    // Pay (an active one is exempt as autopay_already_active). If another tab
+    // turned it on since, the post-commit enrollment would keep THAT method in
+    // charge and the first invoice would be charged to a method other than the
+    // one this accept authorizes — drift. Fail closed on an unreadable method.
+    if (policy.autopayPaused !== true && policy.autopayDisabled !== true) {
+      const { customerOnAutopay } = require('./autopay-eligibility');
+      if (await customerOnAutopay(row, { db: trx, failClosed: true })) return true;
+    }
+    return false;
   } catch (err) {
     logger.warn(`[recurring-cof] locked eligibility recheck failed for customer ${customerId} — treating as drift: ${err.message}`);
     return true;
@@ -1015,6 +1025,11 @@ async function completeRecurringCardEnrollment({
   // card on file (saved + base consent recorded) but is NOT enrolled — the
   // opt-out stands, nothing auto-charges.
   skipEnrollment = false,
+  // { text, version } — the exact authorization the accept recorded as shown
+  // (estimate_data.acceptedRecurringCardConsent). When present it is recorded
+  // verbatim instead of re-deriving today's copy, so a recovery that runs
+  // after a copy change never records wording the customer did not see.
+  renderedConsent = null,
 }) {
   if (!customerId || !stripePaymentMethodId) return { enrolled: false, reason: 'missing_args' };
   try {
@@ -1043,8 +1058,9 @@ async function completeRecurringCardEnrollment({
     // consent (prepay immediate charge) is checked against its own snapshot
     // (Codex r5 P1): an older future-invoice consent must not suppress the
     // immediate-charge authorization the prepay checkbox rendered.
-    const consentAlreadyRecorded = consentVariant
-      ? await ConsentService.hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType: saved?.method_type || 'card', variant: consentVariant, ...(authorizedAt ? { since: authorizedAt } : {}) })
+    const rendered = renderedConsent?.text && renderedConsent?.version ? renderedConsent : null;
+    const consentAlreadyRecorded = (consentVariant || rendered)
+      ? await ConsentService.hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType: saved?.method_type || 'card', variant: consentVariant, ...(rendered ? { text: rendered.text } : {}), ...(authorizedAt ? { since: authorizedAt } : {}) })
       : await ConsentService.hasEnrollmentScopedConsent(customerId, stripePaymentMethodId);
     if (!consentAlreadyRecorded) {
       // The capture modal rendered the locked v8 card consent verbatim
@@ -1059,6 +1075,7 @@ async function completeRecurringCardEnrollment({
         ip,
         userAgent,
         consentVariant,
+        ...(rendered ? { renderedConsent: rendered } : {}),
       });
     }
     if (saved?.id) {
@@ -2016,6 +2033,12 @@ function collectionPromiseMatches(expected, attested = {}) {
   const variant = attested.variant || null;
   if (variant !== (expected.variant || null)) return false;
   if (attested.tender && normalizeCollectionTender(attested.tender) !== expected.tender) return false;
+  // A tab that attests its tender also attests the version of the text it
+  // rendered for that tender — the base card / ACH text included (GitHub
+  // Codex #5481 r5 P1): during a copy rollout an older tab must not have the
+  // newer wording recorded. (Older tabs send no tender and keep the legacy
+  // checks below.)
+  if (attested.tender && attested.version !== expected.version) return false;
   if (expected.variant) {
     if (attested.version !== expected.version) return false;
     if (normalizeCollectionTender(attested.tender) !== expected.tender) return false;

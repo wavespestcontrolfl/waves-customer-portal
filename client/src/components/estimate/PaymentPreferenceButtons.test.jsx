@@ -414,6 +414,17 @@ describe('PaymentPreferenceButtons', () => {
         expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
         expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
       });
+
+      it('r5: a NOT-held capture customer with a setup-only invoice gets no Auto Pay line either (its pay link goes out at accept)', () => {
+        renderButtons({
+          payAfterFirstVisit: true,
+          prepayCardCapture: true,
+          selectedFrequency: { key: 'monthly', billingFrequencyKey: 'monthly', monthly: 49 },
+          extraInvoiceRows: [{ label: 'Rodent bait-station setup', amount: 99 }],
+        });
+        expect(screen.queryByText(AUTO_PAY_LINE)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
+      });
     });
   });
 });

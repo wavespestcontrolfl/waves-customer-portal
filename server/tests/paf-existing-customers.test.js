@@ -85,7 +85,7 @@ describe('accept route wiring (source pins)', () => {
     expect(src).toMatch(/const delivery = RecurringCards\.standardInvoiceDelivery\(\{\s*laneActive: recurringCardLaneActive,\s*minted: standardInvoiceMinted,\s*attached: standardInvoiceAttached,\s*\}\);/);
     expect(src).toMatch(/tender: recurringCardVerification\.methodType,\s*collectsAtAccept: delivery\.collectsAtAccept,/);
     expect(src).toMatch(/!RecurringCards\.collectionPromiseMatches\(expectedPromise, \{\s*variant: attestedConsentVariant,\s*version: attestedConsentVersion,\s*tender: attestedConsentTender,\s*\}\)\) \{\s*await retireOrDenyDroppedCapture\(estimate, recurringCardVerification\.setupIntentId\);[\s\S]{0,300}err\.code = 'CONSENT_VARIANT_STALE';/);
-    expect(src).toMatch(/acceptedCollectionPromise = expectedPromise;/);
+    expect(src).toMatch(/acceptedCollectionPromise = \{\s*\.\.\.expectedPromise,/);
     expect(src).toMatch(/'\{acceptedRecurringCardConsentVariant\}', to_jsonb\(\?::text\)\)",\s*\[expectedPromise\.variant\]/);
   });
 

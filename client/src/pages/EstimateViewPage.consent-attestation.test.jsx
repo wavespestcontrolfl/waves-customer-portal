@@ -21,12 +21,16 @@ describe('EstimateViewPage accept consent attestation', () => {
 
   it('attests {variant, version, tender} from what the capture UI RENDERED at capture time (r3: never recomputed at accept, never a constant), never for prepay', () => {
     // Recorded when the card is saved, from the same flag the capture surfaces render from + the tender in use.
-    expect(src).toMatch(/noteRenderedRecurringConsent = useCallback\(\(tender\) => \{[\s\S]{0,500}variant: afterVisit \? 'after_visit_card' : null,[\s\S]{0,80}version: afterVisit \? cur\.version : null,/);
+    expect(src).toMatch(/noteRenderedRecurringConsent = useCallback\(\(tender\) => \{[\s\S]{0,500}variant: afterVisit \? 'after_visit_card' : null,[\s\S]{0,200}version: afterVisit \? cur\.version : CONSENT_VERSION,/);
     expect(src).toMatch(/noteRenderedRecurringConsent\(renderedTender\);/);
     expect(src).toMatch(/noteRenderedRecurringConsent\(cardResult\.methodType\);/);
     expect(src).toMatch(/if \(paymentPreference === 'prepay_annual' \|\| data\?\.recurringCardPolicy\?\.afterVisitConsent !== true\) return \{\};/);
     expect(src).toMatch(/recurringCardConsentVariant: afterVisit \? 'after_visit_card' : undefined,/);
-    expect(src).toMatch(/recurringCardConsentVersion: afterVisit \? version : undefined,/);
+    expect(src).toMatch(/recurringCardConsentVersion: \(afterVisit \|\| recurringCardSetupIntentIdRef\.current\) \? version : undefined,/);
+    // r5: the base card / ACH text's version is attested too, and a newer
+    // server-side base copy forces a full reload (the copy lives in the bundle).
+    expect(src).toMatch(/const version = rendered \? rendered\.version : \(afterVisit \? cur\.version : CONSENT_VERSION\);/);
+    expect(src).toMatch(/body\.collectionPromise\.version !== CONSENT_VERSION\)\s*\{\s*recurringCardSetupIntentIdRef\.current = null;\s*window\.location\.reload\(\);/);
     expect(src).toMatch(/recurringCardConsentTender: recurringCardSetupIntentIdRef\.current \? tender : undefined,/);
     // The version the server emits wins over the mirrored constant.
     expect(src).toMatch(/version: data\?\.recurringCardPolicy\?\.afterVisitConsentVersion \|\| AFTER_VISIT_CONSENT_VERSION,/);
@@ -51,7 +55,7 @@ describe('EstimateViewPage accept consent attestation', () => {
 
   it('a CONSENT_VARIANT_STALE / ACCEPT_BILLING_CHANGED 409 drops the captured intent and refetches /data so the UI re-renders what the server will record', () => {
     expect(src).toMatch(
-      /if \(body\.code === 'CONSENT_VARIANT_STALE' \|\| body\.code === 'ACCEPT_BILLING_CHANGED'\) \{[\s\S]{0,700}recurringCardSetupIntentIdRef\.current = null;[\s\S]{0,200}await loadEstimate\(\{ preserveSelection: true \}\);/,
+      /if \(body\.code === 'CONSENT_VARIANT_STALE' \|\| body\.code === 'ACCEPT_BILLING_CHANGED'\) \{[\s\S]{0,2000}recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*await loadEstimate\(\{ preserveSelection: true \}\);/,
     );
   });
 

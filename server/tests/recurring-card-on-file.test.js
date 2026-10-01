@@ -856,6 +856,19 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
         expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }), { customerId: 'cust-1', policy: MOVED })).toBe(false);
       });
 
+      it('r5 drift: Auto Pay turned ON (another tab) since the policy was resolved without it', async () => {
+        mockCustomerOnAutopay.mockResolvedValue(true);
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: true }), { customerId: 'cust-1', policy: MOVED })).toBe(true);
+        // A held cohort is never auto-charged, so an active-looking state is not drift there.
+        mockIsPaused.mockReturnValue(true);
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: true }), { customerId: 'cust-1', policy: { ...MOVED, autopayPaused: true } })).toBe(false);
+        mockIsPaused.mockReturnValue(false);
+        // An unreadable method fails closed (treated as drift).
+        mockCustomerOnAutopay.mockRejectedValue(new Error('pm read failed'));
+        expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: true }), { customerId: 'cust-1', policy: MOVED })).toBe(true);
+        mockCustomerOnAutopay.mockResolvedValue(false);
+      });
+
       it('drift: billing_mode flipped to monthly_membership between preflight and the lock', async () => {
         expect(await pafExistingDriftUnderLock(trxFor(MONTHLY_CUSTOMER), { customerId: 'cust-1', policy: MOVED })).toBe(true);
         expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, billing_mode: 'annual_prepay' }), { customerId: 'cust-1', policy: MOVED })).toBe(true);

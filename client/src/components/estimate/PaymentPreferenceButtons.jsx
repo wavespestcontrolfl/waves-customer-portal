@@ -297,7 +297,10 @@ export default function PaymentPreferenceButtons({
         ? 'Nothing due today. Your Auto Pay is paused, so we send you a pay link after your first visit.'
         : 'Nothing due today. We send you a link to pay after your first visit.')
       : '')
-    : (prepayCardCapture ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
+    // Same first-visit-invoice predicate (GitHub Codex #5481 r5 P1): a
+    // setup-only invoice goes out with a pay link at accept, so "nothing due
+    // today" would be the opposite timing.
+    : (prepayCardCapture && hasFirstVisitInvoice ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
     : invoiceRows.length > 0

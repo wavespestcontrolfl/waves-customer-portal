@@ -5149,6 +5149,14 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
         : {}),
       // PR-B: the accept stamped an explicit Auto Pay opt-out — recovery keeps
       // the card (saved + consent) but must not enroll it either.
+      // GitHub Codex #5481 r5 P1: the exact text + version the accept recorded
+      // as shown — recorded verbatim, so a recovery that runs after a consent
+      // copy change never records wording the customer did not see.
+      ...(boundToAccept && typeof estimateData?.acceptedRecurringCardConsent?.text === 'string'
+        && estimateData.acceptedRecurringCardConsent.text
+        && typeof estimateData.acceptedRecurringCardConsent.version === 'string'
+        ? { renderedConsent: { text: estimateData.acceptedRecurringCardConsent.text, version: estimateData.acceptedRecurringCardConsent.version } }
+        : {}),
       ...(boundToAccept && estimateData?.acceptedRecurringCardSkipEnrollment === true
         ? { skipEnrollment: true }
         : {}),

@@ -105,6 +105,26 @@ describe('estimate_recurring_card recovery records the accepted consent variant'
     }));
   });
 
+  test('r5: the accept\'s persisted exact text + version is recorded verbatim on recovery (a later copy change never rewrites it)', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_1',
+      acceptedRecurringCardConsent: { variant: null, version: 'v11_2026-08-25', tender: 'us_bank_account', text: 'ACH TEXT AS SHOWN' },
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({
+      renderedConsent: { text: 'ACH TEXT AS SHOWN', version: 'v11_2026-08-25' },
+    }));
+  });
+
+  test('r5: an unbound intent never borrows the accept\'s persisted text', async () => {
+    wireDb(estimateRow({
+      acceptedRecurringCardSetupIntentId: 'seti_OTHER',
+      acceptedRecurringCardConsent: { variant: null, version: 'v11_2026-08-25', tender: 'card', text: 'TEXT' },
+    }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    for (const [args] of mockCompleteEnrollment.mock.calls) expect(args.renderedConsent).toBeUndefined();
+  });
+
   test('no stamp (every accept that is not a moved existing customer): no variant, base consent exactly as before', async () => {
     wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1' }));
     await handleSetupIntentSucceeded(SETUP_INTENT);
