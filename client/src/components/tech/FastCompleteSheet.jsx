@@ -858,6 +858,13 @@ const recapOn = (service) => service?.recapEnabled === true;
 
 // After Complete: the exact text the server sent (its words, shown as sent),
 // or why none went. Nothing when the sheet never asked for one.
+// A held message's channel is only known once the replay picks it.
+function queuedLabel(channel) {
+  if (channel === 'push') return 'Queued for the customer\'s app';
+  if (channel === 'sms') return 'Text queued';
+  return 'Message queued';
+}
+
 function CustomerTextResult({ outcome }) {
   if (!outcome) return null;
   const { sent, queued, unverified, body, reason, channel } = outcome;
@@ -866,7 +873,7 @@ function CustomerTextResult({ outcome }) {
   return (
     <div data-testid="fast-complete-text-result">
       {sent && <p className="tech-visit-muted">{app ? 'Sent to the customer\'s app:' : 'Text sent to the customer:'}</p>}
-      {!sent && queued && <p className="tech-visit-muted">{app ? 'Queued for the customer\'s app' : 'Text queued'}: {reason}.</p>}
+      {!sent && queued && <p className="tech-visit-muted">{queuedLabel(channel)}: {reason}.</p>}
       {!sent && unverified && <p className="tech-visit-muted">Delivery not confirmed: {reason}.</p>}
       {!sent && !queued && !unverified && <p className="tech-visit-muted">No text sent: {reason}.</p>}
       {body && <blockquote data-testid="fast-complete-text-body">{body}</blockquote>}

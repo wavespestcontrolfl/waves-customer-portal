@@ -305,7 +305,7 @@ describe('review fixes (#5363 r1, second set)', () => {
   test('the sent body shown to the tech is the provider body, and the outcome carries the recorded channel', () => {
     expect(customerTextOutcome({ honored: true, status: 'sent', body: 'X', channel: 'push' })).toMatchObject({ sent: true, channel: 'push' });
     expect(customerTextOutcome({ honored: true, status: 'sent', body: 'X', channel: 'mms' })).toMatchObject({ channel: 'sms' });
-    expect(customerTextOutcome({ honored: true, status: 'deferred', body: 'X' })).toMatchObject({ queued: true, channel: 'sms' });
+    expect(customerTextOutcome({ honored: true, status: 'deferred', body: 'X' })).toMatchObject({ queued: true, channel: null });
     const src = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
     expect(src).toContain('channel: finalRecordNotes.sentSmsChannel || null,');
   });
@@ -446,5 +446,12 @@ describe('review fixes (#5363 r4)', () => {
     const recap = fs.readFileSync(path.join(__dirname, '..', 'services', 'pest-recap.js'), 'utf8');
     expect(recap).toMatch(/const alreadyTexted = !!existing\?\.recap_sms_sent_at \|\| completionSmsAlreadySent \|\| fixedReserviceText;/);
     expect(recap).toContain("existingNotes.completionSmsRecapMode === require('./reservice-fixed-recap').MODE");
+  });
+});
+
+describe('review fixes (#5363 r5)', () => {
+  test('a held message with no recorded channel is channel-neutral', () => {
+    expect(customerTextOutcome({ honored: true, status: 'deferred', body: 'X' })).toMatchObject({ queued: true, channel: null });
+    expect(customerTextOutcome({ honored: true, status: 'deferred', body: 'X', channel: 'push' })).toMatchObject({ queued: true, channel: 'push' });
   });
 });

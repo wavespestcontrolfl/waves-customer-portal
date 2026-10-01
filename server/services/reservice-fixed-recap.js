@@ -213,7 +213,9 @@ function customerTextOutcome({ honored, status, body, error, channel, deliveryUn
   // resumed retry): the tech must not be told nothing went out.
   if (status === 'sent') return { sent: true, ...via, body: body || null, reason: null };
   if (status === 'deferred') {
-    return { sent: false, queued: true, ...via, body: body || null, reason: 'held until the morning send window, then it goes out' };
+    // A held message has no recorded channel yet (the morning replay follows
+    // the customer's preference, app or text): neutral unless one is known.
+    return { sent: false, queued: true, channel: channel || null, body: body || null, reason: 'held until the morning send window, then it goes out' };
   }
   // A provider handoff with an unknown result (completionSmsDeliveryUnverifiedAt
   // kept beside 'failed'): the text may have arrived, so the tech must not

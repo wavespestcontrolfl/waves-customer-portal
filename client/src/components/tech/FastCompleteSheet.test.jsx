@@ -616,7 +616,7 @@ describe('FastCompleteSheet', () => {
   test('recap gate on: a text held for the send window is shown as queued with its words', async () => {
     const request = makeRequest({ completeResponse: { success: true, customerText: { sent: false, queued: true, body: 'Your re-service is done. Details: https://x.test/r/1', reason: 'held until the morning send window, then it goes out' } } });
     await completeRe({ ...SERVICE, recapEnabled: true }, request);
-    expect(await screen.findByText('Text queued: held until the morning send window, then it goes out.')).toBeTruthy();
+    expect(await screen.findByText('Message queued: held until the morning send window, then it goes out.')).toBeTruthy();
     expect(screen.getByTestId('fast-complete-text-body').textContent).toContain('Your re-service is done.');
   });
 
