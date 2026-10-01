@@ -214,6 +214,20 @@ describe('search-term truncation (Codex r6 on #5486)', () => {
     expect(text).toMatch(/TRUNCATED: only the 100 highest-spend terms/);
   });
 
+  test('no fresh sync at all: the prompt says search terms are UNAVAILABLE, not zero (Codex r7)', async () => {
+    mockSearchTerms = [];
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    const { text } = mockDispatch.mock.calls[0][1];
+    expect(text).toMatch(/UNAVAILABLE: no search-term sync in the last 48 hours/);
+  });
+
+  test('fresh rows present: no UNAVAILABLE note', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/UNAVAILABLE: no search-term/);
+  });
+
   test('100 or fewer: no truncation note', async () => {
     mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
     await advisor.generateDailyAdvice();

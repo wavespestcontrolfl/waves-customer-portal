@@ -1200,16 +1200,20 @@ const ADVISOR_FLAGGED_LISTS = ["waste_alerts", "scaling_opportunities", "capacit
 function hasFlaggedFindings(data) {
   return ADVISOR_FLAGGED_LISTS.some((k) => Array.isArray(data?.[k]) && data[k].length > 0);
 }
-function AdvisorEmptyState({ flagged }) {
+// An "N/A" grade means no analysis ran (advisor unavailable, or no campaigns),
+// so empty lists there are not advice and must not read as "nothing to change".
+function AdvisorEmptyState({ flagged, unanalysed }) {
   return (
     <UiCard data-qa="advisor-empty" className="p-6">
       <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
-        No recommendations today
+        {unanalysed ? "No analysis today" : "No recommendations today"}
       </div>
       <div className="text-ui-body text-ink-secondary">
-        {flagged
-          ? "No campaign changes recommended — see the flagged items below."
-          : "No recommendations today — nothing worth changing."}
+        {unanalysed
+          ? "The advisor did not analyse the campaigns, so there is no advice here. Regenerate once it is available."
+          : flagged
+            ? "No campaign changes recommended — see the flagged items below."
+            : "No recommendations today — nothing worth changing."}
       </div>
     </UiCard>
   );
@@ -1329,8 +1333,8 @@ function RecommendationGroup({ priority, recs, applied, generating, onApply }) {
   );
 }
 
-function RecommendationList({ recommendations, flagged, applied, generating, onApply }) {
-  if (recommendations.length === 0) return <AdvisorEmptyState flagged={flagged} />;
+function RecommendationList({ recommendations, flagged, unanalysed, applied, generating, onApply }) {
+  if (recommendations.length === 0) return <AdvisorEmptyState flagged={flagged} unanalysed={unanalysed} />;
   return (
     <UiCard className="p-6">
       {" "}
@@ -1580,6 +1584,7 @@ export function AdvisorTab() {
           <RecommendationList
             recommendations={data.recommendations || []}
             flagged={hasFlaggedFindings(data)}
+            unanalysed={data.grade === "N/A"}
             applied={applied}
             generating={generating}
             onApply={handleApply}

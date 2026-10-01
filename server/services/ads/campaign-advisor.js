@@ -205,7 +205,12 @@ function budgetChangesSection(budgetLog) {
   return JSON.stringify(rows) + note;
 }
 
-function searchTermsSection(searchTerms) {
+function searchTermsSection(searchTerms, available = true) {
+  // No row refreshed within the freshness window means the sync is down or
+  // unconfigured: say the data is missing so an outage never reads as zero spend.
+  if (!available) {
+    return `(UNAVAILABLE: no search-term sync in the last ${ADVISOR_SEARCH_TERM_FRESH_MS / 3600000} hours. Search-term data is missing, not zero; draw no conclusions about search-term waste.)`;
+  }
   const spent = searchTerms.filter((t) => Number(t.cost) > 0);
   const rows = JSON.stringify(spent.slice(0, ADVISOR_MAX_SEARCH_TERMS).map(t => ({
     term: t.search_term, clicks: t.clicks, spend: Number(t.cost),
@@ -366,6 +371,10 @@ class CampaignAdvisor {
       .where('cost', '>', 0)
       .orderBy('cost', 'desc')
       .limit(ADVISOR_MAX_SEARCH_TERMS + 1);
+    // An empty list is only "no spend" if a recent sync actually ran.
+    const searchTermsAvailable = searchTerms.length > 0 || Boolean(await db('ad_search_terms')
+      .where('updated_at', '>=', new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS))
+      .first('updated_at'));
 
     const serviceAttribution = await db('ad_service_attribution')
       .where('lead_date', '>=', d30);
@@ -385,7 +394,7 @@ class CampaignAdvisor {
     const gscSummary = await loadGscSummary();
     const gbpSummary = await loadGbpSummary(d30);
 
-    return { last7days, last30days, searchTerms, serviceAttribution, capacity, targets, techCount, budgetLog, gscSummary, gbpSummary };
+    return { last7days, last30days, searchTerms, searchTermsAvailable, serviceAttribution, capacity, targets, techCount, budgetLog, gscSummary, gbpSummary };
   }
 
   // Aggregate per campaign
@@ -421,8 +430,8 @@ class CampaignAdvisor {
 CAMPAIGN PERFORMANCE:
 ${JSON.stringify(campaignSummaries, null, 2)}
 
-SEARCH TERMS WITH SPEND (by spend, up to ${ADVISOR_MAX_SEARCH_TERMS}, last 30 days — every term that cost money unless marked TRUNCATED below):
-${searchTermsSection(inputs.searchTerms)}
+SEARCH TERMS WITH SPEND (by spend, up to ${ADVISOR_MAX_SEARCH_TERMS}, last 30 days — every term that cost money unless marked TRUNCATED or UNAVAILABLE below):
+${searchTermsSection(inputs.searchTerms, inputs.searchTermsAvailable)}
 
 SERVICE-LINE ATTRIBUTION (last 30 days):
 ${JSON.stringify(this.groupByService(inputs.serviceAttribution))}

@@ -179,4 +179,14 @@ describe("Ads page Advisor tab", () => {
     expect(await screen.findByText(/see the flagged items below/)).toBeInTheDocument();
     expect(screen.queryByText(/nothing worth changing/)).not.toBeInTheDocument();
   });
+  it("an N/A (advisor unavailable) report says no analysis ran, never 'nothing worth changing' (Codex r7)", async () => {
+    stubFetch({ report: { date: "2026-10-01", grade: "N/A", report_data: {
+      ...REPORT_DATA, grade: "N/A", overall_assessment: "AI advisor unavailable — no recommendations generated.",
+      recommendations: [], waste_alerts: [], scaling_opportunities: [], capacity_warnings: [], seo_insights: [],
+    } } });
+    await openAdvisor();
+    expect(await screen.findByText("No analysis today")).toBeInTheDocument();
+    expect(screen.getByText(/did not analyse the campaigns/)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing worth changing/)).not.toBeInTheDocument();
+  });
 });
