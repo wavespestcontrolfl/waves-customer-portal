@@ -3137,6 +3137,21 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
     });
 
+    test('a lone STALE recurringCardConsentVersion (no variant, no tender) is refused — it must not bypass the bundle-version fence (pre-push Codex on the merge)', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentVersion: 'v11_2026-08-25' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).not.toBe('accepted');
+    });
+
+    test('a tender attested WITHOUT a version is an incomplete attestation and is refused', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    });
+
     test('an old tab with no tender attestation keeps working for a CARD capture (tender defaults to card)', async () => {
       conversion('ss-first');
       const { recurringCardConsentTender: _tender, ...legacy } = AFTER_VISIT;

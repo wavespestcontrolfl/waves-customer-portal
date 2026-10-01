@@ -442,13 +442,25 @@ function acceptanceTermsApplyTo(estimate) {
  * v2026-09 text — never a rate term the estimate may not carry).
  */
 // A tab attesting its saved-card capture per #5481 (the copy the capture UI
-// rendered: version, variant and tender). Such an accept is judged by the
-// accept transaction's own verification against the captured intent (a stale
-// version or a mismatched tender/variant answers CONSENT_VARIANT_STALE), so
-// the bundle-level consentTextVersion fence stands down for it.
-function perCaptureConsentAttested(body) {
-  return ['recurringCardConsentVersion', 'recurringCardConsentVariant', 'recurringCardConsentTender']
-    .some((key) => typeof body?.[key] === 'string' && body[key].trim() !== '');
+// rendered: version, variant and tender). The bundle-level consentTextVersion
+// fence stands down ONLY for a COMPLETE attestation (pre-push Codex on the
+// merge): a version beside a variant or tender, which the accept transaction
+// verifies together against the captured intent (CONSENT_VARIANT_STALE on
+// any mismatch) — or a version alone that is a current label (the
+// transaction ignores version when variant and tender are absent, so a stale
+// lone version must be refused here). A variant or tender WITHOUT a version
+// is an incomplete attestation and is refused too.
+//   'none'       — no per-capture field: the bundle fence applies as usual
+//   'complete'   — judged by the accept transaction's own verification
+//   'incomplete' — variant/tender without a version → refuse
+//   'stale'      — a lone version that is not current → refuse
+function perCaptureConsentAttestation(body) {
+  const present = (key) => typeof body?.[key] === 'string' && body[key].trim() !== '';
+  const hasVariantOrTender = present('recurringCardConsentVariant') || present('recurringCardConsentTender');
+  if (!present('recurringCardConsentVersion')) return hasVariantOrTender ? 'incomplete' : 'none';
+  if (hasVariantOrTender) return 'complete';
+  const { CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
+  return [CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION].includes(body.recurringCardConsentVersion.trim()) ? 'complete' : 'stale';
 }
 
 function acceptanceTermsScopeFor(estimate, estData, pricingBundle = {}, { oneTime = false } = {}) {
@@ -10335,7 +10347,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // that verification inside the accept transaction instead, which
       // refuses a stale version or a mismatched tender/variant with its own
       // reloadable CONSENT_VARIANT_STALE 409.
-      if (!perCaptureConsentAttested(req.body) && !paymentConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+      const perCapture = perCaptureConsentAttestation(req.body);
+      if (perCapture === 'incomplete' || perCapture === 'stale') {
+        return res.status(409).json({
+          error: 'Your payment terms were just updated. Please reload the page and review the card authorization before confirming.',
+          code: 'CONSENT_VARIANT_STALE',
+        });
+      }
+      if (perCapture === 'none' && !paymentConsentVersionIsCurrent(req.body?.consentTextVersion)) {
         return res.status(409).json(paymentConsentVersionStaleResponse());
       }
     }
