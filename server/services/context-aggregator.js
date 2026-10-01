@@ -1038,6 +1038,11 @@ class ContextAggregator {
     // adding a serial round trip; it is awaited where hasProcessingPayment is derived.
     const paymentHistoryService = require('./payment-history');
     const inFlightMoneyPromise = paymentHistoryService.hasInFlightMoney(customer.id);
+    // Any estimate deposit beyond a pending one (received, credited, refunded): money the payments table never records. null = unknown.
+    const depositActivityPromise = db('estimate_deposits')
+      .where(function ownDeposit() { this.where({ customer_id: customer.id }).orWhereIn('estimate_id', db('estimates').select('id').where({ customer_id: customer.id })); })
+      .whereNot('status', 'pending').first('id')
+      .then((row) => !!row, () => null);
     // An ACTIVE payment plan on any of the customer's invoices (payment-plans.js): installments are not reflected in the invoice
     // balance, so the payment-status contract renders no balance / due / "nothing owed" sentence for such a customer. An unreadable
     // lookup reads as "on a plan" (fail closed).
@@ -1464,6 +1469,8 @@ class ContextAggregator {
         // Authoritative EXISTENCE query (payment-history.hasInFlightMoney), independent of
         // the display window; null (read failed) is read as in flight — fail closed.
         hasProcessingPayment: inFlightMoney !== false,
+        // the payment-status renderer states no payment absence unless this is false (deposits have no payments row)
+        hasDepositActivity: await depositActivityPromise,
         // v10: real autopay state (canonical eligibility, null = unknown).
         autopay: autopayState,
         // v10: the newest sent-and-unpaid invoice. payerBilled=true means a

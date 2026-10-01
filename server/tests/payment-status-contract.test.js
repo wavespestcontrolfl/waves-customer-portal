@@ -8,7 +8,7 @@ const c = require('../services/payment-status-contract');
 const TODAY = '2026-09-30';
 const row = (over = {}) => ({ id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', ...over });
 const billing = (over = {}) => ({
-  outstandingBalance: 0, hasProcessingPayment: false, recentPaymentsTruncated: false, recentPayments: [row()], invoiceStatuses: [], ...over,
+  outstandingBalance: 0, hasProcessingPayment: false, hasDepositActivity: false, recentPaymentsTruncated: false, recentPayments: [row()], invoiceStatuses: [], ...over,
 });
 const texts = (b, opts) => c.renderPaymentStatusSentences({ billing: b }, { today: TODAY, ...opts }).map((s) => s.text);
 const kinds = (b) => c.renderPaymentStatusSentences({ billing: b }, { today: TODAY }).map((s) => s.kind);
@@ -601,5 +601,25 @@ describe('cash and check receipts', () => {
   });
   test.each(['Please bring cash to the visit.', 'We take cash or check.', 'You can pay with cash or check at the visit.'])('not a status: %s', (b) => {
     expect(c.assertsPaymentStatus(b, { inboundText: 'Can I pay cash?' })).toBe(false);
+  });
+});
+
+// Local Codex review pass 1 (2026-10-01)
+describe('local review pass 1', () => {
+  test('a failed row with ambiguous_outcome (Stripe timeout; may have succeeded) renders no failure and no absence sentence', () => {
+    const amb = row({ id: 'amb', status: 'failed', payment_date: '2026-09-20', metadata: { ambiguous_outcome: true } });
+    const out = texts(billing({ recentPayments: [amb, row()] }));
+    expect(out.some((t) => /did not go through/.test(t))).toBe(false);
+    expect(out.some((t) => /We don't see/.test(t))).toBe(false);
+    expect(out).toContain('We received your $120.00 card payment on Sep 12, 2026.');
+  });
+  test('a cash conversation is payment-scoped: an unbacked cash receipt is held', () => {
+    expect(c.checkPaymentStatusReply({ reply: 'We received your cash, thank you!', sentences: [], inboundText: 'I left cash for the tech' }).ok).toBe(false);
+  });
+  test('deposits: no absence sentence unless the deposit ledger was read and is empty', () => {
+    expect(kinds(billing({ recentPayments: [], hasDepositActivity: false }))).toContain('no_payments');
+    expect(kinds(billing({ recentPayments: [], hasDepositActivity: true }))).not.toContain('no_payments');
+    expect(kinds(billing({ recentPayments: [], hasDepositActivity: null }))).not.toContain('no_payments');
+    expect(kinds(billing({ hasDepositActivity: true }))).not.toContain('no_payment_since');
   });
 });

@@ -132,6 +132,8 @@ function isReceiptRow(p) {
     && String(meta.combined_payment ?? '').toLowerCase() !== 'true'
     && !meta.pending_refund_key
     && !(meta.deferred_reason && !p?.stripe_payment_intent_id) // a never-attempted deferral (lock contention, dispute hold) is no payment attempt
+    // a Stripe timeout recorded as failed with ambiguous_outcome may have succeeded: unknown, never "did not go through" (local review P1)
+    && String(meta.ambiguous_outcome ?? '').toLowerCase() !== 'true'
     && !meta.payer_id && !p?.payer_id;
 }
 
@@ -224,7 +226,10 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   ];
   // money the sentences do not describe (a non-receipt row, an own invoice the renderer cannot model) may carry payments this window
   // does not show: no absence sentence either
-  const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length) ? null : absenceSentence(billing, rows, todayParts);
+  // money the payments table never holds (an estimate deposit has no payments row) makes an absence claim unknowable unless the
+  // deposit ledger was read and is empty (local review P1)
+  const depositUnknown = billing.hasDepositActivity !== false;
+  const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length || depositUnknown) ? null : absenceSentence(billing, rows, todayParts);
   return absence ? [...out, absence] : out;
 }
 
@@ -345,7 +350,7 @@ function withoutCopies(text, candidates) {
 // ---- Detecting -------------------------------------------------------------
 // A reply is PAYMENT-SCOPED when it (or the customer's message) is about money. Only a scoped reply is judged: "We received your
 // photos" in a scheduling thread is not a payment status.
-const TOPIC_RE = /\b(?:payments?|pay(?:s|ing)?|paid|unpaid|invoices?|bills?|billed|billing|balance|charg\w*|refund\w*|funds?|money|transactions?|deposit\w*|transfers?|zelle\w*|ach|venmo|paypal|che(?:ck|que)s?|cards?|autopay|auto-pay|credits?|owe[sd]?|owing|due|overdue|dues|statements?|receipts?|accounts?)\b/i;
+const TOPIC_RE = /\b(?:payments?|pay(?:s|ing)?|paid|unpaid|invoices?|bills?|billed|billing|balance|charg\w*|refund\w*|funds?|money|transactions?|deposit\w*|transfers?|zelle\w*|ach|venmo|paypal|cash|che(?:ck|que)s?|cards?|autopay|auto-pay|credits?|owe[sd]?|owing|due|overdue|dues|statements?|receipts?|accounts?)\b/i;
 // Every word a payment / invoice / refund / balance STATUS can be said with, deliberately wide: one more synonym is one more
 // alternative here, never a new checker.
 const PAYMENT_NOUN = '(?:payments?(?!\\s+(?:links?|page|portal|options?|methods?|instructions?|plan|reminders?))|funds|money|transfers?|deposits?|transactions?|refunds?|invoices?|bills?)';

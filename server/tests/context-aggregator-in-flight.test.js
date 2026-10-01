@@ -49,6 +49,7 @@ jest.mock('../models/db', () => {
     q.select = jest.fn((...cols) => { if (cols.includes('stripe_charge_id')) q._linkage = true; return q; });
     q.first = jest.fn(async () => {
       if (table === 'payment_plans' && db.__planError) throw new Error('plans down');
+      if (table === 'estimate_deposits' && db.__rows && db.__rows.estimate_deposits) return db.__rows.estimate_deposits[0];
       return table === 'customers' ? { id: 'c1' } : (table === 'payment_plans' ? db.__activePlan : undefined);
     });
     q.catch = jest.fn(() => Promise.resolve(rowsFor(table, q)));
@@ -282,6 +283,16 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
     expect(billing.recentPayments.map((p) => p.id)).toEqual(['own1']);
     expect(billing.recentPaymentsTruncated).toBe(false); // the second page came back short: nothing older is hidden
     expect(sentenceTexts(billing)).toContain('We received your $120.00 payment on Sep 12, 2026.');
+  });
+  // Local Codex review pass 1: deposits have no payments row - the aggregator reads the deposit ledger for the absence sentences
+  test('hasDepositActivity: a non-pending deposit => true (no absence sentence); none => false; read failure => null', async () => {
+    db.__rows = { invoices: [], payments: [], estimate_deposits: [{ id: 'dep1' }] };
+    hasInFlightMoney.mockResolvedValue(false);
+    const withDeposit = await build();
+    expect(withDeposit.hasDepositActivity).toBe(true);
+    expect(sentenceTexts(withDeposit).some((t) => /We don't see/.test(t))).toBe(false);
+    db.__rows = { invoices: [], payments: [], estimate_deposits: [] };
+    expect((await build()).hasDepositActivity).toBe(false);
   });
   test('a collectible invoice buried BEHIND the status-list cap is still judged (alwaysJudge): an old AP-owned open invoice never counts', async () => {
     mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));

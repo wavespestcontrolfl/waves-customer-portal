@@ -650,7 +650,7 @@ describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unch
     expect(typeof check.afterMarker).toBe('function');
     const dbi = dbiWith('fp-1');
     await expect(check({ dbi })).resolves.toEqual({ ok: true });
-    expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments WHERE customer_id = ?'), ['c1', 'c1', 'c1', 'c1', 'c1', 'c1']);
+    expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments WHERE customer_id = ?'), Array(10).fill('c1'));
   });
   test('a payment landing after the recheck (fingerprint changed), an unreadable fingerprint, or none taken => retryable refusal', async () => {
     const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: 'fp-1' }, getBody: () => decision.suggested_message });
@@ -669,4 +669,12 @@ describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unch
     expect(fpAt).toBeLessThan(src.indexOf('const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });'));
     expect(src).toContain('checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody })');
   });
+});
+
+// Local Codex review pass 1 (P2): a staff edit's own status wording takes no boundary check either - a customerless one could never send
+test('a staff-edited status body registers no billing boundary check; the unedited AI body does', () => {
+  const { amountsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+  const decision = { id: 'd1', customer_id: null, prompt_version: 'house_voice_v12_real_answers5_cf_pf', suggested_message: 'Thanks for reaching out!', input_snapshot: null, inbound_message: 'did you get my payment?' };
+  expect(amountsProviderPreSendCheck({ decision, getBody: () => 'We got your payment, thank you!' })).toBeUndefined();
+  expect(typeof amountsProviderPreSendCheck({ decision: { ...decision, suggested_message: 'We got your payment, thank you!' }, getBody: () => 'We got your payment, thank you!' })).toBe('function');
 });

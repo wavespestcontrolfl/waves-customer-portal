@@ -14,7 +14,7 @@ describe('billingFingerprint', () => {
   test('one content hash over every row the recheck reads: payments, invoices, plans, payer assignments', () => {
     expect(BILLING_FINGERPRINT_SQL).toMatch(/md5\(concat_ws/);
     for (const t of ['FROM payments WHERE customer_id = ?', 'FROM invoices WHERE customer_id = ?', 'FROM payment_plans WHERE customer_id = ?',
-      'FROM scheduled_services WHERE customer_id = ? AND payer_id IS NOT NULL', 'FROM customers WHERE id = ?']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
+      'FROM payers p', 'FROM customers WHERE id = ?']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
     // the columns a status / amount / ownership / Zelle answer depends on
     // Codex round-50 P1: an invoice's attached PaymentIntent and its saved-card charge attempts are billing state too
     expect(BILLING_FINGERPRINT_SQL).toContain('FROM stripe_invoice_charge_attempts a JOIN invoices i ON i.id = a.invoice_id WHERE i.customer_id = ?');
@@ -25,7 +25,7 @@ describe('billingFingerprint', () => {
   test('reads through the given connection; null on no customer, a failed read, or no row', async () => {
     const dbh = { raw: jest.fn(async () => ({ rows: [{ fingerprint: 'abc' }] })) };
     expect(await billingFingerprint('c1', dbh)).toBe('abc');
-    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, ['c1', 'c1', 'c1', 'c1', 'c1', 'c1']);
+    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(10).fill('c1'));
     expect(await billingFingerprint(null, dbh)).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => { throw new Error('down'); } })).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => ({ rows: [] }) })).toBeNull();
@@ -87,4 +87,12 @@ describe('Zelle at the provider boundary: the full recheck\'s own checks run aga
 // Codex round-51 P1: account credit that would cover the invoice is billing state too
 test('the fingerprint hashes the customer\'s account credit and auto-apply setting', () => {
   expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit) FROM customers WHERE id = ?");
+});
+
+// Local Codex review pass 1: payer activation, self-pay overrides and the estimate-deposit ledger are billing state too
+test('the fingerprint hashes payer activation, self-pay overrides and estimate deposits', () => {
+  expect(BILLING_FINGERPRINT_SQL).toContain("concat_ws('|', p.id, p.active)");
+  expect(BILLING_FINGERPRINT_SQL).toContain('self_pay_override IS TRUE');
+  expect(BILLING_FINGERPRINT_SQL).toContain('FROM estimate_deposits d');
+  expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(10);
 });

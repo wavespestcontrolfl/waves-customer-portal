@@ -233,8 +233,14 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
 // recheck there needs a second pool connection while the handoff holds one, so the route takes the customer's billing FINGERPRINT
 // before the full recheck (billingFingerprintForSend) and the boundary re-reads it in one query on the handoff connection: any change
 // refuses as retryable (the retry reruns the full recheck). Registered only for a body the recheck judges.
-const billingBoundaryJudged = (decision, body) => require('./sms-amount-recheck')
-  .bodyNeedsBillingBoundaryCheck(body, { inboundMessage: resolveInboundMessage(decision), promptVersion: decision?.prompt_version });
+// A staff edit's own status wording is not judged by the contract (owner ruling 2026-10-01) - nor by the boundary (local review P2).
+const billingBoundaryJudged = (decision, body) => {
+  const realAnswers = typeof decision?.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
+  const staffEdited = realAnswers && bodyIsStaffEdited(decision?.suggested_message, body);
+  return require('./sms-amount-recheck').bodyNeedsBillingBoundaryCheck(body, {
+    inboundMessage: resolveInboundMessage(decision), promptVersion: decision?.prompt_version, statusVocabulary: !staffEdited,
+  });
+};
 async function billingFingerprintForSend({ decision, outgoingBody }) {
   if (!decision?.customer_id || !billingBoundaryJudged(decision, String(outgoingBody || ''))) return undefined;
   return require('./billing-fingerprint').billingFingerprint(decision.customer_id);

@@ -20,15 +20,22 @@ const BILLING_FINGERPRINT_SQL = `SELECT md5(concat_ws('#',
   (SELECT string_agg(concat_ws('|', a.id, a.status, a.stripe_payment_intent_id, a.resolved_at), ',' ORDER BY a.id)
    FROM stripe_invoice_charge_attempts a JOIN invoices i ON i.id = a.invoice_id WHERE i.customer_id = ?),
   (SELECT string_agg(concat_ws('|', id, status), ',' ORDER BY id) FROM payment_plans WHERE customer_id = ?),
-  (SELECT string_agg(concat_ws('|', id, payer_id), ',' ORDER BY id) FROM scheduled_services WHERE customer_id = ? AND payer_id IS NOT NULL),
+  (SELECT string_agg(concat_ws('|', id, payer_id, self_pay_override), ',' ORDER BY id) FROM scheduled_services
+   WHERE customer_id = ? AND (payer_id IS NOT NULL OR self_pay_override IS TRUE)),
+  (SELECT string_agg(concat_ws('|', p.id, p.active), ',' ORDER BY p.id) FROM payers p
+   WHERE p.id IN (SELECT payer_id FROM customers WHERE id = ? UNION SELECT payer_id FROM scheduled_services WHERE customer_id = ?)),
+  (SELECT string_agg(concat_ws('|', d.id, d.status, d.credited_amount, d.refunded_amount), ',' ORDER BY d.id) FROM estimate_deposits d
+   WHERE d.customer_id = ? OR d.estimate_id IN (SELECT id FROM estimates WHERE customer_id = ?)),
   (SELECT concat_ws('|', 'c', payer_id, account_credits, auto_apply_account_credit) FROM customers WHERE id = ?)
 )) AS fingerprint`;
+
+const BILLING_FINGERPRINT_PARAMS = (BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length;
 
 // The fingerprint string, or null when it cannot be read (callers fail closed).
 async function billingFingerprint(customerId, dbh = db) {
   if (!customerId) return null;
   try {
-    const res = await dbh.raw(BILLING_FINGERPRINT_SQL, [customerId, customerId, customerId, customerId, customerId, customerId]);
+    const res = await dbh.raw(BILLING_FINGERPRINT_SQL, Array(BILLING_FINGERPRINT_PARAMS).fill(customerId));
     const row = (res && (res.rows || (Array.isArray(res) ? res : [])))[0];
     return typeof row?.fingerprint === 'string' ? row.fingerprint : null;
   } catch {
@@ -88,4 +95,4 @@ async function zelleDenialStillStands({ recheck, customerId, invoiceId, dbh }) {
   return { ok: true };
 }
 
-module.exports = { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL };
+module.exports = { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL, BILLING_FINGERPRINT_PARAMS };
