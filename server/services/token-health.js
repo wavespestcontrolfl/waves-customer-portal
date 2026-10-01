@@ -8,6 +8,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const MODELS = require('../config/models');
+const { TYPESAFE_SYSTEMONE_API } = require('./llm/call');
 
 const GBP_LOCATION_KEYS = ['LWR', 'PARRISH', 'SARASOTA', 'VENICE'];
 
@@ -18,7 +20,7 @@ const KNOWN_PLATFORMS = new Set([
   'meta_ads', 'meta_capi', 'meta_audiences',
   'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
   'bouncie', 'beehiiv', 'dataforseo',
-  'stripe', 'twilio', 'anthropic', 'openai', 'gemini', 'google',
+  'stripe', 'twilio', 'anthropic', 'openai', 'gemini', 'typesafe', 'google',
   'sendgrid',
   'github',
 ]);
@@ -796,6 +798,47 @@ async function checkGemini() {
   }
 }
 
+// TypeSafe Jev (typed decisions, GATE_TYPED_DECISIONS). The provider has no
+// cheap list-models call, so the probe is the smallest real request: one
+// yes/no question over a one-word state against the pinned model. 401/403 =
+// the key is bad (expired); 429/529 = the key works but the service is busy
+// (healthy for credential purposes); anything else is an error.
+async function checkTypeSafe() {
+  const platform = 'typesafe';
+  const envVarName = 'TYPESAFE_API_KEY';
+  const key = process.env.TYPESAFE_API_KEY;
+
+  if (!key) {
+    const result = { platform, status: 'not_configured', lastError: 'TYPESAFE_API_KEY not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch(TYPESAFE_SYSTEMONE_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: MODELS.TYPESAFE_JEV, state: 'ping', questions: { ok: { type: 'noul', instructions: 'Is the state the word ping?' } } }),
+    });
+
+    if (res.ok || res.status === 429 || res.status === 529) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const data = await res.json().catch(() => ({}));
+    const result = { platform, status, lastError: data.error?.message || data.message || `HTTP ${res.status}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
 async function checkGoogle() {
   const platform = 'google';
   const envVarName = process.env.GOOGLE_MAPS_API_KEY ? 'GOOGLE_MAPS_API_KEY' : 'GOOGLE_API_KEY';
@@ -940,6 +983,7 @@ const TokenHealthService = {
       case 'anthropic': return checkAnthropic();
       case 'openai': return checkOpenAI();
       case 'gemini': return checkGemini();
+      case 'typesafe': return checkTypeSafe();
       case 'google': return checkGoogle();
       case 'sendgrid': return checkSendGrid();
       case 'github': return checkGitHub();
@@ -977,6 +1021,7 @@ const TokenHealthService = {
     results.push(await checkAnthropic());
     results.push(await checkOpenAI());
     results.push(await checkGemini());
+    results.push(await checkTypeSafe());
     results.push(await checkGoogle());
     results.push(await checkSendGrid());
     results.push(await checkGitHub());

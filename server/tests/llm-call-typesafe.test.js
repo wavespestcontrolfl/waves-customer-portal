@@ -84,14 +84,16 @@ describe('callTypeSafe', () => {
 
   test('missing key -> no_key without a network call', async () => {
     delete process.env.TYPESAFE_API_KEY;
-    expect(await callTypeSafe({ model: 'jev-1.13.0', state: STATE, questions: QUESTIONS })).toEqual({ ok: false, reason: 'no_key' });
+    expect(await callTypeSafe({ model: 'jev-1.13.0', state: STATE, questions: QUESTIONS })).toMatchObject({ ok: false, reason: 'no_key' });
+    expect(mockRecordCall).toHaveBeenCalledWith(expect.objectContaining({ provider: 'typesafe', ok: false, errorCode: 'no_key' }));
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test.each([['jev-latest'], ['jev-1.13'], ['jev-1.13.0-beta'], ['claude-sonnet-5'], [undefined]])('unpinned model %p -> typesafe_unpinned_model without a network call', async (model) => {
-    expect(await callTypeSafe({ model, state: STATE, questions: QUESTIONS })).toEqual({ ok: false, reason: 'typesafe_unpinned_model' });
+    expect(await callTypeSafe({ model, state: STATE, questions: QUESTIONS })).toMatchObject({ ok: false, reason: 'typesafe_unpinned_model' });
     expect(global.fetch).not.toHaveBeenCalled();
-    expect(mockRecordCall).not.toHaveBeenCalled();
+    // Codex #5476 r3: the dark lane's refusals still file a failed ledger row.
+    expect(mockRecordCall).toHaveBeenCalledWith(expect.objectContaining({ provider: 'typesafe', ok: false, errorCode: 'typesafe_unpinned_model' }));
   });
 
   test.each([[{ answers: {} }], [{ answers: undefined }], [{ answers: [] }], [{ answers: 'nope' }]])('no answers (%j) -> empty_json, billed usage kept', async (over) => {

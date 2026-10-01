@@ -435,13 +435,16 @@ async function callOpenAI({ model, system, text, images = [], documents = [], js
  * `model` must be a pinned version (jev-N.N.N), checked before any network call.
  */
 async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
-  if (!process.env.TYPESAFE_API_KEY) return { ok: false, reason: 'no_key' };
-  if (!TYPESAFE_PINNED_MODEL_RE.test(String(model || ''))) return { ok: false, reason: 'typesafe_unpinned_model' };
   // `text` is the state, so a lane that opts into traces behaves like the
   // other adapters (the trace writer redacts and caps it).
   let stateText;
   try { stateText = typeof state === 'string' ? state : JSON.stringify(state); } catch { stateText = undefined; }
   const base = { provider: 'typesafe', requestedModel: model, laneId, promptVersion, policyLabel, text: stateText };
+  // Unlike the text adapters, a missing key or an unpinned model still files a
+  // failed ledger row (Codex #5476 r3): this lane is dark and has no user in
+  // front of it, so the ledger is the only place a dead credential shows.
+  if (!process.env.TYPESAFE_API_KEY) return failedLeg(base, { latencyMs: 0 }, 'no_key');
+  if (!TYPESAFE_PINNED_MODEL_RE.test(String(model || ''))) return failedLeg(base, { latencyMs: 0 }, 'typesafe_unpinned_model');
   const t0 = nowMs();
   try {
     const resp = await fetch(TYPESAFE_SYSTEMONE_API, {
