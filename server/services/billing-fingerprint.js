@@ -54,17 +54,9 @@ async function billingFingerprint(customerId, dbh = db) {
 function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleInvoiceId = null, zelleDenial = null, getBody = null }) {
   const check = async ({ dbi } = {}) => {
     const dbh = dbi || db;
-    const now = fingerprint ? await billingFingerprint(customerId, dbh) : null;
-    if (!now || now !== fingerprint) {
-      return {
-        ok: false,
-        code: 'BILLING_CHANGED_AT_BOUNDARY',
-        reason: now ? 'billing changed since the payment recheck' : 'billing state could not be re-read at send',
-        retryable: true,
-      };
-    }
     const body = String((typeof getBody === 'function' ? getBody() : getBody) || '');
     const recheck = require('./sms-amount-recheck');
+    // Zelle first; the fingerprint is the LAST read (Codex round-57 P1) - a payment changing during the Zelle DB / Stripe reads is caught
     if (recheck.hasAffirmativeZelleMention(body)) {
       const offer = await zelleOfferStillEligible({ recheck, customerId, zelleInvoiceId, body, dbh });
       if (!offer.ok) return offer;
@@ -75,9 +67,19 @@ function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleIn
       if (configured !== (zelleDenial.recipientConfigured !== false)) {
         return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: 'Zelle setup changed since the recheck', retryable: true };
       }
+      if (zelleDenial.invoiceId) {
+        const denial = await zelleDenialStillStands({ recheck, customerId, invoiceId: zelleDenial.invoiceId, dbh });
+        if (!denial.ok) return denial;
+      }
     }
-    if (zelleDenial?.invoiceId && recheck.hasNegativeZelleAvailabilityClaim(body)) {
-      return zelleDenialStillStands({ recheck, customerId, invoiceId: zelleDenial.invoiceId, dbh });
+    const now = fingerprint ? await billingFingerprint(customerId, dbh) : null;
+    if (!now || now !== fingerprint) {
+      return {
+        ok: false,
+        code: 'BILLING_CHANGED_AT_BOUNDARY',
+        reason: now ? 'billing changed since the payment recheck' : 'billing state could not be re-read at send',
+        retryable: true,
+      };
     }
     return { ok: true };
   };

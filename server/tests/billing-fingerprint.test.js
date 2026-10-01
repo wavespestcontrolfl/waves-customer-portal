@@ -107,3 +107,17 @@ describe('a denial that stood because Zelle was not set up', () => {
   });
 });
 
+
+// Codex round-57 P1: the fingerprint is the LAST boundary read - a payment changing during the Zelle reads is caught
+test('the fingerprint is read after the Zelle checks', async () => {
+  process.env.ZELLE_RECIPIENT = 'pay@example.com';
+  const order = [];
+  mockEligible.mockImplementation(async () => { order.push('zelle'); return { eligible: true }; });
+  const dbi = jest.fn();
+  dbi.raw = async () => { order.push('fingerprint'); return { rows: [{ fingerprint: 'abc' }] }; };
+  const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleInvoiceId: 'inv-1', getBody: () => 'We received your $120.00 card payment on Sep 12, 2026. You can Zelle us at pay@example.com.' });
+  try {
+    await expect(check({ dbi })).resolves.toEqual({ ok: true });
+    expect(order).toEqual(['zelle', 'fingerprint']);
+  } finally { delete process.env.ZELLE_RECIPIENT; mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); }
+});

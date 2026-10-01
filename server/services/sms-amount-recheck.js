@@ -130,8 +130,8 @@ function isTransferInstructionClause(clause) {
 // Zelle") is excluded from hasAffirmativeZelleMention on purpose, but it is a live claim too: the recipient
 // is an env setting and the invoice's eligibility moves, so the denial can go stale before it sends.
 function hasNegativeZelleAvailabilityClaim(body) {
-  if (zelleClauses(body)
-    .some((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && isNegatedZelleClause(clause))) return true;
+  // (a negated clause that also carries the recipient is BOTH: its instruction is rechecked as an offer, its denial as a denial - Codex r57)
+  if (zelleClauses(body).some((clause) => ZELLE_WORD_RE.test(clause) && isNegatedZelleClause(clause))) return true;
   // an elliptical denial ("We accept Zelle, but not for invoice #0002") is a negative claim too
   return ZELLE_WORD_RE.test(String(body || '')) && zelleClauseTexts(body).denialText !== '';
 }
@@ -165,15 +165,18 @@ function zelleClauseTexts(body) {
   const offers = [];
   const denials = [];
   clauses.forEach((clause, i) => {
-    if (kinds[i] === 'offer') offers.push(clause);
-    else if (kinds[i] === 'denial') denials.push(clause);
+    if (kinds[i] === 'offer') {
+      offers.push(clause);
+      // a contact-bearing clause that is ALSO negated ("Zelle isn't available for your invoice at pay@x.com") is a denial too (Codex r57)
+      if (ZELLE_WORD_RE.test(clause) && zelleBodyContacts(clause).length && isNegatedZelleClause(clause)) denials.push(clause);
+    } else if (kinds[i] === 'denial') denials.push(clause);
     else if (!ZELLE_WORD_RE.test(clause) && isTransferInstructionClause(clause)) offers.push(clause);
     else if (!ZELLE_WORD_RE.test(clause) && explicitInvoiceReference(clause)) (nearestKind(i) === 'denial' ? denials : offers).push(clause);
   });
   // the cross-clause case (Zelle affirmed in one clause, the transfer instruction in another) has no single offer clause
   const hasOfferClause = kinds.includes('offer');
   const offerText = hasOfferClause ? offers.join(' ') : (hasAffirmativeZelleMention(text) ? text : '');
-  return { offerText, denialText: kinds.includes('denial') ? denials.join(' ') : '' };
+  return { offerText, denialText: denials.length && (kinds.includes('denial') || denials.some((c) => ZELLE_WORD_RE.test(c))) ? denials.join(' ') : '' };
 }
 function hasAffirmativeZelleMention(body) {
   const clauses = zelleClauses(body);

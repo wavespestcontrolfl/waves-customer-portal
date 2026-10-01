@@ -346,14 +346,19 @@ async function zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payer
     hasPrevBalance = false;
     if (!invoice.payer_id) {
       const PayCombined = require('../services/pay-combined');
+      // Codex round-57 P1: a null result means "no siblings" ONLY for `none` / `gate_off`; an incomplete / over-cap / payer-unresolved
+      // read is UNVERIFIED sibling debt - a transfer would settle only this invoice - so Zelle is denied (fail closed)
+      let siblingsUnverified = false;
       const siblings = await PayCombined.combinedEligibleSiblings(invoice, {
         database,
         reusePaymentIntentId: invoice.stripe_payment_intent_id || null,
         onPayerResolved: () => { payerOwned = true; },
+        // (read-only callers - the SMS draft / send rechecks; the pay page GET keeps its existing behavior)
+        ...(readOnly ? { onDegrade: (reason) => { if (!['none', 'gate_off'].includes(reason)) siblingsUnverified = true; } } : {}),
         // read-only: the sibling charge-claim fences must not release / promote anything either
         ...(readOnly ? { readOnly: true } : {}),
       });
-      hasPrevBalance = !!(siblings && siblings.length);
+      hasPrevBalance = siblingsUnverified || !!(siblings && siblings.length);
     }
   }
   return !!(payerOwned || hasPrevBalance);

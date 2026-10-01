@@ -139,3 +139,21 @@ describe('the real fence: read-only never writes; the default mode does', () => 
     expect(database.writes.some(([table, m]) => table === 'stripe_invoice_charge_attempts' && m === 'update')).toBe(true);
   });
 });
+
+// Codex round-57 P1: for the SMS (read-only) path, a DEGRADED sibling read is unverified sibling debt - Zelle is denied
+describe('degraded sibling resolution (read-only callers)', () => {
+  const degradeWith = (reason) => jest.spyOn(PayCombined, 'combinedEligibleSiblings').mockImplementation(async (inv, opts) => { opts.onDegrade?.(reason); return null; });
+  test.each(['incomplete', 'over_cap', 'payer_unresolved'])('%s => not eligible', async (reason) => {
+    degradeWith(reason);
+    await expect(payRouter.isZelleTransferEligible(invoice, { readOnly: true })).resolves.toBe(false);
+  });
+  test.each(['none', 'gate_off'])('%s => still eligible (genuinely no siblings)', async (reason) => {
+    degradeWith(reason);
+    await expect(payRouter.isZelleTransferEligible(invoice, { readOnly: true })).resolves.toBe(true);
+  });
+  test('the pay page GET (not read-only) is unchanged: no onDegrade is passed', async () => {
+    const siblings = jest.spyOn(PayCombined, 'combinedEligibleSiblings').mockResolvedValue(null);
+    await payRouter.payPageZelleVisibility({ invoice, creditWillCoverAnchor: false });
+    expect(siblings.mock.calls[0][1]).not.toHaveProperty('onDegrade');
+  });
+});

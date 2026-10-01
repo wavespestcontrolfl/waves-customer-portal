@@ -958,3 +958,13 @@ test.each(['We accept Zelle except for invoice #0002.', 'We accept Zelle excludi
   expect(neg(b)).toBe(true);
   expect(zelleClauseTexts(b)).toEqual({ offerText: 'We accept Zelle', denialText: expect.stringMatching(/^(?:except|excluding)/) });
 });
+
+// Codex round-57 P2: a negated clause that also carries the recipient is rechecked as BOTH an offer and a denial
+test('a contact-bearing denial is a denial too (and its instruction still an offer)', () => {
+  const r = require('../services/sms-amount-recheck');
+  const b = "Zelle isn't available for your invoice at pay@example.com";
+  expect(r.hasNegativeZelleAvailabilityClaim(b)).toBe(true);
+  expect(r.hasAffirmativeZelleMention(b)).toBe(true);
+  expect(r.zelleClauseTexts(b).denialText).toBe(b);
+  expect(r.hasNegativeZelleAvailabilityClaim('You can Zelle us at pay@example.com.')).toBe(false);
+});
