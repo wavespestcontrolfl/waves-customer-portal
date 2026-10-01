@@ -340,6 +340,15 @@ function groundedTimeframePhrases(lines) {
     .map((phrase) => phrase.replace(/\s+/g, ' ').trim())
     .filter(Boolean))];
 }
+// The calendar dates a text carries ("Wednesday, October 14", "October
+// 14"): a generated draft passed the generation screen, so its dates were
+// supplied ones, and an edit that keeps them is no new date.
+const CALENDAR_DATE_PHRASE_RE = /\b(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\b/g;
+function draftDatePhrases(text) {
+  return [...new Set(String(text || '').match(CALENDAR_DATE_PHRASE_RE) || [])]
+    .flatMap((date) => [date, date.replace(/^\w+day,\s+/, '')]);
+}
+
 // An allowed phrase matches with loose spacing and either dash.
 function allowedPhrasePattern(phrase) {
   return String(phrase || '').trim().split(/\s+/)
@@ -590,5 +599,6 @@ module.exports = {
   COMMON_ACTIVE_INGREDIENTS,
   activeIngredientsMentioned,
   groundedTimeframePhrases,
+  draftDatePhrases,
   writerRulesRejection,
 };

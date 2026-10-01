@@ -108,7 +108,7 @@ const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, tr
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
-const { writerRulesRejection } = require('../services/service-report/report-writer-rules');
+const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -1973,7 +1973,7 @@ const reportSentences = (sections) => (Array.isArray(sections) ? sections : [])
 // resubmit passes. Only the four-section report is checked, and it exists
 // only while GATE_REPORT_WRITER_RULES is live. Fail-open on checker errors.
 function reportRulesReviewBlockPayload({
-  isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase = null,
+  isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase = null, activeIngredients = [],
 }) {
   if (isIncompleteVisit || reportRulesConfirmed) return null;
   try {
@@ -1986,6 +1986,14 @@ function reportRulesReviewBlockPayload({
       ? fourSectionReport(reportDraftBase)
       : null;
     const unchanged = new Set(reportSentences(base?.sections).map(normalizeSentence));
+    // The same context the generation screen had: this visit's catalog
+    // actives, and the timeframes and dates the generated draft carried
+    // (they passed that screen), so an edit that keeps them is no finding.
+    const screenOptions = {
+      activeIngredients,
+      allowedPhrases: groundedTimeframePhrases([base?.body || '']),
+      allowedDates: draftDatePhrases(base?.body || ''),
+    };
     const findings = [];
     if (submitted.violations.length) {
       findings.push({
@@ -1996,7 +2004,7 @@ function reportRulesReviewBlockPayload({
     }
     for (const sentence of reportSentences(submitted.sections)) {
       if (unchanged.has(normalizeSentence(sentence))) continue;
-      const reason = writerRulesRejection(sentence);
+      const reason = writerRulesRejection(sentence, screenOptions);
       if (reason) findings.push({ reason, label: REPORT_RULE_FINDING_LABELS[reason] || 'A rule the report follows', sentence });
     }
     if (!findings.length) return null;
@@ -3268,8 +3276,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // reportRulesReviewBlockPayload): same 409 shape, same committed-retry
     // exemption as the reconciliation prompt just above.
     {
+      // This visit's catalog actives, as the generation screen reads them
+      // (fail-soft: the common list still applies inside the screen).
+      const reviewProductIds = (Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean);
+      const reviewActives = reportRulesConfirmed || !reviewProductIds.length
+        ? []
+        : (await failSoftRead(db, (k) => k('products_catalog').whereIn('id', reviewProductIds).select('active_ingredient'), []))
+          .map((row) => row?.active_ingredient).filter(Boolean);
       const rulesBlock = reportRulesReviewBlockPayload({
-        isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase,
+        isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase, activeIngredients: reviewActives,
       });
       if (rulesBlock
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {

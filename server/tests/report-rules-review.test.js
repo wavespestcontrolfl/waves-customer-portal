@@ -46,6 +46,20 @@ describe('edit heads-up', () => {
     expect(reportRulesReviewBlockPayload(args({ isIncompleteVisit: true }))).toBeNull();
   });
 
+  test('an edit that keeps the draft\'s approved timeframe and date is no finding', () => {
+    const base = DRAFT.replace("Let us know if they keep trailing.", 'If ants are still trailing by Wednesday, October 14, let us know.');
+    const kept = base
+      .replace('You may see a few more ants for about 1–2 weeks.', 'You might notice more ants near the bait for about 1–2 weeks.')
+      .replace('If ants are still trailing by Wednesday, October 14, let us know.', 'If you still see ants by Wednesday, October 14, text us.');
+    expect(reportRulesReviewBlockPayload(args({ technicianNotes: kept, reportDraftBase: base }))).toBeNull();
+  });
+
+  test("this visit's own active ingredients are screened, as at generation", () => {
+    const edited = DRAFT.replace('We placed bait along the counter, because ants carry it back to the colony.', 'We placed bait with azadirachtin.');
+    const block = reportRulesReviewBlockPayload(args({ technicianNotes: edited, activeIngredients: ['Azadirachtin'] }));
+    expect(block.payload.findings.map((finding) => finding.reason)).toEqual(['active_ingredient']);
+  });
+
   test('with no draft to compare, every sentence is checked', () => {
     const block = reportRulesReviewBlockPayload(args({ technicianNotes: DRAFT, reportDraftBase: null }));
     expect(block.payload.findings.map((finding) => finding.reason)).toEqual(['timeframe']);

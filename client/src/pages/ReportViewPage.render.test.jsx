@@ -665,6 +665,32 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
     expect(screen.getAllByText(new RegExp(PROSE.slice(0, 40)))).toHaveLength(1); // the companion card only
     await screen.findByText('Today’s service is complete.');
   });
+
+  it('the companion card shows the sections and opens "What’s next" with the live visit', async () => {
+    const sections = [
+      { key: 'whatWeFound', title: 'What we found', paragraphs: ['Station 7 had live termites.'] },
+      { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We replaced the bait in station 7.'] },
+      { key: 'whatToExpect', title: 'What to expect', paragraphs: ['Termite bait works slowly on purpose.'] },
+      { key: 'whatsNext', title: 'What’s next', paragraphs: ['Mud tubes on walls are worth telling us about.'] },
+    ];
+    const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+    renderReport(typedPestPayload({
+      pestReportV2: null,
+      typedReport: null,
+      activity: null,
+      summary: body,
+      summarySource: 'technician_report',
+      reportSections: sections,
+      nextSameServiceAppointment: { serviceType: 'Quarterly Pest Control', scheduledDate: '2026-12-09', windowStart: '09:00:00' },
+      companionReports: [{
+        type: 'termite_bait_station',
+        reportTypeLabel: 'Termite Bait Station Service',
+        todaysResult: { headline: 'Bait station service completed today', body, bodySource: 'technician_report' },
+      }],
+    }));
+    expect(await screen.findByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText(/^Next visit: Quarterly Pest Control · /)).toBeInTheDocument();
+  });
 });
 
 describe('ReportViewPage — trapping station map card (program labels)', () => {

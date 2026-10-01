@@ -9515,6 +9515,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                   typedReport={companion}
                   sectionId={`companion-${companion.type}-todays-result`}
                   reportSections={reportSections}
+                  nextVisitLabel={nextSameServiceLabel}
                 />
               )}
               <TypedFindingsCard
