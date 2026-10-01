@@ -2175,7 +2175,7 @@ function buildFailOpenRoutingContext({
         // after the call ended), the extraction path's helper — slot dates resolve
         // from it (codex #5377 r12 P2).
         callStartedAt: callStartedAt(call) || call.created_at,
-        commercialQuoteBookable: commercialQuoteBookableFor({
+        commercialQuoteBookable: auditCommercialQuoteBookableFor({
           extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
           transcription: transcript !== undefined ? transcript : call.transcription,
           services: bookableServices,
@@ -6448,6 +6448,33 @@ function parseLooseJson(value) {
   try { return JSON.parse(value) || {}; } catch (_e) { return {}; }
 }
 
+// The extraction fields the service resolvers read (resolveSchedulableCallService,
+// resolveCallBookingCatalogService, hasCallReServiceIntent). V2-primary adoption can
+// fill or replace them, so the V1 values it replaced are recorded on the canonical
+// extraction as `pre_adoption_service_fields` ({} when adoption touched none).
+const CALL_SERVICE_VIEW_FIELDS = Object.freeze(['matched_service', 'requested_service', 'specific_service_name', 'call_summary', 'pain_points']);
+function preAdoptionServiceFields(preAdoptionExtracted = {}, adoptedFields = []) {
+  return Object.fromEntries(CALL_SERVICE_VIEW_FIELDS
+    .filter((key) => adoptedFields.includes(key))
+    .map((key) => [key, preAdoptionExtracted?.[key] ?? null]));
+}
+
+// The offline audits' commercial quote check (buildFailOpenRoutingContext): the live
+// check's views rebuilt from the persisted extraction. The pre-adoption view is the
+// canonical record with the recorded V1 service values restored. A row with a V2
+// extraction and no record (processed before it was written) has an unknown
+// pre-adoption view, so the audit holds it rather than over-admit (codex #5377 r17 P1).
+function auditCommercialQuoteBookableFor({ extracted = {}, transcription = '', services = null } = {}) {
+  const recorded = extracted?.pre_adoption_service_fields;
+  const hasRecord = !!recorded && typeof recorded === 'object' && !Array.isArray(recorded);
+  const preAdoptionExtracted = hasRecord && Object.keys(recorded).length ? { ...extracted, ...recorded } : null;
+  const check = commercialQuoteBookableFor({ extracted, preAdoptionExtracted, transcription, services });
+  return (quoted, v2Extraction = null) => {
+    if (!hasRecord && isV2Extraction(v2Extraction)) return false;
+    return check(quoted, v2Extraction);
+  };
+}
+
 function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = null, transcription = '', services = null } = {}) {
   return (quoted, v2Extraction = null) => {
     try {
@@ -10004,6 +10031,7 @@ const CallRecordingProcessor = {
     // structure unit waiver must agree with it too (a V1 pick V2 overwrites
     // is a service disagreement, not a WDO).
     const preAdoptionExtracted = { ...extracted };
+    let serviceFieldsAdopted = [];
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
         etWallClock: v2IsoToEtWallClock,
@@ -10019,6 +10047,14 @@ const CallRecordingProcessor = {
         // like the enforce path's approved-booking re-assert (codex P2).
         if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
+      serviceFieldsAdopted = adoption.adoptedFields;
+    }
+    // The V1 values of the service fields adoption replaced ride on the canonical
+    // extraction ({} when none, or when the primary gate kept adoption off), so the
+    // offline audits rebuild the same pre-adoption service view the live commercial
+    // quote check reads (codex #5377 r17 P1).
+    if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
+      extracted = { ...extracted, pre_adoption_service_fields: preAdoptionServiceFields(preAdoptionExtracted, serviceFieldsAdopted) };
     }
 
     // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
@@ -22248,6 +22284,8 @@ CallRecordingProcessor._test = {
   buildFailOpenRoutingContext,
   commercialDictatedBookingActive,
   commercialQuoteBookableFor,
+  auditCommercialQuoteBookableFor,
+  preAdoptionServiceFields,
   resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,

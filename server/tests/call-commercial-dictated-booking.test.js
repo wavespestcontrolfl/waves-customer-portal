@@ -901,6 +901,40 @@ describe('the quote must survive the catalog-aware price resolver (codex #5377 r
     expect(f(150, ex)).toBe(false);
   });
 
+  test('the audits rebuild the pre-adoption view from the recorded V1 service fields (codex #5377 r17 P1)', () => {
+    const { auditCommercialQuoteBookableFor, preAdoptionServiceFields } = require('../services/call-recording-processor')._test;
+    // V1 resolved the RECURRING row; V2-primary filled specific_service_name with the one-time row.
+    const v1 = { requested_service: RECURRING_ROW.name, matched_service: RECURRING_ROW.name, specific_service_name: null };
+    const merged = { ...v1, specific_service_name: ONE_TIME_ROW.name };
+    const v2 = serviceOf(ONE_TIME_ROW.name);
+    v2.meta = { schema_version: '1.21.0' };
+    const services = [ONE_TIME_ROW, RECURRING_ROW];
+    const recorded = preAdoptionServiceFields(v1, ['specific_service_name', 'first_name']);
+    expect(recorded).toEqual({ specific_service_name: null }); // service fields only, V1 values
+    // live: every view must survive, the V1 recurring view does not
+    expect(commercialQuoteBookableFor({ extracted: merged, preAdoptionExtracted: v1, transcription: TRANSCRIPT, services })(150, v2)).toBe(false);
+    // audit with the record: the same verdict
+    expect(auditCommercialQuoteBookableFor({ extracted: { ...merged, pre_adoption_service_fields: recorded }, transcription: TRANSCRIPT, services })(150, v2)).toBe(false);
+    // audit with an empty record (adoption touched no service field): the merged view decides
+    const oneTime = { requested_service: ONE_TIME_ROW.name, matched_service: ONE_TIME_ROW.name };
+    expect(auditCommercialQuoteBookableFor({ extracted: { ...oneTime, pre_adoption_service_fields: {} }, transcription: TRANSCRIPT, services })(150, v2)).toBe(true);
+    // a row processed before the record existed, with a V2 extraction: unknown pre-adoption view, held
+    expect(auditCommercialQuoteBookableFor({ extracted: oneTime, transcription: TRANSCRIPT, services })(150, v2)).toBe(false);
+    // ... and with no V2 extraction there was no adoption: the V1 record decides
+    expect(auditCommercialQuoteBookableFor({ extracted: oneTime, transcription: TRANSCRIPT, services })(150, null)).toBe(true);
+  });
+
+  test('the processor records the V1 service fields for every valid V2 extraction, and the audit builder reads them', () => {
+    const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(proc).toMatch(/if \(v2Result\?\.status === 'valid' && isV2Extraction\(v2Result\.extraction\)\) \{\n\s+extracted = \{ \.\.\.extracted, pre_adoption_service_fields: preAdoptionServiceFields\(preAdoptionExtracted, serviceFieldsAdopted\) \};/);
+    expect(proc).toMatch(/commercialQuoteBookable: auditCommercialQuoteBookableFor\(\{\n\s+extracted: extracted !== undefined \? extracted : parseLooseJson\(call\.ai_extraction\),/);
+    // the record is written before the first ai_extraction write that follows adoption
+    const adoptAt = proc.indexOf('const adoption = adoptV2PrimaryFields(');
+    const rec = proc.indexOf('pre_adoption_service_fields: preAdoptionServiceFields(');
+    expect(rec).toBeGreaterThan(adoptAt);
+    expect(rec).toBeLessThan(proc.indexOf('ai_extraction: JSON.stringify(extracted)', adoptAt));
+  });
+
   test('both processor lanes and every audit hand the check the SAME way', () => {
     const src = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
     const proc = src('../services/call-recording-processor.js');
