@@ -267,13 +267,28 @@ function decideUnreachableRecovery(event) {
     : null;
 }
 
+// The channels a touch selected: the deterministic union of EVERY reservation's persisted selection (a retried
+// leg's claim refreshes only its own row after a prefs change, and an unordered query hands back rows in any
+// order), falling back to the event's first-row metadata only when no entry carries one. null = unknown.
+function selectedChannelsOf(event) {
+  const union = new Set();
+  let seen = false;
+  for (const entry of event.entries || []) {
+    let meta = entry.metadata;
+    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+    if (Array.isArray(meta?.selectedChannels)) { seen = true; meta.selectedChannels.forEach((c) => union.add(c)); }
+  }
+  if (seen) return [...union].sort();
+  return Array.isArray(event.metadata?.selectedChannels) ? event.metadata.selectedChannels : null;
+}
+
 // Is an EXISTING touch done? Judged against the legs that touch itself selected (its reservations persist
 // selectedChannels), minus any channel the customer has since removed: a channel enabled after the touch went
 // out is not owed to it (the progress view's own `complete` counts today's channels). A touch with no persisted
 // selection (an older row) falls back to today's channels.
 function recoveryComplete(event, channels) {
   if (!event) return false;
-  const selected = Array.isArray(event.metadata?.selectedChannels) ? event.metadata.selectedChannels : null;
+  const selected = selectedChannelsOf(event);
   // Today's enabled channels narrow the legs (a removal); when none of the selected legs is still enabled the
   // touch is judged on what it selected (nothing was ever owed on the new channel), never re-sent on it.
   const stillEnabled = selected ? selected.filter((c) => channels.includes(c)) : channels;
@@ -426,6 +441,14 @@ function snapshotMetadata(run, set) {
 const setChanged = (result) => Object.values(result.results || {})
   .some((r) => r?.code === Boundary.SET_CHANGED || r?.reason === Boundary.SET_CHANGED);
 
+// The legs this attempt actually carries the shared pay link on: the still-owed ones, not those already delivered,
+// resolved or waived (a retry after a partial delivery sends the link on the remaining leg only).
+function legsBeingSent(run) {
+  const event = currentEvent(run);
+  const settled = new Set([...(event?.delivered || []), ...(event?.resolved || []), ...(event?.waived || [])]);
+  return run.sendChannels.filter((c) => !settled.has(c));
+}
+
 function attemptSend(run, set) {
   const memberIds = set.members.map((m) => m.invoice_id);
   run.memberIds = memberIds;
@@ -433,6 +456,7 @@ function attemptSend(run, set) {
   run.snapshotMeta = snapshotMetadata(run, set);
   const ctx = {
     schedule: run.schedule, step: run.step, customer: run.customer, set, channels: run.sendChannels,
+    linkChannels: legsBeingSent(run),
     explicit: run.explicit, eventKey: run.eventKey, operatorInitiated: run.operatorInitiated,
     snapshot: Boundary.snapshotOf(run.schedule.customer_id, set, { scheduleId: run.schedule.id, claimStamp: run.claimStamp, operatorInitiated: run.operatorInitiated }), claimStamp: run.claimStamp,
   };
@@ -838,5 +862,6 @@ module.exports = {
   // exported for tests
   namedInvoiceIds,
   snapshotMetadata,
+  selectedChannelsOf,
   OPEN_STATUSES,
 };

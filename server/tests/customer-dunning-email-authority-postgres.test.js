@@ -198,4 +198,105 @@ postgres('customer-dunning email authority on the run\'s handle (PostgreSQL)', (
     expect(state.boundaryBlock).toMatchObject({ retryable: true });
     expect(sent).toEqual([]);
   });
+
+  // ── operator send-now through the SAME authority (#5475 r2) ────────────────
+  describe('operator send-now: the shared authority with the explicit preference-bypass option', () => {
+    const Suppression = require('../services/messaging/validators/suppression');
+    const Library = require('../services/email-template-library');
+    const authorityCall = (customerId, invoiceIds, state, extra = {}) => dispatchUnderBillingEmailAuthority({
+      input: { customerId, invoiceId: null, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
+      recipientEmail: EMAIL, authorityRecipientEmail: EMAIL, templateKey: 'invoice.followup_combined_60_day',
+      preSendCheck: Boundary.check(Boundary.snapshotOf(customerId, set(invoiceIds), { operatorInitiated: true })),
+      dispatch: async () => { state.dispatched = true; }, state, ...extra,
+    });
+    const freshState = () => ({ boundaryBlock: null, handoffStarted: false, providerAccepted: false, dispatched: false });
+    afterEach(() => {
+      Suppression.checkSuppression.mockImplementation(async () => ({ ok: true }));
+      Library.activeSuppressionFor.mockImplementation(async () => null);
+    });
+
+    test('prefs say text-only: the DEFAULT authority call refuses (unchanged), the operator-bypass call sends', async () => {
+      const { customerId, invoiceIds } = await seed();
+      await app('notification_prefs').where({ customer_id: customerId }).update({ invoice_channels: JSON.stringify(['sms']) });
+      const plain = freshState();
+      expect(await authorityCall(customerId, invoiceIds, plain)).toEqual({ ok: false });
+      expect(plain.boundaryBlock).toMatchObject({ retryable: true });
+      expect(plain.dispatched).toBe(false);
+      const operator = freshState();
+      expect(await authorityCall(customerId, invoiceIds, operator, { operatorBypassPreferences: true })).toEqual({ ok: true });
+      expect(operator.dispatched).toBe(true);
+    });
+
+    test('end to end: a processSchedule send-now to a text-only customer sends the email once and advances', async () => {
+      const sent = acceptingLibrary();
+      const { customerId, schedule } = await seed();
+      await app('notification_prefs').where({ customer_id: customerId }).update({ invoice_channels: JSON.stringify(['sms']) });
+      const out = await Runner.processSchedule(schedule.id, NOW, { operatorInitiated: true, force: true });
+      expect(out.outcome).toBe('advanced');
+      expect(sent).toEqual(['invoice.followup_combined_60_day']);
+    });
+
+    test('a messaging_suppression entry (staff manual DNC) refuses the operator email TERMINALLY - the shared check the authority owns', async () => {
+      const sent = acceptingLibrary();
+      const { customerId, schedule } = await seed();
+      Suppression.checkSuppression.mockImplementation(async () => ({ ok: false, code: 'SUPPRESSED_MANUAL_DNC', reason: 'Staff marked do-not-contact', retryable: false }));
+      const out = await Runner.processSchedule(schedule.id, NOW, { operatorInitiated: true, force: true });
+      expect(out.outcome).toBe('paused');
+      expect(sent).toEqual([]);
+      expect(Suppression.checkSuppression).toHaveBeenCalled();
+      const ledger = await app('collections_contact_ledger').where({ customer_id: customerId, channel: 'email' });
+      expect(ledger[0].metadata).toMatchObject({ resolved: true, resolution: 'email_terminal_refusal' });
+    });
+
+    test('an email suppression store entry refuses it too (EMAIL_SUPPRESSED, terminal)', async () => {
+      const { customerId, invoiceIds } = await seed();
+      Library.activeSuppressionFor.mockImplementation(async () => ({ suppression_type: 'unsubscribe' }));
+      const state = freshState();
+      expect(await authorityCall(customerId, invoiceIds, state, { operatorBypassPreferences: true })).toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'EMAIL_SUPPRESSED' });
+      expect(state.boundaryBlock.retryable).toBeUndefined();
+      expect(state.dispatched).toBe(false);
+    });
+
+    test('the address changed after it was prepared: refused under the lock (retryable), nothing dispatched; a case-only difference is the same address', async () => {
+      const { customerId, invoiceIds } = await seed();
+      await app('customers').where({ id: customerId }).update({ email: 'new-address@example.test' });
+      const changed = freshState();
+      expect(await authorityCall(customerId, invoiceIds, changed, { operatorBypassPreferences: true })).toEqual({ ok: false });
+      expect(changed.boundaryBlock).toMatchObject({ code: 'EMAIL_RECIPIENT_CHANGED', retryable: true });
+      expect(changed.dispatched).toBe(false);
+
+      await app('customers').where({ id: customerId }).update({ email: 'Pat@Example.TEST' });
+      const sameAddress = freshState();
+      expect(await authorityCall(customerId, invoiceIds, sameAddress, { operatorBypassPreferences: true, recipientEmail: 'Pat@Example.TEST', authorityRecipientEmail: 'pat@example.test' })).toEqual({ ok: true });
+    });
+
+    test('the final provider-boundary check still runs for an operator send: a set that changed during preparation vetoes it with a tagged refusal', async () => {
+      const sent = acceptingLibrary();
+      const { customerId, invoiceIds, schedule } = await seed();
+      let n = 0;
+      // read 1 = the run, 2 = the authority's first check; every later read (the FINAL check, the re-render) differs again
+      mockResolve.mockImplementation(async () => { n += 1; return n <= 2 ? set(invoiceIds) : { ...set(invoiceIds), digest: `changed-${n}`, totalCents: 10000 + n }; });
+      const out = await Runner.processSchedule(schedule.id, NOW, { operatorInitiated: true, force: true });
+      expect(sent).toEqual([]); // vetoed at the final check every time: nothing reached the provider
+      expect(out.outcome).toBe('held');
+      const ledger = await app('collections_contact_ledger').where({ customer_id: customerId, channel: 'email' });
+      expect(ledger.some((r) => r.metadata.delivered === true)).toBe(false);
+    });
+
+    test('the dispute-hold exemption: a plain dispute hold is skipped for the operator, a wrong-party hold still waits (retryable COLLECTION_HOLD_DEFER)', async () => {
+      const { customerId, invoiceIds } = await seed();
+      const [{ id }] = await app('collections_flags').insert({ customer_id: customerId, flag: 'collection_hold', reason: 'Dispute: customer says the work was not done', created_by: 'test' }).returning('id');
+      const operator = freshState();
+      expect(await authorityCall(customerId, invoiceIds, operator, { operatorBypassPreferences: true, holdExempt: 'operator' })).toEqual({ ok: true });
+      const plain = freshState();
+      expect(await authorityCall(customerId, invoiceIds, plain, {})).toEqual({ ok: false });
+      expect(plain.boundaryBlock).toMatchObject({ code: 'COLLECTION_HOLD_DEFER' });
+      await app('collections_flags').where({ id }).update({ released_at: NOW });
+      await app('collections_flags').insert({ customer_id: customerId, flag: 'collection_hold', reason: 'Wrong number', created_by: 'test' });
+      const fallback = freshState();
+      expect(await authorityCall(customerId, invoiceIds, fallback, { operatorBypassPreferences: true, holdExempt: 'operator' })).toEqual({ ok: false });
+      expect(fallback.boundaryBlock).toMatchObject({ code: 'COLLECTION_HOLD_DEFER', retryable: true });
+    });
+  });
 });

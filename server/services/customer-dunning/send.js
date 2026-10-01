@@ -18,7 +18,7 @@ const logger = require('../logger');
 const { redactContact } = require('../../utils/redact-contact');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const EmailTemplateLibrary = require('../email-template-library');
-const { dispatchUnderBillingEmailAuthority, blocked } = require('../billing-channel-email-authority');
+const { dispatchUnderBillingEmailAuthority } = require('../billing-channel-email-authority');
 const {
   billingEmailRecipient, operatorEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure,
 } = require('../billing-email-sender');
@@ -26,7 +26,6 @@ const ContactLedger = require('../collections/contact-ledger');
 const { isTerminalEmailRefusal } = require('../billing-reminder-delivery');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../short-url');
 const { publicPortalUrl } = require('../../utils/portal-url');
-const { withCustomerCommsLock, lockCustomerEmail } = require('../../utils/customer-comms-lock');
 const Boundary = require('./boundary');
 const Render = require('./render');
 const { SOURCE, emailIdempotencyKey, triggerEventId } = require('./constants');
@@ -55,7 +54,7 @@ function linkCacheKey(digest, channel) {
 async function ensureLink(ctx) {
   if (ctx.link) return ctx.link;
   const { schedule, set, customer } = ctx;
-  const linkChannel = linkChannelFor(ctx.channels);
+  const linkChannel = linkChannelFor(ctx.linkChannels || ctx.channels);
   const cacheKey = linkCacheKey(set.digest, linkChannel.channel);
   if (schedule.link_url && schedule.link_digest === cacheKey) {
     ctx.link = schedule.link_url;
@@ -137,103 +136,26 @@ async function sendTextLeg(ctx, channel, ledger) {
   });
 }
 
-// The operator email's recipient, re-resolved on the comms-lock transaction: null = still good, else a verdict.
-async function operatorRecipientBlock(trx, customerId, { to, templateKey }) {
-  const customer = await trx('customers').where({ id: customerId }).first();
-  const who = customer ? await operatorEmailRecipient(customer, 'customer-dunning', trx) : { refusal: true };
-  if (who.refusal || String(who.to).trim().toLowerCase() !== String(to).trim().toLowerCase()) {
-    return { ok: false, code: 'DUNNING_RECIPIENT_CHANGED', reason: 'The email address changed after this reminder was prepared', retryable: true };
-  }
-  const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey, trx);
-  if (!loaded?.template) return { ok: false, code: 'BILLING_EMAIL_RECHECK_FAILED', reason: 'Billing email template is unavailable', retryable: true };
-  // The shared per-address lock the suppression WRITERS take (a SendGrid webhook, an admin suppression), acquired
-  // after the comms lock exactly as the billing email authority does, so a suppression cannot commit between this
-  // read and the provider request.
-  await lockCustomerEmail(trx, who.to);
-  const suppression = await EmailTemplateLibrary.activeSuppressionFor(loaded.template, who.to, 'transactional_required', trx);
-  if (!suppression) return null;
-  return { ok: false, code: 'EMAIL_SUPPRESSED', reason: `Suppressed: ${suppression.suppression_type || 'active suppression'}`, retryable: false };
-}
-
-/**
- * The operator send's provider handoff: a customer-comms transaction that runs
- * the boundary on ITS handle, then dispatches (the analogue of
- * billing-email-sender's selfPayOnlyHandoff). Fail-closed.
- *
- * It mirrors billing-channel-email-authority's verifyAndDispatch: the check runs
- * once before the provider work, and AGAIN as the `providerBoundaryCheck` the
- * template library calls after its asynchronous marker and SendGrid preparation,
- * immediately before the request. A set that changed in between (an invoice
- * paid, a credit applied) vetoes the send there: `state.boundaryBlock` records
- * the retryable refusal, the tagged throw aborts the dispatch, and the outcome is
- * the same `{ ok: false }` the normal authority returns.
- */
-function boundaryOnlyHandoff(snapshot, state, recipient = null) {
-  const boundary = Boundary.check(snapshot);
-  // The deliberate preference bypass stays, but the ADDRESS and its suppression are re-resolved on the handoff
-  // transaction at both points the boundary runs: a changed address or a new suppression never reaches the provider.
-  const check = async (opts) => {
-    const verdict = await boundary(opts);
-    if (verdict.ok !== true || !recipient) return verdict;
-    try {
-      return (await operatorRecipientBlock(opts.database, snapshot.customerId, recipient)) || verdict;
-    } catch (err) {
-      // A thrown lookup must be a TAGGED refusal: untagged, the template library records the row as an ambiguous
-      // started handoff and the reservation stays unconfirmed for good (mirrors the authority's preSendBlock).
-      logger.warn(`[customer-dunning] operator email recipient check failed for customer ${snapshot.customerId}: ${redactContact(err.message)}`);
-      return { ok: false, code: 'BILLING_EMAIL_RECHECK_FAILED', reason: 'Billing email authority could not be verified', retryable: true };
-    }
-  };
-  const refuse = (verdict) => blocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
-  return async (dispatch) => {
-    try {
-      return await withCustomerCommsLock(db, snapshot.customerId, async (trx) => {
-        const verdict = await check({ database: trx });
-        if (verdict.ok !== true) {
-          state.boundaryBlock = refuse(verdict);
-          return { ok: false };
-        }
-        const providerBoundaryCheck = async ({ database } = {}) => {
-          const final = await check({ database: database || trx, providerBoundary: true });
-          if (final.ok !== true) {
-            state.boundaryBlock = refuse(final);
-            const veto = new Error(state.boundaryBlock.reason);
-            veto.code = state.boundaryBlock.code;
-            veto.retryable = state.boundaryBlock.retryable;
-            veto.providerBoundaryBlocked = true;
-            throw veto;
-          }
-          state.handoffStarted = true;
-          return { ok: true };
-        };
-        state.providerPreparationStarted = true;
-        await dispatch(trx, providerBoundaryCheck);
-        if (state.boundaryBlock) return { ok: false };
-        state.providerAccepted = true;
-        return { ok: true };
-      });
-    } catch (err) {
-      if (state.providerAccepted) return { ok: true };
-      // A final-boundary veto is a definite refusal, however it was thrown.
-      if (state.boundaryBlock && !state.handoffStarted) return { ok: false };
-      throw err;
-    }
-  };
-}
-
 const AUTHORITY_INPUT = (customerId) => ({
   customerId, invoiceId: null, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' },
 });
 
+// Every email - an operator's send-now included - goes through the ONE shared billing email authority: recipient
+// re-resolution under the comms lock, the address lock, both suppression stores, the template check, the
+// collections-hold check and this engine's boundary callback. The operator send differs in exactly two things the
+// authority takes as explicit options: it skips the billing-preference / channel-selection gate (the deliberate
+// bypass) and carries holdExempt 'operator' (a plain dispute hold is skipped, a wrong-party hold still waits).
 function emailHandoff(ctx, to, templateKey, state) {
-  if (ctx.operatorInitiated) return boundaryOnlyHandoff(ctx.snapshot, state, { to, templateKey });
   return (dispatch) => dispatchUnderBillingEmailAuthority({
     input: AUTHORITY_INPUT(ctx.customer.id),
     recipientEmail: to,
+    // the authority compares against its own lower-cased recipient; an operator address comes from the raw record
+    authorityRecipientEmail: String(to).trim().toLowerCase(),
     templateKey,
     preSendCheck: Boundary.check(ctx.snapshot),
     dispatch,
     state,
+    ...(ctx.operatorInitiated ? { operatorBypassPreferences: true, holdExempt: 'operator' } : {}),
   });
 }
 
@@ -330,4 +252,4 @@ function makeSender(ctx) {
   return (channel, ledger) => (channel === 'email' ? sendEmailLeg(ctx, ledger) : sendTextLeg(ctx, channel, ledger));
 }
 
-module.exports = { stampNeverContacted, makeSender, ensureLink, sendTextLeg, sendEmailLeg, boundaryOnlyHandoff, SOURCE };
+module.exports = { stampNeverContacted, makeSender, ensureLink, sendTextLeg, sendEmailLeg, SOURCE };

@@ -30,12 +30,9 @@ const mockOnAutopay = jest.fn();
 jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: (...a) => mockOnAutopay(...a) }));
 const mockSendTemplate = jest.fn();
 const mockLoadTemplate = jest.fn();
-const defaultSuppression = async () => { mockLockOrder.push('suppression-read'); return null; };
-const mockActiveSuppression = jest.fn(defaultSuppression); // the operator email's suppression re-check under the comms lock
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: (...a) => mockSendTemplate(...a),
   loadTemplateByKey: (...a) => mockLoadTemplate(...a),
-  activeSuppressionFor: (...a) => mockActiveSuppression(...a),
 }));
 
 // The billing email authority: models what the real one does around the
@@ -69,22 +66,44 @@ const mockBlocked = (code, reason, { retryable = false } = {}) => ({
 jest.mock('../services/billing-channel-email-authority', () => ({
   blocked: (...a) => mockBlocked(...a),
   loadBillingEmailContext: (...a) => mockLoadContext(...a),
+  // Models the real one around the handoff (the real module is covered against PostgreSQL in
+  // customer-dunning-email-authority-postgres): the caller's check once on the authority's transaction, then again as the
+  // providerBoundaryCheck the template library runs after its asynchronous preparation, a veto being a TAGGED throw.
   dispatchUnderBillingEmailAuthority: jest.fn(async ({ preSendCheck, dispatch, state }) => {
-    const verdict = await preSendCheck({ channel: 'email', database: MOCK_TRX, providerBoundary: false });
-    if (verdict?.ok !== true) {
-      state.boundaryBlock = mockBlocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
+    const ask = async (database, providerBoundary) => {
+      try { return await preSendCheck({ channel: 'email', database, providerBoundary }); } catch (err) {
+        return { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
+      }
+    };
+    const first = await ask(MOCK_TRX, false);
+    if (first?.ok !== true) {
+      state.boundaryBlock = mockBlocked(first.code, first.reason, { retryable: first.retryable === true });
       return { ok: false };
     }
-    state.handoffStarted = true;
-    await dispatch(MOCK_TRX, async () => ({ ok: true }));
+    const providerBoundaryCheck = async ({ database } = {}) => {
+      const final = await ask(database || MOCK_TRX, true);
+      if (final?.ok !== true) {
+        state.boundaryBlock = mockBlocked(final.code, final.reason, { retryable: final.retryable === true });
+        throw Object.assign(new Error(state.boundaryBlock.reason), { code: state.boundaryBlock.code, retryable: state.boundaryBlock.retryable, providerBoundaryBlocked: true });
+      }
+      state.handoffStarted = true;
+      return { ok: true };
+    };
+    state.providerPreparationStarted = true;
+    try {
+      await dispatch(MOCK_TRX, providerBoundaryCheck);
+    } catch (err) {
+      if (state.boundaryBlock) return { ok: false }; // a tagged final-boundary veto is a definite refusal
+      state.handoffStarted = true; // a provider error thrown from the handoff itself is past the point of no return
+      throw err;
+    }
+    if (state.boundaryBlock) return { ok: false };
     state.providerAccepted = true;
     return { ok: true };
   }),
 }));
-const mockLockOrder = []; // the order the comms lock, the per-address lock and the suppression read ran in
 jest.mock('../utils/customer-comms-lock', () => ({
-  withCustomerCommsLock: jest.fn(async (_db, _id, fn) => { mockLockOrder.push('comms'); return fn(MOCK_TRX); }),
-  lockCustomerEmail: jest.fn(async (_trx, email) => { mockLockOrder.push(`address:${email}`); }),
+  withCustomerCommsLock: jest.fn(async (_db, _id, fn) => fn(MOCK_TRX)),
 }));
 // Default: no repair. The crash-recovery tests point this at the REAL repair over an in-memory email_messages.
 let mockRepairImpl = async () => new Set();
@@ -2614,13 +2633,13 @@ describe('final notice, D2/D4/D5/D11', () => {
 });
 
 describe('operator send-now', () => {
-  test('operatorInitiated uses [email, sms], skips prefs, and the email handoff runs the boundary in a customer-comms transaction (no billing authority)', async () => {
+  test('operatorInitiated uses [email, sms], skips prefs, and the email goes through the shared authority with the operator options', async () => {
     const auth = require('../services/billing-channel-email-authority');
     prefs = { invoice_channels: ['sms'] }; // an explicit text-only choice: the operator send ignores it
     const out = await run({ operatorInitiated: true, force: true });
     expect(out.outcome).toBe('advanced');
     expect(mockSendTemplate).toHaveBeenCalledTimes(1);
-    expect(auth.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
+    expect(auth.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({ operatorBypassPreferences: true, holdExempt: 'operator' }));
     expect(mockSendMessage.mock.calls[0][0].operatorInitiated).toBe(true);
     expect(Schedule.claim).toHaveBeenCalledWith(SCHEDULE_ID, NOW, expect.objectContaining({ force: true }));
   });
@@ -2885,7 +2904,7 @@ describe('R11-2: the provider boundary rejects an archived customer', () => {
     expect(Schedule.advance).not.toHaveBeenCalled();
   });
 
-  test('operator send-now (email through the comms-lock handoff, no billing authority) is refused too', async () => {
+  test('operator send-now (email through the shared authority) is refused too', async () => {
     customer.phone = null;
     archiveDuringSetRead();
     expect(await run({ operatorInitiated: true, force: true })).toMatchObject({ outcome: 'paused', reason: 'customer_deleted' });
@@ -3102,7 +3121,7 @@ describe('collections hold (dispute / wrong-party): a WAIT everywhere, as in the
     for (const [args] of mockPolicy.mock.calls) expect(args.holdExempt).toBeUndefined();
   });
 
-  test('operator EMAIL (comms-lock handoff): a fallback hold landing during render vetoes it; a dispute hold landing does not', async () => {
+  test('operator EMAIL (shared authority): a fallback hold landing during render vetoes it; a dispute hold landing does not', async () => {
     customer.phone = null;
     landDuringRender('fallback');
     expectWait(await run({ operatorInitiated: true, force: true }));
@@ -3326,43 +3345,33 @@ describe('follow-up 9: shadow resolves the set at the same point as the live run
   });
 });
 
-describe('follow-up 10: the operator email re-resolves its recipient and suppression under the comms lock', () => {
-  const operatorEmail = () => { customer.phone = null; };
-  const changeAddressDuringRender = () => mockShorten.mockImplementationOnce(async (url) => {
-    customer.email = 'new-address@example.test'; // staff edit the customer's address while the message is being prepared
-    return `https://short.example.test/${Buffer.from(url).toString('hex').slice(-6)}`;
-  });
+describe('follow-up 10 / #5475 r2: the operator email goes through the ONE shared billing email authority', () => {
+  const auth = () => require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority;
 
-  test('unchanged address, no suppression: the operator email goes out (the preference bypass is kept)', async () => {
-    operatorEmail();
-    prefs = { invoice_channels: ['sms'] }; // an explicit text-only choice the operator send ignores
+  test('operator send-now: the preference bypass is an explicit authority option (with holdExempt operator and the lower-cased recipient); the email goes out although the prefs say text-only', async () => {
+    customer.phone = null;
+    prefs = { invoice_channels: ['sms'] };
     expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
     expect(mockEmailMessages).toHaveLength(1);
+    expect(auth()).toHaveBeenCalledTimes(1);
+    expect(auth().mock.calls[0][0]).toMatchObject({
+      operatorBypassPreferences: true, holdExempt: 'operator', recipientEmail: 'pat@example.test', authorityRecipientEmail: 'pat@example.test',
+    });
   });
 
-  test('the address changes before the handoff: refused (retryable), NO email to the stale address, held for the next run', async () => {
-    operatorEmail();
-    changeAddressDuringRender();
-    const out = await run({ operatorInitiated: true, force: true });
-    expect(out).toMatchObject({ outcome: 'held', reason: 'DUNNING_RECIPIENT_CHANGED' });
-    expect(mockEmailMessages).toHaveLength(0);
-    expect(mockLedger.some((r) => r.metadata.delivered === true)).toBe(false);
-  });
-
-  test('a suppression appearing under the lock is a TERMINAL refusal (the leg resolves, nothing is sent)', async () => {
-    operatorEmail();
-    mockActiveSuppression.mockResolvedValueOnce({ suppression_type: 'unsubscribe' }).mockResolvedValue({ suppression_type: 'unsubscribe' });
-    const out = await run({ operatorInitiated: true, force: true });
-    expect(out.outcome).toBe('paused');
-    expect(mockEmailMessages).toHaveLength(0);
-    mockActiveSuppression.mockImplementation(defaultSuppression);
-  });
-
-  test('a scheduled (non-operator) email is untouched by this check (the billing authority owns it)', async () => {
+  test('a mixed-case operator address is compared lower-cased (the authority\'s own form), not refused as a changed recipient', async () => {
     customer.phone = null;
-    mockActiveSuppression.mockClear();
+    customer.email = 'Pat.Synthetic@Example.TEST';
+    await run({ operatorInitiated: true, force: true });
+    expect(auth().mock.calls[0][0].authorityRecipientEmail).toBe('pat.synthetic@example.test');
+  });
+
+  test('a scheduled (non-operator) email carries NO operator options: its authority call is exactly what it was', async () => {
+    customer.phone = null;
     expect((await run()).outcome).toBe('advanced');
-    expect(mockActiveSuppression).not.toHaveBeenCalled();
+    const options = auth().mock.calls[0][0];
+    expect(options).not.toHaveProperty('operatorBypassPreferences');
+    expect(options).not.toHaveProperty('holdExempt');
   });
 });
 
@@ -3403,33 +3412,6 @@ describe('follow-up 12: an existing touch is judged against the legs it selected
 });
 
 // ── #5475 review round 1 ──────────────────────────────────────────────────
-describe('#5475 r1: operator email locks the address before it reads suppressions, and a failed lookup is a tagged refusal', () => {
-  test('lock order: comms lock -> per-address lock -> suppression read, at the pre-handoff check and again at the final one', async () => {
-    customer.phone = null;
-    mockLockOrder.length = 0;
-    expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
-    expect(mockLockOrder).toEqual(['comms', 'address:pat@example.test', 'suppression-read', 'address:pat@example.test', 'suppression-read']);
-  });
-
-  test('the suppression lookup REJECTS at the provider boundary: a tagged retryable refusal (no email, the reservation reopened), and the next tick sends once', async () => {
-    customer.phone = null;
-    mockActiveSuppression.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('connection reset reading email_suppressions'));
-    const out = await run({ operatorInitiated: true, force: true });
-    expect(out).toMatchObject({ outcome: 'held', reason: 'BILLING_EMAIL_RECHECK_FAILED' });
-    expect(mockEmailMessages).toHaveLength(0);
-    expect(rowFor('email').metadata.send_failed).toBe(true); // a definite non-send, reopened - not an ambiguous started handoff
-    expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
-    expect(mockEmailMessages).toHaveLength(1);
-  });
-
-  test('a lookup that rejects BEFORE the handoff is the same tagged refusal', async () => {
-    customer.phone = null;
-    mockActiveSuppression.mockRejectedValueOnce(new Error('db down'));
-    expect(await run({ operatorInitiated: true, force: true })).toMatchObject({ outcome: 'held', reason: 'BILLING_EMAIL_RECHECK_FAILED' });
-    expect(mockEmailMessages).toHaveLength(0);
-  });
-});
-
 describe('#5475 r1: a touch whose selected channels are all gone is judged on what it selected', () => {
   test('email-only touch delivered, prefs now sms-only => settles (advanced, recovered), nothing is sent on the new channel', async () => {
     const key = `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`;
@@ -3513,5 +3495,48 @@ describe('#5475 r1: the cached pay link is keyed by the channel it was minted fo
     cachedAs(live.digest);
     await run();
     expect(mockShorten).not.toHaveBeenCalled();
+  });
+});
+
+describe('#5475 r2: recovery reads every reservation, and a retry link is attributed to the leg being sent', () => {
+  const key = `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`;
+  const row = (channel, selected, extra = {}) => ({
+    id: `t-${channel}`, customer_id: CUSTOMER_ID, channel, source: 'invoice_followups_customer', occurred_at: ago(0.5),
+    invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: keyFor(key, channel),
+    metadata: { notificationEventKey: key, selectedChannels: selected, ...extra },
+  });
+
+  // email delivered under a selection of [email]; the retried sms leg was refreshed after a prefs change to [email, sms]
+  const divergent = () => [row('email', ['email'], { delivered: true }), row('sms', ['email', 'sms'], { send_failed: true })];
+
+  test.each([['email row first', false], ['sms row first', true]])('divergent per-reservation selections give the SAME verdict in either row order (%s): the sms leg is still owed and is sent', async (_label, reversed) => {
+    prefs = { invoice_channels: ['email', 'sms'] };
+    const rows = divergent();
+    mockLedger.push(...(reversed ? rows.reverse() : rows));
+    expect((await run()).outcome).toBe('advanced');
+    expect(mockSendMessage).toHaveBeenCalledTimes(1); // the text goes out; the touch was not settled on the first row's narrower selection
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('unit: the union is deterministic; the event-level metadata is only the fallback when no entry carries a selection', () => {
+    const selected = (entries, metadata) => Runner.selectedChannelsOf({ entries, metadata });
+    expect(selected([{ metadata: { selectedChannels: ['sms', 'email'] } }, { metadata: JSON.stringify({ selectedChannels: ['push'] }) }], {})).toEqual(['email', 'push', 'sms']);
+    expect(selected([{ metadata: { selectedChannels: ['push'] } }, { metadata: { selectedChannels: ['sms', 'email'] } }], {})).toEqual(['email', 'push', 'sms']);
+    expect(selected([{ metadata: {} }], { selectedChannels: ['email'] })).toEqual(['email']);
+    expect(selected([], {})).toBeNull();
+  });
+
+  test('a retry after the email was delivered mints the shared link for the SMS leg alone (recorded sms), not a neutral code', async () => {
+    prefs = { invoice_channels: ['email', 'sms'] };
+    mockLedger.push(row('email', ['email', 'sms'], { delivered: true })); // the link cache write failed, so this run mints again
+    expect((await run()).outcome).toBe('advanced');
+    expect(mockShorten).toHaveBeenCalledTimes(1);
+    expect(mockShorten.mock.calls[0][1].channel).toBe('sms');
+  });
+
+  test('both legs pending (a first attempt) stays neutral', async () => {
+    prefs = { invoice_channels: ['email', 'sms'] };
+    await run();
+    expect(mockShorten.mock.calls[0][1]).not.toHaveProperty('channel');
   });
 });
