@@ -2927,7 +2927,10 @@ class SmartRebooker {
               if (verdict.frozen && !preserveCommitment) {
                 throw Object.assign(new Error('This series includes a service on a visit with an issued link, records or a payment in progress — finish that visit, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
               }
-              if (carriesVisit && grouped) {
+              // A preserved commitment stays put (customer self-serve only,
+              // which never carries — explicit so a preserved visit is never
+              // checked, fenced or excluded from the probes as a carry).
+              if (carriesVisit && grouped && !preserveCommitment) {
                 // The visit moves WITH this occurrence (owner ruling
                 // 2026-10-01). Frozen visits were refused above; what is left
                 // to verify is that every partner can ride: movable status
