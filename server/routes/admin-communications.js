@@ -190,7 +190,9 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     // (stale or edited timing), and the billing amounts (re-read now). This
     // route keeps ownership + thread staleness and orchestrates. Any block
     // refuses and retires the decision the same way a stale anchor does.
-    const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+    const { agentDecisionSendBlockReason, billingFingerprintForSend } = require('../services/agent-decision-send-checks');
+    // Codex round-49 P1: the billing fingerprint BEFORE the full recheck - the provider-boundary check refuses if anything changes after
+    decision.billing_fingerprint = await billingFingerprintForSend({ decision, outgoingBody });
     const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
     if (blockReason) {
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);

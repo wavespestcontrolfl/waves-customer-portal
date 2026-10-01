@@ -2,7 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isUnmodeledInvoice } = require('./payment-status-contract');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { loadLivePayerLinkage, excludeLiveOwnedPayerPayments, LIVE_SCAN_MAX_RESOLUTIONS } = require('./payer-linkage');
+const { loadLivePayerLinkage, excludeLiveOwnedPayerPayments } = require('./payer-linkage');
 const { loadFailedPaymentFacts, standaloneFailedTotal, excludeNeverAttemptedDeferrals } = require('./failed-payments');
 // the payments display read over-fetches so payer-linked rows can be dropped without starving the window
 const PAYMENT_OVERFETCH = 40;
@@ -1152,26 +1152,20 @@ class ContextAggregator {
     // under the homeowner's customer_id — exclude those from both the
     // balance and the recent-payments facts.
     // payer ownership of the payment rows is UNKNOWN when the linkage lookup failed => the money picture is unknowable
-    let billingUnavailable = allInvoices === null || payerLinkage.failed === true || failedFacts === null;
+    const billingUnavailable = allInvoices === null || payerLinkage.failed === true || failedFacts === null;
     // Codex round-46 P1: unknown ownership exposes NO invoice-derived money (balance, flags, summary, open invoice) - the same empty
     // picture main gives when the invoice read fails - rather than counting a payer's invoice as the homeowner's.
-    let invoiceRows = billingUnavailable ? [] : allInvoices;
+    const invoiceRows = billingUnavailable ? [] : allInvoices;
     const VISIBLE_INVOICE_STATUSES = new Set([...OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS]); // payer-billed flag: any open payer debt
     // Codex round-39/40 P1 — ONE live ownership verdict for EVERY invoice-derived fact (services/invoice-payer-ownership, the pay
     // page's own verdict). A payer assigned through the scheduled service / customer default AFTER the invoice was minted leaves
     // payer_id NULL, yet the invoice is the payer's debt: the owed balance, open invoice, Zelle-target list, uncounted-partial flag,
     // payer-billed flag, payment linkage and the invoice-status list below all read THIS set, so no path can still call an AP-owned
-    // invoice the homeowner's. Judged: every row that can feed the balance (collectible / partially paid — always, however far down)
-    // plus the invoice-status window. UNVERIFIABLE ownership => the whole money picture is unknowable (billing unavailable: no
-    // balance, no open invoice, no invoice statuses), never a guess.
+    // invoice the homeowner's. Codex round-49 P2: the set IS the payer linkage's (loadLivePayerLinkage above) - it already judged
+    // every unstamped invoice that can resolve to a payer, memoized per candidate payer, so a mature account is not resolved twice
+    // or failed at a per-visit cap. UNVERIFIABLE ownership (payerLinkage.failed) already made billing unavailable above.
     const isFaceOwn = (inv) => !inv.payer_id && !inv.payer_statement_id && !invoiceWithdrawnFromCustomer(inv);
-    const feedsBalance = (inv) => isCollectibleOwnInvoice(inv) || isUncountedPartialDueInvoice(inv);
-    let liveOwnedIds = new Set();
-    if (!billingUnavailable) {
-      const judgeable = invoiceRows.filter((inv) => isFaceOwn(inv) && (String(inv.status) !== 'draft' || feedsBalance(inv)));
-      const { ownedIds, unverifiable } = await require('./invoice-payer-ownership').liveInvoiceOwnership(customer.id, judgeable, undefined, { ownLimit: 9, alwaysJudge: feedsBalance, maxResolutions: LIVE_SCAN_MAX_RESOLUTIONS }); // 8 listed + 1 to know the list is cut
-      if (unverifiable) { billingUnavailable = true; invoiceRows = []; } else liveOwnedIds = ownedIds;
-    }
+    const liveOwnedIds = billingUnavailable ? new Set() : (payerLinkage.liveOwnedIds || new Set());
     const liveOwned = (inv) => liveOwnedIds.has(String(inv.id));
     // Any own, non-draft invoice whose status the payment-status renderer does not positively model as settled / void / counted
     // (a legacy 'unpaid', ...) is a debt it cannot describe: it suppresses "no balance due" and the "no payments" sentences. Judged
@@ -1256,7 +1250,7 @@ class ContextAggregator {
         total: Number(inv.total), amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
       }));
     // a WITHDRAWN packet invoice is payer-billed in effect (stamp only), so it flags the same fact
-    const hasPayerBilledOpen = invoiceRows.some((inv) => (inv.payer_id || invoiceWithdrawnFromCustomer(inv) || liveOwned(inv)) && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
+    const hasPayerBilledOpen = invoiceRows.some((inv) => (inv.payer_id || inv.payer_statement_id || invoiceWithdrawnFromCustomer(inv) || liveOwned(inv)) && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
     // The BILLING LANE, resolved once and carried as an explicit FACT. The
     // per-application copy rule lets a monthly amount be spoken only when the
     // account says the lane is monthly membership — but nothing produced that

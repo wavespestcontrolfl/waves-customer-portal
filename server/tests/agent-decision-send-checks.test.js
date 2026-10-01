@@ -627,41 +627,46 @@ describe('staff-edited bodies (owner ruling 2026-10-01)', () => {
   });
 });
 
-// Codex round-48 P1: the billing recheck repeats at the TRUE provider boundary of the immediate Agent Review send
-describe('amountsProviderPreSendCheck - billing facts at the provider boundary', () => {
-  const { amountsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
-  const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+// Codex round-48/49 P1: the TRUE provider boundary of the immediate Agent Review send - a billing fingerprint taken BEFORE the full
+// recheck, re-read in one query on the handoff connection (no second pool slot)
+describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unchanged at the provider boundary', () => {
+  const { amountsProviderPreSendCheck, billingFingerprintForSend } = require('../services/agent-decision-send-checks');
+  const db = require('../models/db');
   const decision = { id: 'd1', customer_id: 'c1', prompt_version: 'house_voice_v12_real_answers5_cf_pf', suggested_message: 'Your account balance is $100.00.', input_snapshot: null, inbound_message: 'what do I owe?' };
-  afterEach(() => { outgoingAmountsStale.mockReset(); outgoingAmountsStale.mockResolvedValue({ stale: false }); });
-  test('a body the recheck cannot judge registers nothing (no extra billing read on ordinary sends)', () => {
+  const dbiWith = (fp) => ({ raw: jest.fn(async () => (fp instanceof Error ? Promise.reject(fp) : { rows: [{ fingerprint: fp }] })) });
+  afterEach(() => { delete db.raw; });
+  test('a body the recheck cannot judge takes no fingerprint and registers nothing', async () => {
+    db.raw = jest.fn();
+    expect(await billingFingerprintForSend({ decision, outgoingBody: 'See you Tuesday!' })).toBeUndefined();
+    expect(db.raw).not.toHaveBeenCalled();
     expect(amountsProviderPreSendCheck({ decision, getBody: () => 'See you Tuesday!' })).toBeUndefined();
-    expect(amountsProviderPreSendCheck({ decision: null, getBody: () => 'Your account balance is $100.00.' })).toBeUndefined();
+    expect(amountsProviderPreSendCheck({ decision: null, getBody: () => decision.suggested_message })).toBeUndefined();
   });
-  test('a payment that lands before the provider call refuses the now-false balance (final, not retryable), and repeats after the marker', async () => {
-    const check = amountsProviderPreSendCheck({ decision, getBody: () => decision.suggested_message });
+  test('a judged body: fingerprint before the recheck; unchanged at the boundary => ok, on the HANDOFF connection, repeatable', async () => {
+    db.raw = jest.fn(async () => ({ rows: [{ fingerprint: 'fp-1' }] }));
+    const fp = await billingFingerprintForSend({ decision, outgoingBody: decision.suggested_message });
+    expect(fp).toBe('fp-1');
+    const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: fp }, getBody: () => decision.suggested_message });
     expect(typeof check.afterMarker).toBe('function');
-    await expect(check({ dbi: 'trx' })).resolves.toEqual({ ok: true });
-    expect(outgoingAmountsStale).toHaveBeenLastCalledWith(expect.objectContaining({ customerId: 'c1', body: decision.suggested_message, dbh: 'trx' }));
-    outgoingAmountsStale.mockResolvedValue({ stale: true, reason: 'payment_status_changed' });
-    const verdict = await check.afterMarker({ dbi: 'trx' });
-    expect(verdict).toMatchObject({ ok: false, code: 'BILLING_FACTS_STALE_AT_BOUNDARY' });
-    expect(verdict.retryable).toBeUndefined();
+    const dbi = dbiWith('fp-1');
+    await expect(check({ dbi })).resolves.toEqual({ ok: true });
+    expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments WHERE customer_id = ?'), ['c1', 'c1', 'c1', 'c1', 'c1']);
   });
-  test('a read failure (or a throw) at the boundary is retryable, never sent', async () => {
-    const check = amountsProviderPreSendCheck({ decision, getBody: () => decision.suggested_message });
-    outgoingAmountsStale.mockResolvedValueOnce({ stale: true, reason: 'payment_status_recheck_failed' });
-    await expect(check()).resolves.toMatchObject({ ok: false, code: 'BILLING_FACTS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
-    outgoingAmountsStale.mockRejectedValueOnce(new Error('db down'));
-    await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
+  test('a payment landing after the recheck (fingerprint changed), an unreadable fingerprint, or none taken => retryable refusal', async () => {
+    const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: 'fp-1' }, getBody: () => decision.suggested_message });
+    await expect(check.afterMarker({ dbi: dbiWith('fp-2') })).resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY', retryable: true });
+    await expect(check({ dbi: dbiWith(new Error('db down')) })).resolves.toMatchObject({ ok: false, retryable: true });
+    const none = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: null }, getBody: () => decision.suggested_message });
+    await expect(none({ dbi: dbiWith('fp-1') })).resolves.toMatchObject({ ok: false, retryable: true });
   });
-  test('a Zelle offer on a pre-v12 decision is rechecked at the boundary too', async () => {
-    const check = amountsProviderPreSendCheck({ decision: { ...decision, prompt_version: 'house_voice_v11' }, getBody: () => 'You can Zelle us at pay@example.com.' });
-    expect(typeof check).toBe('function');
-    outgoingAmountsStale.mockResolvedValueOnce({ stale: true, reason: 'zelle_invoice_ineligible' });
-    await expect(check()).resolves.toMatchObject({ ok: false, code: 'BILLING_FACTS_STALE_AT_BOUNDARY' });
+  test('a Zelle offer on a pre-v12 decision is judged too', () => {
+    expect(typeof amountsProviderPreSendCheck({ decision: { ...decision, prompt_version: 'house_voice_v11', billing_fingerprint: 'x' }, getBody: () => 'You can Zelle us at pay@example.com.' })).toBe('function');
   });
-  test('the Agent Review route composes it with the ETA check on the decision-linked send', () => {
+  test('the Agent Review route takes the fingerprint BEFORE the full recheck and composes the boundary check with the ETA one', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-communications'), 'utf8');
+    const fpAt = src.indexOf('decision.billing_fingerprint = await billingFingerprintForSend({ decision, outgoingBody });');
+    expect(fpAt).toBeGreaterThan(-1);
+    expect(fpAt).toBeLessThan(src.indexOf('const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });'));
     expect(src).toContain('checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody })');
   });
 });

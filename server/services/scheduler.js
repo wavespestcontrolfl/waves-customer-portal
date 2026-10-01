@@ -38,11 +38,32 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
   const recheck = require('./sms-amount-recheck');
   const { parseInputSnapshot, bodyIsStaffEdited } = require('./agent-decision-send-checks');
   const loadDecision = () => db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id', 'suggested_message');
+  const pre = await prescreenScheduledSmsRecheck({ msg, claimMeta, recheck, bodyIsStaffEdited, loadDecision });
+  if (pre.failed) return { stale: true, reason: 'amount_recheck_failed' };
+  if (!pre.needs) return { stale: false, reason: null };
+  try {
+    const decision = pre.decisionLoaded ? pre.decision : await loadDecision();
+    const staffEdited = pre.staffEdited || isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited);
+    const verdict = await recheck.outgoingAmountsStale(
+      scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot: parseInputSnapshot(decision?.input_snapshot), staffEdited }),
+    );
+    return { stale: !!verdict.stale, reason: verdict.stale ? (verdict.reason || 'amount_recheck_failed') : null };
+  } catch (err) {
+    logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'amount_recheck_failed' };
+  }
+}
+// Owner ruling 2026-10-01: a staff-edited body (human_authored AND different from the decision's stored AI draft) is the staff member's own
+// wording: the payment-status contract does not judge it. Amounts and Zelle are rechecked as before. Unknown => strict.
+function isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited) {
+  return claimMeta.human_authored === true && bodyIsStaffEdited(decision?.suggested_message, msg.message_body);
+}
+// Main's read-free pre-screen: amounts, Zelle claims, price grammar - plus status vocabulary while real answers is live. The
+// conditional decision load (and its fail-closed read) happens only for a decision-linked row whose body reads as a payment status.
+// { failed: true } when that read fails; else { needs, staffEdited, decision, decisionLoaded }.
+async function prescreenScheduledSmsRecheck({ msg, claimMeta, recheck, bodyIsStaffEdited, loadDecision }) {
   let decision;
   let decisionLoaded = false;
-  // Main's read-free pre-screen: amounts, Zelle claims, price grammar - plus status vocabulary while real answers is live.
-  // Owner ruling 2026-10-01: a staff-edited body (human_authored AND different from the decision's stored AI draft) is the staff member's own
-  // wording: the payment-status contract does not judge it. Amounts and Zelle are rechecked as before. Unknown => strict.
   let staffEdited = false;
   let needs = recheck.bodyNeedsPaymentRecheck(msg.message_body);
   if (!needs && claimMeta.agent_decision_id && recheck.bodyHasPaymentStatusVocabulary(msg.message_body)) {
@@ -54,41 +75,35 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
       decisionLoaded = true;
     } catch (err) {
       logger.warn(`[scheduler] decision read failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
-      return { stale: true, reason: 'amount_recheck_failed' };
+      return { failed: true };
     }
-    staffEdited = claimMeta.human_authored === true && bodyIsStaffEdited(decision?.suggested_message, msg.message_body);
+    staffEdited = isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited);
     needs = !staffEdited && recheck.bodyNeedsPaymentRecheck(msg.message_body, { promptVersion: decision?.prompt_version ?? null });
   }
-  if (!needs) return { stale: false, reason: null };
-  try {
-    if (!decisionLoaded) decision = await loadDecision();
-    if (!staffEdited) staffEdited = claimMeta.human_authored === true && bodyIsStaffEdited(decision?.suggested_message, msg.message_body);
-    const snapshot = parseInputSnapshot(decision?.input_snapshot);
-    // Codex round-11 P1: a scheduled row with no customer_id (shared phone) must
-    // not skip the recheck — fall back to the linked decision's customer. With none
-    // at all, outgoingAmountsStale fails closed for a Zelle offer, a figure or a
-    // payment-status claim (amount_recheck_no_customer / zelle_invoice_unresolved).
-    const verdict = await recheck.outgoingAmountsStale({
-      customerId: msg.customer_id || decision?.customer_id || null,
-      body: msg.message_body,
-      promptVersion: decision?.prompt_version ?? null,
-      // The invoice the drafter's Zelle fact was built for (null for a human-
-      // authored reply with no snapshot — the recheck resolves the CURRENT
-      // open invoice itself).
-      zelleInvoiceId: snapshot?.zelle_invoice_id || null,
-      // The customer's own inbound (draft-time snapshot): scopes the payment-status detector and names the Zelle invoice.
-      inboundMessage: snapshot?.sms?.body || null,
-      // The payment-status sentences the draft copied: the only status wording this body may carry, each re-rendered from live data.
-      paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
-      // A human edit trusts only the OWED-amount half, never a Zelle offer or a payment status (round-4 finding 3).
-      trustOwedAmounts: claimMeta.human_authored === true,
-      humanEditedBody: staffEdited,
-    });
-    return { stale: !!verdict.stale, reason: verdict.stale ? (verdict.reason || 'amount_recheck_failed') : null };
-  } catch (err) {
-    logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
-    return { stale: true, reason: 'amount_recheck_failed' };
-  }
+  return { needs, staffEdited, decision, decisionLoaded };
+}
+// The outgoingAmountsStale argument object (key order and values unchanged from the inline call).
+function scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot, staffEdited }) {
+  // Codex round-11 P1: a scheduled row with no customer_id (shared phone) must
+  // not skip the recheck — fall back to the linked decision's customer. With none
+  // at all, outgoingAmountsStale fails closed for a Zelle offer, a figure or a
+  // payment-status claim (amount_recheck_no_customer / zelle_invoice_unresolved).
+  return {
+    customerId: msg.customer_id || decision?.customer_id || null,
+    body: msg.message_body,
+    promptVersion: decision?.prompt_version ?? null,
+    // The invoice the drafter's Zelle fact was built for (null for a human-
+    // authored reply with no snapshot — the recheck resolves the CURRENT
+    // open invoice itself).
+    zelleInvoiceId: snapshot?.zelle_invoice_id || null,
+    // The customer's own inbound (draft-time snapshot): scopes the payment-status detector and names the Zelle invoice.
+    inboundMessage: snapshot?.sms?.body || null,
+    // The payment-status sentences the draft copied: the only status wording this body may carry, each re-rendered from live data.
+    paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    // A human edit trusts only the OWED-amount half, never a Zelle offer or a payment status (round-4 finding 3).
+    trustOwedAmounts: claimMeta.human_authored === true,
+    humanEditedBody: staffEdited,
+  };
 }
 function amountsStaleNote(reason) {
   const what = AMOUNT_BLOCK_NOTES[reason] || 'This scheduled reply states an amount, payment status or payment instruction that is no longer accurate';

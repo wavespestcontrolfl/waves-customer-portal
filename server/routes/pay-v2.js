@@ -319,12 +319,27 @@ async function invoiceProjectedCreditApplied(invoice) {
 // return from combinedEligibleSiblings used to.
 async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly = false } = {}) {
   if (!invoice) return false;
-  if (!isInvoiceCollectibleStatus(invoice.status)) return false;
-  if (invoiceWithdrawnFromCustomer(invoice)) return false;
+  // Phased verdicts, each short-circuiting in the original order (a later live check never runs once an earlier one denies).
+  if (await zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, saveRequired })) return false;
+  if (await zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payerOwnedLive, readOnly })) return false;
+  if (await zelleDeniedByChargeReconciliation(invoice, readOnly)) return false;
+  if (await zelleDeniedByPaymentIntent(invoice)) return false;
+  return true;
+}
+
+// Collectibility, withdrawn packet invoice, saved-method requirement and account credit that settles the whole invoice.
+async function zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, saveRequired }) {
+  if (!isInvoiceCollectibleStatus(invoice.status)) return true;
+  if (invoiceWithdrawnFromCustomer(invoice)) return true;
   const needsSavedMethod = saveRequired != null ? saveRequired : await invoiceRequiresSavedMethod(invoice);
-  if (needsSavedMethod) return false;
+  if (needsSavedMethod) return true;
   const creditCovers = creditWillCoverAnchor != null ? creditWillCoverAnchor : await invoiceCreditWouldFullyCover(invoice);
-  if (creditCovers) return false;
+  return !!creditCovers;
+}
+
+// Combined-balance siblings and a live third-party payer. A caller-supplied hasPreviousBalance skips the sibling lookup; a
+// payer-stamped invoice has no siblings to discover. `payerOwned` is set by the resolver callback on the lookup itself.
+async function zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payerOwnedLive, readOnly }) {
   let hasPrevBalance = hasPreviousBalance;
   let payerOwned = payerOwnedLive === true;
   if (hasPrevBalance == null) {
@@ -340,8 +355,11 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
       hasPrevBalance = !!(siblings && siblings.length);
     }
   }
-  if (payerOwned) return false;
-  if (hasPrevBalance) return false;
+  return !!(payerOwned || hasPrevBalance);
+}
+
+// true when a saved-card charge in flight / awaiting reconciliation suppresses alternate collection; any other error rethrows.
+async function zelleDeniedByChargeReconciliation(invoice, readOnly) {
   try {
     // Codex round-26 P1: callers that only ASK (SMS drafting and send-time rechecks) pass readOnly — the
     // writing default would release a stale pre-submit claim / promote a submitted one while the original
@@ -351,15 +369,18 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
     else await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
   } catch (err) {
     if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
-    return false;
+    return true;
   }
-  if (invoice.stripe_payment_intent_id) {
-    const verdict = await require('../services/prepaid-pi-guard')
-      .guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly: true })
-      .catch(() => ({ ok: false }));
-    if (!verdict.ok) return false;
-  }
-  return true;
+  return false;
+}
+
+// An attached PaymentIntent Stripe has already moved to succeeded/processing (inspect-only); an unreadable one denies.
+async function zelleDeniedByPaymentIntent(invoice) {
+  if (!invoice.stripe_payment_intent_id) return false;
+  const verdict = await require('../services/prepaid-pi-guard')
+    .guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly: true })
+    .catch(() => ({ ok: false }));
+  return !verdict.ok;
 }
 
 // Live payer-ownership verdict for Zelle visibility (see

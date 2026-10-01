@@ -135,6 +135,40 @@ function isReceiptRow(p) {
     && !meta.payer_id && !p?.payer_id;
 }
 
+// One small renderer per payment status (`f` = the facts paymentSentence derives once). Each returns { kind, text } or null.
+function paidPaymentSentence(f) {
+  const { total, date, what, refundStatus, refunded } = f;
+  if (refunded > 0 && refunded < total && ['partial', 'succeeded'].includes(refundStatus)) {
+    return { kind: 'payment_partly_refunded', text: `We received your ${what} on ${dateText(date)}, and ${money(refunded)} of it was refunded.` };
+  }
+  // any other refund trace on a "paid" row (pending / failed / unreadable refund) is an unknown state: no sentence
+  if (refunded > 0 || !['', 'none'].includes(refundStatus)) return null;
+  return { kind: 'payment_received', text: `We received your ${what} on ${dateText(date)}.` };
+}
+function refundedPaymentSentence(f) {
+  const { total, date, what, refundStatus, refunded } = f;
+  if (!['', 'full', 'succeeded'].includes(refundStatus) || (refunded > 0 && refunded < total)) return null;
+  return { kind: 'payment_refunded', text: `Your ${what} on ${dateText(date)} was refunded in full.` };
+}
+function inFlightPaymentSentence(f) {
+  const { date, what, today } = f;
+  if (today && dayKey(date) > dayKey(today)) return null; // a future-dated scheduled charge is not "processing" yet
+  return { kind: 'payment_processing', text: `Your ${what} from ${dateText(date)} is still processing.` };
+}
+function failedPaymentSentence(f) {
+  const { p, total, date, tender } = f;
+  if (p?.superseded_by_payment_id != null) return null; // a retry collected it
+  return { kind: 'payment_failed', text: `A ${money(total)}${tender ? ` ${tender}` : ''} payment attempt on ${dateText(date)} did not go through.` };
+}
+// disputed, requires_action, canceled, void, unknown, ...: no entry here - a person answers
+const PAYMENT_STATUS_RENDERERS = new Map([
+  ['paid', paidPaymentSentence],
+  ['refunded', refundedPaymentSentence],
+  ['pending', inFlightPaymentSentence],
+  ['processing', inFlightPaymentSentence],
+  ['failed', failedPaymentSentence],
+]);
+
 function paymentSentence(p, today) {
   const status = String(p?.status || '').toLowerCase();
   const total = finiteCents(p?.amount);
@@ -144,44 +178,32 @@ function paymentSentence(p, today) {
   const what = `${money(total)}${tender ? ` ${tender}` : ''} payment`;
   const refundStatus = String(p?.refund_status || '').toLowerCase();
   const refunded = finiteCents(p?.refund_amount) || 0;
-  if (status === 'paid') {
-    if (refunded > 0 && refunded < total && ['partial', 'succeeded'].includes(refundStatus)) {
-      return { kind: 'payment_partly_refunded', text: `We received your ${what} on ${dateText(date)}, and ${money(refunded)} of it was refunded.` };
-    }
-    // any other refund trace on a "paid" row (pending / failed / unreadable refund) is an unknown state: no sentence
-    if (refunded > 0 || !['', 'none'].includes(refundStatus)) return null;
-    return { kind: 'payment_received', text: `We received your ${what} on ${dateText(date)}.` };
-  }
-  if (status === 'refunded') {
-    if (!['', 'full', 'succeeded'].includes(refundStatus) || (refunded > 0 && refunded < total)) return null;
-    return { kind: 'payment_refunded', text: `Your ${what} on ${dateText(date)} was refunded in full.` };
-  }
-  if (status === 'pending' || status === 'processing') {
-    if (today && dayKey(date) > dayKey(today)) return null; // a future-dated scheduled charge is not "processing" yet
-    return { kind: 'payment_processing', text: `Your ${what} from ${dateText(date)} is still processing.` };
-  }
-  if (status === 'failed') {
-    if (p?.superseded_by_payment_id != null) return null; // a retry collected it
-    return { kind: 'payment_failed', text: `A ${money(total)}${tender ? ` ${tender}` : ''} payment attempt on ${dateText(date)} did not go through.` };
-  }
-  return null; // disputed, requires_action, canceled, void, unknown, ...: a person answers
+  const render = PAYMENT_STATUS_RENDERERS.get(status);
+  return render ? render({ p, total, date, tender, what, refundStatus, refunded, today }) : null;
 }
 
+// Invoice statuses that state the total: { kind, verb } -> `Invoice N for $T <verb>.` (null when the total is zero / unreadable).
+const INVOICE_TOTAL_SENTENCES = new Map([
+  ['paid', { kind: 'invoice_paid', verb: 'is paid' }],
+  ['prepaid', { kind: 'invoice_paid', verb: 'is paid' }],
+  ['refunded', { kind: 'invoice_refunded', verb: 'was refunded' }],
+  ['processing', { kind: 'invoice_processing', verb: 'is still processing' }],
+]);
+function invoiceDueSentence(inv, number, status, due, onPlan) {
+  // partially_paid renders NOTHING: its paid portions live in payments, not in the invoice row (matches the balance path's UNCOUNTED treatment)
+  if (onPlan || !['sent', 'viewed', 'overdue'].includes(status) || !due) return null;
+  const by = dateParts(inv?.dueDate);
+  return { kind: 'invoice_due', text: `Invoice ${number} has ${money(due)} due${by ? ` by ${dateText(by)}` : ''}.` };
+}
 function invoiceSentence(inv, { onPlan = false } = {}) {
   const number = String(inv?.invoiceNumber || '');
   if (!new RegExp(`^${INVOICE}$`).test(number)) return null;
   const status = String(inv?.status || '').toLowerCase();
   const total = finiteCents(inv?.total);
   const due = finiteCents(inv?.amountDue);
-  if (status === 'paid' || status === 'prepaid') return total ? { kind: 'invoice_paid', text: `Invoice ${number} for ${money(total)} is paid.` } : null;
-  if (status === 'refunded') return total ? { kind: 'invoice_refunded', text: `Invoice ${number} for ${money(total)} was refunded.` } : null;
-  if (status === 'processing') return total ? { kind: 'invoice_processing', text: `Invoice ${number} for ${money(total)} is still processing.` } : null;
-  // partially_paid renders NOTHING: its paid portions live in payments, not in the invoice row (matches the balance path's UNCOUNTED treatment)
-  if (!onPlan && ['sent', 'viewed', 'overdue'].includes(status) && due) {
-    const by = dateParts(inv?.dueDate);
-    return { kind: 'invoice_due', text: `Invoice ${number} has ${money(due)} due${by ? ` by ${dateText(by)}` : ''}.` };
-  }
-  return null;
+  const stated = INVOICE_TOTAL_SENTENCES.get(status);
+  if (stated) return total ? { kind: stated.kind, text: `Invoice ${number} for ${money(total)} ${stated.verb}.` } : null;
+  return invoiceDueSentence(inv, number, status, due, onPlan);
 }
 
 /**

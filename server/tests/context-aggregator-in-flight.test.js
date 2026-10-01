@@ -15,13 +15,31 @@ jest.mock('../models/db', () => {
   const windowRows = [1, 2, 3, 4, 5].map((n) => ({
     id: `p${n}`, amount: 40 + n, status: 'paid', payment_date: `2026-09-2${n}`, payer_id: null, metadata: null,
   }));
-  const rowsFor = (table, q) => (q && q._failed ? ((db.__rows && db.__rows.failedPayments) || []) : q && q._linkage ? ((db.__rows && db.__rows.payerInvoices) || []) : ((db.__rows && db.__rows[table]) || (table === 'payments' ? windowRows : [])));
+  // payer-linkage's LIVE scan (the invoices query that also filters payer_statement_id IS NULL) reads the unstamped, not-withdrawn
+  // invoices; the batched candidate-payer read gives every visit its OWN candidate payer by default, so ownership is still decided
+  // per scheduled service by the resolver mock (Codex round-49 P2: the aggregator reuses this linkage verdict).
+  // (LIVE_CANDIDATE_PAYER_SQL: no customer default payer here, so only invoices whose visit names a payer are scanned)
+  const unstampedRows = () => ((db.__rows && db.__rows.invoices) || [])
+    .filter((r) => !r.payer_id && !r.payer_statement_id && !/^payer_billed:/.test(String(r.scheduled_send_error || '')));
+  const candidateServices = () => (db.__rows && db.__rows.scheduled_services)
+    || [...new Set(unstampedRows().map((r) => r.scheduled_service_id).filter(Boolean))].map((id) => ({ id, payer_id: `cand-${id}` }));
+  const liveScanRows = () => {
+    const withPayer = new Set(candidateServices().filter((ss) => ss.payer_id).map((ss) => String(ss.id)));
+    return unstampedRows().filter((r) => r.scheduled_service_id && withPayer.has(String(r.scheduled_service_id)));
+  };
+  const rowsFor = (table, q) => {
+    if (q && q._failed) return (db.__rows && db.__rows.failedPayments) || [];
+    if (q && q._linkage) return q._unstamped ? ((db.__rows && db.__rows.liveScan) || liveScanRows()) : ((db.__rows && db.__rows.payerInvoices) || []);
+    if (table === 'scheduled_services') return candidateServices();
+    return (db.__rows && db.__rows[table]) || (table === 'payments' ? windowRows : []);
+  };
   const mk = (table) => {
     const q = {};
     // the aggregator's failed / pending / overdue ledger query (services/failed-payments.js) is the only payments read filtered on status
     q.where = jest.fn(() => q);
     q.whereIn = jest.fn((col, vals) => { if (col === 'status' && Array.isArray(vals) && vals.includes('failed')) q._failed = true; return q; });
-    for (const m of ['whereNull', 'whereNot', 'whereNotNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'modify', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
+    q.whereNull = jest.fn((col) => { if (col === 'payer_statement_id') q._unstamped = true; return q; });
+    for (const m of ['whereNot', 'whereNotNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'modify', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
     // the shared payer-linkage lookup (services/payer-linkage.js) is the only invoices query that selects stripe_charge_id
     q.select = jest.fn((...cols) => { if (cols.includes('stripe_charge_id')) q._linkage = true; return q; });
     q.first = jest.fn(async () => {
@@ -171,7 +189,7 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
   });
   test('an unverifiable ownership lookup makes the whole status list unknown (null) - fail closed', async () => {
     mockResolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
-    const billing = await billingFor([inv('i1', 'WPC-2026-0456', 'sent', 95)]);
+    const billing = await billingFor([inv('i1', 'WPC-2026-0456', 'sent', 95, { scheduled_service_id: 'ss-x' })]);
     expect(billing.invoiceStatuses).toBeNull();
     expect(sentenceTexts(billing)).toEqual([]); // billing unknown renders NO status sentence at all
   });
@@ -193,7 +211,7 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
   });
   test('UNVERIFIABLE ownership makes the whole money picture unavailable: no balance, no open invoice, no statuses', async () => {
     mockResolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
-    const billing = await billingFor([inv('i1', 'WPC-2026-0456', 'sent', 95)]);
+    const billing = await billingFor([inv('i1', 'WPC-2026-0456', 'sent', 95, { scheduled_service_id: 'ss-x' })]);
     expect(billing.unavailable).toBe(true);
     expect(billing.outstandingBalance).toBe(0);
     expect(billing.openInvoice).toBeNull();
@@ -204,8 +222,8 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
   });
   // Codex round-46 P1: the payer-LINKAGE scan failing (or hitting its bound) is unknown ownership too - no invoice money leaks into
   // balance / flags / summary, which legacy readers (response-drafter) use without checking billing.unavailable
-  test('a payer-linkage scan past its bound exposes no balance, overdue flag or summary amount', async () => {
-    db.__rows = { invoices: [inv('i1', 'WPC-2026-0456', 'sent', 95)], payments: [], payerInvoices: Array.from({ length: 121 }, (_, n) => ({ id: `x${n}` })), failedPayments: [{ id: 'f1', amount: 40, status: 'failed', payment_date: '2026-06-01', metadata: null, stripe_payment_intent_id: 'pi_x', retry_count: 1, next_retry_at: null }] };
+  test('a payer-linkage live scan past its bound exposes no balance, overdue flag or summary amount', async () => {
+    db.__rows = { invoices: [inv('i1', 'WPC-2026-0456', 'sent', 95)], payments: [], liveScan: Array.from({ length: 121 }, (_, n) => ({ id: `x${n}`, scheduled_service_id: `s${n}` })), failedPayments: [{ id: 'f1', amount: 40, status: 'failed', payment_date: '2026-06-01', metadata: null, stripe_payment_intent_id: 'pi_x', retry_count: 1, next_retry_at: null }] };
     hasInFlightMoney.mockResolvedValue(false);
     const ctx = await aggregator.getContextForCustomer({ id: 'c1', first_name: 'Test', last_name: 'Customer', phone: '+15555550100' });
     expect(ctx.billing.unavailable).toBe(true);
@@ -224,6 +242,30 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
     expect(billing.recentPaymentsLookahead.map((p) => p.id)).toEqual(['d']);
     expect(billing.recentPaymentsLookaheadComplete).toBe(true);
     expect(sentenceTexts(billing).some((t) => t.includes('$100.00'))).toBe(false);
+  });
+  // Codex round-49 P1: a statement-accrued child (payer_statement_id, payer_id NULL) is the payer's debt everywhere
+  test('a statement-accrued invoice never counts toward the homeowner balance, open invoice or partial-due flag', async () => {
+    const billing = await billingFor([
+      inv('i5', 'WPC-2026-0500', 'sent', 300, { payer_statement_id: 'st-9' }),
+      inv('i6', 'WPC-2026-0600', 'partially_paid', 80, { payer_statement_id: 'st-9' }),
+      inv('i1', 'WPC-2026-0456', 'sent', 95),
+    ]);
+    expect(billing.outstandingBalance).toBe(95);
+    expect(billing.openInvoice.id).toBe('i1');
+    expect(billing.openInvoices.map((x) => x.id)).toEqual(['i1']);
+    expect(billing.hasUncountedPartialDue).toBe(false);
+    expect(billing.payerBilledInvoice).toBe(true);
+  });
+  // Codex round-49 P2: the aggregator reuses the linkage's candidate-payer verdict - 40 visits on ONE payer is one lookup, not a cap hit
+  test('40 unstamped visits inheriting one payer resolve with one lookup and keep billing available', async () => {
+    mockResolveForInvoice.mockImplementation(async () => ({ payerId: 'payer-9' }));
+    const visits = Array.from({ length: 40 }, (_, n) => inv(`v${n}`, `WPC-2026-${1000 + n}`, 'sent', 10, { scheduled_service_id: `svc-${n}` }));
+    db.__rows = { invoices: [...visits, inv('i1', 'WPC-2026-0456', 'sent', 95)], payments: [], scheduled_services: visits.map((v) => ({ id: v.scheduled_service_id, payer_id: 'payer-9' })) };
+    hasInFlightMoney.mockResolvedValue(false);
+    const billing = await build();
+    expect(billing.unavailable).toBe(false);
+    expect(billing.outstandingBalance).toBe(95);
+    expect(mockResolveForInvoice).toHaveBeenCalledTimes(1);
   });
   test('a collectible invoice buried BEHIND the status-list cap is still judged (alwaysJudge): an old AP-owned open invoice never counts', async () => {
     mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));

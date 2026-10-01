@@ -211,16 +211,19 @@ function invoiceWithdrawnFromCustomer(invoice) {
 // (isUncountedPartialDueInvoice): settlement claims fail closed on it, unpaid claims bind through the invoice status.
 const OWN_COLLECTIBLE_INVOICE_STATUSES = Object.freeze(['sent', 'viewed', 'overdue']);
 const PARTIALLY_PAID_STATUS = 'partially_paid';
+// Codex round-49 P1: a statement-accrued child (payer_statement_id, payer_id NULL) is the payer's - the pay page and the portal's Pay
+// Now list treat it so - never the homeowner's debt.
+const isStampedPayerInvoice = (invoice) => !!(invoice.payer_id || invoice.payer_statement_id);
 function isUncountedPartialDueInvoice(invoice) {
   return !!invoice
-    && !invoice.payer_id
+    && !isStampedPayerInvoice(invoice)
     && invoiceStatusKey(invoice.status) === PARTIALLY_PAID_STATUS
     && !invoiceWithdrawnFromCustomer(invoice)
     && invoiceAmountDue(invoice) > 0;
 }
 function isCollectibleOwnInvoice(invoice) {
   return !!invoice
-    && !invoice.payer_id
+    && !isStampedPayerInvoice(invoice)
     && OWN_COLLECTIBLE_INVOICE_STATUSES.includes(invoiceStatusKey(invoice.status))
     && !invoiceWithdrawnFromCustomer(invoice);
 }

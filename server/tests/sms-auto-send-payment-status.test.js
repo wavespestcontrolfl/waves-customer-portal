@@ -187,3 +187,22 @@ test('auto-send is always strict: the dispatch recheck never passes humanEditedB
   await expect(attempt({ reply: "Yes, we got your payment - you're all set!", paymentStatusSnapshot: null })).resolves.toMatchObject({ sent: false });
   expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
+
+// Codex round-49 P1: the autonomous send's billing claims are guarded at the provider boundary too - the billing fingerprint is
+// taken BEFORE the dispatch-time recheck and re-read on the handoff connection right before the provider request
+describe('auto-send billing fingerprint at the provider boundary', () => {
+  afterEach(() => { delete db.raw; });
+  test('a payment-status reply: unchanged billing passes the boundary; a payment landing after the recheck refuses (retryable)', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(live());
+    const order = [];
+    db.raw = jest.fn(async () => { order.push('fingerprint'); return { rows: [{ fingerprint: 'fp-a' }] }; });
+    ContextAggregator.getContextForCustomer.mockImplementation(async () => { order.push('recheck'); return live(); });
+    await expect(attempt()).resolves.toMatchObject({ sent: true });
+    expect(order[0]).toBe('fingerprint'); // BEFORE the full recheck's billing read
+    const check = sendCustomerMessage.mock.calls[0][0].providerPreSendCheck;
+    const dbiWith = (fp) => ({ raw: async () => ({ rows: [{ fingerprint: fp }] }) });
+    await expect(check({ dbi: dbiWith('fp-a') })).resolves.toMatchObject({ ok: true });
+    await expect(check({ dbi: dbiWith('fp-b') })).resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY', retryable: true });
+    await expect(check.afterMarker({ dbi: dbiWith('fp-b') })).resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY' });
+  });
+});

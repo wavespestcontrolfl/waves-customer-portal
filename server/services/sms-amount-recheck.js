@@ -248,6 +248,12 @@ function strictForVersion(promptVersion) {
 function bodyHasPaymentStatusVocabulary(body) {
   return paymentStatus.assertsPaymentStatus(String(body || ''), { inboundText: null });
 }
+// Does this reply carry a billing claim the send-time recheck judges (a Zelle offer / denial, an amount, price grammar, or - for a
+// real-answers draft - a payment status)? Such a reply gets the billing-fingerprint check at the provider boundary (Codex round-49 P1).
+function bodyNeedsBillingBoundaryCheck(body, { inboundMessage = null, promptVersion = null } = {}) {
+  const text = String(body || '');
+  return hasAffirmativeZelleMention(text) || hasNegativeZelleAvailabilityClaim(text) || bodyNeedsPaymentRecheck(text, { inboundMessage, promptVersion });
+}
 function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = null, statusVocabulary = true } = {}) {
   const text = String(body || '');
   if (!text) return false;
@@ -462,5 +468,5 @@ async function outgoingAmountsStale({
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
   hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, hasUnscopedZelleDenial, zelleClauseTexts, zelleDenialStale, classifyZelleClause,
-  paymentStatusSendBlockReason, bodyNeedsPaymentRecheck, bodyHasPaymentStatusVocabulary,
+  paymentStatusSendBlockReason, bodyNeedsPaymentRecheck, bodyHasPaymentStatusVocabulary, bodyNeedsBillingBoundaryCheck,
 };
