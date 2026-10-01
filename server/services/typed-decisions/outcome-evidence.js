@@ -83,13 +83,20 @@ async function callContext(conn, call) {
   return { key, lead, customerId };
 }
 
-// A visit MOVED to a new date in (after, until], from reschedule_log. A missed
+// A visit MOVED to a new date in [from, until], from reschedule_log. A missed
 // appointment is logged there too (workflows/missed-appointment.js, reason
 // customer_noshow) but carries no new_date: it is neither a booking nor a
 // change the customer asked for, so only rows with a new date count.
-function movedTo(conn, customerId, after, until) {
-  return conn('reschedule_log').where('customer_id', customerId).whereNotNull('new_date')
-    .where('created_at', '>', after).where('created_at', '<=', until);
+// `existedAt`: count only moves of a visit that already existed and had not
+// yet happened at that moment (the text evidence: a later booking that is then
+// moved says nothing about what the customer's text asked).
+function movedTo(conn, customerId, from, until, { existedAt = null } = {}) {
+  const q = conn('reschedule_log as r').where('r.customer_id', customerId).whereNotNull('r.new_date')
+    .where('r.created_at', '>=', from).where('r.created_at', '<=', until);
+  if (!existedAt) return q;
+  return q.join('scheduled_services as s', 's.id', 'r.scheduled_service_id')
+    .where('s.customer_id', customerId)
+    .where('s.created_at', '<=', existedAt).where('s.scheduled_date', '>=', etDateString(existedAt));
 }
 
 async function appointmentEvidence(conn, call, ctx, end, now) {
@@ -97,14 +104,17 @@ async function appointmentEvidence(conn, call, ctx, end, now) {
   const window = OUTCOME_SOURCES[source];
   if (!ctx.customerId || !end) return unknown(source, window, now);
   const until = new Date(end.getTime() + WINDOWS[window]);
+  // From the call's START: staff often book while the customer is still on
+  // the line, and that is the strongest evidence there is.
+  const from = callStartedAt(call) || end;
   const base = () => conn('scheduled_services as s').where('s.customer_id', ctx.customerId);
-  const created = await seen(base().where('s.created_at', '>', end).where('s.created_at', '<=', until));
+  const created = await seen(base().where('s.created_at', '>=', from).where('s.created_at', '<=', until));
   const rescheduled = created ? true : await seen(base()
     .join('job_status_history as h', 'h.job_id', 's.id')
-    .where('h.to_status', 'rescheduled').where('h.transitioned_at', '>', end).where('h.transitioned_at', '<=', until), 's.id');
+    .where('h.to_status', 'rescheduled').where('h.transitioned_at', '>=', from).where('h.transitioned_at', '<=', until), 's.id');
   // reschedule_log is the canonical record of a move (the same table the text
   // evidence reads); a move logged there without a status row still counts.
-  const filed = created || rescheduled ? true : await seen(movedTo(conn, ctx.customerId, end, until));
+  const filed = created || rescheduled ? true : await seen(movedTo(conn, ctx.customerId, from, until), 'r.id');
   return settle({ source, window, found: created || rescheduled || filed, end, now });
 }
 
@@ -113,7 +123,10 @@ async function quoteEvidence(conn, call, ctx, end, now) {
   const window = OUTCOME_SOURCES[source];
   if ((!ctx.customerId && !ctx.lead) || !end) return unknown(source, window, now);
   const until = new Date(end.getTime() + WINDOWS[window]);
-  const q = conn('estimates').whereNotNull('sent_at').where('sent_at', '>', end).where('sent_at', '<=', until)
+  // From the call's start, like appointment evidence: a quote sent while the
+  // customer is still on the line counts.
+  const from = callStartedAt(call) || end;
+  const q = conn('estimates').whereNotNull('sent_at').where('sent_at', '>=', from).where('sent_at', '<=', until)
     .where(function linked() {
       if (ctx.customerId) this.orWhere('customer_id', ctx.customerId);
       if (ctx.lead?.estimate_id) this.orWhere('id', ctx.lead.estimate_id);
@@ -177,7 +190,7 @@ async function visitChangeEvidence(conn, sms, at, now) {
   const logged = await seen(services()
     .join('job_status_history as h', 'h.job_id', 's.id')
     .whereIn('h.to_status', MOVE_STATUSES).where('h.transitioned_at', '>', at).where('h.transitioned_at', '<=', until), 's.id');
-  const filed = logged ? true : await seen(movedTo(conn, sms.customer_id, at, until));
+  const filed = logged ? true : await seen(movedTo(conn, sms.customer_id, at, until, { existedAt: at }), 'r.id');
   return settle({ source, window, found: logged || filed, end: at, now });
 }
 
@@ -192,8 +205,11 @@ async function courtesyEvidence(conn, sms, at, now) {
   const texts = (direction) => {
     const q = conn('sms_log').where({ customer_id: sms.customer_id, direction })
       .where('created_at', '>', at).where('created_at', '<=', until)
-      .whereNotIn('status', ['failed', 'undelivered', 'blocked'])
       .whereRaw("COALESCE(message_type, '') <> 'internal_alert'");
+    // An outbound row counts only once it actually went out ('scheduled' and
+    // other pre-send rows are not contact); an inbound row is a received text.
+    if (direction === 'outbound') q.whereIn('status', ['queued', 'sent', 'delivered']);
+    else q.whereNotIn('status', ['failed', 'undelivered', 'blocked']);
     return sms.id ? q.whereNot('id', sms.id) : q;
   };
   let found = await seen(texts('outbound')) || await seen(texts('inbound'));

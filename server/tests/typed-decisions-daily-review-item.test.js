@@ -85,16 +85,23 @@ test('rows: ONE alert with the counts, the review link and per-row detail', asyn
   expect(opts.detail).toContain(LINK);
 });
 
-test('caps: 8 disagreements and 2 spot checks, yesterday (ET) only, unreviewed only', async () => {
+test('caps: 8 disagreements and 2 spot checks, still unreviewed, from the last 14 days (not one calendar day)', async () => {
   const c = conn({ disagreements: [review()], audits: [review()] });
   await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: c });
   expect(c.seen.map((s) => s.limit).sort((a, b) => a - b)).toEqual([2, 8]);
   for (const state of c.seen) {
     expect(state.calls).toContainEqual(['where', [expect.objectContaining({ label_status: 'unreviewed' })]]);
-    expect(state.calls).toContainEqual(['where', ['created_at', '>=', new Date('2026-09-30T04:00:00.000Z')]]);
-    expect(state.calls).toContainEqual(['where', ['created_at', '<', new Date('2026-10-01T04:00:00.000Z')]]);
+    expect(state.calls).toContainEqual(['where', ['created_at', '>=', new Date('2026-09-17T04:00:00.000Z')]]);
+    // no upper bound: a failed day, or a row a later re-record made a disagreement, is still raised
+    expect(state.calls.some(([m, a]) => m === 'where' && a[0] === 'created_at' && a[1] === '<')).toBe(false);
   }
   expect(c.seen.map((s) => s.calls.find(([m]) => m === 'where')[1][0].sampled_for).sort()).toEqual(['disagreement', 'random_audit']);
+});
+
+test('a notification that was not persisted is a failed run, not "raised"', async () => {
+  mockNotify.mockResolvedValue(null);
+  const out = await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: conn({ disagreements: [review()] }) });
+  expect(out).toMatchObject({ raised: false, reason: 'alert_not_persisted', disagreements: 1 });
 });
 
 test('the dedupe key is per ET day, so each day raises its own item', async () => {

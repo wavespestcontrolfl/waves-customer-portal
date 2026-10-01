@@ -17,10 +17,15 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
+const { typedDecisionsLive } = require('../config/feature-gates');
 const { packageFor, answerInDomain, CALL_TRANSCRIPT_CHARS } = require('../services/typed-decisions/packages');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
+// GATE_TYPED_DECISIONS off: 404 before any read or write, so the kill switch
+// also closes the review queue, its live subject text and the label path (a
+// dark gate is indistinguishable from an unshipped route).
+router.use((_req, res, next) => (typedDecisionsLive() ? next() : res.status(404).json({ error: 'Not found' })));
 
 const TABLE = 'decision_reviews';
 const SMS_SUBJECT = 'sms_log';

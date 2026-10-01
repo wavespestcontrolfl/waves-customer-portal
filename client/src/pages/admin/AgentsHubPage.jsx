@@ -74,9 +74,6 @@ const TAB_LIST = [
   // while the gate is off (the endpoint answers { available: false }).
   { key: TABS.ACTIVITY, label: "Runs", Icon: Activity },
   { key: TABS.DECISIONS, label: "Decisions", Icon: ListChecks },
-  // Typed — owner labels typed-decision shadow rows (a daily admin alert
-  // links to ?tab=typed).
-  { key: TABS.TYPED, label: "Typed", Icon: Binary },
   { key: TABS.DRAFTS, label: "Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow", Icon: MessageSquareDashed },
   { key: TABS.HYGIENE, label: "Hygiene", Icon: DatabaseZap },
@@ -87,6 +84,13 @@ const TAB_LIST = [
 // GATE_ADMIN_OPS_QUEUE: the Queue tab exists only when the server says the
 // gate is on (hub probe), so a dark gate renders nothing new.
 const QUEUE_TAB = { key: TABS.QUEUE, label: "Queue", Icon: Layers };
+// GATE_TYPED_DECISIONS: the Typed tab (owner labels typed-decision shadow rows;
+// the daily admin alert links to ?tab=typed) exists only when the hub probe
+// says the lane is live. Fails closed: a dark gate shows no tab and
+// ?tab=typed falls back to Overview.
+const TYPED_TAB = { key: TABS.TYPED, label: "Typed", Icon: Binary };
+// Literal classes so Tailwind keeps them: one column per visible tab.
+const XL_COLS = { 7: "xl:grid-cols-7", 8: "xl:grid-cols-8", 9: "xl:grid-cols-9" };
 // Tabs that read ?area= get the product-area strip under the tab row
 // (AdminCommandHeader's secondary row). Overview joins while it renders the
 // Control center (the old Overview does not read the area).
@@ -134,7 +138,11 @@ export default function AgentsHubPage() {
   // Auto-Dispatch is autonomous. Its diagnostic deep links remain admin-only,
   // but it is no longer a section in the everyday navigation.
   const controlCenter = hub.features.ledger === true;
-  const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
+  const typedAvailable = hub.features.typed === true;
+  const tabList = [
+    ...TAB_LIST.flatMap((t) => (t.key === TABS.DECISIONS && typedAvailable ? [t, TYPED_TAB] : [t])),
+    ...(queueAvailable ? [QUEUE_TAB] : []),
+  ];
   const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
   const diagnosticDispatch = paramTab === TABS.DISPATCH && getAdminUser()?.role === "admin";
@@ -175,7 +183,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-9" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"}
+        navGridClassName={`grid-cols-2 md:grid-cols-4 ${XL_COLS[tabList.length] || "xl:grid-cols-9"}`}
         secondarySections={areaSections}
         secondaryActiveKey={activeArea}
         onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}

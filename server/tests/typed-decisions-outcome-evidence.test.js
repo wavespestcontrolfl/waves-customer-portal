@@ -74,6 +74,18 @@ describe('callEvidence', () => {
     expect(out.appointment_agreed.value).toBe(true);
   });
 
+  test('bookings and quotes count from the call START (booked while still on the line)', async () => {
+    mockCallEndFor.mockReturnValue(ago(5));
+    const c = call({ created_at: ago(5.5) });
+    const conn = fakeConn();
+    await callEvidence(c, { now: NOW, conn });
+    const visits = conn.log.find((q) => q.table === 'scheduled_services');
+    const lowerBound = visits.calls.find(([m, a]) => m === 'where' && a[0] === 's.created_at' && a[1] === '>=');
+    expect(lowerBound[1][2].getTime()).toBeLessThan(ago(5).getTime());
+    const estimates = conn.log.find((q) => q.table === 'estimates');
+    expect(estimates.calls.find(([m, a]) => m === 'where' && a[0] === 'sent_at' && a[1] === '>=')[1][2].getTime()).toBeLessThan(ago(5).getTime());
+  });
+
   test('a move filed in reschedule_log (no status row) also counts', async () => {
     mockCallEndFor.mockReturnValue(ago(5));
     const out = await callEvidence(call(), { now: NOW, conn: fakeConn({ first: { scheduled_services: [undefined], job_status_history: [undefined], reschedule_log: [{ id: 'r1' }] } }) });
@@ -87,7 +99,11 @@ describe('callEvidence', () => {
     await smsEvidence({ id: 'sms-1', customer_id: 'cust-1', created_at: ago(30) }, { now: NOW, conn });
     const logs = conn.log.filter((q) => q.table === 'reschedule_log');
     expect(logs.length).toBe(2);
-    for (const q of logs) expect(q.calls).toContainEqual(['whereNotNull', ['new_date']]);
+    for (const q of logs) expect(q.calls).toContainEqual(['whereNotNull', ['r.new_date']]);
+    // the text's move must be of a visit that already existed and was upcoming
+    expect(logs[1].calls).toContainEqual(['join', ['scheduled_services as s', 's.id', 'r.scheduled_service_id']]);
+    expect(logs[1].calls).toContainEqual(['where', ['s.created_at', '<=', ago(30)]]);
+    expect(logs[0].calls.some(([m]) => m === 'join')).toBe(false); // a call's agreed move may be any visit
   });
 
   test('a visit RESCHEDULED in the window counts when nothing was created', async () => {
@@ -178,6 +194,14 @@ describe('smsEvidence', () => {
     }
   });
 
+  test('courtesy: an outbound row counts only once it went out (queued/sent/delivered)', async () => {
+    const conn = fakeConn();
+    await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn });
+    const [outbound, inbound] = conn.log.filter((q) => q.table === 'sms_log');
+    expect(outbound.calls).toContainEqual(['whereIn', ['status', ['queued', 'sent', 'delivered']]]);
+    expect(inbound.calls).toContainEqual(['whereNotIn', ['status', ['failed', 'undelivered', 'blocked']]]);
+  });
+
   test('visit change: a logged move, cancel or skip within 7d is true', async () => {
     const out = await smsEvidence(sms({ created_at: ago(5) }), { now: NOW, conn: fakeConn({ first: { job_status_history: [{ id: 'h1' }] } }) });
     expect(out.wants_visit_change).toMatchObject({ source: 'job_status_history', window: '7d', value: true });
@@ -192,7 +216,8 @@ describe('smsEvidence', () => {
   });
 
   test('visit change: a reschedule_log row also counts', async () => {
-    const out = await smsEvidence(sms({ created_at: ago(5) }), { now: NOW, conn: fakeConn({ first: { reschedule_log: [{ id: 'r1' }] } }) });
+    // the move query joins its visit, so the stub answers it as scheduled_services
+    const out = await smsEvidence(sms({ created_at: ago(5) }), { now: NOW, conn: fakeConn({ first: { job_status_history: [undefined], scheduled_services: [{ id: 'r1' }] } }) });
     expect(out.wants_visit_change.value).toBe(true);
   });
 

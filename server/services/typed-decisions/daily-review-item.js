@@ -2,8 +2,8 @@
  * Daily owner review item for typed decisions (dark behind GATE_TYPED_DECISIONS).
  *
  * 8:05 AM ET (scheduler.js): refresh the outcome evidence that was still
- * unknown, then raise ONE admin item listing yesterday's unreviewed shadow
- * decisions worth a human look: up to 8 where Jev disagreed with a baseline
+ * unknown, then raise ONE admin item listing the still-unreviewed shadow
+ * decisions of the last 14 days worth a human look: up to 8 where Jev disagreed with a baseline
  * and up to 2 random spot checks, newest first. No rows = nothing raised.
  *
  * The item is a pointer, not a decision: it names each row's capability,
@@ -55,12 +55,13 @@ function describeRow(row) {
   return `${row.capability} ${row.question_id}: Jev ${describeAnswer(jev)} vs ${baselines.join(', ') || 'no baseline'}${proof}`;
 }
 
-// [start, end) of the ET calendar day before `now`.
-function yesterdayBounds(now) {
-  return {
-    start: parseETDateTime(`${etDateString(addETDays(now, -1))}T00:00:00`),
-    end: parseETDateTime(`${etDateString(now)}T00:00:00`),
-  };
+// The item lists what is STILL waiting, not one calendar day: rows stay in
+// it until labeled, so a day whose alert failed to persist is picked up the
+// next morning, and a row that a later nightly re-record turned into a
+// disagreement (it keeps its first created_at) still reaches the owner.
+const REVIEW_WINDOW_DAYS = 14;
+function windowStart(now) {
+  return parseETDateTime(`${etDateString(addETDays(now, -REVIEW_WINDOW_DAYS))}T00:00:00`);
 }
 
 async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
@@ -70,10 +71,10 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
   } catch (err) {
     logger.warn(`[typed-decisions] evidence refresh failed: ${err.message}`);
   }
-  const { start, end } = yesterdayBounds(now);
+  const start = windowStart(now);
   const pick = (sampledFor, limit) => conn('decision_reviews')
     .where({ label_status: 'unreviewed', sampled_for: sampledFor })
-    .where('created_at', '>=', start).where('created_at', '<', end)
+    .where('created_at', '>=', start)
     .orderBy('created_at', 'desc').limit(limit)
     .select('id', 'capability', 'question_id', 'jev_answer', 'baseline_answers', 'outcome_evidence', 'created_at');
   const disagreements = await pick('disagreement', MAX_DISAGREEMENTS);
@@ -83,7 +84,7 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
 
   const day = etDateString(now);
   const detail = [
-    `Yesterday's unreviewed shadow decisions, newest first (up to ${MAX_DISAGREEMENTS} disagreements and ${MAX_SPOT_CHECKS} spot checks). Nothing acts on these answers; label each as Jev right, Jev wrong or unclear.`,
+    `Unreviewed shadow decisions from the last ${REVIEW_WINDOW_DAYS} days, newest first (up to ${MAX_DISAGREEMENTS} disagreements and ${MAX_SPOT_CHECKS} spot checks). Nothing acts on these answers; label each as Jev right, Jev wrong or unclear.`,
     ...disagreements.map((row) => `Disagreement - ${describeRow(row)}`),
     ...spotChecks.map((row) => `Spot check - ${describeRow(row)}`),
     `Review: ${LINK}`,
@@ -104,7 +105,14 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
     refreshOnDedupe: true,
     metadata: { lane: 'typed_decisions', disagreements: disagreements.length, spotChecks: spotChecks.length },
   });
+  // raiseAdminAlert resolves null when the notification row could not be
+  // written: that is a failed run (the rows stay unreviewed, so tomorrow's run
+  // raises them again).
+  if (!alert) {
+    logger.warn('[typed-decisions] daily review item was not persisted; the rows stay queued for the next run');
+    return { raised: false, reason: 'alert_not_persisted', disagreements: disagreements.length, spotChecks: spotChecks.length };
+  }
   return { raised: true, disagreements: disagreements.length, spotChecks: spotChecks.length, dedupeKey: `typed-decisions-review:${day}`, alert };
 }
 
-module.exports = { runDailyReviewItem, describeRow, CATEGORY, LINK };
+module.exports = { runDailyReviewItem, describeRow, CATEGORY, LINK, REVIEW_WINDOW_DAYS };

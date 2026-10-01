@@ -63,7 +63,18 @@ beforeAll(() => {
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
 afterAll(() => new Promise((resolve) => server.close(resolve)));
-beforeEach(() => { db.mockReset(); mockAudit.mockClear(); });
+const gateBefore = process.env.GATE_TYPED_DECISIONS;
+beforeEach(() => { db.mockReset(); mockAudit.mockClear(); process.env.GATE_TYPED_DECISIONS = 'true'; });
+afterAll(() => { if (gateBefore === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = gateBefore; });
+
+describe('GATE_TYPED_DECISIONS off', () => {
+  test('both routes are 404 before any database access', async () => {
+    delete process.env.GATE_TYPED_DECISIONS;
+    expect((await get('/reviews')).status).toBe(404);
+    expect((await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(404);
+    expect(db).not.toHaveBeenCalled();
+  });
+});
 
 const get = async (path) => { const r = await fetch(`${baseUrl}/admin/typed-decisions${path}`); return { status: r.status, body: await r.json() }; };
 const post = async (path, body) => {
