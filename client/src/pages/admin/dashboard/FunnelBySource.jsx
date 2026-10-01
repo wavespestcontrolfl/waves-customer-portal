@@ -108,12 +108,14 @@ export default function FunnelBySource({ data, loading, error }) {
           const lowN = s.leads < 5;
           return (
             <div key={s.sourceKey} className={cn(lowN && "opacity-80")}>
-              <div className="flex items-center gap-2 mb-1">
+              {/* Wraps so the metrics drop to their own line on a narrow
+                  screen instead of squeezing the source label to nothing. */}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mb-1">
                 {/* Plain label, deliberately NOT a drilldown: these are
                     attribution keys, and the Leads page filters by exact
                     lead_sources.name — the labels don't match, so a drill
                     would land on an empty list. */}
-                <span className="truncate text-ui-body font-medium text-ink-primary" title={s.source}>
+                <span className="min-w-0 truncate text-ui-body font-medium text-ink-primary" title={s.source}>
                   {s.source}
                 </span>
                 {s.isPaid && (
