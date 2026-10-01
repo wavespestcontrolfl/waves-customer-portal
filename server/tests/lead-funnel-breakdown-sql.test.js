@@ -12,13 +12,13 @@ describeDb('lead funnel breakdown keys', () => {
   beforeAll(() => { knex = knexLib({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } }); });
   afterAll(async () => { if (knex) await knex.destroy(); });
 
-  const keysFor = async ({ extracted = null, leadCity = null, heard = null, landing = null, customerCity = null, service = null }) => {
+  const keysFor = async ({ extracted = null, leadCity = null, heard = null, landing = null, customerCity = null, service = null, channel = 'form' }) => {
     const { rows } = await knex.raw(
       `SELECT ${B.page} AS page, ${B.service} AS service, ${B.city} AS city, ${B.heard} AS heard
-         FROM (SELECT CAST(? AS jsonb) AS extracted_data, CAST(? AS text) AS city, CAST(? AS text) AS heard_about) l,
+         FROM (SELECT CAST(? AS jsonb) AS extracted_data, CAST(? AS text) AS city, CAST(? AS text) AS heard_about, CAST(? AS text) AS first_contact_channel) l,
               (SELECT CAST(? AS text) AS landing_page_url, CAST(? AS text) AS city) c,
               (SELECT CAST(? AS text) AS service_line) asa`,
-      [extracted == null ? null : JSON.stringify(extracted), leadCity, heard, landing, customerCity, service],
+      [extracted == null ? null : JSON.stringify(extracted), leadCity, heard, channel, landing, customerCity, service],
     );
     return rows[0];
   };
@@ -43,6 +43,9 @@ describeDb('lead funnel breakdown keys', () => {
       .toBe('wavespestcontrol.com/quote');
     expect((await keysFor({ extracted: { attribution: { landing_url: 'https://www.wavespestcontrol.com/lawn-assessment/' } } })).page)
       .toBe('wavespestcontrol.com/lawn-assessment');
+    // a call (or a row with no lead) never inherits the customer's earlier page
+    expect((await keysFor({ channel: 'call', landing: 'https://wavespestcontrol.com/pest-control/ants' })).page).toBe('(unknown)');
+    expect((await keysFor({ channel: null, landing: 'https://wavespestcontrol.com/pest-control/ants' })).page).toBe('(unknown)');
     expect(await keysFor({})).toEqual({ page: '(unknown)', service: '(unknown)', city: '(unknown)', heard: '(unknown)' });
   });
 

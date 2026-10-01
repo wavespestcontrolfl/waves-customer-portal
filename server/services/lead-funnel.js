@@ -148,17 +148,25 @@ const BREAKDOWN_LABELS = {
 // ad_service_attribution, l = leads, c = customers).
 // Landing page: the lead's own captured page (lead webhook attribution.landingUrl
 // / pageUrl, lawn assessment attribution.landing_url, quote wizard landing_url),
-// else the customer's first landing page; host + path, lower-cased, no
+// else (web leads only) the customer's first landing page; host + path, lower-cased, no
 // scheme / www / query / fragment / trailing slash. Calls and tools that record
 // no page stay '(unknown)'. heard: the visitor's self-reported answer, kept
 // apart from observed attribution. chr(63) is '?', kept out of the SQL text
 // because knex reads a bare ? as a binding.
+// The customer's first landing page only stands in for a lead that itself came
+// in on the web; a call, email or manual lead (or a row with no lead) keeps no
+// page rather than inheriting one from an earlier, unrelated visit.
+const WEB_FIRST_CONTACT_CHANNELS = [
+  'form', 'web', 'website_quote', 'booking', 'lawn_assessment_funnel',
+  'pest_identifier_funnel', 'lawn_diagnostic', 'lawn_diagnostic_report',
+];
+const WEB_CHANNELS_SQL = WEB_FIRST_CONTACT_CHANNELS.map((ch) => `'${ch}'`).join(', ');
 const FUNNEL_URL_SQL = `NULLIF(regexp_replace(regexp_replace(regexp_replace(split_part(split_part(lower(trim(COALESCE(
   NULLIF(l.extracted_data->'attribution'->>'landingUrl', ''),
   NULLIF(l.extracted_data->'attribution'->>'pageUrl', ''),
   NULLIF(l.extracted_data->'attribution'->>'landing_url', ''),
   NULLIF(l.extracted_data->>'landing_url', ''),
-  NULLIF(c.landing_page_url, ''),
+  CASE WHEN l.first_contact_channel IN (${WEB_CHANNELS_SQL}) THEN NULLIF(c.landing_page_url, '') END,
   ''))), chr(63), 1), '#', 1), '^[a-z][a-z0-9+.-]*://', ''), '^www\\.', ''), '(.)/$', '\\1'), '')`;
 const FUNNEL_BREAKDOWN_SQL = {
   page: `COALESCE(${FUNNEL_URL_SQL}, '${UNKNOWN}')`,

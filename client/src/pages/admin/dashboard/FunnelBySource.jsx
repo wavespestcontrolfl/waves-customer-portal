@@ -150,9 +150,9 @@ export default function FunnelBySource({ data, loading, error }) {
         middle rungs light up as stage tracking starts writing them. Lost leads
         count only as leads + lost. Call↔lead linkage is call-SID based.
         Won revenue is the completed revenue the attribution sync credited to
-        each lead&apos;s row. Landing page is the form page the lead submitted
-        from (else the customer&apos;s first landing page); calls and tools that
-        record no page show as unknown. Heard about is the visitor&apos;s own
+        each lead&apos;s row. Landing page is the page the lead submitted from (for
+        a web lead with none captured, the customer&apos;s first landing page);
+        calls and other non-web leads show as unknown. Heard about is the visitor&apos;s own
         answer on the form, shown separately from observed attribution; an
         unknown answer stays unknown. Shaping: server/services/lead-funnel.js.
       </FormulaNote>
