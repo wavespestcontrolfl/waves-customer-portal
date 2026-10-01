@@ -105,7 +105,11 @@ router.get('/', async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
-    const offset = (page - 1) * limit;
+    // removed: rows this panel marked done since its first page. Done drops
+    // a row out of the offset-paged feed, so the next page starts that many
+    // rows earlier or it would skip the rows that moved up.
+    const removed = Math.max(parseInt(req.query.removed, 10) || 0, 0);
+    const offset = Math.max((page - 1) * limit - removed, 0);
     const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.

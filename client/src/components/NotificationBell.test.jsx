@@ -836,6 +836,23 @@ describe('NotificationBell admin "Done" (docs/admin-notifications.md section 4.3
     }
   });
 
+  it('Load more after a Done asks for the next page moved back by the rows marked done', async () => {
+    const recent = Array.from({ length: 30 }, (_, i) => ({ ...NOTIFICATIONS[0], id: `recent-${i}`, title: `Recent alert ${i}`, read_at: new Date().toISOString() }));
+    global.fetch = vi.fn(async (url, options) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 0 });
+      if (options?.method === 'PUT') return jsonResponse({ success: true, updated: true });
+      if (String(url).includes('page=2')) return jsonResponse({ notifications: [], hasMore: false });
+      return jsonResponse({ notifications: recent, hasMore: true });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    const [firstDone] = await screen.findAllByRole('button', { name: 'Done' });
+    fireEvent.click(firstDone);
+    await waitFor(() => expect(screen.queryByText('Recent alert 0')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(global.fetch.mock.calls.some(([url]) => /page=2&removed=1\b/.test(String(url)))).toBe(true));
+  });
+
   it('keeps the row when the server refuses the done write', async () => {
     setup();
     global.fetch.mockImplementation(async (url, options = {}) => {

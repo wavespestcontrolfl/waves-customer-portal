@@ -113,6 +113,23 @@ test('a done row leaves the list: read is not done', async () => {
   expect(ids).toContain('older-refreshed');
 });
 
+test('Load more after a Done: removed moves the next page back, so the row that moved up is not skipped', async () => {
+  mockRows.push({ id: 'older-two', recipient_type: 'admin', created_at: '2026-08-01T12:00:00Z', read_at: null });
+  const first = await list({ limit: '30' });
+  // The panel marks one first-page row done: it leaves the server's pages.
+  mockRows.find(r => r.id === first.notifications[0].id).done_at = '2026-09-30T12:00:00Z';
+  const skipped = (await list({ limit: '30', page: '2' })).notifications.map(n => n.id);
+  expect(skipped).not.toContain('older-refreshed'); // the bug the counter fixes
+  const second = (await list({ limit: '30', page: '2', removed: '1' })).notifications.map(n => n.id);
+  expect(second).toEqual(['older-refreshed', 'older-two']);
+});
+
+test('removed never pushes the offset below zero', async () => {
+  const plain = await list({ limit: '30', page: '1' });
+  const result = await list({ limit: '30', page: '1', removed: '5' });
+  expect(result.notifications.map(n => n.id)).toEqual(plain.notifications.map(n => n.id));
+});
+
 describe('PUT /:id/done and /:id/reopen', () => {
   const NotificationService = require('../services/notification-service');
   const routeHandler = (path, method) => router.stack.find(layer => layer.route?.path === path && layer.route.methods[method]).route.stack.slice(-1)[0].handle;
