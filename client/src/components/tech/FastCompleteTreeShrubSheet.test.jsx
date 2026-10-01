@@ -382,6 +382,33 @@ describe('photos and the photo read', () => {
     });
   });
 
+  test("last time's bare oz on a liquid reads as fluid ounces, never grams", async () => {
+    const context = {
+      ...CONTEXT,
+      lastVisit: { ...CONTEXT.lastVisit, products: [{ productId: 'iron', productName: 'Chelated Iron Plus', totalAmount: 0.5, amountUnit: 'oz' }] },
+    };
+    await openSheet(makeRequest({ context }));
+    fireEvent.click(tile('Chelated Iron Plus'));
+    const editor = editorFor('Chelated Iron Plus');
+    const units = within(editor).getByRole('group', { name: 'Unit' });
+    expect(within(units).queryByRole('button', { name: 'g' })).toBeNull();
+    // 0.5 fl oz reads as 3 tsp, the liquid units stay on offer.
+    expect(within(units).getByRole('button', { name: 'tsp' }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(editor).getByLabelText('How much?').value).toBe('3');
+  });
+
+  test('a read that did not score every photo is not reviewable and sends no review', async () => {
+    const request = makeRequest({ preview: { ...PREVIEW, scoredCount: 1 } });
+    await openSheet(request);
+    await addBothPhotos();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze photos' }));
+    expect(await screen.findByText(/could not score these photos/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Reject Pest-pressure signals' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Good' }));
+    const body = await completeBody(request);
+    expect(body).not.toHaveProperty('treeShrubReview');
+  });
+
   test('a photo change after Analyze drops the read, its tiles and the review from the body', async () => {
     const request = makeRequest();
     await openSheet(request);

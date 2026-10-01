@@ -116,7 +116,7 @@ const UNIT_ALIASES = {
   weight: { g: "g", gram: "g", oz: "oz", ounce: "oz", lb: "lb", pound: "lb" },
   count: { each: "each" },
 };
-function measureUnit(unit, dimension) {
+export function measureUnit(unit, dimension) {
   return UNIT_ALIASES[dimension]?.[baseUnit(unit)] || null;
 }
 

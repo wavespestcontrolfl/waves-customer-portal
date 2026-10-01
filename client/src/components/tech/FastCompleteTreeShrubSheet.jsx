@@ -41,7 +41,7 @@ import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { prepareCompletionPhoto } from '../../lib/completion-photo';
 import { defaultApplicationMethodForLine } from '../../lib/product-rate-prefill';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
@@ -102,14 +102,6 @@ function decisionAction(action) {
   return ['monitor', 'confirmed', 'hidden', 'edit'].includes(action) ? action : 'monitor';
 }
 
-// A recorded unit as one of the sheet's own units (never mL), or null.
-function sheetUnit(unit) {
-  const value = String(unit || '').trim().toLowerCase();
-  return Object.keys(UNIT_CHOICES).find((dimension) => UNIT_CHOICES[dimension].some((choice) => choice.value === value))
-    ? value
-    : null;
-}
-
 // A product on the sheet. `last` is the amount the server says was recorded
 // last time: the only thing an amount ever starts from, in the unit it was
 // recorded in. Anything else leaves it blank for the tech.
@@ -117,14 +109,17 @@ function productRow(product, { method, last = null, added = false }) {
   const flags = flagsOf(product);
   const own = productUnits(product, { method });
   const lastAmount = Number(last?.totalAmount);
-  const lastUnit = sheetUnit(last?.amountUnit);
+  // Read last time's unit in the product's own measure first: a bare "oz" is a
+  // fluid ounce for a liquid and a weight ounce for a dry product. Only a unit
+  // that belongs to another measure (a "lb" on a liquid row) moves the row.
+  const lastDimension = measureUnit(last?.amountUnit, own.dimension)
+    ? own.dimension
+    : Object.keys(UNIT_CHOICES).find((name) => measureUnit(last?.amountUnit, name));
   let dimension = own.dimension;
   let seeded = { amount: '', unit: own.unit };
-  if (lastUnit && lastAmount > 0) {
-    dimension = UNIT_CHOICES[own.dimension].some((choice) => choice.value === lastUnit)
-      ? own.dimension
-      : Object.keys(UNIT_CHOICES).find((name) => UNIT_CHOICES[name].some((choice) => choice.value === lastUnit));
-    seeded = seededAmount(lastAmount, lastUnit);
+  if (lastDimension && lastAmount > 0) {
+    dimension = lastDimension;
+    seeded = seededAmount(lastAmount, measureUnit(last.amountUnit, lastDimension));
   }
   return {
     product,
@@ -548,7 +543,10 @@ function usePhotoSlots({ base, request }) {
         body: JSON.stringify({ photos: analyzed.map((data) => ({ data })) }),
       });
       if (sequence !== readSequence.current) return;
-      if (result?.scores) {
+      // Only a read that scored EVERY photo is reviewable: /complete trusts the
+      // tech's decisions only when scoredCount covers the submitted set, and
+      // otherwise re-scores, which would drop a rejection the tech made here.
+      if (result?.scores && Number(result.scoredCount) === analyzed.length) {
         setPreview({ photos: analyzed, result, rejected: new Set() });
         setAnalysis({ busy: false, error: '' });
       } else {
