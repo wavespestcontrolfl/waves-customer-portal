@@ -1315,6 +1315,18 @@ accept-active estimate with a contact gap always gets the React view: the
 the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
 because of these fields.
 
+Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
+dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:
+true` ONLY when the gate is exactly `'true'`, the recurring card-on-file lane is on,
+and the policy the accept would resolve puts this customer on the card rail
+(a card is captured at accept, or a consented method is already saved/Auto Pay is
+active). It is OMITTED (never `false`) in every other case, so a gate-off response is
+byte-identical to before; plan members, payer-billed, invoice-mode, commercial manual
+billing, one-time, paused-Auto-Pay, and the annual-prepay legacy carve-out never carry
+it. It is a boolean about the viewer's own estimate only: no customer, payer, or
+payment-method data rides it. Informational only for now: no client reads it, and it
+moves no money and sends no message.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
