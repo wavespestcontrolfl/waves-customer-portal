@@ -995,25 +995,33 @@ async function seriesCandidateDateClashes(conn, template, date) {
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
   if (!clash.length) return false;
-  // The customer's own other visit at the SAME property is a grouping partner
-  // (a pest visit on its own lawn day), never a clash. Anything else — another
-  // customer, a hold, or this customer's visit at a different property —
-  // still counts.
+  // The customer's own visit that this date would GROUP with (a pest visit on
+  // its own lawn day) is a stop partner, never a clash. Anything else —
+  // another customer, a hold, a different property, a service that cannot
+  // group, another technician — still counts.
   const own = clash.filter((row) => template.customer_id && String(row.customer_id) === String(template.customer_id));
   if (own.length < clash.length) return true;
-  return !(await sameStopPartners(conn, template, own.map((row) => row.id)));
+  return !(await allGroupingPartners(conn, template, own.map((row) => row.id)));
 }
 
-// True when every row is at the template's property: equal property_id, or
-// neither side stamped and the customer has at most one property on file
-// (an unstamped multi-property pair is unknown, so it stays a clash).
-async function sameStopPartners(conn, template, rowIds) {
-  const rows = await conn('scheduled_services').whereIn('id', rowIds).select('id', 'property_id');
-  const want = template.property_id ? String(template.property_id) : null;
-  if (rows.every((row) => want && row.property_id && String(row.property_id) === want)) return true;
-  if (want || rows.some((row) => row.property_id)) return false;
-  const [{ n }] = await conn('customer_properties').where({ customer_id: template.customer_id, active: true }).count('* as n');
-  return Number(n) <= 1;
+// The same eligibility visit-groups.groupRowOn applies to a partner: both
+// sides at one stamped property, both services groupable in one group family,
+// a placed window, a joinable status, and no technician conflict.
+async function allGroupingPartners(conn, template, rowIds) {
+  if (!template.property_id || !template.service_id) return false;
+  const { JOIN_INELIGIBLE_STATUSES } = require('../services/visit-context/statuses');
+  const subject = await conn('services').where({ id: template.service_id }).first('groupable', 'group_family');
+  if (!subject?.groupable || !subject.group_family) return false;
+  const rows = await conn('scheduled_services as ss')
+    .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+    .whereIn('ss.id', rowIds)
+    .select('ss.property_id', 'ss.technician_id', 'ss.window_start', 'ss.status', 'svc.groupable', 'svc.group_family');
+  return rows.length === rowIds.length && rows.every((row) => row.property_id
+    && String(row.property_id) === String(template.property_id)
+    && row.groupable && row.group_family === subject.group_family
+    && row.window_start
+    && !JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))
+    && (!row.technician_id || !template.technician_id || String(row.technician_id) === String(template.technician_id)));
 }
 
 // In-trx half of the plan: a destination the pre-trx peek did not predict
@@ -19003,13 +19011,21 @@ async function riderExtensionDates(conn, parent, cols, latestStr, { skipWeekends
       const host = await sp('scheduled_services').where({ id: parent.rides_parent_id }).first();
       if (!host || String(host.customer_id) !== String(parent.customer_id)
         || !riderPairingEnabled(host, riderFamilyOf(parent), parent.recurring_pattern)) return [];
-      return liveHostRows(sp, host, cols, etDateString());
+      const live = await liveHostRows(sp, host, cols, etDateString());
+      if (!live.length || !parent.property_id) return [];
+      // The rider joins the lawn OCCURRENCE as it stands today (dispatch may
+      // have moved its window or tech), and only at the rider's own property.
+      return sp('scheduled_services').whereIn('id', live.map((r) => r.id))
+        .whereNotNull('window_start')
+        .where('property_id', parent.property_id)
+        .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
     });
     // A lawn date that has since become a closed day (blackout added after
     // seeding) or a weekend the customer opted out of is not a ride date; the
     // rule then takes the next lawn date or its own nudged +84 fallback.
     const { isBlackedOut } = require('../services/scheduling/blackout-nudge');
-    const hostDates = hostRows.map((r) => dateOnly(r.scheduled_date)).filter((d) => d
+    const hostByDate = new Map(hostRows.map((r) => [dateOnly(r.scheduled_date), r]));
+    const hostDates = [...hostByDate.keys()].filter((d) => d
       && !isBlackedOut(d, blackoutDates)
       && !(skipWeekends && [0, 6].includes(etParts(parseETDateTime(`${d}T12:00`)).dayOfWeek)));
     if (!hostDates.length) return null;
@@ -19021,7 +19037,7 @@ async function riderExtensionDates(conn, parent, cols, latestStr, { skipWeekends
       weekendShift,
       blackoutDates,
     });
-    return dates.length ? dates : null;
+    return dates.length ? { dates, hostByDate } : null;
   } catch (err) {
     logger.warn(`[recurring] rider extension dates failed for parent=${parent.id} (walking the cadence): ${err.message}`);
     return null;
@@ -19113,9 +19129,15 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     const riderDates = await riderExtensionDates(conn, parent, cols, latestStr, {
       skipWeekends: skipParent, weekendShift: dirParent, blackoutDates: autoExtendBlackoutDates,
     });
+    const riderProbeTemplate = (date) => {
+      const host = riderDates && riderDates.hostByDate.get(date);
+      return host
+        ? { ...clashProbeTemplate, window_start: host.window_start, window_end: host.window_end, technician_id: host.technician_id }
+        : clashProbeTemplate;
+    };
     while (attempt <= 12) {
       const candidate = riderDates
-        ? (riderDates[attempt - 1] || null)
+        ? (riderDates.dates[attempt - 1] || null)
         : seasonalSafeShift(nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts), parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
       if (!candidate) {
         attempt++;
@@ -19154,14 +19176,21 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // series can lose most of a year's candidates to one recurring
       // conflict. Insert on the cadence date and log the overlap instead.
       if (opts.overlapAdvisoryOnly) {
-        if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+        if (await seriesCandidateDateClashes(conn, riderProbeTemplate(candidate), candidate)) {
           logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
         }
-      } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+      } else if (await seriesCandidateDateClashes(conn, riderProbeTemplate(candidate), candidate)) {
         attempt++; continue;
       }
       nextStr = candidate;
       break;
+    }
+    // A rider date that is a lawn occurrence takes that occurrence's stop —
+    // its current window and technician — so the two group.
+    const riderHost = nextStr && riderDates ? riderDates.hostByDate.get(nextStr) : null;
+    if (riderHost) {
+      nextWindowStart = riderHost.window_start;
+      nextWindowEnd = riderHost.window_end;
     }
     // Re-check the ongoing flag immediately before inserting: it was
     // read once at the top of this block, and a cancellation (the
@@ -19192,7 +19221,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const childIdentity = await resolveSeriesChildIdentity(conn, parent);
       const nextData = {
         customer_id: parent.customer_id,
-        technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
+        technician_id: await assignableRecurringTemplateTechnicianId(conn, riderHost
+          ? { ...parent, recurring_technician_override: true, recurring_technician_id: riderHost.technician_id }
+          : parent, nextStr),
         scheduled_date: nextStr,
         window_start: nextWindowStart, window_end: nextWindowEnd,
         service_type: childIdentity.service_type, status: 'pending',

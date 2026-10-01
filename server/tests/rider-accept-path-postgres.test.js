@@ -381,7 +381,7 @@ postgres('pest rides the lawn from accept', () => {
 
         const ownLawn = await trx('scheduled_services').insert({
           customer_id: f.customerId, property_id: f.propertyId, service_type: 'Lawn Care', status: 'pending',
-          scheduled_date: target, ...WINDOW, estimated_duration_minutes: 60,
+          service_id: f.lawnParent.service_id, scheduled_date: target, ...WINDOW, estimated_duration_minutes: 60,
         }).returning('id');
         const landed = await extendPest(trx, f.pestParent);
         expect(dateOf(landed.scheduled_date)).toBe(target);
@@ -395,6 +395,42 @@ postgres('pest rides the lawn from accept', () => {
         });
         const skipped = await extendPest(trx, f.pestParent);
         expect(dateOf(skipped.scheduled_date)).not.toBe(target);
+      } finally { await trx.rollback(); }
+    });
+
+    test('clash probe: the same customer\'s visit that cannot group (no groupable service) still pushes the date away', async () => {
+      delete process.env[GATE];
+      const trx = await mockPg.transaction();
+      try {
+        const f = await seriesPair(trx, { rides: false });
+        const probe = await extendPest(trx, f.pestParent);
+        const target = dateOf(probe.scheduled_date);
+        await trx('scheduled_services').where({ id: probe.id }).del();
+        await trx('scheduled_services').insert({
+          customer_id: f.customerId, property_id: f.propertyId, service_type: 'Inspection', status: 'pending',
+          scheduled_date: target, ...WINDOW, estimated_duration_minutes: 60,
+        });
+        const skipped = await extendPest(trx, f.pestParent);
+        expect(dateOf(skipped.scheduled_date)).not.toBe(target);
+      } finally { await trx.rollback(); }
+    });
+
+    test('gate on: the rider takes the lawn occurrence\'s CURRENT window and groups into it after dispatch moved it', async () => {
+      process.env[GATE] = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const f = await seriesPair(trx);
+        const hostDate = addDays(f.first, 84);
+        await trx('scheduled_services')
+          .where({ recurring_parent_id: f.lawnParent.id, scheduled_date: hostDate })
+          .update({ window_start: '14:00', window_end: '15:00' });
+        const child = await extendPest(trx, f.pestParent);
+        expect(dateOf(child.scheduled_date)).toBe(hostDate);
+        expect(String(child.window_start).slice(0, 5)).toBe('14:00');
+        const lawnRow = await trx('scheduled_services')
+          .where({ recurring_parent_id: f.lawnParent.id, scheduled_date: hostDate }).first();
+        expect(child.visit_id).not.toBeNull();
+        expect(child.visit_id).toBe(lawnRow.visit_id);
       } finally { await trx.rollback(); }
     });
 
