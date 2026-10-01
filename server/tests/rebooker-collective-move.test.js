@@ -1617,8 +1617,13 @@ describe('caller wiring (source)', () => {
     // The partner plans' maintenance locks join the sweep's own, in one
     // sorted pass (two sweeps carrying each other's plans cannot deadlock).
     const reb = read('../services/rebooker.js');
-    expect(reb).toContain('...[...carryPartners0.values()].flat().map(partnerSeriesRoot).filter(Boolean).map(String),');
-    expect(reb).toContain("for (const root of maintenanceRoots) {");
+    // Partner plans are try-locked (the sweep already holds stop locks; a
+    // blocking wait could deadlock with that plan's maintenance writer).
+    const tryLock = reb.slice(reb.indexOf('async function tryLockPartnerPlans('));
+    expect(tryLock).toContain("'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked'");
+    expect(reb).toContain('await tryLockPartnerPlans(trx, carryPartners0, parentId);');
+    // The edit modal commit never carries.
+    expect(read('../routes/admin-schedule.js')).toContain('carryVisit: false,');
     // A carried partner's own landing window is checked against "already
     // passed today", like the anchor's, before its write.
     const fence = reb.slice(reb.indexOf('const fencePartner = async'), reb.indexOf('const recordCarriedPartner = async'));

@@ -10862,6 +10862,9 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // Never carries grouped partners (refuseCarriedStopInEditMove's
+        // promise holds even if a stop is grouped after that preflight).
+        carryVisit: false,
         actorId: req.technicianId || null,
         notifyRequested: notifyCustomer === true,
         // The acknowledged occurrence set, enforced against the locked sweep.

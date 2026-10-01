@@ -307,6 +307,10 @@ function seriesCarriesVisitFor(initiatedBy, options = {}) {
   // A reviewed move (call reschedule Apply) approved a conflict snapshot
   // that never included partner rows — it keeps today's refusal.
   if (Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) return false;
+  // A surface that promised not to move grouped stops (the edit modal, which
+  // saves other fields before its series move) opts out explicitly: a stop
+  // grouped after its preflight is then refused, never carried undisclosed.
+  if (options.carryVisit === false) return false;
   // An explicit STAFF allowlist (the board, edit modal and IB moves run as
   // 'admin'; Quick Move as 'tech' or 'admin'): every automatic or
   // customer-driven initiator — ai_call_pipeline, auto_dispatch, customer* —
@@ -837,6 +841,25 @@ function assertPartnersCanRide({ sweptInVisit, partners, allowLive, vg }) {
     || String(partner.property_id || '') !== String(occ.property_id || ''));
   if (detached) {
     throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: detached.id, isOperational: true });
+  }
+}
+
+// Nonblocking maintenance fences for the carried partners' own plans (their
+// roots, sorted, the sweep's own plan excluded — it is already held).
+async function tryLockPartnerPlans(trx, carryPartners, parentId) {
+  const roots = [...new Set([...carryPartners.values()].flat().map(partnerSeriesRoot).filter(Boolean).map(String))]
+    .filter((root) => root !== String(parentId))
+    .sort();
+  for (const root of roots) {
+    const result = await trx.raw(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+      ['recurring-series-maintenance', root],
+    );
+    if (result.rows[0]?.locked !== true) {
+      throw Object.assign(new Error('A grouped service\'s plan is being updated — reload and try again.'), {
+        statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
+      });
+    }
   }
 }
 
@@ -2874,23 +2897,19 @@ class SmartRebooker {
           // inserts a child after the snapshot; the sweep then commits its
           // known siblings while the new child sits on the old cadence
           // (codex r8 P1).
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['recurring-series-maintenance', String(parentId)],
+          );
           // Carried partners' OWN plans too (GATE_SERIES_MOVE_CARRIES_VISIT):
           // a partner landing on a new day must not race that plan's
           // completion top-up inserting the same day (the plan-day block in
-          // carryVisitPartners reads under it). All keys in one sorted pass,
-          // so two sweeps carrying each other's plans cannot deadlock. A
-          // partner set that changed while waiting is caught by the locked
-          // re-read below.
-          const maintenanceRoots = [...new Set([
-            String(parentId),
-            ...[...carryPartners0.values()].flat().map(partnerSeriesRoot).filter(Boolean).map(String),
-          ])].sort();
-          for (const root of maintenanceRoots) {
-            await trx.raw(
-              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-              ['recurring-series-maintenance', root],
-            );
-          }
+          // carryVisitPartners reads under it). NONBLOCKING: this sweep
+          // already holds stop locks, and that plan's maintenance writer
+          // takes maintenance first and may then wait on a stop lock, so
+          // waiting here could deadlock. A busy plan is a retryable 409 (the
+          // reviewed-move preflight's rule).
+          await tryLockPartnerPlans(trx, carryPartners0, parentId);
           if (deferFuturePlacement) {
             // The reminder sender holds this same fence through SMS/email
             // delivery. Take it before the freeze read and every row write:

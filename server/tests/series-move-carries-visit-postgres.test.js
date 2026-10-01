@@ -312,6 +312,27 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
   });
 
+  test('carryVisit: false (the edit modal) keeps the refusal even with the gate on', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const anchor = f.lawn[0];
+    await expect(rebooker.rescheduleSeries(anchor.id, addDays(dateOnly(anchor.scheduled_date), 1), '09:00-10:00', 'admin', 'admin', {
+      allowLive: true, sourceSurface: 'edit_modal', notifyRequested: false, overlapAdvisory: true, carryVisit: false,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED' });
+  });
+
+  test('a partner plan busy with maintenance is a retryable 409, never a wait', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    // Another transaction holds the pest plan's maintenance lock.
+    await db.transaction(async (other) => {
+      await other.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['recurring-series-maintenance', String(f.pestParent.id)]);
+      await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY' });
+    });
+    const pest = await db('scheduled_services').where({ id: f.pest[0].id }).first();
+    expect(dateOnly(pest.scheduled_date)).toBe(dateOnly(f.pest[0].scheduled_date));
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
