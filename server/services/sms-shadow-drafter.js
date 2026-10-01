@@ -1426,7 +1426,7 @@ const PEST_COMPLAINT_TIEBREAK = Object.freeze([
   { label: 'a dispute over what happened or over billing', source: "disput\\w*|chargeback|charged\\s+(?:me\\s+)?(?:wrong|twice|again|incorrect\\w*)|(?:double|over|wrongly|incorrectly)[- ]?charg\\w*" },
   // Codex round-44 P2: a cancel HAND-OFF is request / threat language — "I want to cancel", "going to cancel", "please cancel my plan",
   // "I'm cancelling", "cancel my service" — never a past-tense description ("the tech canceled yesterday's appointment").
-  { label: 'a threat to cancel over it', source: "(?:want(?:ed)?|wanna|going|gonna|plan(?:ning)?|need(?:ed)?|ready|decid\\w+|think(?:ing)?|consider(?:ing)?|about|trying|try|please|pls|will|would|should|may|might|could|gotta|have|like|let['’]?s)\\s+(?:to\\s+|of\\s+|about\\s+)?(?:just\\s+|probably\\s+|go\\s+ahead\\s+and\\s+)?cancel(?:l?ing)?\\b|cancel(?:l?ing)?\\s+(?:my|our|the|this|that|it|them|everything|all|service|plan|account|membership|subscription|program|contract|agreement|autopay|us|me|now)\\b|(?:i['’]?m|we['’]?re|i\\s+am|we\\s+are)\\s+(?:just\\s+)?cancel(?:l?ing)\\b|(?:i|we)\\s+(?:just\\s+)?cancel\\b|(?:want|need|like|request(?:ing)?)\\s+(?:a\\s+)?cancell?ation\\b|cancell?ation\\s+(?:please|pls|request)\\b|(?<![\\w'’])cancel(?:l?ing)?(?=\\s*(?:[.!?,;:–—]|$|please\\b|pls\\b|now\\b|asap\\b))" },
+  { label: 'a threat to cancel over it', source: "(?:want(?:ed)?|wanna|going|gonna|plan(?:ning)?|need(?:ed)?|ready|decid\\w+|think(?:ing)?|consider(?:ing)?|about|trying|try|please|pls|will|would|should|may|might|could|gotta|have|like|let['’]?s)\\s+(?:to\\s+|of\\s+|about\\s+)?(?:be\\s+)?(?:just\\s+|probably\\s+|go\\s+ahead\\s+and\\s+)?cancel(?:l?ing)?\\b|(?:i|we)['’](?:ll|d)\\s+(?:be\\s+)?(?:just\\s+|probably\\s+|go\\s+ahead\\s+and\\s+)?cancel(?:l?ing)?\\b|cancel(?:l?ing)?\\s+(?:my|our|the|this|that|it|them|everything|all|service|plan|account|membership|subscription|program|contract|agreement|autopay|us|me|now|(?:on|for|after|before|by|until|starting|effective|tomorrow|today|tonight|next|following|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|[a-z]+['’]s)\\b|(?:i['’]?m|we['’]?re|i\\s+am|we\\s+are)\\s+(?:just\\s+)?cancel(?:l?ing)\\b|(?:i|we)\\s+(?:just\\s+)?cancel\\b|(?:want|need|like|request(?:ing)?)\\s+(?:a\\s+)?cancell?ation\\b|cancell?ation\\s+(?:please|pls|request)\\b|(?<![\\w'’])cancel(?:l?ing)?(?=\\s*(?:[.!?,;:–—]|$|please\\b|pls\\b|now\\b|asap\\b))" },
 ]);
 function pestComplaintTieBreakLabels() {
   const labels = PEST_COMPLAINT_TIEBREAK.map((c) => c.label);
@@ -1454,11 +1454,17 @@ function reserviceRefusalAffirmed(text) {
   return require('./reservice-scheduler').mentionsAffirmed(String(text || ''), RESERVICE_REFUSAL_RE);
 }
 // A true hand-off the customer's OWN words establish, or an explicit refusal, suppresses the owed offer (and the state replies below).
+// PR #5465 round 1: a cancellation DESCRIBED as someone else's / a past act ("Your tech had to cancel", "You called to cancel", "they decided to
+// cancel on Friday", "I had to cancel last time") is not the customer's request or threat. The span is blanked before the hand-off read, so a
+// clause-final bare "cancel" or a "cancel on Friday" reads as intent only when its subject is the customer. Requests with the tech as the
+// ADDRESSEE ("can you cancel on Friday", "I told you to cancel") have no past / obligation lead and stay requests.
+const RESERVICE_CANCEL_DESCRIBED_RE = /\b(?:(?:(?:your|the|a|our)\s+)?(?:tech\w*|office|team|crew|company|staff|dispatcher|rep|guy|lady|girl|person|someone|somebody|they|he|she|you|u|waves)|(?:i|we)(?=\s+had\s+to\b))\s+(?:(?:had|has|called|said|told|texted|emailed|needed|decided|wanted|tried|already|just|kept|always|did|got|ended|asked|came|went)\s+(?:to\s+)?){1,3}cancel(?:l?ing)?\b/gi;
 function reserviceOfferSuppressed(inboundMessage) {
   const handoffRe = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS') ? RESERVICE_HANDOFF_TEXT_RE : RESERVICE_HANDOFF_WITH_ANGER_RE;
+  const text = String(inboundMessage || '').replace(RESERVICE_CANCEL_DESCRIBED_RE, (m) => ' '.repeat(m.length));
   // Codex round-24 P2: only an AFFIRMED hand-off clause suppresses the offer — "I don't need a refund" or
   // "I don't want to cancel" mentions the term to negate it (the scheduler's clause-level negation rule).
-  return require('./reservice-scheduler').mentionsAffirmed(String(inboundMessage || ''), handoffRe) || reserviceRefusalAffirmed(inboundMessage);
+  return require('./reservice-scheduler').mentionsAffirmed(text, handoffRe) || reserviceRefusalAffirmed(inboundMessage);
 }
 function reserviceOfferOwed({ inboundMessage, lanes, context }) {
   if (reserviceOfferSuppressed(inboundMessage)) return false;
@@ -1800,7 +1806,7 @@ function reserviceAssertedDays(sentence) {
   for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\b/g)) out.push(`${Number(m[1])}/${Number(m[2])}`);
   // Codex round-44 P2: FULL dates — ISO "2026-10-09" (the FREE RE-SERVICE fact renders this form, so a draft copies it) and M/D/YYYY — are
   // compared year-and-all as an `iso:` token against the live callback date (the M/D token above is pushed too, so a wrong year fails here).
-  for (const m of sentence.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) out.push(`iso:${m[1]}-${m[2]}-${m[3]}`);
+  for (const m of sentence.matchAll(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g)) out.push(`iso:${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`);
   for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})\b/g)) {
     const year = m[3].length === 2 ? `20${m[3]}` : m[3];
     out.push(`iso:${year}-${String(Number(m[1])).padStart(2, '0')}-${String(Number(m[2])).padStart(2, '0')}`);
@@ -1812,7 +1818,7 @@ const RESERVICE_LEXICAL_TIME_RE = /\b(?:noon|midnight|midday|tonight|later\s+tod
 function reserviceAssertedTimes(sentence) {
   const out = [];
   // an ISO / numeric full date is a DAY (reserviceAssertedDays), not a clock range ("2026-10-09" would read as the range 10–09)
-  let rest = String(sentence).replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ').replace(/\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b/g, ' ');
+  let rest = String(sentence).replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ').replace(/\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b/g, ' ');
   const push = (h, mi, mer) => out.push({ minutes: (Number(h) % 12) * 60 + Number(mi || 0) + (mer === 'p' ? 720 : 0), mer: mer || null });
   rest = rest.replace(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\s*(?:-|–|—|to|and|until)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi, (m, h1, m1, mer1, h2, m2, mer2) => {
     const second = mer2[0].toLowerCase();
@@ -1851,6 +1857,7 @@ function reserviceLiveDayTokens(dateStr) {
 // the lanes the SENTENCE names (Codex round-31 P2 — derived from the body itself, never only from snapshotted lanes, so an
 // edited "Your lawn re-service is scheduled Thursday" is a lawn claim even with no lawn snapshot). A sentence refers when it
 // carries an existing-appointment marker, a relative day, or a snapshotted day/date/time AND has re-service context.
+const RESERVICE_FULL_DATE_RE = /\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b/;
 function reserviceBookedClaims(body, snapshot) {
   const named = Object.values(snapshot).flatMap((info) => reserviceBookedDayNames(info))
     .map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
@@ -1871,12 +1878,16 @@ function reserviceBookedClaims(body, snapshot) {
     .replace(/\b(Mr|Mrs|Ms|Dr|St|Ave|Blvd|Rd|approx|Apt|Ste|No)\./gi, '$1');
   for (const sentence of normalizedBody.split(/[.!?\n]+/)) {
     const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
-    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || named.some((rx) => rx.test(sentence)))) continue;
+    // Round-1 C3: a FULL date (ISO / M/D/YYYY) is admitted whatever its value — an EDITED wrong date ("Your pest re-service is 2027-10-08") must reach the
+    // day comparison, not be skipped because it is not the snapshot's exact string; the re-service-context check below still gates it.
+    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || RESERVICE_FULL_DATE_RE.test(sentence) || named.some((rx) => rx.test(sentence)))) continue;
     if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) continue;
     // A sentence whose re-service is a NEW OFFER (its marker belongs to something else: "Your lawn treatment is scheduled, and
     // I'll send your free pest re-service link") is not a reference to a booked callback.
     const spans = reserviceOfferSpans(sentence);
-    if (spans.length && !spans.some((span) => reserviceExistingApptGoverns(span, sentence))) continue;
+    // (a FULL date with no link / send / text wording is an assertion about a specific appointment even with no marker — "Your pest re-service is 2027-10-08")
+    const datedAssertion = RESERVICE_FULL_DATE_RE.test(sentence) && !RESERVICE_PROMISE_AFTER_RE.test(sentence);
+    if (spans.length && !datedAssertion && !spans.some((span) => reserviceExistingApptGoverns(span, sentence))) continue;
     claims.push({
       lanes: RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l),
       relative: relative ? (relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today') : null,

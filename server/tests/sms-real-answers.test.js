@@ -3022,6 +3022,16 @@ describe('free re-service is an entitlement resolved through the existing mechan
         for (const m of ['ants are back, I want to cancel', 'ants are back, please cancel my plan', "ants are back and I'm cancelling", 'ants are back, we are going to cancel', 'ants are back. Cancel.', 'cancel! the roaches are back', 'ants are back - cancellation please', "ants are back, I'd like to cancel"]) expect(owed(m)).toBe(false);
       });
 
+      // PR #5465 round 1 (C1 + R3): the cancel hand-off is INTENT — a date-modified request, a contracted future / threat — and a cancellation
+      // DESCRIBED as the tech's / the office's / a past act (even clause-final or dated) does not suppress the offer.
+      test('date-modified and contracted-future cancel requests hand off; a described cancellation (tech / you / they, past) does not', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const owed = (m) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: m }).ok === false;
+        for (const m of ["Cancel tomorrow's appointment; the ants are back", 'Can you cancel next week\u2019s service? The ants are back', 'ants are back, cancel on Friday', 'the ants are back, cancel next month', 'ants are back, cancel after this visit',
+          "I'll cancel if this happens again, the ants are back", "the ants are back and we'll cancel unless someone comes out", "ants are back, I'll be cancelling after this visit", 'ants are back, I will be cancelling']) expect([m, owed(m)]).toEqual([m, false]);
+        for (const m of ['Your tech had to cancel, and now the ants are back', 'You called to cancel. Anyway, the ants are back.', 'The tech had to cancel on Friday and the ants are back', 'ants are back, they decided to cancel next week', 'the ants are back, I had to cancel last time']) expect([m, owed(m)]).toEqual([m, true]);
+      });
+
       // Codex round-39 P2: an explicit, AFFIRMED refusal of a visit / callback / link suppresses the owed offer and forbids a promise.
       test('an explicit refusal of a visit / link suppresses the owed offer; a negated or third-party "refusal" does not', () => {
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
@@ -4016,10 +4026,14 @@ describe('free re-service is an entitlement resolved through the existing mechan
           const drafter = require('../services/sms-shadow-drafter');
           return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
         };
-        for (const ok of ['Your pest re-service is scheduled for 2026-10-08.', 'Your pest re-service is scheduled for 2026-10-08, 9-11 AM.', 'Your pest re-service is scheduled for 10/8/2026.', 'Your pest re-service is scheduled for 10/08/26.']) {
+        for (const ok of ['Your pest re-service is scheduled for 2026-10-08.', 'Your pest re-service is scheduled for 2026-10-08, 9-11 AM.', 'Your pest re-service is scheduled for 10/8/2026.', 'Your pest re-service is scheduled for 10/08/26.',
+          // PR #5465 R4: an unpadded full date is still a DAY (not a "10-3" clock range)
+          'Your pest re-service is scheduled for 2026-10-8.']) {
           await expect(send(ok)).resolves.toBeNull();
         }
-        for (const bad of ['Your pest re-service is scheduled for 2027-10-08.', 'Your pest re-service is scheduled for 2026-10-09.', 'Your pest re-service is scheduled for 10/8/2027.', 'Your pest re-service is scheduled for 10/9/2026.', 'Your pest re-service is scheduled for 2026-10-08, 1-3 PM.']) {
+        for (const bad of ['Your pest re-service is scheduled for 2027-10-08.', 'Your pest re-service is scheduled for 2026-10-09.', 'Your pest re-service is scheduled for 10/8/2027.', 'Your pest re-service is scheduled for 10/9/2026.', 'Your pest re-service is scheduled for 2026-10-08, 1-3 PM.',
+          // PR #5465 C3: an edited wrong full date with NO scheduled / booked marker still reaches the day comparison
+          'Your pest re-service is 2027-10-08.', 'Your pest re-service is 2026-10-09.', 'Your free pest re-service is on 10/9/2026.', 'Your pest re-service is 2026-10-3.']) {
           await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
         }
       } finally {
