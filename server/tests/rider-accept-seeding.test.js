@@ -125,53 +125,56 @@ describe('rider context fall-backs', () => {
     expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'pest' }), pestPlan)).toBeNull();
   });
 
+  const lawnDates = (n) => Array.from({ length: n }, (_, k) => {
+    const d = new Date(Date.UTC(2098, 0, 5, 12));
+    d.setUTCDate(d.getUTCDate() + 42 * (k + 1));
+    return d.toISOString().slice(0, 10);
+  });
+  const conn = Object.assign((table) => ({
+    whereIn: () => ({ select: async () => [] }),
+    where: (w) => ({ update: async (u) => { conn.updates.push({ table, w, u }); return 1; } }),
+  }), { updates: [] });
+  // The lawn seeds first in this accept, with these follow-up dates.
+  async function seedLawn(ctx, n = 8, over = {}) {
+    const lawn = parent({ id: 'lawn', ...over });
+    expect(await RiderAccept.beforeSeed(ctx, conn, lawn, lawnPlan)).toBeNull();
+    await RiderAccept.afterSeed(ctx, conn, lawn, null, { insertedRows: lawnDates(n).map((d) => ({ scheduled_date: d })) });
+  }
+  const pest = (over) => parent({ id: 'pest', service_type: 'Quarterly Pest Control', ...over });
+  beforeEach(() => { conn.updates = []; });
+
   test.each([
     ['a different first date', { scheduled_date: '2098-01-06' }],
     ['a different property', { property_id: 'prop2' }],
     ['a different customer', { customer_id: 'c2' }],
   ])('%s falls back to the normal walk', async (_, over) => {
     const ctx = RiderAccept.createContext();
-    expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'lawn' }), lawnPlan)).toBeNull();
-    expect(ctx.lawn.parent.id).toBe('lawn');
-    expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'pest', service_type: 'Quarterly Pest Control', ...over }), pestPlan)).toBeNull();
+    await seedLawn(ctx);
+    expect(await RiderAccept.beforeSeed(ctx, conn, pest(over), pestPlan)).toBeNull();
   });
 
   test('a bi-monthly pest or a mosquito line is not a rider of the recorded lawn', async () => {
     const ctx = RiderAccept.createContext();
-    await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'lawn' }), lawnPlan);
-    expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'b' }), { ...pestPlan, pattern: 'bimonthly' })).toBeNull();
-    expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'm' }), { ...pestPlan, family: 'mosquito' })).toBeNull();
+    await seedLawn(ctx);
+    expect(await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'b' }), { ...pestPlan, pattern: 'bimonthly' })).toBeNull();
+    expect(await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'm' }), { ...pestPlan, family: 'mosquito' })).toBeNull();
   });
 
   test('a failure while planning fails open to the normal walk (never throws into the accept)', async () => {
     const ctx = RiderAccept.createContext();
-    await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'lawn' }), lawnPlan);
-    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockRejectedValue(new Error('db down'));
-    try {
-      expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan)).toBeNull();
-    } finally { spy.mockRestore(); }
+    await seedLawn(ctx);
+    groupSpy.mockRejectedValue(new Error('db down'));
+    expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
   });
 
-  test('a lawn that starts the same day at the same stop yields the 84-day rider dates, three follow-ups', async () => {
+  test('a seeded lawn at the same stop yields the 84-day rider dates (three follow-ups) and the link', async () => {
     const ctx = RiderAccept.createContext();
-    await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'lawn' }), lawnPlan);
-    const lawnFollowUps = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => {
-      const d = new Date(Date.UTC(2098, 0, 5, 12));
-      d.setUTCDate(d.getUTCDate() + 42 * i);
-      return d.toISOString().slice(0, 10);
-    });
-    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnFollowUps);
-    try {
-      const rider = await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan);
-      expect(rider.hostParentId).toBe('lawn');
-      expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
-    } finally { spy.mockRestore(); }
-  });
-
-  const lawnDates = (n) => Array.from({ length: n }, (_, k) => {
-    const d = new Date(Date.UTC(2098, 0, 5, 12));
-    d.setUTCDate(d.getUTCDate() + 42 * (k + 1));
-    return d.toISOString().slice(0, 10);
+    await seedLawn(ctx);
+    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    expect(rider.hostParentId).toBe('lawn');
+    expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
+    await RiderAccept.afterSeed(ctx, conn, pest(), rider, { insertedRows: [] });
+    expect(conn.updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
   });
 
   test.each([
@@ -179,75 +182,21 @@ describe('rider context fall-backs', () => {
     ['too few lawn follow-ups (the rule would fall back to its own +84 dates)', 3],
   ])('%s: not a ride, the normal walk seeds and nothing links', async (_, n) => {
     const ctx = RiderAccept.createContext();
-    await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'lawn' }), lawnPlan);
-    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(n));
-    try {
-      expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan)).toBeNull();
-    } finally { spy.mockRestore(); }
+    await seedLawn(ctx, n);
+    expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
   });
 
-  test('a rider planned on PROJECTED lawn dates is never linked when the lawn seeds different dates (or nothing)', async () => {
-    const updates = [];
-    const conn = (table) => ({
-      where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }),
-      whereIn: () => ({ select: async () => [] }),
-    });
+  test('a lawn that has not seeded yet in this accept hosts nothing', async () => {
     const ctx = RiderAccept.createContext();
-    RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
-    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(8));
-    let rider;
-    try {
-      rider = await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan);
-    } finally { spy.mockRestore(); }
-    expect(rider.projected).toBe(true);
-    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'pest' }), rider, { insertedRows: [] });
-    // Not linked yet: the lawn has not seeded.
-    expect(updates).toEqual([]);
-    // The lawn then seeds nothing (e.g. its series was kept elsewhere): still unlinked.
-    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'lawn' }), null, { insertedRows: [] });
-    expect(updates).toEqual([]);
+    expect(RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan)).toBe(true);
+    expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
   });
 
-  test('a rider planned on projected dates stays linked when the lawn seeds exactly those dates', async () => {
-    const updates = [];
-    const conn = (table) => ({
-      where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }),
-      whereIn: () => ({ select: async () => [] }),
-    });
+  test('a rider whose first visit would NOT group with the lawn is not a ride', async () => {
     const ctx = RiderAccept.createContext();
-    RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
-    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(8));
-    let rider;
-    try {
-      rider = await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan);
-    } finally { spy.mockRestore(); }
-    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'pest' }), rider, { insertedRows: [] });
-    expect(updates).toEqual([]);
-    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'lawn' }), null, {
-      insertedRows: lawnDates(8).map((d) => ({ scheduled_date: d })),
-    });
-    expect(updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
-  });
-
-  test('a projected rider whose first visit would NOT group with the lawn is left unlinked', async () => {
+    await seedLawn(ctx);
     groupSpy.mockResolvedValue(null);
-    const updates = [];
-    const conn = (table) => ({
-      where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }),
-      whereIn: () => ({ select: async () => [] }),
-    });
-    const ctx = RiderAccept.createContext();
-    RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
-    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(8));
-    let rider;
-    try {
-      rider = await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan);
-    } finally { spy.mockRestore(); }
-    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'pest' }), rider, { insertedRows: [] });
-    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'lawn' }), null, {
-      insertedRows: lawnDates(8).map((d) => ({ scheduled_date: d })),
-    });
-    expect(updates).toEqual([]);
+    expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
   });
 
   test('a lawn row with a stale non-lawn label is still a host when its resolved family is lawn', () => {
@@ -258,10 +207,10 @@ describe('rider context fall-backs', () => {
 
   test('a lawn whose seeding failed is forgotten: later riders seed their own walk', async () => {
     const ctx = RiderAccept.createContext();
-    RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
+    await seedLawn(ctx);
     RiderAccept.forgetLawn(ctx, parent({ id: 'lawn' }));
     expect(ctx.lawn).toBeNull();
-    expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan)).toBeNull();
+    expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
   });
 });
 

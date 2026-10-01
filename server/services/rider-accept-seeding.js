@@ -18,10 +18,10 @@
  * rider dates than the plan needs, a read failing) falls back to today's
  * quarterly walk — an accept never fails because of this.
  *
- * One context per accept (createContext). The converter seeds series in
- * whatever order the estimate lists them (lawn first when it can), so the lawn
- * is recorded either when it is about to seed (beforeSeed) or, for a reserved
- * lawn visit that seeds after the promoted riders, up front (noteLawn).
+ * One context per accept (createContext). The converter seeds a lawn host
+ * ahead of its riders wherever it can; the lawn is recorded as it seeds
+ * (beforeSeed/afterSeed), and only a lawn that has ALREADY seeded in this
+ * accept can host a rider.
  */
 const logger = require('./logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -83,13 +83,12 @@ function isHostPlan(family, pattern, parentRow = {}) {
   return family === 'lawn_care' && !!require('./rider-series-preview').riderHostKind(hostRow(parentRow, pattern));
 }
 
-// Records a lawn host (called ahead of the promoted programs for a
-// reserved lawn visit, and by beforeSeed for every series about to seed).
-function noteLawn(ctx, parentRow, { family, pattern, seedOpts }) {
+// Records a lawn host as it is about to seed (beforeSeed).
+function noteLawn(ctx, parentRow, { family, pattern }) {
   if (!ctx || !isHostPlan(family, pattern, parentRow)) return false;
   if (!ctx.lawn || String(ctx.lawn.parent.id) !== String(parentRow.id)) {
     ctx.lawn = {
-      parent: parentRow, host: hostRow(parentRow, pattern), seedOpts, seededDates: null,
+      parent: parentRow, host: hostRow(parentRow, pattern), seededDates: null,
     };
   }
   return true;
@@ -118,9 +117,12 @@ async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }
     logger.warn(`[rider-accept] lawn ${lawn.id} and rider ${rider.id} do not start at the same stop (seeding the quarterly walk)`);
     return null;
   }
-  // A lawn that has already seeded can be checked now; a reserved lawn's
-  // projected plan is checked when it seeds (settleProjectedRiders).
-  if (ctx.lawn.seededDates && !(await firstVisitsGroup(conn, rider.id, lawn.id))) {
+  // Only a lawn that has ALREADY seeded in this accept can host: its real
+  // dates are known and the two first visits can be checked as one stop.
+  // (A reserved lawn that seeds after a promoted rider is not a host — the
+  // rider walks its own cadence.)
+  if (!ctx.lawn.seededDates) return null;
+  if (!(await firstVisitsGroup(conn, rider.id, lawn.id))) {
     logger.warn(`[rider-accept] rider ${rider.id} would not group with lawn ${lawn.id} (seeding the quarterly walk)`);
     return null;
   }
@@ -128,7 +130,7 @@ async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }
   const { getBlackoutLayers } = require('./scheduling/blackout-dates');
   const horizon = addDays(firstDate, HORIZON_DAYS);
   const wanted = Seeder.plannedVisitCountForPattern(pattern, seedOpts) - 1;
-  const hostFollowUps = ctx.lawn.seededDates || await inSavepoint(conn, (sp) => Seeder.planFollowUpSeedDates(sp, lawn, ctx.lawn.seedOpts));
+  const hostFollowUps = ctx.lawn.seededDates;
   let blackoutDates = null;
   try { blackoutDates = await getBlackoutLayers(firstDate, horizon, conn); } catch { /* fail open */ }
   const overrideDates = planRiderDates({
@@ -146,7 +148,7 @@ async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }
     logger.warn(`[rider-accept] rider ${rider.id} has ${overrideDates.filter((d) => hostSet.has(d)).length}/${wanted} lawn dates to ride (seeding the quarterly walk)`);
     return null;
   }
-  return { overrideDates, hostParentId: lawn.id, projected: !ctx.lawn.seededDates };
+  return { overrideDates, hostParentId: lawn.id };
 }
 
 // After the seeder ran: remember a seeded lawn's real dates for a later rider,
@@ -155,16 +157,8 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
   if (!ctx) return;
   if (ctx.lawn && String(ctx.lawn.parent.id) === String(parentRow.id)) {
     ctx.lawn.seededDates = (seedResult?.insertedRows || []).map((r) => dateOnly(r.scheduled_date)).filter(Boolean);
-    await settleProjectedRiders(ctx, conn);
   }
   if (!rider?.hostParentId) return;
-  // Planned on a reserved lawn's PROJECTED dates: link only once that lawn has
-  // really seeded them (settleProjectedRiders). A lawn that never seeds
-  // (kept series, failure) leaves the rider unlinked on valid 84-day dates.
-  if (rider.projected) {
-    (ctx.lawn.projectedRiders = ctx.lawn.projectedRiders || []).push({ id: parentRow.id, dates: rider.overrideDates });
-    return;
-  }
   await linkRider(conn, parentRow.id, rider.hostParentId);
 }
 
@@ -175,24 +169,6 @@ async function linkRider(conn, riderId, hostParentId) {
     await inSavepoint(conn, (sp) => sp('scheduled_services').where({ id: riderId }).update({ rides_parent_id: hostParentId }));
   } catch (err) {
     logger.warn(`[rider-accept] could not link rider ${riderId} to lawn ${hostParentId}: ${err.message}`);
-  }
-}
-
-// Riders planned on the lawn's PROJECTED dates (a reserved lawn seeds after
-// them) are linked here, once the lawn has really seeded — and only when every
-// rider date is a real lawn date. Otherwise they stay unlinked.
-async function settleProjectedRiders(ctx, conn) {
-  const pending = ctx.lawn.projectedRiders || [];
-  ctx.lawn.projectedRiders = [];
-  const actual = new Set(ctx.lawn.seededDates);
-  for (const r of pending) {
-    let groups = false;
-    try { groups = await firstVisitsGroup(conn, r.id, ctx.lawn.parent.id); } catch { /* not a ride */ }
-    if (groups && r.dates.every((d) => actual.has(d))) {
-      await linkRider(conn, r.id, ctx.lawn.parent.id);
-    } else {
-      logger.warn(`[rider-accept] lawn ${ctx.lawn.parent.id} did not seed the dates rider ${r.id} planned on, or the two do not group — left unlinked`);
-    }
   }
 }
 

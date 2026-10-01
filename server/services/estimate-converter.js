@@ -6331,45 +6331,6 @@ const EstimateConverter = {
         const promotedUnits = riderCtx
           ? lawnHostFirst(promotedUnitsListed, (unit) => unit.service, inferredFrequencyKey, acceptedPlanFrequency)
           : promotedUnitsListed;
-        // A reserved lawn visit seeds after the promoted programs, so a promoted
-        // quarterly rider must already find it (rider-accept-seeding.js).
-        if (riderCtx && reservedStart) {
-          const reservedLine = recurringServiceForScheduledRow(
-            recurringServicesForConversion,
-            reservedStart,
-            separateReservedPrograms
-              ? seedFamilyForReservedIdentity(
-                reservedServiceKeyById.get(reservedStart.service_id)
-                  || String(reservedStart.service_key_snapshot || '') || null,
-              )
-              : null,
-          );
-          const reservedPlan = reservedLine
-            && followUpSeedPlan(reservedStart, reservedLine, { fallbackFrequency: inferredFrequencyKey, acceptedPlanFrequency });
-          // Only a lawn that WILL seed its series can host: the duplicate-series
-          // guard below keeps an existing active lawn series instead of seeding
-          // this one, and then there are no lawn dates to ride (fail closed —
-          // the riders walk their own cadence).
-          let reservedSeeds = false;
-          if (reservedPlan) {
-            try {
-              // Savepoint on a caller transaction: a failed optional read must
-              // not abort the accept (25P02).
-              const lookup = (conn) => RecurringAppointmentSeeder.findActiveRecurringSeries(conn, {
-                customerId,
-                serviceId: reservedStart.service_id || null,
-                serviceType: guardServiceTypeFor(reservedStart.service_type) || null,
-                excludeParentId: reservedStart.id,
-                serviceAddressScope: seriesAddressScope,
-              });
-              const existingLawn = database.isTransaction ? await database.transaction(lookup) : await lookup(database);
-              reservedSeeds = !(existingLawn && existingLawn.length);
-            } catch (guardErr) {
-              logger.warn(`[estimate-converter] rider host pre-check failed (riders walk their own cadence): ${guardErr.message}`);
-            }
-          }
-          if (reservedPlan && reservedSeeds) RiderAcceptSeeding.noteLawn(riderCtx, reservedStart, reservedPlan);
-        }
         // One reserved row with a stamped price: it stands for exactly one
         // accepted line — or, when the combined route is about to rewrite it,
         // for the pair it will perform (codex #3938 r2 P1) — and its price is

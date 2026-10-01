@@ -229,22 +229,17 @@ postgres('pest rides the lawn from accept', () => {
 
   // A reserved lawn visit seeds AFTER the promoted programs, so the quarterly
   // rider promoted beside it (termite bait) must find the lawn through noteLawn.
-  test('gate on, reserved LAWN start with termite bait promoted before it seeds: bait still rides the lawn', async () => {
+  test('gate on, reserved LAWN start with termite bait promoted before it seeds: the lawn has not seeded yet, so the bait walks its own cadence unlinked', async () => {
     process.env[GATE] = 'true';
     const trx = await mockPg.transaction();
     try {
       const f = await reservedAccept(trx, [LAWN_LINE, TERMITE_BAIT_QUARTERLY]);
       const rows = await trx('scheduled_services').where({ source_estimate_id: f.estimateId }).orderBy('scheduled_date');
-      const lawnParent = rows.find((r) => r.id === f.reserved.id);
       const baitParent = rows.find((r) => !r.recurring_parent_id && /termite/i.test(r.service_type));
       expect(baitParent).toBeDefined();
-      expect(baitParent.rides_parent_id).toBe(lawnParent.id);
-      const lawnDates = new Set(rows.filter((r) => r.id === lawnParent.id || r.recurring_parent_id === lawnParent.id)
-        .map((r) => dateOf(r.scheduled_date)));
-      const baitDates = rows.filter((r) => r.id === baitParent.id || r.recurring_parent_id === baitParent.id)
-        .map((r) => dateOf(r.scheduled_date));
-      expect(baitDates).toEqual([f.date, addDays(f.date, 84), addDays(f.date, 168), addDays(f.date, 252)]);
-      for (const d of baitDates) expect(lawnDates.has(d)).toBe(true);
+      expect(baitParent.rides_parent_id).toBeNull();
+      const baitDates = rows.filter((r) => r.recurring_parent_id === baitParent.id).map((r) => dateOf(r.scheduled_date));
+      expect(baitDates).not.toContain(addDays(f.date, 84));
     } finally { await trx.rollback(); }
   });
 
@@ -277,23 +272,6 @@ postgres('pest rides the lawn from accept', () => {
       const baitDates = rows.filter((r) => r.recurring_parent_id === baitParent.id).map((r) => dateOf(r.scheduled_date));
       expect(baitDates).not.toContain(addDays(f.date, 84));
     } finally { await trx.rollback(); }
-  });
-
-  test('gate on: a failing host pre-check leaves the accept transaction usable and the rider unlinked', async () => {
-    process.env[GATE] = 'true';
-    const seeder = require('../services/recurring-appointment-seeder');
-    const spy = jest.spyOn(seeder, 'findActiveRecurringSeries')
-      .mockImplementationOnce((conn) => conn.raw('select * from rider_precheck_no_such_table'));
-    const trx = await mockPg.transaction();
-    try {
-      const f = await reservedAccept(trx, [LAWN_LINE, TERMITE_BAIT_QUARTERLY]);
-      // The accept finished on the same transaction (no 25P02) and seeded.
-      const rows = await trx('scheduled_services').where({ source_estimate_id: f.estimateId });
-      const baitParent = rows.find((r) => !r.recurring_parent_id && /termite/i.test(r.service_type));
-      expect(baitParent).toBeDefined();
-      expect(baitParent.rides_parent_id).toBeNull();
-      expect(rows.some((r) => r.recurring_parent_id === f.reserved.id)).toBe(true);
-    } finally { spy.mockRestore(); await trx.rollback(); }
   });
 
   test('a failing rider link write rolls back to its savepoint and leaves the transaction usable', async () => {
