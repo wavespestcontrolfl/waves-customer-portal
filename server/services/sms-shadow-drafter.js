@@ -5848,6 +5848,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // rechecks them are still en_route immediately before sending.
           liveEtaSnapshot,
           techNames,
+          // PR #5499: open commitments the reply was grounded on — rechecked at the provider boundary.
+          visitLoopCommitmentIds: visitLoopCommitmentIds(context),
           // Codex round-43 P2: the already-booked callback(s) a reply may refer to — persisted on the claim and rechecked live before provider entry.
           reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
         });

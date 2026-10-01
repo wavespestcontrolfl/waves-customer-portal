@@ -464,4 +464,17 @@ describe('open-loop commitments recheck', () => {
     await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }]) })).resolves.toBeNull();
     await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: commitmentsDb([{ id: 'cc-1', status: 'fulfilled' }]) })).resolves.toBe('commitment_closed');
   });
+
+  test('provider-boundary form: no ids → no check; closed → refused; unreadable → refused retryably; repeatable', async () => {
+    const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+    expect(openLoopsProviderPreSendCheck({ commitmentIds: [] })).toBeUndefined();
+    expect(openLoopsProviderPreSendCheck({ commitmentIds: null })).toBeUndefined();
+    const check = openLoopsProviderPreSendCheck({ commitmentIds: ['cc-1'] });
+    expect(check.afterMarker).toBe(check);
+    await expect(check({ dbi: commitmentsDb([{ id: 'cc-1', status: 'open' }]) })).resolves.toEqual({ ok: true });
+    await expect(check({ dbi: commitmentsDb([{ id: 'cc-1', status: 'fulfilled' }]) }))
+      .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (commitment_closed)' });
+    await expect(check({ dbi: () => { throw new Error('down'); } }))
+      .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true });
+  });
 });

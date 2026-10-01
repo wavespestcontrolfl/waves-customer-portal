@@ -45,6 +45,7 @@ const LATE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
 // or a "never completed" reading is true of.
 const NOT_STARTED_STATUSES = ['pending', 'confirmed'];
 const LIVE_TRACK_STATES = ['en_route', 'on_property', 'on_site'];
+const ON_SITE_STATUSES = ['on_site', 'on_property'];
 
 function emptyVisitLoops() {
   return {
@@ -175,7 +176,10 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
     status: fresh ? String(status.status) : 'stale',
     minutesSinceUpdate: ageMs == null ? null : Math.max(0, Math.floor(ageMs / 60000)),
     stopsAhead,
-    atThisVisit: Boolean(status?.current_job_id) && String(status.current_job_id) === String(visit.id),
+    // current_job_id is set from en_route on, so "at this visit" also needs an
+    // on-site status; driving to it is "en route", not "at this visit now".
+    atThisVisit: fresh && ON_SITE_STATUSES.includes(String(status?.status))
+      && Boolean(status?.current_job_id) && String(status.current_job_id) === String(visit.id),
     // Which of today's visits this is about (a customer can have two today).
     visitType: visit.service_type || null,
     windowDisplay: windowLabel(visit, deriveWindow),

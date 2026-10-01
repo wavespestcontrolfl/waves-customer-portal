@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -263,6 +263,8 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // send-time snapshot publishSuggestion persists — see its comment.
           ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
           ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
+          // PR #5499: the open call_commitments ids the draft's VISIT STATUS & OPEN LOOPS lines named.
+          ...(Array.isArray(visitLoopCommitmentIds) && visitLoopCommitmentIds.length ? { visit_loop_commitment_ids: visitLoopCommitmentIds } : {}),
         }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
@@ -313,6 +315,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       // dispatchClaimedSend's pre-send LIVE ETA recheck needs no round trip
       // through the row it just inserted.
       liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion: promptVersion || null,
+      visitLoopCommitmentIds: Array.isArray(visitLoopCommitmentIds) ? visitLoopCommitmentIds : null,
     };
   });
 }
@@ -797,10 +800,13 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     // async ETA read goes FIRST and the lane's own predicate (booked-callback reference /
     // gratitude handoff) LAST, so no other state can change after the final guard and before
     // the provider request; the repeatable parts re-run in the same order after the marker.
+    // Open-loop commitments (PR #5499) run next: a promise the reply was grounded on
+    // can be fulfilled or dismissed while the draft is verified and claimed.
     providerPreSendCheck: (() => {
-      const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      const { etaSnapshotProviderPreSendCheck, openLoopsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
+        openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds }),
         laneFields.providerPreSendCheck,
       );
     })(),

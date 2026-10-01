@@ -195,6 +195,26 @@ function markRepeatable(check) {
   return check;
 }
 
+// Open-loop commitments at the provider boundary, for a caller holding the ids in
+// memory (the auto-send executor's claim). Closed → refused; an unreadable recheck
+// → refused retryably (nothing is known to be stale). No ids → undefined (no check).
+function openLoopsProviderPreSendCheck({ commitmentIds }) {
+  const ids = Array.isArray(commitmentIds) ? commitmentIds.filter((id) => typeof id === 'string' && id) : [];
+  if (!ids.length) return undefined;
+  const check = async ({ dbi } = {}) => {
+    const reason = await openLoopsBlockReason({ decision: { input_snapshot: { visit_loop_commitment_ids: ids } }, dbh: dbi });
+    if (reason == null) return { ok: true };
+    const retryable = reason === 'open_loops_recheck_failed';
+    return {
+      ok: false,
+      code: retryable ? 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY' : 'OPEN_LOOPS_STALE_AT_BOUNDARY',
+      reason: `open-loop facts stale (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+  return markRepeatable(check);
+}
+
 // Run several provider-boundary predicates in order; the first refusal wins.
 // undefined entries are skipped; returns undefined when there is nothing to run.
 function composeProviderPreSendChecks(...checks) {
@@ -323,4 +343,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };

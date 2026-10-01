@@ -117,6 +117,12 @@ describe('techPosition', () => {
     expect(out.techPosition).toMatchObject({ status: 'on_site', atThisVisit: true });
   });
 
+  test('en route TO this visit (current_job_id already set) is not "at this visit"', async () => {
+    const conn = fakeConn(handlers({ status: { status: 'en_route', current_job_id: 'visit-1', location_updated_at: minutesAgo(1) } }));
+    const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
+    expect(out.techPosition).toMatchObject({ status: 'en_route', atThisVisit: false });
+  });
+
   test('a location older than five minutes reads stale but keeps the age', async () => {
     const conn = fakeConn(handlers({ status: { status: 'en_route', current_job_id: null, location_updated_at: minutesAgo(9) } }));
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
