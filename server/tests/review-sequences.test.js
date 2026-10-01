@@ -4870,6 +4870,25 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(touch.template_key).toBe('day0_ask');
     });
 
+    test('Codex r3: a tech-voice draft that would run past two segments with the long (unshortened) link sends the fixed template', async () => {
+      mockGates.reviewAskTechVoice = true;
+      // ~250 chars of text: two segments around the 40-char short link, three around the long /rate URL this suite renders.
+      const body = `It's Christopher, thanks for waiting on me this morning when you had to get to work. ${'I checked the kitchen and the garage and the lanai and the beds. '.repeat(2)}A Google review would really help: {review_url}`;
+      mockDraftTechVoice.mockResolvedValue(body);
+      const mock = makeMock({
+        customers: [{ id: 'tv-4', first_name: 'Lena', last_name: 'K', phone: '+19410000096', nearest_location_id: 'bradenton' }],
+      });
+      db.mockImplementation(mock);
+      const result = await ReviewService.startReviewSequence({ customerId: 'tv-4', serviceType: 'Quarterly Pest Control', techName: 'Christopher Adams', startedBy: 'admin-1' });
+      expect(result.started).toBe(true);
+      const sent = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sent).not.toContain('waiting on me this morning');
+      expect(sent).toContain('A Google review means a lot');
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+      expect(touch.custom_body == null).toBe(true);
+    });
+
     test('tech voice on but no verified draft: the fixed Day-0 template sends', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({

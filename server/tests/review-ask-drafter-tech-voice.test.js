@@ -224,6 +224,23 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
   });
 
+  test('Codex r3: one time budget covers write, check and redraft; each call gets only what is left', async () => {
+    let now = 1_000_000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
+      // The first write takes 57 s and is rejected: no time is left for a redraft.
+      mockDispatch.mockImplementation(async () => { now += 57_000; return reply(ungrounded); });
+      expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+      expect(mockDispatch).toHaveBeenCalledTimes(1);
+      const [, req, opts] = mockDispatch.mock.calls[0];
+      expect(req.timeoutMs).toBeLessThanOrEqual(60_000);
+      expect(opts).toMatchObject({ hardDeadline: true });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('Codex r1: the checker rules ride the system channel; the user message is data only', async () => {
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     await Drafter.draftTechVoice(INPUT);

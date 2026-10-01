@@ -205,7 +205,7 @@ const TEMPLATES = [
     id: "soft_reminder",
     name: "Soft Reminder",
     sentiment: "happy",
-    body: "Hi {first}! Just a quick nudge from Waves - that review link one more time:\n\n{review_url}",
+    body: "Hi {first}! Just a quick nudge from Waves - that review link one more time, for a Google review:\n\n{review_url}",
   },
   {
     id: "final_nudge",

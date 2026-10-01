@@ -67,7 +67,7 @@ const OUTREACH_TEMPLATES = [
     id: 'soft_reminder',
     name: 'Soft Reminder',
     sentiment: 'happy',
-    body: "Hi {first}! Just a quick nudge from Waves - that review link one more time:\n\n{review_url}",
+    body: "Hi {first}! Just a quick nudge from Waves - that review link one more time, for a Google review:\n\n{review_url}",
   },
   {
     id: 'final_nudge',
@@ -139,7 +139,7 @@ const OUTREACH_TEMPLATES = [
     // waits for the FINAL visit. No "today": the smart send window can defer
     // past midnight. Cap/cooldown-exempt (CAP_EXEMPT_TEMPLATE_KEYS) so the
     // owner-spec'd 1-after-first + 3-after-final flow fits inside one series.
-    body: "Hi {first}! {tech} with Waves. First treatment's done - see you at the follow-up. A quick review helps:\n\n{review_url}",
+    body: "Hi {first}! {tech} with Waves. First treatment's done - see you at the follow-up. A Google review helps:\n\n{review_url}",
   },
 ];
 

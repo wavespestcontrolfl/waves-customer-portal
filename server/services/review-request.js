@@ -382,7 +382,7 @@ async function stampWithRetry(makeQuery, label) {
   }
 }
 
-const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. Would you take 15 seconds to share a quick review of your recent service?";
+const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. Would you take 15 seconds to share a quick Google review of your recent service?";
 
 /**
  * Build the (shortened) review link for an ask. Behind GATE_REVIEW_DIRECT_LINK
@@ -5007,8 +5007,24 @@ const ReviewService = {
     // The canonical fallback arrives fully rendered by getTemplate (its own
     // placeholder set incl. reservice_line) — never re-run the outreach
     // renderer over it.
-    const body = prerendered
+    let body = prerendered
       ?? OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
+    // A tech-voice draft is verified to fit two segments around the SHORT
+    // link. When the shortener degrades to the full tokenized URL, the draft
+    // could render to three; send the step's fixed template instead and
+    // record it as such (the template copy is short enough to absorb the
+    // long link within the existing one-extra-segment trade below).
+    if (/_tech_voice$/.test(String(request.template_key || "")) && customBody && tpl && !isNoLink) {
+      const { countSegments } = require("./messaging/segment-counter");
+      const rendered = require("./messaging/gsm-normalize").normalizeGsmPunctuation(body);
+      if (countSegments(rendered).segmentCount > 2) {
+        body = OUTREACH.renderOutreachBody(tpl.body, renderVars, { requireLink: requiresLink });
+        logger.info(`[review] tech-voice draft over two segments with the long link — template sent (requestId=${request.id} template=${templateId})`);
+        request.template_key = templateId;
+        await db("review_requests").where({ id: request.id }).update({ template_key: templateId, custom_body: null })
+          .catch((err) => logger.warn(`[review] tech-voice long-link fallback stamp failed (requestId=${request.id}): ${err.message}`));
+      }
+    }
 
     // Segment observability (codex #3235 r3): the one-segment contract is
     // enforced on template copy and drafter output against the SHORT link;
