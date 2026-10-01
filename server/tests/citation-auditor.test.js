@@ -72,10 +72,10 @@ describe('classifyListing', () => {
   });
 
   test('deeply nested JSON-LD is read without exhausting the stack, in linear time', () => {
-    let deep = { name: 'x' };
-    for (let i = 0; i < 20000; i += 1) deep = { subjectOf: deep };
-    const node = { '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '(941) 555-0142', subjectOf: deep };
-    const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(node)}`), expected);
+    // Built as text: a recursive JSON.stringify of this depth overflows on Node 20.
+    const deep = `${'{"subjectOf":'.repeat(5000)}{"name":"x"}${'}'.repeat(5000)}`;
+    const block = `<script type="application/ld+json">{"@type":"LocalBusiness","name":"Waves Pest Control","telephone":"(941) 555-0142","subjectOf":${deep}}</script>`;
+    const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${block}`), expected);
     expect(r.status).toBe('mismatched'); // the stated phone is still evidence
     let chain = { '@type': 'WebPage', name: 'leaf' };
     for (let i = 0; i < 2000; i += 1) chain = { '@type': 'WebPage', name: `p${i}`, mainEntity: chain };
