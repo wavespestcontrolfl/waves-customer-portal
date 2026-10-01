@@ -20,7 +20,7 @@ describe('StripeService.charge settlement moment', () => {
       exp_month: '12', exp_year: '2035', ach_status: methodType === 'card' ? null : 'verified' };
     const query = (table) => {
       const chain = {};
-      for (const name of ['where', 'whereIn', 'whereNotNull', 'orderBy']) chain[name] = jest.fn(() => chain);
+      for (const name of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orderBy']) chain[name] = jest.fn(() => chain);
       chain.first = jest.fn(async () => ({ customers: customer, payment_methods: method }[table] || null));
       chain.update = jest.fn(async () => 1);
       chain.insert = jest.fn((payload) => {
