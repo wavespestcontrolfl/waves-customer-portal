@@ -1020,17 +1020,86 @@ function englishKnown(word) {
 }
 // English by PROPORTION, not by one shared word: a code-switched "Kailan puwedeng lumabas ang aso after treatment?" has two English
 // tokens in seven and is unverified. Tokens are letters only, two or more of them (numbers, URLs, emoji and one-letter words drop out).
+// Follow-up to #5416 (prod sweep: 29 of 30 flags were English): what is not language never counts against a text - a reaction
+// ("Liked “See you Tuesday”"), a name or other capitalized word after the first word of a sentence, and an address
+// (the words after a house number up to its street word). A text of three tokens or fewer is held only on POSITIVE evidence:
+// a function word of a language the guards cannot read ("Dlaczego nie"), never an unknown English word ("No growth").
 const ENGLISH_SHARE = 0.6;
+const REACTION_RE = /^\s*(?:liked|loved|disliked|laughed\s+at|emphasi[sz]ed|questioned|removed\s+an?\s+\w+\s+from|reacted\s+\S+\s+to)\s+[\u201c\u2018"'][\s\S]*[\u201d\u2019"']\s*$/i;
+const STREET_WORDS = wordList('st street rd road dr drive ln lane ave avenue blvd boulevard ct court cir circle pl place ter terrace way pkwy parkway hwy highway trl trail loop run cv cove pt point sq square apt ste suite unit');
+// Function / timing words of languages the guards cannot read, beyond the profiles above (Polish, Vietnamese without diacritics).
+const EXTRA_FOREIGN_WORDS = wordList('nie czy jest sie kiedy dlaczego mozna moge moga prosze dziekuje dzien dobry dwie godziny godzin godzine poczekaj czekac psy pies dzieci deszcz trawnik juz tylko khi nao cho the ngoai sau xit thuoc toi hoi tre em choi tren duoc khong bao lau');
+let foreignWordSetCache = null;
+function foreignWordSet() {
+  if (!foreignWordSetCache) {
+    const lex = englishLexicon();
+    foreignWordSetCache = new Set();
+    for (const set of [SUPPORTED_PROFILES.es, SUPPORTED_PROFILES.pt, SUPPORTED_PROFILES.fr, ...Object.values(UNSUPPORTED_PROFILES), EXTRA_FOREIGN_WORDS]) {
+      for (const w of set) if (w.length > 1 && !lex.has(w)) foreignWordSetCache.add(w);
+    }
+  }
+  return foreignWordSetCache;
+}
+// The tokens that can speak for the text's language: lower-cased, accents removed, with names and addresses left out.
+function languageTokens(text, { keepNames = false } = {}) {
+  // Title Case or ALL CAPS text is not a run of names: when nearly every word after the first is capitalized, every word counts
+  // ("Hi this is Marisol Quintanilla" stays a name; "Can The Dogs Go Out Now" does not).
+  const rest = (stripMarks(text).match(/[A-Za-z]{2,}/g) || []).slice(1);
+  const keepCapitalized = keepNames || (rest.length > 0 && rest.filter((w) => /^[A-Z]/.test(w)).length >= 0.8 * rest.length);
+  const raws = text.split(/\s+/).filter(Boolean);
+  // An address is a house number followed, within four words, by a street word ("4821 Weatherby Oaks Cir"): only those words are
+  // skipped. A number with no street word after it ("2 godziny wystarczy?", "2 hours later") leaves every word counted.
+  const skip = new Set();
+  raws.forEach((raw, i) => {
+    if (!/^\d+[a-z]?[,.]?$/i.test(raw)) return;
+    for (let j = i + 1; j <= i + 4 && j < raws.length; j++) {
+      const word = stripMarks(raws[j]).toLowerCase().replace(/[^a-z]/g, '');
+      if (STREET_WORDS.has(word)) { for (let k = i + 1; k <= j; k++) skip.add(k); break; }
+    }
+  });
+  const tokens = [];
+  let sentenceStart = true;
+  raws.forEach((raw, i) => {
+    const endsSentence = /[.!?]["\u201d\u2019')]*$/.test(raw);
+    if (skip.has(i)) { sentenceStart = endsSentence; return; }
+    // a number glued to a word ("2godziny", "4hrs") still contributes the word; a bare number contributes nothing
+    for (const word of stripMarks(raw.replace(/^[\d.,:/-]+/, '')).match(/[A-Za-z]+/g) || []) {
+      const lower = word.toLowerCase();
+      const capitalized = /^[A-Z]/.test(word);
+      if (!((capitalized && !sentenceStart && !keepCapitalized) || lower.length < 2)) tokens.push(lower);
+      sentenceStart = false;
+    }
+    if (endsSentence) sentenceStart = true;
+  });
+  return tokens;
+}
 function isUnverifiedLanguageInbound(inbound) {
   if (inboundOverCap(Array.isArray(inbound) ? inbound[0] : inbound)) return true;
-  const text = canonText(Array.isArray(inbound) ? inbound[0] : inbound).toLowerCase();
-  const plain = stripMarks(text.replace(/https?:\/\/\S+|www\.\S+|\S+@\S+/g, ' '));
-  if (wordsOf(plain).length < 2) return false;
+  const original = canonText(Array.isArray(inbound) ? inbound[0] : inbound).replace(/https?:\/\/\S+|www\.\S+|\S+@\S+/g, ' ');
+  const text = original.toLowerCase();
+  if (wordsOf(stripMarks(text)).length < 2) return false;
   if ([...text.matchAll(/\p{L}/gu)].some(([ch]) => !/[a-z]/.test(ch) && !ALLOWED_DIACRITICS.includes(ch))) return true;
-  const tokens = wordsOf(plain).filter((w) => w.length > 1);
+  if (REACTION_RE.test(original)) return false;
+  // Names leave the count only when the rest is plainly English: one unknown lowercase word beside a name puts every word back
+  // ("Hi Fido kimehet most kerlek please?" is judged on all six words, #5520 r4; "Hi this is Marisol Quintanilla" stays English).
+  const withoutNames = languageTokens(original);
+  const tokens = withoutNames.every(englishKnown) ? withoutNames : languageTokens(original, { keepNames: true });
   if (!tokens.length) return false;
+  const foreign = foreignWordSet();
+  // (also held: a short text with no known English word at all, "Pot iesi?" - a language on no list, which the reply guards cannot read)
+  if (tokens.length <= 3) {
+    // A short text is judged on ALL its words, capitalized ones included (#5520 r3): leaving a name out of two or three words
+    // lets one English word carry a foreign verb ("Can Fido mehet?"). Names in the lexicon ("Hey Adam") still read as English.
+    const all = languageTokens(original, { keepNames: true });
+    if (all.some((w) => foreign.has(w))) return true;
+    const knownShort = all.filter(englishKnown).length;
+    // A short text that asks a label question must be ALL known words: one unknown word beside "outside" is exactly where a
+    // foreign question hides ("Kutyak mehetnek outside?", #5520 r2). Any other short text needs half ("No growth" stays English).
+    const asksLabel = askedKindsOf(text).kinds.length > 0 || askedKindsOf(text).elliptical;
+    return asksLabel ? knownShort < all.length : knownShort * 2 < all.length;
+  }
   const known = tokens.filter(englishKnown).length;
-  return !(known / tokens.length >= ENGLISH_SHARE || (tokens.length <= 2 && known === tokens.length));
+  return known / tokens.length < ENGLISH_SHARE;
 }
 
 // The greeting "buenos dias" says no timing; everything else in the table is held.
@@ -1147,11 +1216,14 @@ const ASKED_ACCESS_RE = /\b(?:when|before|while|as)\s+(?:you|y'?all|we|the\s+(?:
 
 // A short follow-up with no topic word ("is it ok now?", "what about now", "and outside?") asks whatever the
 // thread was about; with nothing classifiable in the thread it is treated as asking both kinds (fail closed).
-const ELLIPTICAL_RE = /^and\s+\w+|^(?:(?:so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this)|are\s+they|can\s+(?:they|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
+// A BARE first-person modal follow-up (Codex #5416 r30: "Can we now?", "Can I now?", "Are we allowed now?") is elliptical too: the
+// whole message is the modal plus a closed vocabulary of re-entry / timing words, so "can I clean the grill now?" stays its own question.
+const FIRST_PERSON_FOLLOWUP_RE = /^(?:(?:so|ok|okay|but)\s+)?(?:can|could|may|should|are|am)\s+(?:we|i)\b(?:\s+(?:now|yet|then|today|tonight|too|also|still|go|be|allowed|ok|okay|good|fine|safe|to|out|outside|inside|in|back|there|it|on|walk|wait|let|the|dogs?|kids?|pets?|cats?|them|again|already|please|pls|plz|just|maybe|really))*[\s?.!]*$/;
+const ELLIPTICAL_RE = /^and\s+\w+|^(?:(?:so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this|everyone|everybody)|are\s+they|can\s+(?:they|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
 const NOT_ELLIPTICAL_RE = new RegExp([BUSINESS_RE.source, SCHEDULE_WORD_RE.source, /\b(?:arrive|arrives|come|coming|call|text|schedule|reschedule|appointment|book|booking|visit|pay|price|cost|service)\b/.source].join('|'));
 function isEllipticalInbound(text) {
   // (a bare "can we come back now?" is a short follow-up too: it carries the thread's kinds and visit references, though "come" is a NOT_ELLIPTICAL word)
-  return text.split(/\s+/).length <= 8 && (asksBareBackEntry(text) || (ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text)));
+  return text.split(/\s+/).length <= 8 && (asksBareBackEntry(text) || FIRST_PERSON_FOLLOWUP_RE.test(text) || (ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text)));
 }
 
 // No question shape is required for a topic: "tell me when my dogs can go outside" asks re-entry as much as a
@@ -1178,11 +1250,22 @@ function cleaningKinds(text) {
   if (CLEANING_RE.test(text) && (WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text))) return ['reentry', 'rain'];
   return WASH_VERB_RE.test(text) && WASH_TREATMENT_RE.test(text) ? ['rain'] : null;
 }
+// Whether watering will hurt the treatment ("Will the sprinklers weaken it?", "does irrigation affect the spray?") is the rain-fast question
+// in other words (Codex #5416 r34), not general watering advice. A generic noun (problem / issue / matter) counts only when it is tied
+// to the treatment, and so does every effect verb ("will the sprinklers be a problem for the treatment?", "will they weaken it?"); "Sprinkler issue in
+// zone 2" and "will the sprinklers hurt my new plants?" are not about the treatment (#5520 r2).
+const WATERING_EFFECT_OBJECT_SRC = '(?:treatment|treated|spray\\w*|application|applied|product|granules?|fertiliz\\w*|it|that)';
+// Effectiveness wording is about the treatment whatever its grammar ("make it less effective", "affect how well it works", "whether it
+// works", #5520 r4).
+const WATERING_EFFECTIVENESS_RE = /\b(?:less\s+effective|effectiveness|(?:how\s+well|whether|if)\s+(?:it|the\s+(?:treatment|spray|product|application))\s+(?:still\s+)?works?|stop\s+(?:it\s+)?(?:from\s+)?working)\b/;
+const WATERING_EFFECT_RE = new RegExp(`\\b(?:(?:weaken\\w*|affect\\w*|hurt\\w*|harm\\w*|ruin\\w*|undo\\w*|dilut\\w*|impact\\w*|reduc\\w*|cancel\\w*|mess(?:es|ed)?\\s+(?:up|with)|interfer\\w*\\s+with|(?:have|has)\\s+an?\\s+effect\\s+on)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?|(?:a\\s+)?(?:problem|issue|matter|bother)\\s+(?:for|with|to)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?)${WATERING_EFFECT_OBJECT_SRC}\\b`);
 function wateringKinds(text) {
   if (!WATERING_RE.test(text)) return cleaningKinds(text);
   const context = WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text);
   if (context) return ['reentry', 'rain'];
-  return OTHER_REENTRY_TOPIC_RE.test(text) ? null : [];
+  // a re-entry topic beside the watering ("will the sprinklers hurt the dogs if they walk on it?") goes to the general classifier first
+  if (OTHER_REENTRY_TOPIC_RE.test(text)) return null;
+  return WATERING_EFFECT_RE.test(text) || WATERING_EFFECTIVENESS_RE.test(text) ? ['rain'] : [];
 }
 
 function askedKindsOf(inboundText) {
@@ -1472,6 +1555,7 @@ async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, t
 // LABEL FACTS speaks for the customer's LATEST performed visit. A message that
 // points at a different visit (a future one, or an older one) gets the none-on-file
 // section instead. Conservative: anything ambiguous reads as a different visit.
+// A COUNTED visit reference ("three visits ago", "2 treatments back", "a couple services before") is never the latest one.
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const WEEKDAY_SRC = '(?:sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?';
 // A COUNTED weekday ("two Tuesdays ago", "2 Tuesdays ago", "a few Tuesdays ago", "a couple Tuesdays back", "the Tuesday before that", "every other Tuesday") is
@@ -1481,7 +1565,7 @@ const QUALIFIED_WEEKDAY_RE = new RegExp(`\\b(?:(?:next|this|coming|following|upc
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
-const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|two\s+visits?\s+ago|second\s+to\s+last)\b/;
+const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|(?:a\s+)?few|(?:a\s+)?couple(?:\s+of)?|several|some|many|a\s+number\s+of)\s+(?:visits?|services?|treatments?|applications?|sprays?|sprayings?|rounds?|appointments?|times?)\s+(?:ago|back|before|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|prior)|second\s+to\s+last)\b/;
 
 function isoAddDays(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);

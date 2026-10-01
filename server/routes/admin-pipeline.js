@@ -1111,6 +1111,10 @@ async function fetchLeads({ search, source, ownerId }) {
       db.raw('technicians.name as assigned_name'),
     )
     .whereNull('leads.deleted_at')
+    // 'handled' is closed, neither won nor lost (a /book preferred-time request
+    // the customer's own booking closed): it is not an opportunity, and the
+    // stage derivation would otherwise show it as a new lead needing action.
+    .whereRaw("leads.status IS DISTINCT FROM 'handled'")
     .orderBy('leads.first_contact_at', 'desc')
     .limit(MAX_CANDIDATES + 1);
 

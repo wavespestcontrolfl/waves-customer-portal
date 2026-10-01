@@ -20911,6 +20911,11 @@ router.put('/:id/status', async (req, res, next) => {
         // The hold guard again UNDER the row lock: a concurrent call pass may promote this booking to a
         // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
         if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
+        // The office's approval of an address hold records the address it is for (same transaction, same
+        // row lock), so a later retry of the activation cannot release the hold for a changed address.
+        if (isOfficeReviewConfirm && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
+          await require('../services/street-level-hold').recordApprovedAddressWitness(trx, svc.id);
+        }
         // Re-validate technician ownership INSIDE the transaction, row-
         // locked: the predicate on the pre-transaction SELECT alone leaves
         // a window where dispatch reassigns the visit and the former
@@ -24449,6 +24454,8 @@ router.post('/generate-report', async (req, res) => {
       includeCustomerComms,
       structuredFindings, companionFindings, typedActivityScore,
       treeShrubReview,
+      // The promise check: [{ id, mark, stillLeft? }] (visit-promises.js).
+      promiseMarks,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -24613,6 +24620,10 @@ router.post('/generate-report', async (req, res) => {
       || ratingNum !== null
       || typedHasFindingInput
       || hasValidLawnAssessment
+      // Provisional, like companion input: submitted promise marks keep the
+      // request alive to grounding, and only marks that resolve against the
+      // customer's open promises open generation (re-checked below).
+      || (Array.isArray(promiseMarks) && promiseMarks.length > 0)
       || suppliedTreeShrubReview
       || cappedPhotoCaptions.length > 0;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
@@ -25177,7 +25188,21 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       || hasValidLawnAssessment
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
       || cappedPhotoCaptions.length > 0;
-    if (!baseHasReportInput && !companionCustomerInput) {
+    // The technician's promise marks, resolved against this customer's open
+    // promises (owner "ok yes add these" 2026-10-01): with the writer rules
+    // on a grounded visit only. Fail-soft: no record, no mention. Resolved
+    // before the input check: a validated mark is visit detail on its own
+    // (Codex #5516).
+    let visitPromises = [];
+    if (writerRulesOn && groundingCustomerId && Array.isArray(promiseMarks) && promiseMarks.length) {
+      try {
+        visitPromises = await require('../services/service-report/visit-promises')
+          .resolveVisitPromiseMarks(db, { customerId: groundingCustomerId, marks: promiseMarks });
+      } catch (promiseErr) {
+        logger.warn(`[generate-report] promise marks not loaded (${require('../services/service-report/visit-promises').errorCode(promiseErr)})`);
+      }
+    }
+    if (!baseHasReportInput && !companionCustomerInput && !visitPromises.length) {
       return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     }
 
@@ -25210,6 +25235,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         writerRules: writerRulesOn,
         findingsType: reportPromptContext.findingsType || null,
         serviceKind: reportPromptContext.serviceKind || null,
+        visitPromises,
       });
       contextText = ctx.contextText || '';
       writerAllowedPhrases = Array.isArray(ctx.writerAllowedPhrases) ? ctx.writerAllowedPhrases : [];
@@ -25219,6 +25245,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         ? ctx.deterministicApplications : [];
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
+    }
+
+    // A request grounded by promise marks alone lives or dies by them: when
+    // the marks were the only substantive input and never reached the
+    // writer's context (the context build failed), there is nothing real to
+    // write from. Reject retryably rather than return copy that leaves the
+    // marked promise out (Codex #5516), as the assessment-only path does.
+    if (visitPromises.length && !baseHasReportInput && !companionCustomerInput && !contextSignals.hasVisitPromises) {
+      return res.status(503).json({
+        error: 'The promises you marked could not be loaded right now — try Generate again in a moment.',
+        code: 'promise_grounding_unavailable',
+        retryable: true,
+      });
     }
 
     if (Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0

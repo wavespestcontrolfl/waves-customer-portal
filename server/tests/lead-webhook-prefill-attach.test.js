@@ -138,7 +138,7 @@ describe('attachVoicemailPrefillLead — attach semantics', () => {
     expect(result).toBeNull();
 
     const { builder } = state.updates[0];
-    expect(builder.whereNotIns).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(builder.whereNotIns).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate', 'handled']]);
     expect(builder.whereNulls).toContain('converted_at');
   });
 
