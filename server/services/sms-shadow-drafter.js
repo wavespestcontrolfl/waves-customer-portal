@@ -2414,11 +2414,19 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
   });
   const source = (named[0].full.length || named[0].tail.length) ? named[0] : named[1];
   // a tail-only reply reference to the invoice the customer named IN FULL means that full invoice (same tail, e.g. year 2025)
-  const promoted = source === named[0]
-    ? named[0].tail.map((t) => named[1].full.find((f) => String(f).split('-').pop().replace(/^0+/, '') === String(t).replace(/^0+/, '')) || null)
-    : [];
   // a tail (#0123) that is just the tail of a named full number is the same invoice, not a second one
   const fullTails = new Set(source.full.map((f) => strip(String(f).split('-').pop())));
+  // Codex round-38 P1: the tail must match exactly ONE distinct full reference the customer named - two full numbers sharing a tail
+  // (WPC-2025-0123 / WPC-2026-0123) make "#0123" ambiguous, which is ungrounded, never arbitrarily the first one.
+  let ambiguousTail = false;
+  const promoted = source === named[0]
+    ? named[0].tail.map((t) => {
+      const hits = [...new Set(named[1].full)].filter((f) => String(f).split('-').pop().replace(/^0+/, '') === String(t).replace(/^0+/, ''));
+      if (hits.length > 1 && !fullTails.has(strip(t))) ambiguousTail = true;
+      return hits.length === 1 ? hits[0] : null;
+    })
+    : [];
+  if (ambiguousTail) return true;
   const refs = [
     ...source.full.map((v) => ['full', v]),
     ...source.tail.map((v, i) => [v, i]).filter(([v]) => !fullTails.has(strip(v))).map(([v, i]) => (promoted[i] ? ['full', promoted[i]] : ['tail', v])),

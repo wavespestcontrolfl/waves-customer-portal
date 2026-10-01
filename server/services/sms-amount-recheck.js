@@ -410,10 +410,21 @@ function bodyNeedsPaymentRecheck(body) {
  * recipient configured, no open invoice, or the invoice fails the pay page's Zelle visibility); stale
  * ('zelle_now_available') when it would be offered now. An unverifiable check fails CLOSED.
  */
+// Codex round-38 P2: while a Zelle recipient is configured, Waves DOES accept Zelle, so only a denial EXPLICITLY scoped to this customer's
+// account / invoice ("Zelle isn't available for this account right now", "Zelle isn't available for invoice WPC-2026-0002") can be
+// true - and only that kind is judged against the invoice's eligibility. A general / business-wide denial ("We don't accept Zelle",
+// "Zelle isn't available right now") is false whatever the invoice state is, so it is stale outright (fail closed: scope must be stated).
+const ZELLE_DENIAL_SCOPE_RE = /\b(?:this|that|your|these|those|my|the)\s+(?:[\w#-]+\s+){0,2}?(?:accounts?|invoices?|bills?|balances?)\b|\binvoices?\s*#?\s*[\w-]*\d|#\s?\d{3,}|\bWPC-\d{4}-\d+|\bfor\s+you\b/i;
+function hasUnscopedZelleDenial(body) {
+  return String(body || '').split(CLAUSE_SPLIT_RE)
+    .filter((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause))
+    .some((clause) => !ZELLE_DENIAL_SCOPE_RE.test(clause));
+}
 const ZELLE_DENIAL_UNVERIFIABLE = new Set(['zelle_recheck_failed', 'payer_unverifiable', 'credit_unverifiable']);
 async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null, body = null } = {}) {
   const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
   if (!manualPayOptionsFromEnv()?.zelle?.recipient) return { stale: false };
+  if (body && hasUnscopedZelleDenial(body)) return { stale: true, reason: 'zelle_now_available' };
   if (!customerId) return { stale: true, reason: 'zelle_recheck_failed' };
   try {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
@@ -597,6 +608,6 @@ async function outgoingAmountsStale({
 
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, zelleClauseTexts, zelleDenialStale, classifyZelleClause, bodyMakesPaymentClaim,
+  hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, hasUnscopedZelleDenial, zelleClauseTexts, zelleDenialStale, classifyZelleClause, bodyMakesPaymentClaim,
   amountFreeStatusClaimStale, bodyNeedsPaymentRecheck,
 };

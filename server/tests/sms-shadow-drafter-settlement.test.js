@@ -496,3 +496,25 @@ describe('round-37: invoice status tail references against a truncated list', ()
     expect(check('Invoice WPC-2026-0123 is paid.', { billing: billing(true) })).toBe(false);
   });
 });
+
+// Codex round-38 P1 class: a bare tail that matches MORE THAN ONE invoice the customer named in full is ambiguous - fail closed.
+describe('round-38: ambiguous invoice tail across two named full invoices', () => {
+  const inv = (y, status) => ({ id: `i${y}`, invoiceNumber: `WPC-${y}-0123`, status, total: 120, amountDue: status === 'paid' ? 0 : 120 });
+  const billing = { outstandingBalance: 120, recentPayments: [], invoiceStatuses: [inv(2025, 'paid'), inv(2026, 'sent')] };
+  const opts = { byMeaning: true, inboundMessage: 'Is WPC-2025-0123 or WPC-2026-0123 paid?' };
+  test('"Invoice #0123 is paid" is rejected when the inbound names two full invoices sharing that tail', () => {
+    expect(replyQuotesUngroundedAmount('Invoice #0123 is paid.', { billing }, opts)).toBe(true);
+  });
+  test('...even when only ONE of the two named invoices is in the account list (the tail alone would resolve uniquely)', () => {
+    const oneListed = { outstandingBalance: 120, recentPayments: [], invoiceStatuses: [inv(2025, 'paid')] };
+    expect(replyQuotesUngroundedAmount('Invoice #0123 is paid.', { billing: oneListed }, opts)).toBe(true);
+  });
+  test('a tail naming exactly one of the inbound full numbers still promotes to it', () => {
+    const one = { byMeaning: true, inboundMessage: 'Is WPC-2025-0123 paid?' };
+    expect(replyQuotesUngroundedAmount('Invoice #0123 is paid.', { billing }, one)).toBe(false);
+  });
+  test('the reply naming the full number explicitly is unaffected by the shared tail', () => {
+    expect(replyQuotesUngroundedAmount('Invoice WPC-2025-0123 is paid.', { billing }, opts)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Invoice WPC-2026-0123 is paid.', { billing }, opts)).toBe(true);
+  });
+});

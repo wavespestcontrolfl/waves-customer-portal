@@ -10,7 +10,7 @@
 // non-draft invoice (that invoice already carries the debt — double-count guard). A failure linked to a still-DRAFT
 // invoice keeps counting (the invoice sum only covers sent / viewed / overdue).
 const db = require('../models/db');
-const { isNeverAttemptedHoldDeferral } = require('./collections/collection-hold');
+const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 
 const metadataInvoiceId = (p) => {
   try {
@@ -23,11 +23,17 @@ const metadataInvoiceId = (p) => {
 
 // Never-attempted LOCK-contention deferral (Codex #4682 r3/r4): the monthly cron writes a 'failed' row with next_retry_at armed when
 // another collector held the billing lock (metadata.deferred_reason = 'lock_contention', no PI, retry_count 0).
+const LOCK_DEFERRAL_REASON = 'lock_contention';
 const isNeverAttemptedLockDeferral = (p) => {
-  if (p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0 || p.next_retry_at == null) return false;
+  if (!p || p.stripe_payment_intent_id) return false;
+  // armed (never retried), or already COLLECTED: the retry sweep inserts its OWN paid row and leaves this placeholder failed,
+  // disarmed and superseded by that row - still never a payment (same lifecycle as the collection_hold placeholder).
+  const armed = Number(p.retry_count || 0) === 0 && p.next_retry_at != null;
+  const collected = p.superseded_by_payment_id != null && String(p.superseded_by_payment_id) !== String(p.id);
+  if (!armed && !collected) return false;
   try {
     const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-    return !!(m && m.deferred_reason === 'lock_contention');
+    return !!(m && m.deferred_reason === LOCK_DEFERRAL_REASON);
   } catch {
     return false;
   }
@@ -35,6 +41,18 @@ const isNeverAttemptedLockDeferral = (p) => {
 
 // collection_hold (B10) deferrals ride the same shared predicate every failed-payment consumer uses.
 const isNeverAttemptedDeferral = (p) => isNeverAttemptedHoldDeferral(p) || isNeverAttemptedLockDeferral(p);
+
+// SQL twin of isNeverAttemptedDeferral for query builders: ONE exclusion of EVERY never-attempted placeholder kind (dispute-hold AND
+// lock-contention) for the payment-history readers (SMS grounding window + authoritative history), applied BEFORE any cap so a
+// placeholder can neither use up a window slot nor ground "your payment failed" (Codex round-38 P1). A new placeholder kind is added
+// HERE and in the in-memory predicate above, nowhere else.
+function excludeNeverAttemptedDeferrals(query, alias = 'payments') {
+  excludeNeverAttemptedHoldDeferrals(query, alias);
+  return query.whereRaw(
+    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id)))`,
+    [LOCK_DEFERRAL_REASON],
+  );
+}
 
 // EVERY unsuperseded failed row of the customer (not a display window) plus the set of NON-DRAFT invoices they link to.
 // Throws when the failed-row read fails (callers decide: the route 500s, the aggregator marks billing unavailable).
@@ -81,4 +99,4 @@ function standaloneFailedTotal({ rows, balanceCarryingInvoiceIds }, isPayerPayme
     .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 }
 
-module.exports = { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral, metadataInvoiceId };
+module.exports = { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral, excludeNeverAttemptedDeferrals, metadataInvoiceId };

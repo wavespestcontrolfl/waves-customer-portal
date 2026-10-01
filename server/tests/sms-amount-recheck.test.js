@@ -913,7 +913,32 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
     await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for this account right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+  });
+
+  // Codex round-38 P2 class: a denial is only true when EXPLICITLY scoped to this account / invoice; a general or business-wide
+  // denial is false while a recipient is configured, whatever the invoice state.
+  test('a business-wide / unscoped denial is stale while a recipient is configured, even with no open invoice or an ineligible one', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    for (const ctx of [{ openInvoice: null }, { openInvoice: { id: 'inv-1' } }]) {
+      ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: ctx });
+      payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
+      for (const body of ["We don't accept Zelle.", "We don't take Zelle for payments.", "Zelle isn't available right now.", 'We no longer offer Zelle.']) {
+        await expect({ body, r: await zelleDenialStale({ customerId: 'c1', dbh, body }) }).toEqual({ body, r: { stale: true, reason: 'zelle_now_available' } });
+        await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
+      }
+    }
+  });
+  test('an explicitly account- or invoice-scoped denial still stands when no invoice is open / the invoice is ineligible', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null } });
+    for (const body of ["Zelle isn't available for this account right now.", "We can't take Zelle for your invoice.", "Zelle isn't available for invoice WPC-2026-0002."]) {
+      await expect({ body, r: await zelleDenialStale({ customerId: 'c1', dbh, body }) }).toEqual({ body, r: { stale: false } });
+    }
+  });
+  test('with no recipient configured an unscoped denial is true (nothing to accept)', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    await expect(zelleDenialStale({ customerId: 'c1', dbh, body: "We don't accept Zelle." })).resolves.toEqual({ stale: false });
   });
 
   // Codex round-21 P2: an UNVERIFIABLE Zelle state is not a confirmed "ineligible" — the denial can't be confirmed.
@@ -974,7 +999,7 @@ describe('several open invoices: the send-time Zelle recheck resolves the same i
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available right now.", dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for your invoice.", dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
     // an ambiguous reference (two invoices share the amount) is unverifiable too; a named invoice that is not open too
     await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I Zelle invoice WPC-2026-0999?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
     // nothing open at all: there is nothing to pay by Zelle, the denial stands

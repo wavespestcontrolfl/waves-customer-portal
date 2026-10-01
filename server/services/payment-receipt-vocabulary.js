@@ -412,8 +412,16 @@ const MODAL_NON_ASSERTIVE = [
   '\\?', // a question
   '^\\s*(?:if|once|when|whenever|unless|in\\s+case|should\\s+you|as\\s+soon\\s+as|after\\s+you|before\\s+you)\\b', // conditional (opens the sub-clause)
 ];
+// Codex round-38 P1: a polite / modal word is a discourse marker unless it GOVERNS a requested or offered action. "Please note your
+// payment settled" / "You can rest assured your payment settled" assert a payment fact; "please call", "you can pay online" do not.
+// So the marker exempts a sub-clause only when an ACTION verb follows it directly (optionally after an adverb / "to"); anything else
+// ("note", "rest", "be sure", "see that", ...) stays an assertion and goes through the claim binders.
+const OFFER_ACTION_VERBS = 'pay|repay|settle|use|try|text|call|reply|respond|email|send|resend|share|forward|let|contact|reach|visit|click|tap|log|sign|check|review|view|open|update|add|enter|re-?enter|give|provide|confirm|verify|find|come|stop|ask|request|make|set|schedule|reschedule|retry|submit|choose|select|switch|change|download|print|save|keep|bring|mail|drop|cancel|message|get|go|head|take|remit|hold|wait|bear|zelle|venmo|wire|transfer|put|mail|dm';
+const OFFER_MARKER = '(?:you\\s+(?:can|could|may|might)|will\\s+be\\s+able\\s+to|(?:can|could|would|will)\\s+you|please|feel\\s+free(?:\\s+to)?)';
+const OFFER_LEAD = "(?:(?:also|still|just|always|simply|kindly|now|then|first|please|do\\s+not\\s+hesitate\\s+to|don['\u2019]t\\s+hesitate\\s+to|be\\s+sure\\s+to|make\\s+sure\\s+to|remember\\s+to|go\\s+ahead\\s+and|to)\\s+)*";
 const OFFER_NON_ASSERTIVE = [
-  '\\b(?:you\\s+(?:can|could|may|might|will\\s+be\\s+able\\s+to)|feel\\s+free|please|(?:can|could|would|will)\\s+you|let\\s+me|reply\\s+with|just\\s+(?:reply|text)|go\\s+ahead)\\b', // offer / request
+  `\\b${OFFER_MARKER}\\s+${OFFER_LEAD}(?:${OFFER_ACTION_VERBS})\\b`, // offer / request that governs an action
+  '\\b(?:let\\s+me|reply\\s+with|just\\s+(?:reply|text)|go\\s+ahead)\\b', // offer / request
   "\\b(?:we|i)(?:'ll|\\s+will|'d|\\s+can|\\s+could)\\s+(?:send|text|email|share|resend|forward|get|help|check|look|find|make|set|go|take|give|walk|confirm|follow|let|reach|call|update|see)\\b", // future action
 ];
 const REFERENCE_NON_ASSERTIVE = [

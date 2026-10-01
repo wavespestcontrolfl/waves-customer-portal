@@ -417,7 +417,7 @@ describe('no snapshot: the body\'s explicit target beats the inbound\'s', () => 
     // denial about B (eligible now) => stale, even though the inbound named A (ineligible)
     await expect(zelleDenialStale({ customerId: 'c1', dbh: idDb, inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?', body: 'Zelle is not available for invoice WPC-2026-0002.' })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
     // no reference in the body => the inbound (A, ineligible) => the denial stands
-    await expect(zelleDenialStale({ customerId: 'c1', dbh: idDb, inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?', body: "Zelle isn't available right now." })).resolves.toEqual({ stale: false });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh: idDb, inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?', body: "Zelle isn't available for this account right now." })).resolves.toEqual({ stale: false });
   });
 });
 

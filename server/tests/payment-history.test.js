@@ -61,6 +61,17 @@ describe('loadPaymentHistory', () => {
     expect(hold[2]).toBeLessThan(dbh.calls.findIndex(([m]) => m === 'limit'));
   });
 
+  test('never-attempted lock_contention deferrals are excluded IN SQL too, before the limit (Codex round-38 P1)', async () => {
+    const dbh = fakeDb([{ id: 1 }]);
+    await loadPaymentHistory('c1', dbh);
+    const raws = dbh.calls.map(([m, a], i) => [m, a, i]).filter(([m, a]) => m === 'whereRaw' && /deferred_reason/.test(a[0]));
+    const lock = raws.find(([, a]) => a[1][0] === 'lock_contention');
+    expect(lock).toBeDefined();
+    expect(lock[1][0]).toMatch(/^NOT \(/);
+    expect(lock[1][0]).toMatch(/stripe_payment_intent_id IS NULL/);
+    expect(lock[2]).toBeLessThan(dbh.calls.findIndex(([m]) => m === 'limit'));
+  });
+
   test('complete is exact: <= cap rows complete; cap+1 rows is truncated to cap and incomplete', async () => {
     const few = await loadPaymentHistory('c1', fakeDb(Array.from({ length: 4 }, (_, i) => ({ id: i }))));
     expect(few).toEqual({ rows: expect.any(Array), complete: true });
@@ -277,5 +288,22 @@ describe('surfaceReferencedPayments prompt size', () => {
     const context = { customer: { id: 'c1' }, billing: { recentPayments: [...newest], recentPaymentsTruncated: true } };
     await surfaceReferencedPayments(context, 'Did my $77 payment go through?', fakeDb([...newest, ...many]));
     expect(context.billing.recentPayments.slice(3).map((p) => p.amount)).toEqual([77]);
+  });
+});
+
+describe('isNeverAttemptedDeferral (shared placeholder predicate, Codex round-38 P1)', () => {
+  const { isNeverAttemptedDeferral } = require('../services/failed-payments');
+  const base = { stripe_payment_intent_id: null, retry_count: 0, next_retry_at: new Date() };
+  test('armed lock_contention and collection_hold placeholders are both never-attempted', () => {
+    expect(isNeverAttemptedDeferral({ ...base, metadata: { deferred_reason: 'lock_contention' } })).toBe(true);
+    expect(isNeverAttemptedDeferral({ ...base, metadata: { deferred_reason: 'collection_hold' } })).toBe(true);
+  });
+  test('a lock placeholder the retry sweep collected (superseded by another row) is still a placeholder', () => {
+    expect(isNeverAttemptedDeferral({ ...base, id: 'a', retry_count: 1, next_retry_at: null, superseded_by_payment_id: 'b', metadata: { deferred_reason: 'lock_contention' } })).toBe(true);
+    expect(isNeverAttemptedDeferral({ ...base, id: 'a', retry_count: 1, next_retry_at: null, superseded_by_payment_id: 'a', metadata: { deferred_reason: 'lock_contention' } })).toBe(false);
+  });
+  test('a row a real attempt touched is not a placeholder', () => {
+    expect(isNeverAttemptedDeferral({ ...base, stripe_payment_intent_id: 'pi_x', metadata: { deferred_reason: 'lock_contention' } })).toBe(false);
+    expect(isNeverAttemptedDeferral({ ...base, metadata: { type: 'monthly_autopay' } })).toBe(false);
   });
 });

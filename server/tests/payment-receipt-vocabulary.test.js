@@ -65,3 +65,32 @@ describe('zeroBalanceClaim / ZERO_BALANCE_RE', () => {
     'You owe us $0.05', 'Your balance is $0,50.', 'Your balance is $10.00.', 'Is your balance zero?',
   ])('not zero: %s', (t) => { expect(zeroBalanceClaim(t)).toBe(false); });
 });
+
+// Codex round-38 P1 class: a polite / modal word exempts a sub-clause ONLY when it governs an action. As a discourse marker
+// ("please note", "you can rest assured") it leaves a real payment assertion standing.
+describe('offer markers exempt only governed actions (round-38)', () => {
+  const { unrecognizedPaymentAssertion, isNonAssertivePaymentClause } = require('../services/payment-receipt-vocabulary');
+  test.each([
+    'Please note your payment settled.',
+    'You can rest assured your payment settled.',
+    'Please be advised your payment settled.',
+    'You can see your payment settled.',
+    'You can be sure your payment settled.',
+    'Feel free to relax, your payment settled so we are done', // marker is its own sub-clause; the assertion stays
+    'Please know that your payment settled.',
+  ])('assertion stays an assertion: %s', (t) => { expect(unrecognizedPaymentAssertion(t)).toBe(true); });
+  test.each([
+    'Please call us if your payment failed.',
+    'You can pay online with your card.',
+    'Please let us know about your payment.',
+    'Feel free to text us about your payment.',
+    'Please do not hesitate to call about your payment.',
+    'You can Zelle payment to payments@example.com.',
+    'Can you resend the payment?',
+    'Please be sure to use the pay link for your payment.',
+  ])('real offer / request stays exempt: %s', (t) => { expect(unrecognizedPaymentAssertion(t)).toBe(false); });
+  test('the exported non-assertive test agrees', () => {
+    expect(isNonAssertivePaymentClause('Please note your payment settled')).toBe(false);
+    expect(isNonAssertivePaymentClause('Please call us about your payment')).toBe(true);
+  });
+});

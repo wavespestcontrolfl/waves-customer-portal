@@ -1,9 +1,8 @@
 const db = require('../models/db');
-const { excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { loadPayerLinkage } = require('./payer-linkage');
-const { loadFailedPaymentFacts, standaloneFailedTotal } = require('./failed-payments');
+const { loadFailedPaymentFacts, standaloneFailedTotal, excludeNeverAttemptedDeferrals } = require('./failed-payments');
 // the payments display read over-fetches so payer-linked rows can be dropped without starving the window
 const PAYMENT_OVERFETCH = 40;
 // how many open own invoices the SMS context lists (the target list for Zelle / invoice status); flagged when cut
@@ -573,7 +572,7 @@ class ContextAggregator {
       // then id break the tie, so the same rows are shown (and hidden) on every read, draft and send.
       // A never-attempted dispute-hold deferral is not a payment the customer made: out of the recent-payments sample
       // (SQL, so it cannot use up one of the 5 rows), consistent with the failed-payment ledger below.
-      excludeNeverAttemptedHoldDeferrals(db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }), 'payments').orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').limit(PAYMENT_OVERFETCH),
+      excludeNeverAttemptedDeferrals(db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }), 'payments').orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').limit(PAYMENT_OVERFETCH),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
