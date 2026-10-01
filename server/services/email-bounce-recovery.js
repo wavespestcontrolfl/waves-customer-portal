@@ -942,10 +942,10 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
       .whereRaw("(metadata->>'dispatch_started_at') IS NULL")
       .whereExists(unsentRecoveryMessage));
   // Settle the ambiguous rows first: compare-and-swap resent -> resend_uncertain (a second worker's
-  // identical swap finds nothing), then one office alert each. A late delivery webhook still commits the
-  // correction (commitRecoveryOnDelivery resolves the ledger by recovery_message_id, whatever its status).
+  // identical swap finds nothing). A late delivery webhook still commits the correction
+  // (commitRecoveryOnDelivery resolves the ledger by recovery_message_id, whatever its status).
   let uncertain = 0;
-  const ambiguous = await ambiguousRows().select('id', 'original_message_id', 'customer_id', 'corrected_email').limit(limit);
+  const ambiguous = await ambiguousRows().select('id').limit(limit);
   for (const row of ambiguous) {
     const settled = await ambiguousRows().where({ id: row.id }).update({
       status: RESEND_UNCERTAIN_STATUS, updated_at: new Date(),
@@ -954,7 +954,23 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
     if (!Number(settled)) continue;
     uncertain += 1;
     logger.warn(`[bounce-recovery] recovery ${row.id} reached the provider call but no outcome was recorded - settled as uncertain, not re-sent`);
-    await alertRecoveryResendUncertain(row);
+  }
+  // Then tell the office (Codex #5459 r1 P2): settlement and the alert are separate writes, so the alert is
+  // tracked by its own durable flag (metadata.resend_alerted_at, stamped only AFTER raiseAdminAlert succeeds).
+  // An alert that failed, or a worker that died between the two, is retried by the next sweep; the alert's
+  // dedupeKey keeps a retry that did land from ringing twice.
+  const unalerted = await db('email_bounce_recoveries')
+    .where({ status: RESEND_UNCERTAIN_STATUS })
+    .whereRaw("(metadata->>'resend_alerted_at') IS NULL")
+    .select('id', 'original_message_id', 'customer_id', 'corrected_email').limit(limit);
+  for (const row of unalerted) {
+    try {
+      await alertRecoveryResendUncertain(row);
+      await db('email_bounce_recoveries').where({ id: row.id, status: RESEND_UNCERTAIN_STATUS })
+        .update({ updated_at: new Date(), metadata: jsonbMerge({ resend_alerted_at: new Date().toISOString() }) });
+    } catch (err) {
+      logger.error(`[bounce-recovery] uncertain-resend alert for ${row.id} failed, will retry next sweep: ${err.message}`);
+    }
   }
   const due = await db('email_bounce_recoveries')
     .where(eligible)
@@ -996,24 +1012,21 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
 // SendGrid may or may not have accepted it. The recovery is settled (never re-sent, which could deliver the
 // same notice twice) and the office confirms with the customer or the SendGrid activity feed.
 async function alertRecoveryResendUncertain(row) {
-  try {
-    await require('./admin-alert-compose').raiseAdminAlert('alert', {
-      area: 'Comms',
-      action: 'check a re-sent email that may not have gone',
-      why: 'A corrected-address re-send stopped mid-send, so it was not tried again.',
-      severity: 'needs-you',
-      link: row.customer_id ? `/admin/customers?customerId=${row.customer_id}` : '/admin/communications',
-      subject: row.customer_id ? { type: 'customer', id: String(row.customer_id) } : { type: 'check', id: String(row.id) },
-      doneWhen: 'resend_outcome_confirmed',
-      who: 'person',
-    }, {
-      detail: `Bounce recovery ${row.id} (original email ${row.original_message_id}): the worker died after starting the provider send to the corrected address, with no outcome recorded. Check whether the customer received it; the system will not re-send it, so send it by hand if it did not arrive.`,
-      dedupeKey: `bounce-recovery-resend-uncertain:${row.id}`,
-      metadata: { recovery_id: row.id, original_message_id: row.original_message_id, customer_id: row.customer_id || null },
-    });
-  } catch (err) {
-    logger.error(`[bounce-recovery] uncertain-resend alert failed for ${row.id}: ${err.message}`);
-  }
+  // Throws on failure: the caller stamps resend_alerted_at only after this resolves.
+  await require('./admin-alert-compose').raiseAdminAlert('alert', {
+    area: 'Comms',
+    action: 'check a re-sent email that may not have gone',
+    why: 'A corrected-address re-send stopped mid-send, so it was not tried again.',
+    severity: 'needs-you',
+    link: row.customer_id ? `/admin/customers?customerId=${row.customer_id}` : '/admin/communications',
+    subject: row.customer_id ? { type: 'customer', id: String(row.customer_id) } : { type: 'check', id: String(row.id) },
+    doneWhen: 'resend_outcome_confirmed',
+    who: 'person',
+  }, {
+    detail: `Bounce recovery ${row.id} (original email ${row.original_message_id}): the worker died after starting the provider send to the corrected address, with no outcome recorded. Check whether the customer received it; the system will not re-send it, so send it by hand if it did not arrive.`,
+    dedupeKey: `bounce-recovery-resend-uncertain:${row.id}`,
+    metadata: { recovery_id: row.id, original_message_id: row.original_message_id, customer_id: row.customer_id || null },
+  });
 }
 
 /**

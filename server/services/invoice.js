@@ -3538,14 +3538,44 @@ async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExem
     // time, so the ordinary "waits, then sends after the release" defer would be a lie. Never return
     // it: surface a distinct held + manual-recovery outcome and raise a durable office alert.
     if (!restored) {
-      await alertHoldClaimStranded(invoiceId, row);
-      return holdClaimStrandedOutcome();
+      // A false restore does not prove the claim is stuck (Codex #5459 r1 P2): a concurrent payment, void
+      // or other transition can legitimately have moved the row, and those writers do not keep this send
+      // claim. Re-read it; only a row STILL 'sending' under OUR claim token is stranded. An answer that
+      // cannot be read is treated as stranded (fail toward telling the office).
+      let current = null;
+      let readFailed = false;
+      try {
+        current = await db("invoices").where({ id: invoiceId }).first("status", "send_claim_token");
+      } catch { readFailed = true; }
+      const stillOurs = readFailed
+        || (current && current.status === "sending" && current.send_claim_token === invoice.send_claim_token);
+      if (stillOurs) {
+        await alertHoldClaimStranded(invoiceId, row);
+        return holdClaimStrandedOutcome();
+      }
+      // The claim is gone and the invoice is not stuck: nothing to recover, no alert.
+      if (!current || SETTLED_AFTER_HOLD_STATUSES.has(String(current.status || "").toLowerCase())) {
+        return holdInvoiceAlreadySettledOutcome(current?.status);
+      }
+      // Handed back by someone else (draft / scheduled again): the ordinary hold refusal is accurate.
     }
   }
   return holdRefusal;
 }
 
 const HOLD_CLAIM_STRANDED_CODE = "COLLECTION_HOLD_CLAIM_STRANDED";
+// Statuses a concurrent writer can move an invoice to while its send claim is being handed back.
+const SETTLED_AFTER_HOLD_STATUSES = new Set(["paid", "prepaid", "void", "voided", "refunded", "canceled", "cancelled", "sent", "viewed", "overdue"]);
+// The invoice settled on its own (paid, voided, ...) while the hold refused the send: not stranded, not a wait.
+function holdInvoiceAlreadySettledOutcome(status) {
+  return {
+    code: "INVOICE_ALREADY_SETTLED",
+    reason: `The invoice is already ${status || "settled"}; nothing was sent`,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "not_sent",
+  };
+}
 // NOT the retryable hold defer: the invoice is stuck in 'sending' and will not be retried by the sender.
 function holdClaimStrandedOutcome() {
   return {
@@ -8096,6 +8126,20 @@ const InvoiceService = {
         }
         if (fenced.error) {
           logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} left queued — Bill-To fence failed: ${fenced.error.message}`);
+          // A broken fence on a HELD customer's row must not re-occupy the page every tick (Codex #5424 r15
+          // review): stamp the same recheck interval a confirmed fence gets. Nothing can be sent to a held
+          // self-pay homeowner meanwhile, a hold release makes the row non-held (the stamp is ignored and
+          // the first tick after it sends), and a payer assigned since is picked up at the recheck. A hold
+          // lookup that cannot answer stamps nothing (retried next tick).
+          try {
+            const holdNow = await require("./collections/collection-hold").messagingHeldByCollectionHold(inv.customer_id);
+            if (holdNow.held && holdNow.reason !== "lookup_failed") {
+              await db("invoices").where({ id: inv.id, status: "scheduled" }).whereNull("payer_id")
+                .update({ hold_bill_to_checked_at: new Date(), updated_at: new Date() });
+            }
+          } catch (stampErr) {
+            logger.warn(`[invoice] Could not stamp the Bill-To recheck on ${inv.invoice_number} after its fence failed: ${stampErr.message}`);
+          }
           continue;
         }
         if (!fenced.claim?.claimed) continue;

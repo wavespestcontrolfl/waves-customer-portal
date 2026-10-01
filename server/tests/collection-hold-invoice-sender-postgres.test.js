@@ -31,6 +31,8 @@ jest.mock('../models/db', () => {
     },
     get(target, prop) {
       if (prop === '__failTables') return failing;
+      // a failing transaction (the claim restore runs in one) is simulated with the '__transaction' entry
+      if (prop === 'transaction' && failing.has('__transaction')) return () => Promise.reject(new Error('simulated transaction failure'));
       const v = target[prop];
       return typeof v === 'function' ? v.bind(target) : v;
     },
@@ -224,6 +226,30 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const rearmedAt = (await invoice(exhausted)).scheduled_send_at.getTime();
       expect(await Hold.queueHeldInvoiceForSender(exhausted)).toMatchObject({ queued: false, settled: true });
       expect((await invoice(exhausted)).scheduled_send_at.getTime()).toBe(rearmedAt);
+    });
+
+    // Codex #5459 r1 P2: an exhausted row PARKED for manual review (scheduled_send_at NULL + an evidence marker) is
+    // not retryable: re-arming it would clear the evidence and could send a second pay link.
+    test('an exhausted PARKED invoice is never re-armed: a null send time or a park marker (stale-claim review hold, summary-planned, payer withdrawal, renewal withheld) returns settled and the row is byte-unchanged', async () => {
+      const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('../services/invoice-helpers');
+      const c = await newCustomer();
+      const past = new Date(Date.now() - 3600 * 1000);
+      const parked = {
+        staleReviewHold: { scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR },
+        summaryPlannedPark: { scheduled_send_at: null, scheduled_send_error: `${SUMMARY_TEXT_PLANNED_ERROR}: synthetic email failure` },
+        nullTimeOtherError: { scheduled_send_at: null, scheduled_send_error: 'sms: synthetic' },
+        // a marker with a time still set is not retryable either
+        staleMarkerWithTime: { scheduled_send_at: past, scheduled_send_error: `${STALE_SEND_PARK_ERROR} - the visit summary text did not carry the link` },
+        summaryPlannedWithTime: { scheduled_send_at: past, scheduled_send_error: SUMMARY_TEXT_PLANNED_ERROR },
+        payerWithdrawn: { scheduled_send_at: past, scheduled_send_error: 'payer_billed:7' },
+        renewalWithheld: { scheduled_send_at: past, scheduled_send_error: 'renewal_send_withheld: synthetic' },
+      };
+      for (const [name, patch] of Object.entries(parked)) {
+        const id = await newInvoice(c, { status: 'scheduled', scheduled_send_attempts: 5, ...patch });
+        const before = await invoice(id);
+        expect(await Hold.queueHeldInvoiceForSender(id)).toMatchObject({ queued: false, settled: true });
+        expect({ name, row: await invoice(id) }).toEqual({ name, row: before });
+      }
     });
 
     test('end to end: a completion hand-over (handOverHeldInvoiceToSender) of an exhausted scheduled invoice records the sender as owner AND the invoice is delivered by the first tick after the release', async () => {
@@ -421,11 +447,21 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       // 'sending' (ten minutes on, stale-claim recovery parks it with no scheduled send time).
       describe('a hold found after the Bill-To-fenced claim whose restore FAILS (Codex #5424 r15 P2)', () => {
         const notifications = () => require('../services/notification-service');
-        // The claim is lost between the claim and its hand-back: the token no longer matches, so the token-scoped restore fails.
-        function stealClaimBeforeRestore(inv) {
+        // The hand-back fails (a database error in the restore transaction) AFTER the hold lookup answered held:
+        // the invoice is left in 'sending' under our own claim token.
+        function failRestoreAfterHoldLookup() {
           const real = Hold.messagingHeldByCollectionHold;
           return jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementation(async (...args) => {
-            await db('invoices').where({ id: inv, status: 'sending' }).update({ send_claim_token: randomUUID() });
+            const answer = await real(...args);
+            db.__failTables.add('__transaction');
+            return answer;
+          });
+        }
+        // The claim is lost / moved between the claim and its hand-back.
+        function stealClaimBeforeRestore(inv, patch = { send_claim_token: randomUUID() }) {
+          const real = Hold.messagingHeldByCollectionHold;
+          return jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementation(async (...args) => {
+            await db('invoices').where({ id: inv, status: 'sending' }).update(patch);
             return real(...args);
           });
         }
@@ -436,9 +472,9 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
             const c = await newCustomer();
             await placeHold(c);
             const { inv: viaWrapper } = await packetInvoiceFor(c);
-            const spy = stealClaimBeforeRestore(viaWrapper);
+            const spy = failRestoreAfterHoldLookup();
             let out;
-            try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(viaWrapper, {})); } finally { spy.mockRestore(); }
+            try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(viaWrapper, {})); } finally { spy.mockRestore(); db.__failTables.clear(); }
             expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_CLAIM_STRANDED', held: true, manualRecovery: true, retryable: false, deferred: false, deliveryOutcome: 'not_sent' });
             expect(out.code).not.toBe('COLLECTION_HOLD_DEFER');
             expect(out.sms).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_CLAIM_STRANDED' });
@@ -449,12 +485,44 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
               expect.objectContaining({ dedupeKey: `hold-claim-stranded:${viaWrapper}`, link: `/admin/invoices?invoice=${viaWrapper}` }));
 
             const { inv: viaSms } = await packetInvoiceFor(c);
-            const spy2 = stealClaimBeforeRestore(viaSms);
+            const spy2 = failRestoreAfterHoldLookup();
             let smsOut;
-            try { smsOut = await Invoices.sendViaSMS(viaSms, {}); } finally { spy2.mockRestore(); }
+            try { smsOut = await Invoices.sendViaSMS(viaSms, {}); } finally { spy2.mockRestore(); db.__failTables.clear(); }
             expect(smsOut).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_CLAIM_STRANDED', held: true, manualRecovery: true, retryable: false, deferred: false });
             expect(notify).toHaveBeenCalledTimes(2);
             expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: `hold-claim-stranded:${viaSms}` }));
+          } finally { notify.mockRestore(); }
+        });
+
+        // Codex #5459 r1 P2: a false restore does not prove the invoice is stuck. Re-read: only a row still
+        // 'sending' under OUR claim token is stranded.
+        test('a false restore on an invoice that was paid / voided / handed back meanwhile is NOT stranded: an accurate outcome and no alert', async () => {
+          const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+          try {
+            const c = await newCustomer();
+            await placeHold(c);
+            for (const settled of [{ status: 'paid', paid_at: new Date() }, { status: 'void' }]) {
+              const { inv } = await packetInvoiceFor(c);
+              const spy = stealClaimBeforeRestore(inv, { ...settled, send_claim_token: null });
+              let out;
+              try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {})); } finally { spy.mockRestore(); }
+              expect(out).toMatchObject({ ok: false, code: 'INVOICE_ALREADY_SETTLED', retryable: false, deferred: false, deliveryOutcome: 'not_sent' });
+              expect(out.code).not.toBe('COLLECTION_HOLD_CLAIM_STRANDED');
+              expect(await invoice(inv)).toMatchObject({ status: settled.status });
+            }
+            // still 'sending' but under SOMEONE ELSE'S claim token: not ours to recover, so no alert, ordinary defer
+            const { inv: otherClaim } = await packetInvoiceFor(c);
+            const spyOther = stealClaimBeforeRestore(otherClaim);
+            let outOther;
+            try { outOther = await withRealSender(() => Invoices.sendViaSMSAndEmail(otherClaim, {})); } finally { spyOther.mockRestore(); }
+            expect(outOther).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true });
+            // handed back by someone else as a draft (token cleared): the ordinary hold defer is accurate
+            const { inv: handedBack } = await packetInvoiceFor(c);
+            const spy = stealClaimBeforeRestore(handedBack, { status: 'draft', send_claim_token: null });
+            let out;
+            try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(handedBack, {})); } finally { spy.mockRestore(); }
+            expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true });
+            expect(notify).not.toHaveBeenCalled();
           } finally { notify.mockRestore(); }
         });
 
@@ -675,6 +743,39 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
         if (beforeSecond[r.id].hold_bill_to_checked_at !== null) expect(r.updated_at.getTime()).toBe(beforeSecond[r.id].updated_at.getTime());
       }
       for (const id of heldIds) expect(sentIds()).not.toContain(id);
+    });
+
+    // Reviewer note on #5459: a Bill-To fence that ERRORS on a held packet row left it unstamped, so it
+    // re-took a page slot every tick. It now gets the recheck stamp (held customers only).
+    test('a Bill-To fence that errors on a HELD packet row stamps the recheck interval (no page slot every tick); an unheld row is not stamped and a hold release still sends', async () => {
+      const held = await newCustomer();
+      const clear = await newCustomer();
+      const holdId = await placeHold(held);
+      const { inv: heldInv } = await packetInvoiceFor(held);
+      const { inv: clearInv } = await packetInvoiceFor(clear);
+      for (const id of [heldInv, clearInv]) await db('invoices').where({ id }).update({ status: 'scheduled', scheduled_send_at: new Date(Date.now() - 1000) });
+      await db.raw(`CREATE OR REPLACE FUNCTION b10_fail_fence() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'fence down (synthetic)'; END $$ LANGUAGE plpgsql`);
+      await db.raw(`CREATE TRIGGER b10_fail_fence_trg BEFORE UPDATE ON invoices FOR EACH ROW WHEN (OLD.id IN ('${heldInv}', '${clearInv}') AND NEW.status = 'sending') EXECUTE FUNCTION b10_fail_fence()`);
+      try {
+        await Invoices.processScheduledSends({ limit: 25 });
+        const h = await invoice(heldInv);
+        expect(h).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
+        expect(h.hold_bill_to_checked_at).not.toBeNull();
+        expect((await invoice(clearInv)).hold_bill_to_checked_at).toBeNull(); // not held: nothing to stamp, retried next tick
+        // the next tick does not take the held row again
+        await makeDueNow(heldInv);
+        const stamped = (await invoice(heldInv)).updated_at.getTime();
+        await Invoices.processScheduledSends({ limit: 25 });
+        expect((await invoice(heldInv)).updated_at.getTime()).toBe(stamped);
+      } finally {
+        await db.raw('DROP TRIGGER IF EXISTS b10_fail_fence_trg ON invoices');
+        await db.raw('DROP FUNCTION IF EXISTS b10_fail_fence()');
+      }
+      // fence healthy again + hold released: the stamp does not hold the row back
+      await db('collections_flags').where({ id: holdId }).update({ released_at: db.fn.now() });
+      await makeDueNow(heldInv);
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).toContain(heldInv);
     });
 
     test('a confirmed-held packet row with a fresh stamp is invisible to the due query: 26 of them plus 1 ordinary invoice - the ordinary one sends on the FIRST tick, nothing held is claimed', async () => {

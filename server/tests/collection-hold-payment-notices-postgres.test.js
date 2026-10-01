@@ -728,6 +728,38 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
         } finally { notify.mockRestore(); }
       });
 
+      // Codex #5459 r1 P2: settlement and the office alert are separate writes. The alert is tracked by its
+      // own flag (metadata.resend_alerted_at), stamped only after raiseAdminAlert succeeds, so a failed alert
+      // or a crash between the two is retried by the next sweep instead of abandoning the email silently.
+      test('an alert that FAILS (or a crash between settlement and alert) is retried by the next sweep, stamped only on success, and never rung twice', async () => {
+        const sendgrid = require('../services/sendgrid-mail');
+        const Recovery = require('../services/email-bounce-recovery');
+        const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockRejectedValueOnce(new Error('alert store down (synthetic)')).mockResolvedValue({ id: 'synthetic' });
+        try {
+          const { rec } = await strandedResent({ withMarker: true });
+          expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0, uncertain: 1 });
+          let row = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+          expect(row.status).toBe(Recovery.RESEND_UNCERTAIN_STATUS);
+          expect(row.metadata.resend_alerted_at).toBeUndefined(); // the alert failed: still owed
+          expect(notify).toHaveBeenCalledTimes(1);
+          // next sweep: settled row is not re-settled, but the owed alert is retried and then stamped
+          expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0, uncertain: 0 });
+          expect(notify).toHaveBeenCalledTimes(2);
+          row = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+          expect(row.metadata.resend_alerted_at).toBeTruthy();
+          // alerted: later sweeps ring nothing more, and nothing is ever re-sent
+          expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0, uncertain: 0 });
+          expect(notify).toHaveBeenCalledTimes(2);
+          expect(notify.mock.calls.every((call) => call[3].dedupeKey === `bounce-recovery-resend-uncertain:${rec.id}`)).toBe(true);
+          expect(sendgrid.sendOne).not.toHaveBeenCalled();
+          // a crash between settlement and alert leaves status resend_uncertain with no flag: the same retry covers it
+          await db('email_bounce_recoveries').where({ id: rec.id }).update({ metadata: db.raw("metadata - 'resend_alerted_at'") });
+          await Recovery.retryHeldRecoveries();
+          expect(notify).toHaveBeenCalledTimes(3);
+          expect((await db('email_bounce_recoveries').where({ id: rec.id }).first()).metadata.resend_alerted_at).toBeTruthy();
+        } finally { notify.mockRestore(); }
+      });
+
       test('a marked row whose provider outcome WAS recorded (provider id published) is settled: not reclaimed, not alerted', async () => {
         const sendgrid = require('../services/sendgrid-mail');
         const Recovery = require('../services/email-bounce-recovery');
@@ -780,6 +812,46 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       expect(sendgrid.sendOne.mock.calls[0][0].to).toBe(`${local}@gmail.com`);
       rec = await db('email_bounce_recoveries').where({ id: rec.id }).first();
       expect(rec.status).toBe('resent');
+    });
+
+    test('a hold that lands at the PROVIDER BOUNDARY of a billing.notice recovery (providerBoundaryBlocked) still parks as held_dispute, with no send and no marker left behind', async () => {
+      const sendgrid = require('../services/sendgrid-mail');
+      const Recovery = require('../services/email-bounce-recovery');
+      const local = randomUUID();
+      const typo = `${local}@gmial.com`;
+      const c = await newCustomer();
+      await db('customers').where({ id: c }).update({ email: typo });
+      const eventKey = `evt-${randomUUID()}`;
+      const [bounced] = await db('email_messages').insert({
+        recipient_type: 'customer', recipient_id: c, recipient_email_snapshot: typo,
+        subject_snapshot: 'Synthetic billing notice', html_snapshot: '<p>Pay your invoice</p>', text_snapshot: 'Pay your invoice',
+        template_key: 'billing.notice', suppression_group_key_snapshot: 'transactional_required',
+        trigger_event_id: eventKey, idempotency_key: `billing_channel_email:${eventKey}:email`,
+        categories: JSON.stringify(['invoice']), status: 'bounced', has_attachments: false, send_attempt_token: randomUUID(),
+      }).returning('*');
+      const Hold = require('../services/collections/collection-hold');
+      const holdId = await placeHold(c);
+      // The dispute is "not there yet" for the up-front authority read (the first lookup) and standing by the
+      // time the provider boundary re-reads it (the authority holds row locks, so the hold is placed up front).
+      const realLookup = Hold.messagingHeldByCollectionHold;
+      const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementationOnce(async () => ({ held: false }))
+        .mockImplementation((...args) => realLookup(...args));
+      let boundaryError = null;
+      sendgrid.sendOne.mockImplementationOnce(async (args) => {
+        try { await args.providerBoundaryCheck({}); } catch (err) { boundaryError = err; throw err; }
+        return { messageId: 'sg-should-not-send' };
+      });
+      let res;
+      try { res = await Recovery.attemptRecovery(bounced, {}); } finally { lookup.mockRestore(); }
+      expect(boundaryError).toMatchObject({ providerBoundaryBlocked: true });
+      expect(res).toMatchObject({ deferred: 'collection_hold' });
+      expect(res.error).toBeUndefined();
+      const rec = await db('email_bounce_recoveries').where({ original_message_id: bounced.id }).first();
+      expect(rec.status).toBe(Recovery.HELD_RECOVERY_STATUS);
+      expect(rec.metadata.send_error).toBeUndefined();
+      expect(rec.metadata.dispatch_started_at).toBeUndefined();
+      expect(await db('email_messages').where({ id: rec.recovery_message_id }).first()).toMatchObject({ status: 'queued', provider_message_id: null });
+      await release(holdId);
     });
   });
 

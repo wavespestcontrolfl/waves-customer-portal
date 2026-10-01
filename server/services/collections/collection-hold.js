@@ -422,11 +422,24 @@ async function queueHeldInvoiceForSender(invoiceId, database = db) {
   // attempt, so the cap was reached by earlier definite failures and the hold gives it a fresh budget. A
   // live claim is never touched: a claimed row is 'sending' (the compare-and-set needs status 'scheduled'),
   // and the sender's own claim needs attempts < 5, so no claimer can hold an exhausted row.
-  const rearmed = await database('invoices')
+  // Only a RETRYABLE exhausted row (Codex #5459 r1 P2): one that still has its scheduled send time. A row
+  // parked for manual review has scheduled_send_at NULL and carries its evidence in scheduled_send_error
+  // (a stale-claim review hold, a payer withdrawal, the visit summary's planned-text state, a renewal
+  // withheld stamp); re-arming it would clear that evidence and could send a second pay link while the
+  // earlier outcome is unresolved. A parked row is never re-armed, by its null time OR by its marker.
+  const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('../invoice-helpers');
+  const likeEscape = (text) => text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+  const PARK_PREFIXES = [STALE_SEND_PARK_ERROR, 'payer_billed:', SUMMARY_TEXT_PLANNED_ERROR, 'renewal_send_withheld'];
+  let rearmQuery = database('invoices')
     .where({ id: invoiceId, status: 'scheduled' })
+    .whereNotNull('scheduled_send_at')
     .where('scheduled_send_attempts', '>=', SCHEDULED_SEND_ATTEMPT_CAP)
     .whereNull('payer_id').whereNull('payer_statement_id')
-    .whereNull('paid_at').whereNull('sent_at').whereNull('sms_sent_at').whereNull('email_sent_at')
+    .whereNull('paid_at').whereNull('sent_at').whereNull('sms_sent_at').whereNull('email_sent_at');
+  for (const prefix of PARK_PREFIXES) {
+    rearmQuery = rearmQuery.whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE ?", [`${likeEscape(prefix)}%`]);
+  }
+  const rearmed = await rearmQuery
     .update({
       scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
       scheduled_send_error: null, updated_at: database.fn.now(),
