@@ -4506,6 +4506,13 @@ function visitLoopsNeedAnswer(context) {
   const delay = v.lateAlert && typeof v.lateAlert === 'object' && v.lateAlert.missingTracking !== true;
   return Boolean(delay || v.pastWindow || v.missedVisit) || listed(v.weOwe) || listed(v.customerWaiting);
 }
+// Deterministic draft check (same loop as validateReserviceOffer): with an open loop
+// listed, an empty reply breaks the "never go silent" rule — it is revised, or stays
+// unconverged, instead of passing as "no reply warranted".
+function validateOpenLoopAnswer({ reply, context }) {
+  if (!visitLoopsNeedAnswer(context) || String(reply || '').trim()) return { ok: true, violations: [] };
+  return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
+}
 // Marks a draft whose section showed time-sensitive VISIT STATUS (tech position, a
 // flagged delay, a passed window, a missed visit): the send boundary holds it to the
 // LIVE ETA freshness window, and recounts a fresh position's stops when the reply
@@ -5422,6 +5429,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassLiveEta.violations);
     }
+    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, context });
+    if (!singlePassOpenLoop.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassOpenLoop.violations);
+    }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
@@ -5448,7 +5460,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // empty reply is checked like any other and revised.
     if (!parsed.reply) {
       const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
-      if (owed.ok) { converged = true; break; }
+      if (owed.ok && validateOpenLoopAnswer({ reply: '', context }).ok) { converged = true; break; }
     }
 
     // Owner-directed structural fix: check the model's own offered_times
@@ -5460,7 +5472,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
-    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck]) {
+    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, context });
+    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, openLoopCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
         timesCheck.violations.push(...check.violations);
@@ -6057,6 +6070,7 @@ module.exports = {
   visitLoopCommitmentIds,
   visitLoopStatus,
   visitLoopsNeedAnswer,
+  validateOpenLoopAnswer,
   VISIT_LOOPS_HEADER,
   formatExemplarBlock,
   exemplarLooksClean,

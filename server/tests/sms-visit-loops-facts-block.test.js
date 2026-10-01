@@ -12,6 +12,7 @@ const {
   visitLoopCommitmentIds,
   visitLoopStatus,
   visitLoopsNeedAnswer,
+  validateOpenLoopAnswer,
   REAL_ANSWERS_PROMPT_VERSION,
   REAL_ANSWERS_HANDOFF_CATEGORIES,
 } = require('../services/sms-shadow-drafter');
@@ -237,6 +238,18 @@ describe('visitLoopsNeedAnswer', () => {
     expect(visitLoopsNeedAnswer({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBe(true);
     delete process.env[GATE];
     expect(visitLoopsNeedAnswer({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBe(false);
+  });
+});
+
+describe('validateOpenLoopAnswer', () => {
+  test('gate on: an empty reply fails while something is owed; any text, no loop, or gate off passes', () => {
+    const owed = { visitLoops: { weOwe: [{ id: 'cc-1', kind: 'callback' }] } };
+    expect(validateOpenLoopAnswer({ reply: '', context: owed }).ok).toBe(true); // gate off
+    process.env[GATE] = 'true';
+    expect(validateOpenLoopAnswer({ reply: '', context: owed })).toMatchObject({ ok: false, violations: [expect.stringContaining('empty reply is not allowed')] });
+    expect(validateOpenLoopAnswer({ reply: '   ', context: owed }).ok).toBe(false);
+    expect(validateOpenLoopAnswer({ reply: 'We still owe you that callback.', context: owed }).ok).toBe(true);
+    expect(validateOpenLoopAnswer({ reply: '', context: { visitLoops: { techPosition: { status: 'en_route' } } } }).ok).toBe(true);
   });
 });
 

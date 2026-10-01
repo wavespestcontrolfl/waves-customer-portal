@@ -235,6 +235,21 @@ describe('live-webhook gratitude drafter boundary', () => {
     expect(result.publishSuggestion).toHaveBeenCalledWith(expect.objectContaining({ visitLoopCommitmentIds: ['cc-1'] }));
   });
 
+  test('gate on + an open loop + an empty model reply: revised, never passed as "no reply warranted"', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    const visitLoops = { techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the quote' }], customerWaiting: [] };
+    const result = await runDraft({
+      reply: '',
+      intended_actions: [{ type: 'none', note: 'no reply warranted' }],
+      missing_info: null,
+    }, { deliveryMode: 'suggest', contextExtra: { visitLoops } });
+    // the empty draft failed the open-loop check and was sent back for revision
+    expect(result.dispatchWithFallback.mock.calls.length).toBeGreaterThan(1);
+    // still empty after the revision budget: unconverged, so nothing is published or sent
+    expect(result.publishSuggestion).not.toHaveBeenCalled();
+    expect(result.maybeAutoSend).not.toHaveBeenCalled();
+  });
+
   test('gate on + only a tech position (no loop): still a gratitude candidate', async () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     const visitLoops = { techPosition: { techName: 'Sam', status: 'en_route', stopsAhead: 1 }, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] };
