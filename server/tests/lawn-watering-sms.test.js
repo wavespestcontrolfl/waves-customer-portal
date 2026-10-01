@@ -125,7 +125,7 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
       internalOnly: false,
       completionTextRequested: true,
     };
-    const deps = { db: {}, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified: (r) => r };
+    const deps = { db: {}, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified: (r) => r, sleep: jest.fn(async () => {}) };
     return { state, deps, sendCustomerMessage, getTemplate, mergeNotes, merged };
   }
 
@@ -273,11 +273,31 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     expect(h.sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('a retryable block (lookup failed) lifts the fence and stays retryable', async () => {
+  test('a retryable block (lookup failed) is retried in place, then gives up for good', async () => {
     const h = harness({ sendResult: { sent: false, blocked: true, retryable: true, deferred: true, code: 'CONSENT_LOOKUP_FAILED' } });
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'failed' });
-    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'failed', lawnWateringSmsError: 'CONSENT_LOOKUP_FAILED', lawnWateringSmsDeliveryUnverifiedAt: null });
-    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(false);
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_retries_exhausted' });
+    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(3);
+    expect(h.deps.sleep.mock.calls.map((c) => c[0])).toEqual([2000, 8000]);
+    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'skipped_retries_exhausted', lawnWateringSmsError: 'CONSENT_LOOKUP_FAILED', lawnWateringSmsDeliveryUnverifiedAt: null });
+    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
+  });
+
+  test('a retry that succeeds sends exactly once', async () => {
+    const h = harness();
+    h.sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'PROVIDER_FAILURE' });
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
+    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'sent', lawnWateringSmsDeliveryUnverifiedAt: null });
+  });
+
+  test('an instruction that goes stale while waiting to retry is never retried', async () => {
+    const h = harness({ sendResult: { sent: false, code: 'PROVIDER_FAILURE' } });
+    h.deps.sleep = jest.fn(async () => {
+      h.state.notes.lawnWateringFreeze.wateringInstruction.waterInBy = new Date(Date.now() - 1000).toISOString();
+    });
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_stale' });
+    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
   });
 
   test('the handoff recheck passes a fresh instruction and refuses a stale one; a stale refusal is final', async () => {
@@ -301,12 +321,11 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(true);
   });
 
-  test('a definite provider rejection lifts the fence and stays retryable', async () => {
+  test('a definite provider rejection lifts the fence and is retried in place', async () => {
     const h = harness({ sendResult: { sent: false, code: 'PROVIDER_FAILURE' } });
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'failed' });
-    expect(h.state.notes.lawnWateringSmsStatus).toBe('failed');
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skipped_retries_exhausted' });
+    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(3);
     expect(h.state.notes.lawnWateringSmsDeliveryUnverifiedAt).toBeNull();
-    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(false);
   });
 
   test('a throw after the provider handoff keeps the fence so a retry never double-texts', async () => {
@@ -326,12 +345,11 @@ describe('sendLawnWateringSms (completion path wiring, mocked IO)', () => {
     expect(h.state.notes.lawnWateringSmsStatus).toBe('sent');
   });
 
-  test('a throw that carries a definite not_sent outcome lifts the fence, so a resumed completion retries', async () => {
+  test('a throw that carries a definite not_sent outcome lifts the fence and is retried', async () => {
     const h = harness();
     h.sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed after reject'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }));
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'failed' });
-    expect(h.state.notes).toMatchObject({ lawnWateringSmsStatus: 'failed', lawnWateringSmsDeliveryUnverifiedAt: null });
-    expect(lawnWateringSmsAlreadyHandled(h.state.notes)).toBe(false);
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
+    expect(h.sendCustomerMessage).toHaveBeenCalledTimes(2);
     // ...whereas an uncertain throw keeps the fence.
     const u = harness();
     u.sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('timeout'), { providerOutcome: { sent: false, deliveryOutcome: 'uncertain' } }));

@@ -30,11 +30,13 @@ const TEMPLATE_KEY = 'lawn_watering_instruction';
 const PURPOSE = 'lawn_watering_instruction';
 const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']);
 
-// Statuses that end the obligation for this visit. 'failed' (a definite
-// provider rejection) is deliberately NOT here: it is known not delivered, so a
-// resumed completion may try again. 'sending' is covered by the uncertainty
+// Statuses that end the obligation for this visit. 'failed' (known not
+// delivered) is deliberately NOT here: the in-call bounded retry owns it, and
+// a crash mid-retry leaves a resumed completion free to try again. 'sending' is covered by the uncertainty
 // fence below, which is written in the same claim.
 const STALE_CODE = 'LAWN_WATERING_STALE';
+// Waits before each retry of a known-unsent watering text.
+const RETRY_DELAYS_MS = Object.freeze([2000, 8000]);
 const TERMINAL_STATUSES = Object.freeze(['sent', 'skipped_blocked', 'skipped_quiet_hours']);
 
 function parseNotes(value) {
@@ -177,137 +179,165 @@ async function sendLawnWateringSms(args, deps) {
       record.structured_notes = { ...parseNotes(record.structured_notes), ...delta };
     };
 
-    // CLAIM before the provider call. If this write fails nothing was sent and
-    // nothing can be deduped, so do not send.
-    const attemptedAt = new Date().toISOString();
-    try {
-      await stamp({
-        lawnWateringSmsStatus: 'sending',
-        lawnWateringSmsDeliveryUnverifiedAt: attemptedAt,
-        lawnWateringSmsAttemptedAt: attemptedAt,
-      });
-    } catch (claimErr) {
-      logger.warn(`[lawn-watering-sms] claim write failed for service_record ${record.id}; not sending: ${claimErr.message}`);
-      return { status: 'skip_claim_failed' };
-    }
-
-    const sendInput = {
-      // The template read, claim write and policy lookups can cross ET
-      // midnight or the instruction's deadline: recheck at the handoff.
-      preSendCheck: async () => (wateringInstructionFresh(instruction, completedAt, Date.now())
-        ? { ok: true }
-        : { ok: false, code: STALE_CODE, reason: 'watering instruction went stale before handoff', retryable: false }),
-      to: svc.cust_phone,
-      body,
-      channel: 'sms',
-      audience: 'customer',
-      purpose: PURPOSE,
-      customerId: svc.customer_id,
-      appointmentId: svc.id,
-      identityTrustLevel: 'phone_matches_customer',
-      metadata: {
-        original_message_type: TEMPLATE_KEY,
-        service_record_id: record.id,
-        notificationEventKey: `scheduled-service:${svc.id}:lawn-watering`,
-        useCustomerChannel: true,
-        templateKey: TEMPLATE_KEY,
-      },
-    };
-
-    let result;
-    try {
-      result = deps.throwIfDeliveryUnverified(await deps.sendCustomerMessage(sendInput));
-    } catch (sendErr) {
-      // Past this point the text MAY have been delivered (the messaging layer
-      // throws after provider acceptance when its own audit write fails), so
-      // the uncertainty fence stays and blocks any resend.
-      const accepted = sendErr?.providerOutcome?.sent === true;
-      // A throw that carries a definite provider rejection (deliveryOutcome
-      // 'not_sent', e.g. the audit write failed after Twilio refused) is known
-      // not delivered: lift the fence so a resumed completion retries.
-      const notSent = !accepted && sendErr?.providerOutcome?.deliveryOutcome === 'not_sent';
+    // One claim + send. 'failed' = known not delivered and worth another try
+    // (provider rejection, retryable messaging block).
+    const attemptSend = async () => {
+      // CLAIM before the provider call. If this write fails nothing was sent and
+      // nothing can be deduped, so do not send.
+      const attemptedAt = new Date().toISOString();
       try {
-        await stamp(accepted
-          ? { lawnWateringSmsStatus: 'sent', lawnWateringSmsAt: new Date().toISOString(), lawnWateringSmsDeliveryUnverifiedAt: null }
-          : {
-            lawnWateringSmsStatus: 'failed',
-            lawnWateringSmsError: String(sendErr?.code || sendErr?.name || 'exception').slice(0, 64),
-            lawnWateringSmsFailedAt: new Date().toISOString(),
-            ...(notSent ? { lawnWateringSmsDeliveryUnverifiedAt: null } : {}),
-          });
-      } catch (stampErr) {
-        logger.warn(`[lawn-watering-sms] post-send status write failed for service_record ${record.id}: ${stampErr.message}`);
+        await stamp({
+          lawnWateringSmsStatus: 'sending',
+          lawnWateringSmsDeliveryUnverifiedAt: attemptedAt,
+          lawnWateringSmsAttemptedAt: attemptedAt,
+        });
+      } catch (claimErr) {
+        logger.warn(`[lawn-watering-sms] claim write failed for service_record ${record.id}; not sending: ${claimErr.message}`);
+        return { status: 'skip_claim_failed' };
       }
-      logger.warn(`[lawn-watering-sms] send raised for service_record ${record.id} (${sendErr?.code || sendErr?.name || 'exception'}); resend fenced`);
-      return { status: accepted ? 'sent' : (notSent ? 'failed' : 'unverified') };
-    }
 
-    if (result && result.sent === true) {
-      await stamp({
-        lawnWateringSmsStatus: 'sent',
-        lawnWateringSmsAt: new Date().toISOString(),
-        lawnWateringSmsDeliveryUnverifiedAt: null,
-      }).catch((e) => logger.warn(`[lawn-watering-sms] sent-status write failed for service_record ${record.id}: ${e.message}`));
-      return { status: 'sent' };
-    }
+      const sendInput = {
+        // The template read, claim write and policy lookups can cross ET
+        // midnight or the instruction's deadline: recheck at the handoff.
+        preSendCheck: async () => (wateringInstructionFresh(instruction, completedAt, Date.now())
+          ? { ok: true }
+          : { ok: false, code: STALE_CODE, reason: 'watering instruction went stale before handoff', retryable: false }),
+        to: svc.cust_phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: PURPOSE,
+        customerId: svc.customer_id,
+        appointmentId: svc.id,
+        identityTrustLevel: 'phone_matches_customer',
+        metadata: {
+          original_message_type: TEMPLATE_KEY,
+          service_record_id: record.id,
+          notificationEventKey: `scheduled-service:${svc.id}:lawn-watering`,
+          useCustomerChannel: true,
+          templateKey: TEMPLATE_KEY,
+        },
+      };
 
-    // Quiet-hours hold: never requeued. The instruction's clock times are
-    // anchored to the visit's own day ("until 9 PM tonight", "water in by 8 PM
-    // tonight"), so a text held to the next morning would read wrong or past
-    // its deadline. Final skip; the report banner still carries the instruction.
-    if (result && result.code === 'QUIET_HOURS_HOLD') {
-      await stamp({
-        lawnWateringSmsStatus: 'skipped_quiet_hours',
-        lawnWateringSmsDeliveryUnverifiedAt: null,
-      }).catch((e) => logger.warn(`[lawn-watering-sms] quiet-hours status write failed for service_record ${record.id}: ${e.message}`));
-      return { status: 'skipped_quiet_hours' };
-    }
+      let result;
+      try {
+        result = deps.throwIfDeliveryUnverified(await deps.sendCustomerMessage(sendInput));
+      } catch (sendErr) {
+        // Past this point the text MAY have been delivered (the messaging layer
+        // throws after provider acceptance when its own audit write fails), so
+        // the uncertainty fence stays and blocks any resend.
+        const accepted = sendErr?.providerOutcome?.sent === true;
+        // A throw that carries a definite provider rejection (deliveryOutcome
+        // 'not_sent', e.g. the audit write failed after Twilio refused) is known
+        // not delivered: lift the fence; the bounded retry below tries again.
+        const notSent = !accepted && sendErr?.providerOutcome?.deliveryOutcome === 'not_sent';
+        try {
+          await stamp(accepted
+            ? { lawnWateringSmsStatus: 'sent', lawnWateringSmsAt: new Date().toISOString(), lawnWateringSmsDeliveryUnverifiedAt: null }
+            : {
+              lawnWateringSmsStatus: 'failed',
+              lawnWateringSmsError: String(sendErr?.code || sendErr?.name || 'exception').slice(0, 64),
+              lawnWateringSmsFailedAt: new Date().toISOString(),
+              ...(notSent ? { lawnWateringSmsDeliveryUnverifiedAt: null } : {}),
+            });
+        } catch (stampErr) {
+          logger.warn(`[lawn-watering-sms] post-send status write failed for service_record ${record.id}: ${stampErr.message}`);
+        }
+        logger.warn(`[lawn-watering-sms] send raised for service_record ${record.id} (${sendErr?.code || sendErr?.name || 'exception'}); resend fenced`);
+        return { status: accepted ? 'sent' : (notSent ? 'failed' : 'unverified') };
+      }
 
-    // Went stale between the plan and the handoff: final, never resent.
-    if (result && result.code === STALE_CODE) {
-      await stamp({
-        lawnWateringSmsStatus: 'skipped_stale',
-        lawnWateringSmsDeliveryUnverifiedAt: null,
-      }).catch((e) => logger.warn(`[lawn-watering-sms] stale-status write failed for service_record ${record.id}: ${e.message}`));
-      return { status: 'skipped_stale' };
-    }
+      if (result && result.sent === true) {
+        await stamp({
+          lawnWateringSmsStatus: 'sent',
+          lawnWateringSmsAt: new Date().toISOString(),
+          lawnWateringSmsDeliveryUnverifiedAt: null,
+        }).catch((e) => logger.warn(`[lawn-watering-sms] sent-status write failed for service_record ${record.id}: ${e.message}`));
+        return { status: 'sent' };
+      }
 
-    // A retryable block (consent / suppression lookup failed, a liftable
-    // hold) is known not sent but not a decision: lift the fence and leave
-    // the status retryable so a resumed completion tries again (freshness
-    // still bounds it).
-    if (result && result.blocked && result.retryable === true) {
+      // Quiet-hours hold: never requeued. The instruction's clock times are
+      // anchored to the visit's own day ("until 9 PM tonight", "water in by 8 PM
+      // tonight"), so a text held to the next morning would read wrong or past
+      // its deadline. Final skip; the report banner still carries the instruction.
+      if (result && result.code === 'QUIET_HOURS_HOLD') {
+        await stamp({
+          lawnWateringSmsStatus: 'skipped_quiet_hours',
+          lawnWateringSmsDeliveryUnverifiedAt: null,
+        }).catch((e) => logger.warn(`[lawn-watering-sms] quiet-hours status write failed for service_record ${record.id}: ${e.message}`));
+        return { status: 'skipped_quiet_hours' };
+      }
+
+      // Went stale between the plan and the handoff: final, never resent.
+      if (result && result.code === STALE_CODE) {
+        await stamp({
+          lawnWateringSmsStatus: 'skipped_stale',
+          lawnWateringSmsDeliveryUnverifiedAt: null,
+        }).catch((e) => logger.warn(`[lawn-watering-sms] stale-status write failed for service_record ${record.id}: ${e.message}`));
+        return { status: 'skipped_stale' };
+      }
+
+      // A retryable block (consent / suppression lookup failed, a liftable
+      // hold) is known not sent but not a decision: lift the fence and leave
+      // it to the bounded retry below (freshness still bounds it).
+      if (result && result.blocked && result.retryable === true) {
+        await stamp({
+          lawnWateringSmsStatus: 'failed',
+          lawnWateringSmsError: String(result.code || 'blocked_retryable').slice(0, 64),
+          lawnWateringSmsFailedAt: new Date().toISOString(),
+          lawnWateringSmsDeliveryUnverifiedAt: null,
+        }).catch((e) => logger.warn(`[lawn-watering-sms] retryable-block status write failed for service_record ${record.id}: ${e.message}`));
+        logger.warn(`[lawn-watering-sms] retryable messaging block for service_record ${record.id}: ${result.code || 'unknown'}`);
+        return { status: 'failed' };
+      }
+
+      // Policy block (consent, STOP, suppression): intentional and final.
+      if (result && result.blocked) {
+        await stamp({
+          lawnWateringSmsStatus: 'skipped_blocked',
+          lawnWateringSmsBlockCode: String(result.code || 'blocked').slice(0, 64),
+          lawnWateringSmsDeliveryUnverifiedAt: null,
+        }).catch((e) => logger.warn(`[lawn-watering-sms] blocked-status write failed for service_record ${record.id}: ${e.message}`));
+        logger.info(`[lawn-watering-sms] blocked by messaging policy for service_record ${record.id}: ${result.code || 'unknown'}`);
+        return { status: 'skipped_blocked' };
+      }
+
+      // Definite provider rejection: known not delivered, so the fence is lifted
+      // and the bounded retry below tries again.
       await stamp({
         lawnWateringSmsStatus: 'failed',
-        lawnWateringSmsError: String(result.code || 'blocked_retryable').slice(0, 64),
+        lawnWateringSmsError: String((result && (result.code || result.reason)) || 'send_failed').slice(0, 64),
         lawnWateringSmsFailedAt: new Date().toISOString(),
         lawnWateringSmsDeliveryUnverifiedAt: null,
-      }).catch((e) => logger.warn(`[lawn-watering-sms] retryable-block status write failed for service_record ${record.id}: ${e.message}`));
-      logger.warn(`[lawn-watering-sms] retryable messaging block for service_record ${record.id}: ${result.code || 'unknown'}`);
+      }).catch((e) => logger.warn(`[lawn-watering-sms] failed-status write failed for service_record ${record.id}: ${e.message}`));
+      logger.warn(`[lawn-watering-sms] send failed for service_record ${record.id}: ${(result && (result.code || result.reason)) || 'unknown'}`);
       return { status: 'failed' };
-    }
+    };
 
-    // Policy block (consent, STOP, suppression): intentional and final.
-    if (result && result.blocked) {
-      await stamp({
-        lawnWateringSmsStatus: 'skipped_blocked',
-        lawnWateringSmsBlockCode: String(result.code || 'blocked').slice(0, 64),
-        lawnWateringSmsDeliveryUnverifiedAt: null,
-      }).catch((e) => logger.warn(`[lawn-watering-sms] blocked-status write failed for service_record ${record.id}: ${e.message}`));
-      logger.info(`[lawn-watering-sms] blocked by messaging policy for service_record ${record.id}: ${result.code || 'unknown'}`);
-      return { status: 'skipped_blocked' };
+    // Nothing re-enters this sender after the completion finishes (a later
+    // submission replays the stored response), so a retryable failure is
+    // retried HERE, a bounded few times; each attempt rechecks freshness at
+    // the handoff. Exhausted = final 'failed' (the report banner still
+    // carries the instruction).
+    const sleep = deps.sleep || ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
+    let outcome = await attemptSend();
+    for (const delayMs of RETRY_DELAYS_MS) {
+      if (outcome.status !== 'failed') break;
+      await sleep(delayMs);
+      if (!wateringInstructionFresh(instruction, completedAt, Date.now())) {
+        await stamp({ lawnWateringSmsStatus: 'skipped_stale', lawnWateringSmsDeliveryUnverifiedAt: null })
+          .catch((e) => logger.warn(`[lawn-watering-sms] stale-status write failed for service_record ${record.id}: ${e.message}`));
+        return { status: 'skipped_stale' };
+      }
+      outcome = await attemptSend();
     }
-
-    // Definite provider rejection: known not delivered, so the fence is lifted
-    // and the status stays retryable on a resumed completion.
-    await stamp({
-      lawnWateringSmsStatus: 'failed',
-      lawnWateringSmsError: String((result && (result.code || result.reason)) || 'send_failed').slice(0, 64),
-      lawnWateringSmsFailedAt: new Date().toISOString(),
-      lawnWateringSmsDeliveryUnverifiedAt: null,
-    }).catch((e) => logger.warn(`[lawn-watering-sms] failed-status write failed for service_record ${record.id}: ${e.message}`));
-    logger.warn(`[lawn-watering-sms] send failed for service_record ${record.id}: ${(result && (result.code || result.reason)) || 'unknown'}`);
-    return { status: 'failed' };
+    if (outcome.status === 'failed') {
+      await stamp({ lawnWateringSmsStatus: 'skipped_retries_exhausted' })
+        .catch((e) => logger.warn(`[lawn-watering-sms] exhausted-status write failed for service_record ${record.id}: ${e.message}`));
+      logger.warn(`[lawn-watering-sms] gave up after ${RETRY_DELAYS_MS.length + 1} attempts for service_record ${record.id}`);
+      return { status: 'skipped_retries_exhausted' };
+    }
+    return outcome;
   } catch (err) {
     logger.warn(`[lawn-watering-sms] unexpected error (completion unaffected): ${err.message}`);
     return { status: 'error' };
