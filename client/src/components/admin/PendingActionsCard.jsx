@@ -326,7 +326,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               style={dark ? { color: D.text, fontSize: 14, fontWeight: 500, marginBottom: 6 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-900 font-medium mb-1.5"}
             >
-              {expired ? "Expired proposal: " : settled ? "Action result: " : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
+              {expired ? "Expired proposal: " : settled ? "Action result: " : previewOnly ? "Preview only: " : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
             </div>
 
             {settled || expired ? <details style={{ marginBottom: 8, fontSize: 14 }}>
@@ -400,6 +400,14 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                     className={dark ? undefined : "text-[14px] text-zinc-500"}
                   >
                     {countdownLabel(remaining)}
+                  </div>
+                )}
+                {previewOnly && (
+                  <div
+                    style={dark ? { fontSize: 14, color: D.amber } : undefined}
+                    className={dark ? undefined : "text-[14px] text-zinc-700"}
+                  >
+                    This card was made as a preview only and can&apos;t be applied. Ask again for a fresh card.
                   </div>
                 )}
               <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>

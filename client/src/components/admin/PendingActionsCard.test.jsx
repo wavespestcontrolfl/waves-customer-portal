@@ -173,6 +173,9 @@ it('Codex #5514 r5: a card stored as preview-only (minted before the commit path
     },
   };
   render(<PendingActionsCard actions={[stored]} variant="light" />);
+  expect(screen.getByText(/Preview only: /)).toBeInTheDocument();
+  expect(screen.queryByText(/Awaiting your confirmation/)).not.toBeInTheDocument();
+  expect(screen.getByText(/made as a preview only and can't be applied/)).toBeInTheDocument();
   expect(screen.getByText(/Change: false → true/)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
