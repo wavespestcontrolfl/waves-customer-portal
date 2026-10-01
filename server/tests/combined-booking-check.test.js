@@ -169,10 +169,14 @@ describe('evaluateCombinedBooking', () => {
   });
 
   test('a member the office split onto its own invoice is judged off the combined total', () => {
-    const lawn = lawnRows({ parentOverrides: { has_own_live_invoice: true } });
+    const lawn = lawnRows({ parentOverrides: { has_own_live_invoice: true, own_first_invoice: { id: 'inv-2', status: 'sent', line_items: [firstApp(100, 'Lawn Care')] } } });
     const pestOnly = invoice([setupFee, firstApp(150, 'Quarterly Pest Control')]);
     expect(run([PEST, LAWN], [...pestRows(), ...lawn], { invoice: pestOnly }).problems).toEqual([]);
     expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: pestOnly }))).toEqual(['first_invoice_mismatch']);
+    const cheap = lawnRows({ parentOverrides: { has_own_live_invoice: true, own_first_invoice: { id: 'inv-2', status: 'sent', line_items: [firstApp(1, 'Lawn Care')] } } });
+    const verdict = run([PEST, LAWN], [...pestRows(), ...cheap], { invoice: pestOnly });
+    expect(codes(verdict)).toEqual(['split_invoice_mismatch']);
+    expect(verdict.problems[0].text).toBe('split first invoice lawn $1.00 vs $100.00');
   });
 
   test('a left-out family still on the shared first invoice keeps its share of the invoice total', () => {

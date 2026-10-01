@@ -310,6 +310,20 @@ function checkStampedFirstDay(stamped, programs, invoices, facts) {
   return [];
 }
 
+// 3c. members split off onto their own invoice: each bills its own accepted
+// first-application price.
+function checkSplitInvoices(split, programs) {
+  const off = [];
+  for (const row of split) {
+    const expected = expectedFor(row, programs);
+    const billed = row.own_first_invoice ? firstApplicationAmount(row.own_first_invoice) : null;
+    if (expected != null && billed != null && Math.abs(billed - expected) > PRICE_TOLERANCE) {
+      off.push(`${lowerLabel(programRowFamilies(row, programs)[0])} ${money(billed)} vs ${money(expected)}`);
+    }
+  }
+  return off.length ? [{ code: 'split_invoice_mismatch', text: `split first invoice ${off[0]}`, detail: off.join('; ') }] : [];
+}
+
 // 3b. first-day rows with no invoice stamp: priced themselves, or one row
 // carrying the combined same-day total.
 function checkUnstampedFirstDay(unstamped, programs, facts) {
@@ -366,6 +380,8 @@ function evaluateCombinedBooking(ctx) {
   // covered by that invoice, not the combined one.
   const stamped = (ctx.rows || []).filter((row) => isPlanRow(row, accepted.programs) && !NOT_LIVE.has(row.status)
     && !row.recurring_parent_id && row.first_application_invoice_id && !row.has_own_live_invoice);
+  const split = (ctx.rows || []).filter((row) => isPlanRow(row, programs) && !NOT_LIVE.has(row.status)
+    && !row.recurring_parent_id && row.has_own_live_invoice);
   const invoicePrograms = new Map([...accepted.programs]
     .filter(([family]) => programs.has(family) || stamped.some((row) => rowFamilies(row).includes(family))));
   // Rows were created and every one was cancelled: the customer or office
@@ -407,6 +423,7 @@ function evaluateCombinedBooking(ctx) {
     ...checkLaterPrices(dated, programs, firstDay),
     ...(stamped.length ? checkStampedFirstDay(stamped, invoicePrograms, invoices, facts) : []),
     ...(unstamped.length ? checkUnstampedFirstDay(unstamped, programs, facts) : []),
+    ...checkSplitInvoices(split, programs),
   ];
   return { ok: problems.length === 0 && !deferred, deferred, problems, facts };
 }
@@ -488,6 +505,7 @@ async function markOwnFirstInvoices(conn, rows) {
     const row = byRow.get(String(invoice.scheduled_service_id));
     if (row && String(invoice.id) !== String(row.first_application_invoice_id) && invoiceBillsBaseApplication(invoice)) {
       row.has_own_live_invoice = true;
+      row.own_first_invoice = invoice;
     }
   }
 }
