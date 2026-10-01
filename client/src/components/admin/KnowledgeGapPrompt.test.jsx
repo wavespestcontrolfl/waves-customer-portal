@@ -33,12 +33,15 @@ describe("KnowledgeGapPrompt", () => {
       .mockRejectedValueOnce(new Error("Network error"))
       .mockResolvedValueOnce({ success: true });
     render(<KnowledgeGapPrompt misses={["chinch bugs"]} save={save} />);
-    const button = screen.getByRole("button", { name: "Add to knowledge gaps" });
-    fireEvent.click(button);
-    await screen.findByRole("alert");
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
+    await screen.findByRole("alert");
+    // The first save may have landed under this key, so an edit after it
+    // must not change what the retry sends (or what the screen says saved).
+    fireEvent.change(screen.getByRole("textbox", { name: "Knowledge gap" }), { target: { value: "something else" } });
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
-    expect(save.mock.calls[1][1]).toBe(save.mock.calls[0][1]);
+    expect(save.mock.calls[1]).toEqual(save.mock.calls[0]);
+    expect(await screen.findByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/)).toBeInTheDocument();
   });
 
   it("the mobile box is 16px so Safari does not zoom on focus", () => {
@@ -46,12 +49,14 @@ describe("KnowledgeGapPrompt", () => {
     expect(screen.getByRole("textbox", { name: "Knowledge gap" }).style.fontSize).toBe("16px");
   });
 
-  it("keeps the box and shows the error when the save fails", async () => {
+  it("shows the error and locks the submitted text when the save fails", async () => {
     const save = vi.fn(async () => { throw new Error("Admin access required"); });
     render(<KnowledgeGapPrompt misses={["chinch bugs"]} save={save} variant="light" />);
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Admin access required");
-    expect(screen.getByRole("textbox", { name: "Knowledge gap" })).toHaveValue("chinch bugs");
+    const box = screen.getByRole("textbox", { name: "Knowledge gap" });
+    expect(box).toHaveValue("chinch bugs");
+    expect(box).toHaveAttribute("readonly");
   });
 
   it("disables the button when the text is under 3 characters", () => {

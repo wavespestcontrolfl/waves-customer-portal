@@ -22,12 +22,17 @@ function GapRow({ initial, save, dark }) {
   const [requestKey] = useState(uuid);
   const [state, setState] = useState("idle"); // idle | saving | saved | error
   const [error, setError] = useState("");
-  const trimmed = text.replace(/\s+/g, " ").trim();
+  // The text sent on the first tap. After that the box is locked: a failed
+  // save may still have landed under this key, so a retry resends exactly
+  // this text and the screen never shows other words as saved.
+  const [submitted, setSubmitted] = useState(null);
+  const trimmed = submitted ?? text.replace(/\s+/g, " ").trim();
   const muted = dark ? "#64748B" : "#71717A";
   const border = dark ? "#CBD5E1" : "#D4D4D8";
 
   async function onSave() {
     if (state === "saving" || trimmed.length < 3) return;
+    setSubmitted(trimmed);
     setState("saving");
     setError("");
     try {
@@ -55,7 +60,7 @@ function GapRow({ initial, save, dark }) {
         value={text}
         maxLength={KNOWLEDGE_GAP_MAX}
         onChange={(e) => setText(e.target.value)}
-        disabled={state === "saving"}
+        readOnly={submitted !== null}
         style={{
           flex: "1 1 220px",
           minWidth: 0,
@@ -83,7 +88,7 @@ function GapRow({ initial, save, dark }) {
           color: "inherit",
         }}
       >
-        {state === "saving" ? "Adding…" : "Add to knowledge gaps"}
+        {state === "saving" ? "Adding…" : state === "error" ? "Try again" : "Add to knowledge gaps"}
       </button>
       {state === "error" && (
         <div role="alert" style={{ flexBasis: "100%", color: "#B91C1C" }}>
