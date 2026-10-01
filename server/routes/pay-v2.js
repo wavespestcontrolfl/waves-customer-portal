@@ -190,16 +190,16 @@ async function rejectIfInvoiceCollectionPending(invoice, res, { recordExistingPa
 //     stay exempt too.
 // Payer-billed invoices never save on the homeowner account.
 // Column-guarded: pre-migration environments require nothing.
-async function invoiceRequiresSavedMethod(invoice) {
+async function invoiceRequiresSavedMethod(invoice, { database = db } = {}) {
   const customerId = invoice?.customer_id || invoice?.customer?.id;
   if (!customerId || invoice?.payer_id) return false;
   try {
-    const row = await db('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate');
+    const row = await database('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate');
     if (['per_application', 'annual_prepay'].includes(row?.billing_mode)) return true;
     if (!(Number(row?.monthly_rate) > 0)) return false;
     const scheduledServiceId = invoice?.scheduled_service_id || invoice?.scheduledServiceId;
     if (!scheduledServiceId) return false;
-    const ss = await db('scheduled_services')
+    const ss = await database('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('source_estimate_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
     if (!ss?.source_estimate_id) return false;
@@ -259,10 +259,10 @@ async function invoiceCaptureNeeded(invoice) {
 // Account credit /setup WILL auto-apply to this invoice (same gate + opt-in
 // as invoiceCreditWouldFullyCover), so the pay page can show the post-credit
 // amount before /setup answers. 0 when the gate is off / opted out / no credit.
-async function invoiceProjectedCreditApplied(invoice) {
+async function invoiceProjectedCreditApplied(invoice, { database = db } = {}) {
   if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return 0;
   if (!invoice?.customer_id || invoice?.payer_id) return 0;
-  const row = await db('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
   if (row?.auto_apply_account_credit !== true) return 0;
   const credit = Number(row?.account_credits) || 0;
   if (!(credit > 0)) return 0;
@@ -317,29 +317,29 @@ async function invoiceProjectedCreditApplied(invoice) {
 // denies Zelle the instant the anchor resolves to a LIVE payer, never
 // silently falling through as "no previous balance" the way a bare null
 // return from combinedEligibleSiblings used to.
-async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly = false } = {}) {
+async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly = false, database = db } = {}) {
   if (!invoice) return false;
   // Phased verdicts, each short-circuiting in the original order (a later live check never runs once an earlier one denies).
-  if (await zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, saveRequired })) return false;
-  if (await zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payerOwnedLive, readOnly })) return false;
-  if (await zelleDeniedByChargeReconciliation(invoice, readOnly)) return false;
+  if (await zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, saveRequired, database })) return false;
+  if (await zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payerOwnedLive, readOnly, database })) return false;
+  if (await zelleDeniedByChargeReconciliation(invoice, readOnly, database)) return false;
   if (await zelleDeniedByPaymentIntent(invoice)) return false;
   return true;
 }
 
 // Collectibility, withdrawn packet invoice, saved-method requirement and account credit that settles the whole invoice.
-async function zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, saveRequired }) {
+async function zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, saveRequired, database }) {
   if (!isInvoiceCollectibleStatus(invoice.status)) return true;
   if (invoiceWithdrawnFromCustomer(invoice)) return true;
-  const needsSavedMethod = saveRequired != null ? saveRequired : await invoiceRequiresSavedMethod(invoice);
+  const needsSavedMethod = saveRequired != null ? saveRequired : await invoiceRequiresSavedMethod(invoice, { database });
   if (needsSavedMethod) return true;
-  const creditCovers = creditWillCoverAnchor != null ? creditWillCoverAnchor : await invoiceCreditWouldFullyCover(invoice);
+  const creditCovers = creditWillCoverAnchor != null ? creditWillCoverAnchor : await invoiceCreditWouldFullyCover(invoice, { database });
   return !!creditCovers;
 }
 
 // Combined-balance siblings and a live third-party payer. A caller-supplied hasPreviousBalance skips the sibling lookup; a
 // payer-stamped invoice has no siblings to discover. `payerOwned` is set by the resolver callback on the lookup itself.
-async function zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payerOwnedLive, readOnly }) {
+async function zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payerOwnedLive, readOnly, database }) {
   let hasPrevBalance = hasPreviousBalance;
   let payerOwned = payerOwnedLive === true;
   if (hasPrevBalance == null) {
@@ -347,6 +347,7 @@ async function zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payer
     if (!invoice.payer_id) {
       const PayCombined = require('../services/pay-combined');
       const siblings = await PayCombined.combinedEligibleSiblings(invoice, {
+        database,
         reusePaymentIntentId: invoice.stripe_payment_intent_id || null,
         onPayerResolved: () => { payerOwned = true; },
         // read-only: the sibling charge-claim fences must not release / promote anything either
@@ -359,13 +360,13 @@ async function zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payer
 }
 
 // true when a saved-card charge in flight / awaiting reconciliation suppresses alternate collection; any other error rethrows.
-async function zelleDeniedByChargeReconciliation(invoice, readOnly) {
+async function zelleDeniedByChargeReconciliation(invoice, readOnly, database = db) {
   try {
     // Codex round-26 P1: callers that only ASK (SMS drafting and send-time rechecks) pass readOnly — the
     // writing default would release a stale pre-submit claim / promote a submitted one while the original
     // charge worker can still commit, exposing a second payment rail. The public pay page GET keeps main's
     // behavior (default, writing) — the same call main's own GET makes.
-    if (readOnly) await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, db, { readOnly: true });
+    if (readOnly) await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true });
     else await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
   } catch (err) {
     if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
@@ -440,7 +441,7 @@ async function payPageZelleVisibility({
   // could fully cover the invoice or change the amount). Fail closed.
   let coverage = creditWillCoverAnchor;
   if (coverage == null) {
-    try { coverage = await invoiceCreditWouldFullyCover(inv); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
+    try { coverage = await invoiceCreditWouldFullyCover(inv, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
   }
   // Pre-push audit P1: isZelleTransferEligible RETHROWS a non-suppression error from
   // the charge-reconciliation check (and any probe below it can throw or hang on
@@ -450,7 +451,7 @@ async function payPageZelleVisibility({
   let eligible;
   try {
     eligible = await withTimeout(
-      isZelleTransferEligible(inv, { creditWillCoverAnchor: coverage, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly }),
+      isZelleTransferEligible(inv, { creditWillCoverAnchor: coverage, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly, database: dbh }),
       ZELLE_ELIGIBILITY_TIMEOUT_MS,
     );
   } catch (err) {
@@ -465,7 +466,7 @@ async function payPageZelleVisibility({
   // answer for (before any /setup call exists to resolve the post-credit
   // amount).
   let projectedCredit;
-  try { projectedCredit = await invoiceProjectedCreditApplied(inv); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
+  try { projectedCredit = await invoiceProjectedCreditApplied(inv, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
   // projectedCredit rides the verdict so GET /:token reuses it instead of a
   // third credit read (Codex round-13 P1).
   if (projectedCredit > 0) return { visible: false, reason: 'credit_pending', projectedCredit };
