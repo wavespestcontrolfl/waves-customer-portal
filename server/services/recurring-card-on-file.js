@@ -833,6 +833,41 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
   });
 }
 
+// An accept refused because the live policy no longer expects the capture the
+// tab made (CONSENT_VARIANT_STALE) leaves that SetupIntent succeeded in Stripe
+// and unbound. Retire it so no later recovery can treat it as a legacy capture
+// (the setup_intent.succeeded recovery live-reads an unbound intent and skips a
+// retired one) — durable whichever way the policy moved (gate off, saved method
+// landed, exemption). Only an intent that belongs to THIS estimate is touched
+// (a crafted id must not retire another estimate's capture); an unknown /
+// foreign / already-retired / canceled intent needs nothing. ok:false only when
+// Stripe could not confirm — the caller fails closed.
+async function retireOrphanedCaptureIntent({ estimate, setupIntentId }) {
+  if (!setupIntentId) return { ok: true, retired: false };
+  let current = null;
+  try {
+    current = await readLiveSetupIntent(setupIntentId);
+  } catch (err) {
+    if (isStripeResourceMissing(err)) return { ok: true, retired: false };
+    logger.warn('[recurring-cof] orphaned-capture lookup failed', { error: err.message });
+    return { ok: false, reason: 'verification_failed' };
+  }
+  if (!current) return { ok: false, reason: 'verification_failed' };
+  if (!recurringCardIntentBelongsToEstimate(current, estimate.id)
+    || current.status === 'canceled'
+    || isRetiredSetupIntent(current)) {
+    return { ok: true, retired: false };
+  }
+  try {
+    await StripeService.retireSetupIntent(current.id);
+  } catch (err) {
+    logger.warn(`[recurring-cof] orphaned-capture retire failed for ${current.id}`, { error: err.message });
+    return { ok: false, reason: 'retire_failed' };
+  }
+  logger.info(`[recurring-cof] retired orphaned SetupIntent ${current.id} for estimate ${estimate.id} — accept refused it (policy no longer expects a capture)`);
+  return { ok: true, retired: true };
+}
+
 // In-transaction re-check of the verified intent under the accept's row lock
 // (pre-push Codex P1 r3): the pre-transaction verify can be a moment stale —
 // a replacement from another tab/request retires the intent between that
@@ -1935,6 +1970,7 @@ module.exports = {
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
   replaceRecurringCardIntent,
+  retireOrphanedCaptureIntent,
   resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
   verifyRecurringCardIntentUnderLock,

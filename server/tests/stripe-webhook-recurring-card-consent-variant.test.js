@@ -142,6 +142,26 @@ describe('estimate_recurring_card recovery never enrolls an intent the accept di
   });
 });
 
+describe('estimate_recurring_card recovery skips an orphaned capture the rejected accept retired (PAF-B r3 pre-push P0)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('capture -> gate off -> 409 (intent retired) -> reload/accept with NO marker -> the unbound intent live-reads retired and is never enrolled', async () => {
+    // Gate-off accept: no marker, estimate_data carries no intent stamp.
+    wireDb(estimateRow({}));
+    require('../services/stripe').retrieveSetupIntent.mockResolvedValueOnce({ id: 'seti_1', metadata: { retired: 'true' } });
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(require('../services/stripe').retrieveSetupIntent).toHaveBeenCalledWith('seti_1');
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('control: a genuine legacy capture (not retired) on an unstamped accept still enrolls', async () => {
+    wireDb(estimateRow({}));
+    require('../services/stripe').retrieveSetupIntent.mockResolvedValueOnce({ id: 'seti_1', metadata: {} });
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('estimate_recurring_card recovery honors an explicit Auto Pay opt-out (PR-B)', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 

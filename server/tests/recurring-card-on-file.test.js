@@ -1194,6 +1194,40 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
   });
 });
 
+describe('retireOrphanedCaptureIntent (PAF-B r3 pre-push P0)', () => {
+  const { retireOrphanedCaptureIntent } = require('../services/recurring-card-on-file');
+  const LIVE = { ...GOOD_SI, payment_method: { id: 'pm_1', type: 'card' } };
+  const liveById = (map) => mockRetrieveSetupIntent.mockImplementation(async (id) => map[id] || null);
+
+  it('retires this estimate\'s succeeded intent (metadata.retired, no replacement)', async () => {
+    liveById({ seti_1: LIVE });
+    mockRetireSetupIntent.mockResolvedValue({});
+    expect(await retireOrphanedCaptureIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: true, retired: true });
+    expect(mockRetireSetupIntent).toHaveBeenCalledWith('seti_1');
+  });
+
+  it.each([
+    ['another estimate\'s intent', { ...LIVE, metadata: { ...GOOD_SI.metadata, estimate_id: 'est-OTHER' } }],
+    ['a one-time HOLD intent', { ...LIVE, metadata: { purpose: 'estimate_card_hold', estimate_id: 'est-1' } }],
+    ['an already-retired intent', { ...LIVE, metadata: { ...GOOD_SI.metadata, retired: 'true' } }],
+    ['a canceled intent', { ...LIVE, status: 'canceled' }],
+  ])('leaves %s alone', async (_label, si) => {
+    liveById({ [si.id]: si });
+    expect(await retireOrphanedCaptureIntent({ estimate: EST, setupIntentId: si.id })).toEqual({ ok: true, retired: false });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  it('an id Stripe never minted needs nothing; an outage or a failed stamp is ok:false (caller fails closed)', async () => {
+    mockRetrieveSetupIntent.mockRejectedValueOnce(Object.assign(new Error('No such setupintent'), { code: 'resource_missing', statusCode: 404, type: 'StripeInvalidRequestError' }));
+    expect(await retireOrphanedCaptureIntent({ estimate: EST, setupIntentId: 'seti_nope' })).toEqual({ ok: true, retired: false });
+    mockRetrieveSetupIntent.mockRejectedValueOnce(Object.assign(new Error('Stripe is down'), { statusCode: 503, type: 'StripeAPIError' }));
+    expect(await retireOrphanedCaptureIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'verification_failed' });
+    liveById({ seti_1: LIVE });
+    mockRetireSetupIntent.mockRejectedValueOnce(new Error('stripe write failed'));
+    expect(await retireOrphanedCaptureIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'retire_failed' });
+  });
+});
+
 describe('replaceRecurringCardIntent ("use a different payment method")', () => {
   const LIVE_GOOD = { ...GOOD_SI, payment_method: { id: 'pm_1', type: 'card' }, client_secret: 'cs_1' };
   const FRESH = { id: 'seti_after', client_secret: 'cs_after', status: 'requires_payment_method', metadata: { purpose: 'estimate_recurring_card', estimate_id: 'est-1' } };

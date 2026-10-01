@@ -9979,6 +9979,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         : attestedConsentVariant !== '';
     }
     if (consentMismatch) {
+      // r3 pre-push P0: the policy no longer expects a capture (rollout gate
+      // off, saved method from another tab, exemption), so the intent this
+      // tab captured is ORPHANED. The reload accepts on a no-capture path
+      // that may leave no marker (gate off), and the setup_intent.succeeded
+      // recovery would then read it as a legacy capture and enroll it —
+      // undoing an Auto Pay opt-out. Retire it in Stripe now (the recovery
+      // live-reads an unbound intent and skips a retired one). A retire that
+      // cannot be confirmed fails closed: the tab keeps its intent and retries.
+      if (recurringCardPolicy.required !== true && recurringCardSetupIntentId) {
+        const retired = await RecurringCards.retireOrphanedCaptureIntent({
+          estimate,
+          setupIntentId: recurringCardSetupIntentId,
+        });
+        if (!retired.ok) {
+          return res.status(503).json({
+            error: 'We could not update your payment terms just now. Please try again in a moment.',
+            code: 'RECURRING_CARD_RETIRE_FAILED',
+          });
+        }
+      }
       return res.status(409).json({
         error: 'Your payment terms were just updated. Please reload the page and review the card authorization before confirming.',
         code: 'CONSENT_VARIANT_STALE',

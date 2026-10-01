@@ -2379,8 +2379,10 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
   let TOKEN = 'tok-pafb-r2-x0123456789';
   let tokenSeq = 0;
   let resolverSpy;
+  let retireSpy;
 
   function seed() {
+    retireSpy = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
     tokenSeq += 1;
     TOKEN = `tok-pafb-r2-${tokenSeq}-x0123456789`;
     resetStore(recurringPestEstimate({ id: 'est-pafb-r2', token: TOKEN }));
@@ -2409,6 +2411,8 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
   afterEach(() => {
     if (resolverSpy) resolverSpy.mockRestore();
     resolverSpy = null;
+    if (retireSpy) retireSpy.mockRestore();
+    retireSpy = null;
   });
 
   test('P0: rollout gate turned off mid-flight (policy no longer enforced) — captured intent + attestation 409, nothing committed', async () => {
@@ -2417,6 +2421,8 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     const res = await putAccept(TOKEN, CAPTURED);
     expect(res.status).toBe(409);
     expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    // r3 P0: the orphaned capture is retired in Stripe so it can never be recovered later.
+    expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
@@ -2442,6 +2448,25 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('r3 P0: a retire that cannot be confirmed fails closed (503), nothing committed, no 409 that would drop the intent', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    retireSpy.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(503);
+    expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('r3 P0: an attestation alone (no intent) retires nothing', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, { recurringCardConsentVariant: 'after_visit_card' });
+    expect(res.status).toBe(409);
+    expect(retireSpy).not.toHaveBeenCalled();
   });
 
   test('control: a not-required policy with NO intent / attestation still accepts', async () => {

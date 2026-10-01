@@ -97,7 +97,7 @@ describe('accept route wiring (source pins)', () => {
 
   test('render attestation: the accept 409s CONSENT_VARIANT_STALE when the recorded variant differs from the one the page rendered (never records unseen text)', () => {
     // Checked only when a card is captured (a consent row is recorded) and not for prepay.
-    expect(src).toMatch(/\} else if \(!annualPrepaySelected\) \{[\s\S]{0,1400}code: 'CONSENT_VARIANT_STALE'/);
+    expect(src).toMatch(/\} else if \(!annualPrepaySelected\) \{[\s\S]{0,2600}code: 'CONSENT_VARIANT_STALE'/);
     // Version is verified against the server's own constant, variant against the live-recomputed one.
     expect(src).toMatch(/attestedConsentVersion === require\('\.\.\/services\/payment-method-consent-text'\)\.AFTER_VISIT_CONSENT_VERSION/);
     expect(src).toMatch(/consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'\s*\? !attestedAfterVisit\s*: attestedConsentVariant !== '';/);
