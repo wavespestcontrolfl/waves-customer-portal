@@ -21,7 +21,9 @@ const BANDED = [IMA_JET, PHOSPHO_JET, MN_JET, PALM_JET];
 describe('injectionLabelRate', () => {
   it('reads an Arborjet label in mL per inch of trunk or per palm, with its band table', () => {
     expect(injectionLabelRate(IMA_JET)).toMatchObject({ low: 2, high: 8, basis: 'inch', pick: 'Target pest' });
-    expect(injectionLabelRate(IMA_JET).bands.map((band) => [band.key, band.low, band.high])).toEqual([['sap_feeders', 2, 4], ['borers_heavy', 4, 8]]);
+    expect(injectionLabelRate(IMA_JET).bands.map((band) => [band.key, band.low, band.high])).toEqual([
+      ['sap_feeders', 2, 4], ['sap_feeders_severe', 4, 4], ['borers', 4, 8], ['borers_severe', 8, 8],
+    ]);
     expect(injectionLabelRate(IMA_JET).note).toMatch(/under 12 in use the lower rate/);
     expect(injectionLabelRate(PHOSPHO_JET)).toMatchObject({ basis: 'inch', pick: null });
     expect(injectionLabelRate(PHOSPHO_JET).bands.map((band) => [band.low, band.high])).toEqual([[3.5, 3.5], [3.5, 5], [5, 7]]);
@@ -51,7 +53,22 @@ describe('the label band that applies', () => {
     const rate = injectionLabelRate(IMA_JET);
     expect(injectionBand(rate, 10, '')).toBeNull();
     expect(injectionDoseText(rate, 10, '')).toBeNull();
-    expect(injectionBand(rate, 10, 'sap_feeders')).toMatchObject({ low: 2, high: 4 });
+    expect(injectionBand(rate, 10, 'sap_feeders')).toMatchObject({ low: 2, high: 2 });
+  });
+
+  it("applies IMA-jet's trunk rule inside the picked target group", () => {
+    const rate = injectionLabelRate(IMA_JET);
+    // Under 12 in: the lower rate; 12 to 24 in: the range; over 24 in: the highest.
+    expect(injectionBand(rate, 10, 'sap_feeders')).toMatchObject({ low: 2, high: 2 });
+    expect(injectionBand(rate, 18, 'sap_feeders')).toMatchObject({ low: 2, high: 4 });
+    expect(injectionBand(rate, 30, 'sap_feeders')).toMatchObject({ low: 4, high: 4 });
+    expect(injectionBand(rate, 10, 'borers')).toMatchObject({ low: 4, high: 4 });
+    expect(injectionBand(rate, 30, 'borers')).toMatchObject({ low: 8, high: 8 });
+    // A severe infestation takes the highest rate at any size.
+    expect(injectionBand(rate, 10, 'sap_feeders_severe')).toMatchObject({ low: 4, high: 4 });
+    expect(injectionBand(rate, 10, 'borers_severe')).toMatchObject({ low: 8, high: 8 });
+    // The trunk is needed before a size-split group settles.
+    expect(injectionBand(rate, '', 'sap_feeders')).toBeNull();
   });
 
   it("picks PHOSPHO-jet's band by the trunk, as its label does", () => {
@@ -87,7 +104,8 @@ describe('the rate and dose as the tech reads them', () => {
     expect(injectionDoseText(phospho, 18, '')).toBe('2¼ – 3 fl oz');
     expect(injectionDoseText(phospho, 30, '')).toBe('5¼ – 7 fl oz');
     const imaJet = injectionLabelRate(IMA_JET);
-    expect(injectionDoseText(imaJet, 10, 'sap_feeders')).toBe('¾ – 1¼ fl oz');
+    // 10 in for sap feeders: the lower rate only, 20 mL.
+    expect(injectionDoseText(imaJet, 10, 'sap_feeders')).toBe('4 tsp');
     expect(injectionDoseText(imaJet, '', 'sap_feeders')).toBeNull();
     expect(injectionDoseText(imaJet, 0, 'sap_feeders')).toBeNull();
     // Per palm, whatever the palm's trunk.
@@ -171,10 +189,14 @@ describe('doseOverLabel', () => {
   const imaJet = injectionLabelRate(IMA_JET);
 
   it("checks the dose against the band's exact limit for the trunk", () => {
-    // 10 in for sap feeders: up to 40 mL (1.35 fl oz).
-    expect(doseOverLabel(imaJet, 10, 1.25, 'fl_oz', 'sap_feeders')).toBe(false);
-    expect(doseOverLabel(imaJet, 10, 1.4, 'fl_oz', 'sap_feeders')).toBe(true);
-    expect(doseOverLabel(imaJet, 10, 1.4, 'fl_oz', 'borers_heavy')).toBe(false);
+    // 10 in for sap feeders: the lower rate, 20 mL (0.676 fl oz).
+    expect(doseOverLabel(imaJet, 10, 4, 'tsp', 'sap_feeders')).toBe(false);
+    expect(doseOverLabel(imaJet, 10, 1.25, 'fl_oz', 'sap_feeders')).toBe(true);
+    // A severe infestation allows the highest rate: 40 mL.
+    expect(doseOverLabel(imaJet, 10, 1.25, 'fl_oz', 'sap_feeders_severe')).toBe(false);
+    // 18 in for sap feeders: up to 72 mL (2.43 fl oz).
+    expect(doseOverLabel(imaJet, 18, 2.4, 'fl_oz', 'sap_feeders')).toBe(false);
+    expect(doseOverLabel(imaJet, 18, 2.5, 'fl_oz', 'sap_feeders')).toBe(true);
     // A PHOSPHO-jet tree of 18 in: 5 mL per inch is the limit (90 mL, 3.04 fl oz).
     const phospho = injectionLabelRate(PHOSPHO_JET);
     expect(doseOverLabel(phospho, 18, 3, 'fl_oz')).toBe(false);
@@ -203,7 +225,7 @@ describe('the record and its product', () => {
   it('reads the band picked for this product only', () => {
     const products = [{ name: IMA_JET.name, rate: injectionLabelRate(IMA_JET) }];
     const record = { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH', labelBand: { product: IMA_JET.name, key: 'sap_feeders' } };
-    expect(injectionRecordView(record, products)).toMatchObject({ pickKey: 'sap_feeders', trunkInches: '10', doseRange: '¾ – 1¼ fl oz' });
+    expect(injectionRecordView(record, products)).toMatchObject({ pickKey: 'sap_feeders', trunkInches: '10', doseRange: '4 tsp' });
     expect(injectionRecordView({ ...record, labelBand: { product: 'Other', key: 'sap_feeders' } }, products).pickKey).toBe('');
     expect(injectionRecordView({}, products)).toMatchObject({ pickKey: '', rate: null, doseRange: null });
   });

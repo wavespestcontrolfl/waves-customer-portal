@@ -8,7 +8,7 @@ import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompletionPanel, TreeShrubCloseoutBlock, treeShrubCloseoutBlocksClient } from './SchedulePage';
-import { injectionDoseText, injectionLabelRate, injectionLabelText } from '../../lib/injection-dose';
+import { injectionBand, injectionDoseText, injectionLabelRate, injectionLabelText } from '../../lib/injection-dose';
 
 vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlagReady: () => ({ enabled: false, ready: true }),
@@ -75,7 +75,8 @@ describe('the injection record', () => {
     fireEvent.change(screen.getByLabelText('Target pest'), { target: { value: 'sap_feeders' } });
     expect(screen.getByText('Dose for this tree')).toBeTruthy();
     expect(screen.getByText(injectionDoseText(IMA_RATE, 10, 'sap_feeders'))).toBeTruthy();
-    expect(screen.getByText('½ – ¾ tsp per inch of trunk')).toBeTruthy();
+    // Under 12 in, the label's lower rate for sap feeders: 2 mL per inch.
+    expect(screen.getByText(injectionLabelText(IMA_RATE, injectionBand(IMA_RATE, 10, 'sap_feeders')))).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1' } });
     expect(record().dose).toBe('1 fl oz');
@@ -98,9 +99,9 @@ describe('the injection record', () => {
     // 2 fl oz is 59 mL, inside the label's top 80 mL for a 10-inch trunk.
     fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '2' } });
     expect(screen.queryByRole('note')).toBeNull();
-    // For sap feeders the same tree is allowed 40 mL: 2 fl oz is over it.
+    // For sap feeders the same tree (under 12 in) is allowed 20 mL: 2 fl oz is over it.
     fireEvent.change(screen.getByLabelText('Target pest'), { target: { value: 'sap_feeders' } });
-    expect(screen.getByRole('note').textContent).toMatch(/^2 fl oz is more than the label allows for a 10-inch trunk \(¾ – 1¼ fl oz\)/);
+    expect(screen.getByRole('note').textContent).toMatch(/^2 fl oz is more than the label allows for a 10-inch trunk \(4 tsp\)/);
   });
 
   it("starts a new product without the old product's dose and band", async () => {

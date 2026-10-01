@@ -24,7 +24,8 @@ export const DOSE_UNITS = [
 // palm size, target pest or season. Only labels read in full are here
 // (shared/injection-label-bands.json, shared with the server's closeout
 // check; each row cites its label). A trunk-size band has below / from /
-// through / above inches; the other bands are the tech's pick. An injectable
+// through / above inches; the other bands are the tech's pick, and a picked
+// band can split again by trunk (its sizes). An injectable
 // with no row (IMA-jet 10, Propizol until their labels are read) gets no
 // worked-out dose: the record shows the label line only.
 export const INJECTION_LABEL_BANDS = LABEL_BANDS.map((row) => ({ ...row, match: new RegExp(row.match, "i") }));
@@ -68,7 +69,13 @@ export function injectionBand(rate, trunkInches, pickKey) {
     if (!(inches > 0)) return null;
     return bands.find((band) => fitsTrunk(band, inches)) || null;
   }
-  return bands.find((band) => band.key === pickKey) || null;
+  const picked = bands.find((band) => band.key === pickKey) || null;
+  if (!picked?.sizes) return picked;
+  // A picked band the label splits again by trunk (IMA-jet: the lower rate
+  // under 12 in, the highest over 24 in).
+  const inches = Number(trunkInches);
+  const size = inches > 0 ? picked.sizes.find((band) => fitsTrunk(band, inches)) : null;
+  return size ? { ...picked, low: size.low, high: size.high } : null;
 }
 
 // A single-rate dose in the truck's measures, never more than 5% under it

@@ -10959,7 +10959,7 @@ export function treeShrubCloseoutBlocksClient({
     else if (labelRate?.basis === "inch" && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
     const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand?.key || "" : "";
     const pickedBand = labelRate?.pick ? injectionBand(labelRate, inches, bandKey) : null;
-    if (labelRate?.pick && !pickedBand) {
+    if (labelRate?.pick && !labelRate.bands.some((option) => option.key === bandKey)) {
       push(`Pick the ${labelRate.pick.toLowerCase()} for the injection dose.`, "injectionRecord.labelBand");
     } else if (labelRate?.basis === "palm" && pickedBand && String(injection.sizeClassOrDbh || "").trim().toLowerCase() !== pickedBand.label.toLowerCase()) {
       push(`Palm size must match the picked band (${pickedBand.label}).`, "injectionRecord.sizeClassOrDbh");

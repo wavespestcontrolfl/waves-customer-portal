@@ -5,18 +5,66 @@
     "match": "\\bima[\\s-]*jet\\b(?![\\s-]*10\\b)",
     "basis": "inch",
     "pick": "Target pest",
-    "note": "Label: under 12 in use the lower rate; over 24 in, or a severe infestation, use the highest rate.",
+    "note": "Label: under 12 in use the lower rate, 12 to 24 in the range, over 24 in the highest; a severe infestation takes the highest rate at any size.",
     "bands": [
       {
         "key": "sap_feeders",
         "label": "Aphids, scales, whiteflies and other sap feeders",
         "low": 2,
+        "high": 4,
+        "sizes": [
+          {
+            "below": 12,
+            "low": 2,
+            "high": 2
+          },
+          {
+            "from": 12,
+            "through": 24,
+            "low": 2,
+            "high": 4
+          },
+          {
+            "above": 24,
+            "low": 4,
+            "high": 4
+          }
+        ]
+      },
+      {
+        "key": "sap_feeders_severe",
+        "label": "Sap feeders, severe infestation",
+        "low": 4,
         "high": 4
       },
       {
-        "key": "borers_heavy",
-        "label": "Borers, beetles, lanternfly, or a heavy sap-feeder infestation",
+        "key": "borers",
+        "label": "Borers, beetles, lanternfly, royal palm bug, sawfly",
         "low": 4,
+        "high": 8,
+        "sizes": [
+          {
+            "below": 12,
+            "low": 4,
+            "high": 4
+          },
+          {
+            "from": 12,
+            "through": 24,
+            "low": 4,
+            "high": 8
+          },
+          {
+            "above": 24,
+            "low": 8,
+            "high": 8
+          }
+        ]
+      },
+      {
+        "key": "borers_severe",
+        "label": "Borers or beetles, severe infestation",
+        "low": 8,
         "high": 8
       }
     ]
