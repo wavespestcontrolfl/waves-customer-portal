@@ -4487,8 +4487,12 @@ function visitLoopItemLines(items, label, trailing) {
 // The call_commitments ids renderVisitLoopsSection can show (the same five-per-list
 // cap) — persisted on a suggestion so the send boundary rechecks they are still
 // open. [] gate-off: the section is not rendered then.
-function visitLoopCommitmentIds(context) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return [];
+// Keyed on the facts block the reply was generated from (did it carry the
+// section?), not the live gate: a gate flip between generation and persistence
+// must not drop the send-time rechecks for a reply grounded on the section.
+const factsCarryVisitLoops = (factsBlock) => String(factsBlock || '').includes(`\n${VISIT_LOOPS_HEADER}\n`);
+function visitLoopCommitmentIds(context, factsBlock) {
+  if (!factsCarryVisitLoops(factsBlock)) return [];
   const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
   const ids = [...(Array.isArray(v.weOwe) ? v.weOwe.slice(0, 5) : []), ...(Array.isArray(v.customerWaiting) ? v.customerWaiting.slice(0, 5) : [])]
     // "id:rev" — the send boundary checks the row is still open AND unedited
@@ -4518,8 +4522,8 @@ function validateOpenLoopAnswer({ reply, context }) {
 // visit-loops-facts visitStatusSignature. The send boundary holds it to the LIVE
 // ETA freshness window AND rebuilds the facts, refusing if the signature changed.
 // null when the section showed none of these, or gate-off.
-function visitLoopStatus(context) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+function visitLoopStatus(context, factsBlock) {
+  if (!factsCarryVisitLoops(factsBlock)) return null;
   const signature = require('./visit-loops-facts').visitStatusSignature(context && context.visitLoops);
   return signature ? { signature } : null;
 }
@@ -5729,7 +5733,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       smsLogId: smsLogId || null,
       intent: intentName,
       schedulingIntent,
-      requireReview: openLoopThanks,
+      // Any draft whose facts list something owed goes to a person: no check can
+      // prove a non-empty reply actually addressed it (openLoopThanks is the
+      // demoted-gratitude case of the same rule).
+      requireReview: openLoopThanks || (factsCarryVisitLoops(factsForDraft) && visitLoopsNeedAnswer(context)),
     });
 
     // Deterministic comms-lint verdict for this draft, computed once and
@@ -5905,8 +5912,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           liveEtaSnapshot,
           techNames,
           // PR #5499: open commitments the reply was grounded on — rechecked at the provider boundary.
-          visitLoopCommitmentIds: visitLoopCommitmentIds(context),
-          visitLoopStatus: visitLoopStatus(context),
+          visitLoopCommitmentIds: visitLoopCommitmentIds(context, factsForDraft),
+          visitLoopStatus: visitLoopStatus(context, factsForDraft),
           // Codex round-43 P2: the already-booked callback(s) a reply may refer to — persisted on the claim and rechecked live before provider entry.
           reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
         });
@@ -5950,8 +5957,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
               liveEtaSnapshot,
               techNames,
-              visitLoopCommitmentIds: visitLoopCommitmentIds(context),
-              visitLoopStatus: visitLoopStatus(context),
+              visitLoopCommitmentIds: visitLoopCommitmentIds(context, factsForDraft),
+              visitLoopStatus: visitLoopStatus(context, factsForDraft),
               // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
               reserviceLanesSnapshot,
               reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -6009,8 +6016,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
             liveEtaSnapshot,
             techNames,
-            visitLoopCommitmentIds: visitLoopCommitmentIds(context),
-            visitLoopStatus: visitLoopStatus(context),
+            visitLoopCommitmentIds: visitLoopCommitmentIds(context, factsForDraft),
+            visitLoopStatus: visitLoopStatus(context, factsForDraft),
             // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
             reserviceLanesSnapshot,
             reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),

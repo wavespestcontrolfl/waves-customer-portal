@@ -101,9 +101,9 @@ function familyKey(serviceType) {
   if (/lawn|turf|fertiliz|weed|sod/.test(t)) return 'lawn';
   if (/mosquito/.test(t)) return 'mosquito';
   if (/termite|wdo|wood.destroying/.test(t)) return 'termite';
-  if (/rodent|rat\b|mice|mouse/.test(t)) return 'rodent';
+  if (/rodent|\brats?\b|mice|mouse/.test(t)) return 'rodent';
   if (/tree|shrub|ornamental/.test(t)) return 'tree_shrub';
-  if (/pest|roach|ant\b|ants|spider|perimeter|general|bug/.test(t)) return 'pest';
+  if (/pest|roach|\bants?\b|spider|perimeter|general|bug/.test(t)) return 'pest';
   return t.trim() || null;
 }
 
@@ -181,7 +181,10 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
 
   // A started visit (by status or tracker) has no stops "before" it — and the send
   // recount rejects started visits — so only a not-started visit carries a count.
-  const notStarted = NOT_STARTED_STATUSES.includes(visit.status)
+  // ...and a fresh tech_status whose current job is this visit (on site, or driving
+  // to it) leads a lagging 'confirmed' row the same way.
+  const currentJob = fresh && String(status?.current_job_id ?? '') === String(visit.id);
+  const notStarted = NOT_STARTED_STATUSES.includes(visit.status) && !currentJob
     && !LIVE_TRACK_STATES.includes(visit.track_state) && visit.track_state !== 'complete';
   const stopsAhead = notStarted ? await countStopsAhead(conn, visit, now) : null;
   return {
@@ -191,8 +194,7 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
     stopsAhead,
     // current_job_id is set from en_route on, so "at this visit" also needs an
     // on-site status; driving to it is "en route", not "at this visit now".
-    atThisVisit: fresh && ON_SITE_STATUSES.includes(String(status?.status))
-      && Boolean(status?.current_job_id) && String(status.current_job_id) === String(visit.id),
+    atThisVisit: currentJob && ON_SITE_STATUSES.includes(String(status.status)),
     // Which of today's visits this is about (a customer can have two today).
     visitId: String(visit.id),
     techId: String(visit.technician_id),
@@ -275,11 +277,16 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
 
 // ── missed visit ────────────────────────────────────────────────────────────
 const MISSED_SCAN_MAX = 10;
-function missedWindowLabel(originalWindow, deriveWindow) {
+// The logged original START ("09:00:00-10:30:00" → "09:00:00"); writers store the
+// internal job block as the end, so only the start is the promised window.
+function missedWindowStart(originalWindow) {
   const start = /^\s*(\d{1,2}:\d{2})/.exec(String(originalWindow || ''));
   if (!start) return null;
-  const startHms = start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
-  return windowLabel({ window_start: startHms }, deriveWindow);
+  return start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
+}
+function missedWindowLabel(originalWindow, deriveWindow) {
+  const startHms = missedWindowStart(originalWindow);
+  return startHms ? windowLabel({ window_start: startHms }, deriveWindow) : null;
 }
 async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
   const today = etDateString(now);
@@ -311,7 +318,7 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
   const unfinished = (unfinishedRows || []).find((row) => !stillOpen(row));
   if (unfinished) {
     candidates.push({
-      type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date),
+      type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date), windowStart: unfinished.window_start || null,
       windowDisplay: windowLabel(unfinished, deriveWindow), status: unfinished.status, reason: 'not_completed',
     });
   }
@@ -348,7 +355,7 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
     const followedUp = movedSelf || (later || []).some((r) => familyKey(r.service_type) === family);
     if (!followedUp) {
       candidates.push({
-        type: noshow.service_type || null, date,
+        type: noshow.service_type || null, date, windowStart: missedWindowStart(noshow.original_window),
         // The window that was MISSED, as the customer was promised it: the logged
         // original START through the arrival-window formatter (writers store
         // "start-end" with the internal job block as the end), never the joined
@@ -498,7 +505,7 @@ function visitStatusSignature(visitLoops) {
     tp && `pos:${tp.visitId}@${tp.windowStart ?? ''}:${tp.techId}:${tp.status}:${tp.atThisVisit === true}:${tp.stopsAhead ?? ''}`,
     v.lateAlert && `late:${v.lateAlert.visitId}@${v.lateAlert.windowStart ?? ''}:${v.lateAlert.type}:${v.lateAlert.missingTracking === true}`,
     v.pastWindow && `past:${v.pastWindow.visitId}@${v.pastWindow.windowStart ?? ''}`,
-    v.missedVisit && `missed:${v.missedVisit.type}:${v.missedVisit.date}:${v.missedVisit.reason}`,
+    v.missedVisit && `missed:${v.missedVisit.type}:${v.missedVisit.date}@${v.missedVisit.windowStart ?? ''}:${v.missedVisit.reason}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
 }

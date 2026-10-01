@@ -313,10 +313,22 @@ async function reserviceBlock({ decision, outgoingBody }) {
 // completion, a resolved alert, a moved route) refuses — one check for every
 // time-sensitive line, whatever wording the reply used.
 // Fails closed on a read error. Returns null or a reason code.
-function visitStatusExpired(snapshot, nowMs) {
+// The hard 15-minute TTL is for the location-derived line only (a tech position
+// moves by the minute); durable facts (a delay, a passed window, a missed visit)
+// are revalidated by the rebuilt signature however long the card waited.
+function visitStatusExpired(snapshot, signature, nowMs) {
+  if (!String(signature || '').split('|').some((part) => part.startsWith('pos:'))) return false;
   const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness');
   const at = Date.parse(snapshot?.facts_generated_at || '');
   return !Number.isFinite(at) || nowMs - at > ETA_FRESHNESS_WINDOW_MS;
+}
+// A commitment line's relative wording ("later today") means the ET day the facts
+// were built: past that day the reply is refused rather than sent with a shifted
+// meaning. No stamp = refused.
+function commitmentDayChanged(snapshot, now) {
+  const at = Date.parse(snapshot?.facts_generated_at || '');
+  const { etDateString } = require('../utils/datetime-et');
+  return !Number.isFinite(at) || etDateString(new Date(at)) !== etDateString(now);
 }
 // Each ref must still be in THIS customer's open list from the same canonical
 // readers the facts came from: that one question covers closed, dismissed,
@@ -334,25 +346,28 @@ async function commitmentsChanged(conn, refs, customerId) {
   const live = new Map([...(calls || []), ...(texts || [])].map((r) => [String(r.id), r]));
   return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));
 }
+// The same question for VISIT STATUS: rebuild the facts for the customer (strict —
+// a failed read throws) and compare their signature with the draft's.
+async function visitStatusChanged(conn, signature, customerId) {
+  if (!customerId) return true;
+  const facts = require('./visit-loops-facts');
+  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true });
+  return facts.visitStatusSignature(fresh) !== signature;
+}
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
 async function openLoopsBlockReason({ decision, customerId = decision?.customer_id, dbh, now = new Date() }) {
   const snapshot = objectOrNull(parseInputSnapshot(decision?.input_snapshot)) || {};
   const refs = [...new Set([].concat(snapshot.visit_loop_commitment_ids || []))]
     .filter((ref) => typeof ref === 'string' && ref)
     .map((ref) => { const [id, rev = null] = ref.split(':'); return { id, rev }; });
-  const status = objectOrNull(snapshot.visit_loop_status);
-  if (status && visitStatusExpired(snapshot, now.getTime())) return 'visit_status_expired';
-  const signature = typeof status?.signature === 'string' ? status.signature : null;
+  const signature = objectOrNull(snapshot.visit_loop_status)?.signature || null;
+  if (visitStatusExpired(snapshot, signature, now.getTime())) return 'visit_status_expired';
+  if (refs.length && commitmentDayChanged(snapshot, now)) return 'commitment_day_changed';
   if (!refs.length && !signature) return null;
   try {
     const conn = dbh || require('../models/db');
     if (refs.length && await commitmentsChanged(conn, refs, customerId)) return 'commitment_closed';
-    if (signature) {
-      if (!customerId) return 'visit_status_changed';
-      const facts = require('./visit-loops-facts');
-      const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true });
-      if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
-    }
+    if (signature && await visitStatusChanged(conn, signature, customerId)) return 'visit_status_changed';
     return null;
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed: ${err.message}; blocking send`);

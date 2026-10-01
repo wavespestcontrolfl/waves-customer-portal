@@ -217,15 +217,17 @@ describe('sanctioned delay wording passes the send-time status guard', () => {
 });
 
 describe('visitLoopCommitmentIds', () => {
-  test('gate on: the rendered commitment ids (five per list, deduped); gate off: none', () => {
+  // keyed on the facts block the reply was generated from, not the live gate
+  const WITH = `UPCOMING SERVICES:\n- none\n${HEADER}\n- none\nBILLING:\n`;
+  const WITHOUT = 'UPCOMING SERVICES:\n- none\nBILLING:\n';
+  test('facts with the section: the rendered commitment ids (five per list, deduped); without it: none', () => {
     const v = { weOwe: Array.from({ length: 7 }, (_, i) => ({ id: `w${i}` })), customerWaiting: [{ id: 'w0' }, { id: 'q1' }, { kind: 'no id' }] };
-    expect(visitLoopCommitmentIds({ visitLoops: v })).toEqual([]);
-    process.env[GATE] = 'true';
-    expect(visitLoopCommitmentIds({ visitLoops: v })).toEqual(['w0', 'w1', 'w2', 'w3', 'w4', 'q1']);
+    expect(visitLoopCommitmentIds({ visitLoops: v }, WITHOUT)).toEqual([]);
+    expect(visitLoopCommitmentIds({ visitLoops: v }, WITH)).toEqual(['w0', 'w1', 'w2', 'w3', 'w4', 'q1']);
     // a revision rides along as "id:rev" so the send boundary can spot a staff edit
-    expect(visitLoopCommitmentIds({ visitLoops: { weOwe: [{ id: 'c9', rev: 'abc123def456' }] } })).toEqual(['c9:abc123def456']);
-    expect(visitLoopCommitmentIds(null)).toEqual([]);
-    expect(visitLoopCommitmentIds({})).toEqual([]);
+    expect(visitLoopCommitmentIds({ visitLoops: { weOwe: [{ id: 'c9', rev: 'abc123def456' }] } }, WITH)).toEqual(['c9:abc123def456']);
+    expect(visitLoopCommitmentIds(null, WITH)).toEqual([]);
+    expect(visitLoopCommitmentIds({}, WITH)).toEqual([]);
   });
 });
 
@@ -254,17 +256,18 @@ describe('validateOpenLoopAnswer', () => {
 });
 
 describe('visitLoopStatus', () => {
-  test('gate on: the visit-status signature when a time-sensitive line shows; otherwise null', () => {
+  const WITH = `UPCOMING SERVICES:\n- none\n${HEADER}\n- none\nBILLING:\n`;
+  test('facts with the section: the visit-status signature when a time-sensitive line shows; otherwise null', () => {
     const tp = { techName: 'Sam', status: 'en_route', stopsAhead: 2, visitId: 'v1', techId: 't1', windowStart: '09:00:00', atThisVisit: false };
-    expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toBeNull(); // gate off
-    process.env[GATE] = 'true';
-    expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toEqual({ signature: 'pos:v1@09:00:00:t1:en_route:false:2' });
-    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } })).toBeNull();
-    expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn', date: '2026-09-30', reason: 'not_completed' } } })).toEqual({ signature: 'missed:Lawn:2026-09-30:not_completed' });
-    expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }))
+    expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull();
+    expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, WITH)).toEqual({ signature: 'pos:v1@09:00:00:t1:en_route:false:2' });
+    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } }, WITH)).toBeNull();
+    expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } } }, WITH))
+      .toEqual({ signature: 'missed:Lawn:2026-09-30@09:00:00:not_completed' });
+    expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }, WITH))
       .toEqual({ signature: 'late:v1@09:00:00:tech_late:false|past:v1@09:00:00' });
-    expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBeNull(); // commitments have their own recheck
-    expect(visitLoopStatus({})).toBeNull();
+    expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } }, WITH)).toBeNull(); // commitments have their own recheck
+    expect(visitLoopStatus({}, WITH)).toBeNull();
   });
 });
 

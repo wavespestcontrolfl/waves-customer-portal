@@ -687,8 +687,8 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       // Technician first name(s) independent of live entries (round-42 P2).
       techNames: drafter.techNamesFromContext(context),
       // PR #5499 r1: open call_commitments ids its VISIT STATUS & OPEN LOOPS lines named.
-      visitLoopCommitmentIds: drafter.visitLoopCommitmentIds(context),
-      visitLoopStatus: drafter.visitLoopStatus(context),
+      visitLoopCommitmentIds: drafter.visitLoopCommitmentIds(context, factsBlock),
+      visitLoopStatus: drafter.visitLoopStatus(context, factsBlock),
       reserviceLanesSnapshot,
       reserviceBookedSnapshot: drafter.reserviceBookedSnapshot(reserviceBooked),
     };

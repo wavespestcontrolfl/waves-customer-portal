@@ -442,13 +442,14 @@ describe('open-loop commitments recheck', () => {
   const { listOpenCommitments } = require('../services/call-commitments');
   const { listSmsCommitments } = require('../services/sms-operational-actions');
   const { commitmentRevision } = require('../services/visit-loops-facts');
-  const withIds = (ids, over = {}) => decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_commitment_ids: ids }), ...over });
+  const nowIso = () => new Date().toISOString();
+  const withIds = (ids, over = {}) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: nowIso(), visit_loop_commitment_ids: ids }), ...over });
   // the customer's current open lists, from the same canonical readers the facts used
   const openFor = ({ calls = [], texts = [] } = {}) => {
     listOpenCommitments.mockReset().mockResolvedValue(calls);
     listSmsCommitments.mockReset().mockResolvedValue(texts);
   };
-  const decisionRowDb = (row = { input_snapshot: JSON.stringify({ visit_loop_commitment_ids: ['cc-1'] }), customer_id: 'c1' }) => (table) => {
+  const decisionRowDb = (row = { input_snapshot: JSON.stringify({ facts_generated_at: new Date().toISOString(), visit_loop_commitment_ids: ['cc-1'] }), customer_id: 'c1' }) => (table) => {
     const q = { where: () => q, first: async () => row };
     return table === 'agent_decisions' ? q : null;
   };
@@ -484,6 +485,16 @@ describe('open-loop commitments recheck', () => {
     await expect(openLoopsBlockReason({ decision: withIds([ref]) })).resolves.toBe('commitment_closed');
   });
 
+  test('a commitment-backed reply is refused once the ET day the facts were built has passed ("later today" would shift)', async () => {
+    openFor({ calls: [{ id: 'cc-1' }] });
+    const at = (iso) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: iso, visit_loop_commitment_ids: ['cc-1'] }) });
+    // drafted 11:30 PM ET, sent 8 AM ET the next day
+    await expect(openLoopsBlockReason({ decision: at('2026-10-01T03:30:00Z'), now: new Date('2026-10-01T12:00:00Z') })).resolves.toBe('commitment_day_changed');
+    await expect(openLoopsBlockReason({ decision: at('2026-10-01T12:00:00Z'), now: new Date('2026-10-01T20:00:00Z') })).resolves.toBeNull();
+    // no facts stamp: refused
+    await expect(openLoopsBlockReason({ decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_commitment_ids: ['cc-1'] }) }) })).resolves.toBe('commitment_day_changed');
+  });
+
   test('a read error fails closed', async () => {
     listOpenCommitments.mockReset().mockRejectedValue(new Error('db down'));
     await expect(openLoopsBlockReason({ decision: withIds(['cc-1']) })).resolves.toBe('open_loops_recheck_failed');
@@ -507,7 +518,7 @@ describe('open-loop commitments recheck', () => {
     const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
     expect(openLoopsProviderPreSendCheck({ commitmentIds: [] })).toBeUndefined();
     expect(openLoopsProviderPreSendCheck({ commitmentIds: null })).toBeUndefined();
-    const check = openLoopsProviderPreSendCheck({ commitmentIds: ['cc-1'], customerId: 'c1' });
+    const check = openLoopsProviderPreSendCheck({ commitmentIds: ['cc-1'], customerId: 'c1', factsGeneratedAt: new Date() });
     expect(check.afterMarker).toBe(check);
     openFor({ calls: [{ id: 'cc-1' }] });
     await expect(check({ dbi: () => null })).resolves.toEqual({ ok: true });
@@ -576,6 +587,13 @@ describe('open-loop commitments recheck', () => {
       const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
       expect(blockReasonIsEtaInfrastructure('open-loop facts stale (open_loops_recheck_failed)')).toBe(true);
       expect(blockReasonIsEtaInfrastructure('open-loop facts stale (commitment_closed)')).toBe(false);
+    });
+
+    test('durable facts (missed visit, passed window, delay) do not expire with the ETA window; they are rebuilt', async () => {
+      const missed = loops({ missedVisit: { type: 'Pest Control', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } });
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date(Date.now() - 60 * 60000).toISOString(), visit_loop_status: { signature: facts.visitStatusSignature(missed) } }) });
+      nowFacts(missed);
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
     });
 
     test('visit status is held to the 15-minute freshness window; no stamp = expired', async () => {

@@ -145,6 +145,12 @@ describe('techPosition', () => {
     expect(out.techPosition).toMatchObject({ status: 'en_route', atThisVisit: false });
   });
 
+  test('a fresh tech_status whose current job is this visit means no stop count, even with a lagging confirmed row', async () => {
+    const conn = fakeConn(handlers({ status: { status: 'on_site', current_job_id: 'visit-1', location_updated_at: minutesAgo(1) } }));
+    const out = await loadVisitLoops({ customerId: 'c1', now: NOW, conn });
+    expect(out.techPosition).toMatchObject({ atThisVisit: true, stopsAhead: null });
+  });
+
   test('a started visit (status or tracker) carries no stop count and runs no count query', async () => {
     for (const visit of [{ status: 'en_route' }, { status: 'on_site' }, { status: 'confirmed', track_state: 'on_property' }]) {
       const conn = fakeConn(handlers({ visit }));
@@ -320,7 +326,7 @@ describe('missedVisit', () => {
 
   test('a pending visit from the last week reads as not completed', async () => {
     const out = await run({ unfinished: { id: 'v0', service_type: 'Lawn Care', scheduled_date: '2026-09-29', window_start: '09:00:00', status: 'confirmed' } });
-    expect(out.missedVisit).toEqual({ type: 'Lawn Care', date: '2026-09-29', windowDisplay: '9:00 AM–11:00 AM', status: 'confirmed', reason: 'not_completed' });
+    expect(out.missedVisit).toEqual({ type: 'Lawn Care', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM', status: 'confirmed', reason: 'not_completed' });
   });
 
   test('queries the last 7 ET days, before today, pending/confirmed only', async () => {
@@ -406,6 +412,10 @@ describe('missedVisit', () => {
   });
 
   test('familyKey buckets', () => {
+    // word-bounded: "Plant Health Program" is not ants; "Pirate" is not rats
+    expect(familyKey('Plant Health Program')).not.toBe('pest');
+    expect(familyKey('Fire Ant Treatment')).toBe('pest');
+    expect(familyKey('Rat Exclusion')).toBe('rodent');
     expect(familyKey('Lawn Fertilization')).toBe('lawn');
     expect(familyKey('Quarterly Pest Control')).toBe('pest');
     expect(familyKey('Mosquito Barrier')).toBe('mosquito');
