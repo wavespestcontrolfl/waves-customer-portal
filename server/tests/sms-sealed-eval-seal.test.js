@@ -66,15 +66,17 @@ const cand = (id, intent, createdAt) => ({
 // BILLING: line (Codex #5392 r3 P2), not a header LIKE, so its clause binds
 // the delimiter + exact suffixes; SLA and FREE RE-SERVICE stay LIKE markers.
 const {
-  BILLING_DELIMITER: D_, exactSectionSuffix: exactSuffix_,
+  BILLING_DELIMITER: D_, exactStructureRegexSource,
 } = require('../services/sms-company-facts');
-const EXACT = exactSuffix_();
-// FREE RE-SERVICE is matched at its rendered position too (round-24 P2): delimiter + company suffix + pattern.
+// SLA line (substring), COMPANY FACTS + LABEL FACTS (exact-structure regex twins of hasExactCompanyFacts / hasExactLabelFacts), and
+// FREE RE-SERVICE at its rendered position too (round-24 P2): the text before the first BILLING: line minus the exact company (+ label)
+// structure must end with the SLA line + the re-service line.
 const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
-const RS_BINDINGS = [D_, D_, EXACT.length, EXACT, D_, D_, EXACT.length, D_, RESERVICE_SECTION_RE.source];
+const RS_BINDINGS = [D_, D_, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source];
 const CONTRACT_BINDINGS = [
   '%FOLLOW-UP SLA RIGHT NOW:%',
-  D_, D_, EXACT.length, EXACT,
+  D_, D_, exactStructureRegexSource('optional'),
+  D_, D_, exactStructureRegexSource('required'),
   ...RS_BINDINGS,
 ];
 
@@ -244,14 +246,16 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers_cf+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers3_cfl+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
+    // the current identity (3_cfl) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS, LABEL FACTS
+    const CURRENT_BINDINGS = ['%FOLLOW-UP SLA RIGHT NOW:%', ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required')];
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(CONTRACT_BINDINGS);
-      expect(String(args[0])).not.toMatch(/NOT LIKE/); // _cf+c: every fact the version carries is required, none forbidden
+      expect(args[1]).toEqual(CURRENT_BINDINGS);
+      expect(String(args[0])).not.toMatch(/NOT LIKE/); // 3_cfl+c: every fact the version carries is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
@@ -363,7 +367,7 @@ test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND for
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     // the pre-_cf identity also forbids COMPANY FACTS (Codex #5392 r1)
-    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in .*CASE WHEN right\(split_part\(.*~ \?::text\)$/);
+    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in .*regexp_replace\(split_part\(.*~ \?::text\)$/);
     expect(compat[1][1]).toEqual(CONTRACT_BINDINGS);
   } finally {
     spy.mockRestore();
