@@ -47,7 +47,8 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
     const record = joined || service;
     const token = await ensureReportToken(service.id, knex);
-    const data = await buildReportV1Data(record, token, knex).catch(() => null);
+    const instructionOut = {};
+    const data = await buildReportV1Data(record, token, knex, { wateringInstructionOut: instructionOut }).catch(() => null);
     const reportV2 = data && data.reportV2;
     if (!reportV2) return empty;
 
@@ -82,7 +83,39 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       ),
     });
 
-    return { smsSummary: frozen.smsSummary, frozen, warnings, persisted: true };
+    // The watering instruction and its banner (GATE_LAWN_WATERING_RULE) freeze
+    // under their OWN top-level key, first writer wins, in a statement of their
+    // own. They cannot live inside lawnReportV2: the write above replaces that
+    // whole object, which would erase a snapshot a concurrent or earlier run
+    // had just frozen. The guarded UPDATE takes the row lock, so of two racing
+    // writers the second re-checks the guard after the first commits and
+    // writes nothing; a retry (or a gate rollback and re-run) changes nothing
+    // either. Gate off builds no instruction, so nothing is written, and
+    // nothing here ever deletes an existing snapshot.
+    let wateringFreeze = null;
+    // The frozen banner keeps only the treatment-specific lines: plan-dependent
+    // sentences are composed at each render, never frozen.
+    // Only a real claim is a snapshot: a state-null instruction, or one built
+    // while the visit's products could not be read, is never frozen (the next
+    // render regenerates it from what the products really are). A mow hold on
+    // a state-null visit is regenerated too, from the frozen product facts, so
+    // it reads the same at every render.
+    if (instructionOut.instruction && instructionOut.instruction.state && !instructionOut.productsLoadFailed) {
+      await knex('service_records')
+        .where({ id: service.id })
+        .whereRaw("(structured_notes::jsonb -> 'lawnWateringFreeze') IS NULL")
+        .update({
+          structured_notes: knex.raw(
+            "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ lawnWateringFreeze: { wateringInstruction: instructionOut.instruction, banner: reportV2.banner ? { ...reportV2.banner, lines: instructionOut.instruction.lines } : null, frozenAt: frozen.generatedAt } })],
+          ),
+        });
+      // Whichever writer won, the caller needs the persisted value.
+      wateringFreeze = await knex('service_records').where({ id: service.id }).first('structured_notes')
+        .then((row) => parseJsonObject(row && row.structured_notes).lawnWateringFreeze || null);
+    }
+
+    return { smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true };
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);
     return empty;

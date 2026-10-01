@@ -7,6 +7,7 @@ const {
 const {
   buildCustomerDocumentContext,
   jsonb,
+  lockActiveVersionForIssue,
   renderDocumentTemplate,
   serializeTemplate,
 } = require('./document-template-library');
@@ -772,6 +773,14 @@ async function createDocumentRequestForCustomer({ loaded, customer, productGuide
       templateKey: loaded.template.template_key,
       skipRecentDays: options.skipRecentDays,
     });
+    // `loaded` was resolved once, before the campaign loop: a publish or a
+    // content migration that activates a new version mid-campaign must not
+    // keep snapshotting the old wording for the rest of the audience. The
+    // template row lock (after the customers row, the order the admin
+    // issue route holds) serializes this insert behind that writer and
+    // refuses (409) once the pointer moved; the loop records the customer
+    // as failed and the operator re-runs the send from the new version.
+    await lockActiveVersionForIssue(trx, loaded);
 
     const [row] = await trx('customer_contracts').insert({
       customer_id: customer.id,
@@ -1004,6 +1013,7 @@ module.exports = {
   _internals: {
     channelsFor,
     channelsForCustomer,
+    createDocumentRequestForCustomer,
     formatProductGuideAppendix,
     hasMarketingSmsConsent,
     duplicateContractError,

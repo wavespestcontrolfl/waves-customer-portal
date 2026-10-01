@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -256,6 +256,9 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
           ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
+          // Codex round-43 P2: the already-booked re-service callback(s) the drafted reply may refer to ({ lane: { date, windowStart } }) —
+          // rechecked live before provider entry (reserviceBookedHandoffCheck), same snapshot the manual / scheduled seams read.
+          ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
           ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
         }),
         suggested_message: reply,
@@ -302,7 +305,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
     return {
-      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot,
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot, reserviceBookedSnapshot,
       // what the LABEL FACTS send-time check needs to read the question: the customer's own text and the prompt family
       inboundMessage, promptVersion: promptVersion || null,
     };
@@ -716,6 +719,22 @@ function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
   };
 }
 
+/**
+ * Codex round-43 P2: a drafted reply that refers to an ALREADY-BOOKED re-service callback ("your re-service is scheduled for Thursday,
+ * 9-11 AM") carries no escalate action, so it is auto-send eligible — and the booking can be cancelled or moved between drafting and
+ * sending. The same live check the manual / scheduled seams run (sms-shadow-drafter reserviceBookedReferenceBlock) against the snapshot
+ * persisted on the claim. Runs BOTH before provider entry (dispatchClaimedSend) and as the ordinary lane's providerPreSendCheck, the last
+ * await before the provider request. Fails closed: a body claiming a booked appointment with no snapshot / no live callback is blocked.
+ */
+function reserviceBookedHandoffCheck({ claim, reply, customerId }) {
+  return async () => {
+    const block = await require('./sms-shadow-drafter').reserviceBookedReferenceBlock({
+      body: reply, customerId, booked: claim.reserviceBookedSnapshot || null,
+    });
+    return block ? { ok: false, code: 'reservice_booking_changed', reason: block } : { ok: true };
+  };
+}
+
 /** The lane-specific sendCustomerMessage input for a claimed reply. */
 function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff }) {
   const parkedIds = claim.parkedIds || [];
@@ -729,7 +748,10 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
       await dispatch(trx);
       return { ok: true };
     }),
-  } : {};
+  } : {
+    // Codex round-43 P2: the ordinary lane's last await before the provider request rechecks a booked-callback reference.
+    providerPreSendCheck: reserviceBookedHandoffCheck({ claim, reply, customerId }),
+  };
   return {
     to: claim.toPhone,
     body: reply,
@@ -848,6 +870,17 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
         return outcome;
       }
     }
+    // Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
+    // the ordinary lane's providerPreSendCheck at the provider boundary. Same supersede-via-failClaim mechanism as the OPEN TIMES refusal.
+    if (!gratitudeLane) {
+      const booked = await reserviceBookedHandoffCheck({ claim, reply, customerId })();
+      if (!booked.ok) {
+        logger.warn(`[sms-auto-send] booked re-service reference stale (decision ${claim.decisionId}): ${booked.reason}`);
+        const outcome = await notSent(booked.code, booked.reason);
+        await reopenParked('Auto-send held: the referenced re-service appointment changed — suggestion reopened.');
+        return outcome;
+      }
+    }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -944,11 +977,20 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
   // push audit P1 round 2): currentPromptVersion() suffixes
   // REAL_ANSWERS_PROMPT_VERSION with whichever per-category gates are also
   // on (e.g. '...+complaints'), so an exact 2-value list would stop
-  // matching the moment any category gate joins the master one — the
-  // prefix recognizes every such variant without enumerating them. This is
-  // a DISCOVERY filter (no single row to compare against yet), so it's a
-  // membership check rather than the per-row "whichever version this draft
-  // actually used" the claim/reload sites use.
+  // matching the moment any category gate joins the master one. Codex
+  // round-2 finding: an EXACT match against the CURRENT
+  // REAL_ANSWERS_PROMPT_VERSION also stopped matching the moment that
+  // constant's own numeric suffix bumps (e.g. 'house_voice_v12_real_answers'
+  // → '...answers2') — drafts written in the minutes before such a deploy
+  // under the PREVIOUS identity were orphaned. The gratitude copy is
+  // identical across every v12 real-answers variant regardless of that
+  // suffix or any category tag, so this matches the whole v12 real-answers
+  // FAMILY by prefix (REAL_ANSWERS_PROMPT_BASE_PREFIX, e.g.
+  // 'house_voice_v12_real_answers%' — covers the bare identity, any numeric
+  // bump, and any +category suffix on either) plus the exact v11 identity.
+  // This is a DISCOVERY filter (no single row to compare against yet), so
+  // it's a membership check rather than the per-row "whichever version this
+  // draft actually used" the claim/reload sites use.
   const q = db('message_drafts as md')
     .join('sms_log as s', 'md.sms_log_id', 's.id')
     .where({

@@ -135,6 +135,11 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // the one fact the text carries; missed-call-text-back.js passes this same
   // list to getTemplate at render time.
   missed_call_text_back: Object.freeze(['callback_clause']),
+  // Lawn watering text: the frozen watering lines ARE the message. A body
+  // edited to drop {watering_lines} would otherwise render as a bare lead-in
+  // with no instruction; lawn-watering-sms.js passes this same requiredVars
+  // list to getTemplate at render time.
+  lawn_watering_instruction: Object.freeze(['watering_lines']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {
@@ -479,14 +484,17 @@ const MSG_TYPE_TO_TEMPLATE = {
 };
 
 // ── Template helper for services — check if a template is enabled before sending ──
-router.isTemplateActive = async function(messageType) {
+// `database`: a caller holding an open transaction reads on it (never a second
+// pool connection). `requireRow`: a missing row is NOT sendable, as getTemplate
+// reads it (the provider's kill-switch check keeps missing = active).
+router.isTemplateActive = async function(messageType, { database = db, requireRow = false } = {}) {
   try {
-    if (!(await db.schema.hasTable('sms_templates'))) return true;
+    if (!(await database.schema.hasTable('sms_templates'))) return !requireRow;
     const templateKey = MSG_TYPE_TO_TEMPLATE[messageType] || messageType;
-    const t = await db('sms_templates').where({ template_key: templateKey }).first();
-    if (!t) return true; // template not in DB = active by default
+    const t = await database('sms_templates').where({ template_key: templateKey }).first();
+    if (!t) return !requireRow; // template not in DB = active by default
     return t.is_active !== false;
-  } catch { return true; }
+  } catch { return !requireRow; }
 };
 
 // Get template body by key (returns null if disabled)

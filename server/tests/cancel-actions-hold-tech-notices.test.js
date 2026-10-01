@@ -13,7 +13,7 @@ const mockSkips = jest.fn().mockResolvedValue(undefined);
 const mockRestartTexts = jest.fn().mockResolvedValue(undefined);
 const mockMarkAccepted = jest.fn().mockResolvedValue(undefined);
 const mockRestoreAway = jest.fn().mockResolvedValue(undefined);
-const mockRecordAway = jest.fn().mockResolvedValue(undefined);
+const mockNoteAway = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -26,8 +26,7 @@ jest.mock('../services/cancellation-resolution/holds', () => ({
   sendDueRestartTexts: (...a) => mockRestartTexts(...a),
   markHoldsAccepted: (...a) => mockMarkAccepted(...a),
   restoreAwayMode: (...a) => mockRestoreAway(...a),
-  recordPendingAwayMode: (...a) => mockRecordAway(...a),
-  ymdOrDefaultAwayUntil: (d) => d || '2027-03-01',
+  noteAwayMode: (...a) => mockNoteAway(...a),
 }));
 
 const { executeAcceptedAction } = require('../services/cancellation-resolution/actions');
@@ -185,14 +184,48 @@ test('away pairing: a marking failure after Away Mode was written undoes the hol
   expect(mockSkips).not.toHaveBeenCalled();
 });
 
-test('away pairing records the Away Mode change on its holds before writing it', async () => {
+test('away pairing hands its holds to the Away Mode write, which records them under its own lock', async () => {
   mockStartHold.mockResolvedValueOnce(hold('lawn_care', []));
   mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'Nov 1', previousUntil: null });
   await executeAcceptedAction({
     customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care'],
   });
-  expect(mockRecordAway).toHaveBeenCalledWith(['h-lawn_care'], { customerId: 'c1', until: '2026-11-01' });
-  expect(mockRecordAway.mock.invocationCallOrder[0]).toBeLessThan(mockStartAwayMode.mock.invocationCallOrder[0]);
+  expect(mockStartAwayMode).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', until: '2026-11-01', holdIds: ['h-lawn_care'] }));
+});
+
+test('the Away Mode staff note waits for the whole paired accept: none when the marking fails and the preference is rolled back', async () => {
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', ['v1']));
+  mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'Nov 1', previousUntil: null });
+  mockMarkAccepted.mockRejectedValueOnce(new Error('db down'));
+  await expect(executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care'],
+  })).rejects.toThrow('db down');
+  expect(mockNoteAway).not.toHaveBeenCalled();
+
+  jest.clearAllMocks();
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', ['v1']));
+  mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'Nov 1', previousUntil: null });
+  await executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care'],
+  });
+  expect(mockNoteAway).toHaveBeenCalledWith({ customerId: 'c1', caseId: 'case-1', until: '2026-11-01' });
+  expect(mockNoteAway.mock.invocationCallOrder[0]).toBeGreaterThan(mockMarkAccepted.mock.invocationCallOrder[0]);
+
+  // A plain Away Mode accept has nothing to wait for.
+  jest.clearAllMocks();
+  mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'Nov 1', previousUntil: null });
+  await executeAcceptedAction({ customerId: 'c1', caseRow, action: { type: 'away_mode' }, params: { resumeDate: '2026-11-01' }, families: ['pest_control'] });
+  expect(mockNoteAway).toHaveBeenCalledTimes(1);
+});
+
+test('a moved visit is never described as already paid: card-hold and prepaid moves read the same', async () => {
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', ['v1']));
+  const out = await executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'hold' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care'],
+  });
+  const text = out.effects.join(' ');
+  expect(text).toContain('moved them to after you are back');
+  expect(text).not.toMatch(/paid/i);
 });
 
 test('a same-case retry never undoes a hold it picked up from another run: only its own holds are compensated', async () => {
@@ -214,10 +247,10 @@ test('a same-case retry never undoes a hold it picked up from another run: only 
   expect(mockSkips).not.toHaveBeenCalled();
 });
 
-test('a failed paired retry restores the Away Mode value its first attempt recorded, not the one it re-read', async () => {
+test('a failed paired retry restores the Away Mode value the write recorded on its first attempt', async () => {
   mockStartHold.mockResolvedValueOnce(hold('lawn_care', []));
-  mockRecordAway.mockResolvedValueOnce(null);
-  mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'Nov 1', previousUntil: '2026-11-01' });
+  // startAwayMode returns the value recorded by the first attempt, not the one it re-read.
+  mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'Nov 1', previousUntil: null });
   mockMarkAccepted.mockRejectedValueOnce(new Error('db down'));
   await expect(executeAcceptedAction({
     customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care'],

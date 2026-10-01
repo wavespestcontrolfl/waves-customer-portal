@@ -916,6 +916,66 @@ suppression writes are best effort: the abandoned-booking recovery worker
 re-checks at send time (SMS and email) and skips, marking suppressed, any intent
 whose draft is so linked — a lookup error skips that tick — so a failed
 suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
+`/book` "Can't find a time?" request (owner 2026-09-29, dark behind
+`GATE_BOOK_PREFERRED_TIME`, strict opt-in read at call time via
+`bookPreferredTimeLive()`; `GET /api/booking/config` reports it as
+`preferred_time`): `POST /api/booking/preferred-time` is guarded by a pre-router
+mount in `server/index.js` (above the global cors(), the global `/api/` limiter
+and the body parsers): while the gate is off EVERY method answers the generic
+unknown-route 404, and every response (404, 400, 429, success) carries
+`Cache-Control: no-store`, `X-Robots-Tag: noindex` and `Referrer-Policy:
+no-referrer`. Its two limiters key by the /64-collapsed client IP. On: the same IP-bound funnel token
+`/availability` mints for capture-intent is required (`400 session_expired`
+otherwise), a hidden honeypot field answers success and stores nothing, and
+two per-IP limiters apply (5/min, 15/hour). A valid request files ONE internal
+lead (`lead_type = 'book_preferred_time'`, status `new`, the preferred days /
+time of day / note as plain English in `transcript_summary` and structured in
+`extracted_data`) that the office answers by hand and rings one `new_lead`
+admin bell (the /book first-touch attribution — click ids, UTMs, referrer — is
+resolved through `resolveLeadSource` onto the lead like every other funnel's);
+lookup and write run under a per-phone advisory lock, so a repeat or overlapping
+submit from the same phone inside 24h refreshes that still-open lead (no second
+row or bell). Recency is `extracted_data.last_requested_at`, written only by a
+submit — office edits (status, notes, assignment) never extend the dedupe
+window or the suppression. Filing a lead also stamps its
+`ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
+public lead. A booking NEVER closes a preferred-time request (owner ruling
+2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
+on both the first commit and the `txResult.existing` replay; a free re-service
+callback visit is skipped) never marks the lead won and never touches its funnel
+row — the booking's own attribution runs exactly as for any other booking.
+Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
+booked customer's open preferred-time leads (phone match) whose
+`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
+booked <service> for <date> (visit <id>) on /book — close this request if
+nothing else is needed" — deduped per (lead, visit) through
+`lead_activities.metadata`, so a replay never stacks notes; a newer request is
+new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+is `booking`, so the shared customer-originated-contact allowlist
+(`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
+booking that committed while a submit was still in flight (its note ran before
+the lead was visible) is reconciled by the submit after its commit: the lead gets
+the same note and NO `new_lead` bell rings; with no live booking since the
+request began the bell rings as usual. A repeat submit inside 24h merges only that
+request's own fields into `extracted_data`; the lead's first-touch UTM /
+referrer / landing URL are written once at creation and kept. The service line
+`address_line2` (apartment unit) is kept inline with the street line and in
+`extracted_data.address_line2`. It sends NOTHING to the customer — no SMS, no email — and
+retires every open abandoned-booking intent for the same phone or session, and
+capture-intent skips a phone that filed a request in the last day, and the
+recovery worker itself re-checks for a request filed since the intent was
+captured (fail closed on a lookup error) immediately before every text and
+email. The fence with the worker is the `booking_intents` ROW lock, not the
+per-phone advisory lock: the submit's suppression UPDATE and the worker's final
+check + dispatch (`withLockedRecoveryIntent`, which runs `SELECT ... FOR UPDATE`
+on the intent row and holds it through the send) contend on the same row, so
+exactly one goes first — the worker never takes the advisory lock, which only
+de-duplicates concurrent SUBMITS from one phone. A submit that waited out a
+send commits after it; a worker that arrives after the submit's commit reads the
+row as suppressed and its re-check sees the request. Neither a failed
+suppression write nor a racing capture nor a racing submit can lead to a message
+after the visitor's confirmation. Success is a constant
+`{"ok": true}`.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
@@ -1255,6 +1315,26 @@ accept-active estimate with a contact gap always gets the React view: the
 the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
 because of these fields.
 
+Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
+dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:
+true` ONLY when the gate is exactly `'true'`, the recurring card-on-file lane is on,
+and the policy the accept would resolve puts this customer on the card rail
+(a card is captured at accept, or a consented method is already saved/Auto Pay is
+active). It is OMITTED (never `false`) in every other case, so a gate-off response is
+byte-identical to before. A plan member whose Auto Pay is already active DOES carry it
+(that policy resolves to `autopay_already_active`, an on-rail state: the saved method is
+charged after the visit). Plan members NOT on Auto Pay (`existing_plan_customer`),
+payer-billed, invoice-mode, commercial manual billing, one-time and paused-Auto-Pay
+never carry it. It is a boolean about the viewer's own estimate only: no customer, payer, or
+payment-method data rides it. SCOPE: it describes the PAY-PER-APPLICATION option only.
+`/data` resolves the policy before the viewer picks a payment option
+(`paymentMethodPreference: null`), so it says nothing about annual prepay: a viewer who
+later selects annual prepay is resolved again at accept (with `GATE_PREPAY_CARD_AND_CHARGE`
+off that is the `prepay_annual` exemption and its pay-link path). A client must not show
+the after-first-visit promise on the annual-prepay option on the strength of this field.
+Informational only for now: no client reads it, and it moves no money and sends no
+message.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
@@ -1521,6 +1601,76 @@ evidence provenance is normalized to review-required: its recorded note remains
 visible beside confirmation guidance, while the former inferred “normal watering
 within 24 hours” instruction is removed. Historical neutral fallbacks retain
 their existing shape and wording.
+`GATE_LAWN_WATERING_RULE` (dark; gate off leaves this payload unchanged, key for
+key) expands the lawn payload with the visit's one watering instruction, built
+from the per-product rules frozen with the visit, the completion time and the
+customer's own irrigation entries (withheld after a move). When it resolves to
+hold, water-in or hold-then-water-in: `reportV2.banner`
+`{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
+`hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
+finished customer sentences with absolute Eastern clock times; `holdUntil`,
+`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+has dried" hold has no printed duration and `expiresAt: null` (dryness is a
+condition, so no instruction that waits for drying, including one followed by a
+water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
+`holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
+"ended" note past it; the key is absent when there is no claim).
+`reportV2.aftercare` is a record of the visit and never changes by the clock
+(owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
+`wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
+is a hold), `holdTask` (the banner's first line verbatim, or its first two lines
+for hold-then-water-in), `waterInTask` (the banner's first line verbatim, for a
+water-in that earns no plan credit; it stays the customer's task in the hero,
+the follow-up card and the assistant within the visit's plan week), `ruleSource`,
+`holdUntil` and `waterInBy`; and
+`reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
+`{ title, detail }`, the week's plan with a "not before" sentence naming the hold's
+end time (the `{holdUntil}` placeholder is always filled or the key dropped; it
+never reaches the payload). Provenance: `ruleSource` is `label`, `owner` or
+`default`, the weakest source among the rules that drive the instruction; state
+`none` is asserted only when every applied product resolved to a rule and at
+least one is label- or owner-sourced; any applied product with no rule makes
+the whole visit no claim (no banner, no product_instruction aftercare, the
+existing fail-closed aftercare stays), whatever the other products say. The rule itself
+(`wateringRule` / `post_application_watering`) never appears on
+`applications[].product` or anywhere else in the public payload. The complete
+instruction is frozen at completion under `structured_notes.lawnWateringFreeze`
+(first writer wins, atomically) and later reads replay it, so an edit to the customer's
+sprinkler entries after the visit never changes the minutes or times an existing
+report showed; a record with no frozen instruction regenerates it. Only the treatment-specific sentences are frozen; the one
+sentence that depends on the weekly plan ("follow this week's plan", or "that
+counts toward this week's watering" for a water-in shallower than the plan's
+run) is composed on each render from the plan present on that render.
+Label mow hold (P2b, same gate): when an applied product's frozen facts carry a
+label-sourced `mowHoldDays` (from `products_catalog.mow_hold_days`, 1..14; no
+default, no derivation), the banner gains `mowHold`
+`{ days, untilDate, untilLabel, line }` for the longest hold: `untilDate` is the
+completion's Eastern calendar date plus `days` (YYYY-MM-DD), `untilLabel` the
+Eastern weekday ("Thu"; "Wed, Jan 6" at 7+ days), `line` one finished sentence
+("Mowing: hold off until Thu, 2 days after today's treatment."). The key is
+absent when no product has a value. A visit with a mow hold but no watering
+claim gets a banner `{ state: null, lines: [], holdUntil: null, waterInBy: null,
+expiresAt: null, ruleSource, mowHold }`; that is the only case `state` is
+`null`, and the client then titles the card "Mowing after today's visit".
+`mowHold.line` is never in `lines` (so the lawn watering text and the PDF's one
+watering line are unchanged), it is frozen with a frozen instruction and
+otherwise rebuilt from the frozen product facts (a state-null instruction is
+never frozen), it never changes by the clock (the live banner's "ended" note
+replaces only the watering lines), and `mowHoldDays` never appears on
+`applications[].product`. Facts frozen before the column existed make no mow
+claim. The value is part of the lawn render cache signature.
+`reportV2.aftercare.watering` carries every treatment sentence. A render whose
+watering inputs could not be read (customer preferences or the catalog) omits
+the direction and adds the boolean marker `lawnAssessment.wateringInputsUnavailable`;
+such a render is served but never cached, and a pinned delivery defers. The gate is
+part of the lawn PDF cache signature.
+`GATE_LAWN_WATERING_SMS` (dark, strict `true`; also requires
+`GATE_LAWN_WATERING_RULE`) adds no public payload field: it sends the frozen
+instruction (`state` hold, water_in or hold_then_water_in, never none) as one
+separate customer text right after the lawn completion text, rendered from the
+`lawn_watering_instruction` SMS template with the instruction's `lines` joined
+by single spaces, at most once per visit
+(`structured_notes.lawnWateringSmsStatus`).
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -1530,7 +1680,7 @@ The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Review-required or restricted
 aftercare also keeps the deterministic report before cache/model access. Lawn
-PDF render strategy `p6-aftercare-guards-20260927` regenerates older cached PDFs
+PDF render strategy `p7-watering-instruction-20260929` regenerates older cached PDFs
 to match these evidence rules),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
@@ -1927,7 +2077,22 @@ buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
 token format gate, generic 404, isEstimateCustomerViewable gate identical
 to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
 draft can never produce a customer-facing document), serviceKey must be
-BOTH a known guide key and a recurring service actually on this estimate,
+BOTH a known guide key and a recurring service actually on this estimate —
+one exception: `lawn_care` is also served when the estimate's only lawn work
+is a one-time lawn row (`one_time_lawn`, `plugging`, `dethatching`,
+`top_dressing`), read from the same replayed pricing bundle `/data` sends
+(`pricingBundle.oneTimeBreakdown`, stored breakdown as fallback; malformed
+data fails closed), and that estimate gets the ONE-TIME variant of the guide
+(no visit count, re-service, or recurring-program content). An estimate with
+BOTH a recurring lawn line and a one-time lawn row serves the recurring guide
+unless the request carries the one-time card's hint (`?scope=one_time` on the
+GET, `scope: 'one_time'` in the send body; the texted link keeps it) — the
+hint only picks the variant when a one-time lawn row is present and never
+widens membership; no other guide
+widens for one-time rows, and the Bermuda-removal sections render only when
+the estimate carries the bermudaSuppression add-on with
+GATE_BERMUDA_SUPPRESSION on. The same membership rule gates
+`POST /api/estimates/:token/service-details/send`;
 60 req/min limit, `no-store`/`no-referrer` headers; the PDF contains the
 service guide plus PUBLIC product-registry fields only — active
 ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,
@@ -1990,11 +2155,15 @@ when the SPA is built against a separate API origin via VITE_API_URL).
 Admin-only surfaces keep their direct URLs).
 `/api/estimates/:token/service-details/send` (write; emails or texts that
 same packet to the contact info ALREADY ON the estimate — the destination
-is NEVER caller-supplied (body carries only `service` + `channel`), so
+is NEVER caller-supplied (body carries only `service` + `channel`, plus
+the optional one-time lawn hint `scope: 'one_time'`, which only picks the
+lawn guide's one-time variant as described on the GET above), so
 the token cannot be used to spray documents at arbitrary addresses; same
 gate-404 + token format gate + customer-viewable + service-on-estimate
 checks as the GET, 6 req/hour limit, email sends idempotent per
-estimate+service+day, suppression-blocked addresses return 409 with no
+estimate+service+day (the lawn guide's one-time variant is its own packet:
+its idempotency key and SMS dedup claim carry a `:one_time` suffix and its
+texted link keeps `?scope=one_time`; every other guide keeps one key), suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
@@ -2015,8 +2184,8 @@ hit, and the email per-day idempotency dedup all funnel through it, so a
 changed or never-delivered annual offer can never surface through a
 shortcut that skips the check — mapping a blocked verdict to the same
 generic 404, with the SMS dedup claim stamped/released exactly like the
-customer-viewable/call-side-hold case; no new request shape, no new
-payload).
+customer-viewable/call-side-hold case; the only request-shape addition
+is the optional `scope` hint above).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
@@ -2194,6 +2363,26 @@ responses are deliberately cacheable and indexable — they expose only
 modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy
 headers do NOT apply to them. `/nearest` is the exception: its answer is
 per visitor, so it stays `private, no-store`).
+`/api/public/yard-calendar` (read-only, no auth, no token, no DB access,
+no LLM call, no PII, no request body — the SWFL yard pressure calendar: a
+monthly lawn / shrubs & trees / weeds guide derived at request time from the
+owner-approved species catalog (`server/data/species-catalog-v1`, via
+`server/services/pest-forecast/landscape-calendar.js`). Query: `month` (1-12,
+default the current ET month) and `grass` (`all|sta|bah|zoy|ber`, default
+`all`); anything else is a 400 (`invalid_month` / `invalid_grass`). The
+payload is items with name, host text, level (0-3) for the month plus the
+12-month `levels`, a trend flag, the homeowner sign and look-alike copy, the
+catalog service line and site link, and the month's plan-ahead notes; no
+customer, pricing or account data. Level comes only from the catalog's
+`active_months` / `peak_months`; a slug that is missing or not
+owner-approved is left out with a warning (never a boot crash), and the
+overlay test fails CI, so a thinner calendar never ships unnoticed. Intentionally CORS-open
+(`Access-Control-Allow-Origin: *`, same app-level preflight handler as
+`/pest-forecast`) so the guide can be embedded on other sites; inherits the
+global `/api/` IP rate limit. Cacheable and indexable: an explicit month is
+`public, max-age=3600, s-maxage=86400`, a defaulted month
+`public, max-age=300, s-maxage=900` (it flips at ET midnight on the 1st).
+No feature gate: it is read-only reference content.)
 `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
 access, no PII — compatibility shim that always returns
 `{ portalGlass: true }`. The glass release gate is retired and current
@@ -3302,6 +3491,9 @@ AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
 also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
 API/PDF responses must never be claimed by the app).
+`/.well-known/security.txt` (RFC 9116 vulnerability-disclosure contact — static
+plain text, no auth, no PII, not gated; `Expires` is computed per request 180
+days ahead so it never goes stale; cached 1 day).
 `/api/public/track/:token` (read-only live service tracker; the
 `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
 rate limit. In ANY state it returns the customer property block — first name,
@@ -3822,8 +4014,12 @@ against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
-`{ error: 'service_area_unavailable' }`, recoverable), else the box test
-`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
+DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
+rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
+is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
+DeSoto ZIP); elsewhere in the box is in. Out of area 422s
 `{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
 address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
 The slot is re-validated against a fresh single-day

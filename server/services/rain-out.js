@@ -2428,7 +2428,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
               'schedule_conflict',
               'Rain-out series shift needs a look',
               `A rain-out moved a recurring visit to ${target.date} but its future visits could not shift with it (a later occurrence conflicts). The plan's cadence no longer follows the moved visit — adjust from dispatch.`,
-              { metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, targetDate: target.date, reasonCode } }
+              { link: `/admin/dispatch?tab=schedule&date=${String(target.date).split('T')[0]}&appointment=${encodeURIComponent(job.id)}`,
+                metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, targetDate: target.date, reasonCode } }
             );
             if (!card) {
               logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — series cadence broken with no admin card; targetDate=${target.date} reason=${reasonCode}`);

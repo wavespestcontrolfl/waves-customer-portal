@@ -864,12 +864,14 @@ describe('normalizeCounty', () => {
 describe('isInServiceAreaCounty', () => {
   test('matches exact display names', () => {
     expect(isInServiceAreaCounty('Manatee')).toBe(true);
-    expect(isInServiceAreaCounty('DeSoto')).toBe(true);
+    expect(isInServiceAreaCounty('Charlotte')).toBe(true);
+    // DeSoto is NOT served (owner ruling 2026-09-30).
+    expect(isInServiceAreaCounty('DeSoto')).toBe(false);
   });
   test('matches case-insensitively', () => {
     expect(isInServiceAreaCounty('sarasota')).toBe(true);
     expect(isInServiceAreaCounty('MANATEE')).toBe(true);
-    expect(isInServiceAreaCounty('desoto')).toBe(true);
+    expect(isInServiceAreaCounty('desoto')).toBe(false);
   });
   test('matches with County suffix', () => {
     expect(isInServiceAreaCounty('Manatee County')).toBe(true);

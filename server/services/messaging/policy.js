@@ -21,6 +21,7 @@
  *   'tech_en_route'      |
  *   'tech_arrived'       |
  *   'service_completion' |
+ *   'lawn_watering_instruction' | // separate watering text after a lawn visit (GATE_LAWN_WATERING_SMS)
  *   'billing'             |   // overdue, statement, dunning
  *   'payment_receipt'     |   // paid receipt / payment confirmation
  *   'payment_failure'     |   // failed charge / retry / bank-verification action required
@@ -86,6 +87,7 @@ const MESSAGE_PURPOSES = [
   'tech_en_route',
   'tech_arrived',
   'service_completion',
+  'lawn_watering_instruction',
   'billing',
   'payment_receipt',
   'payment_failure',
@@ -245,6 +247,19 @@ const PURPOSE_POLICY = {
     requireIds: ['customerId'],
   },
   service_completion: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: 'service_completed',
+    minIdentityTrust: 'service_contact_authorized',
+    requireIds: ['customerId'],
+  },
+  // The watering text that follows a lawn completion text (owner 2026-09-30,
+  // GATE_LAWN_WATERING_SMS). Same consent class, prefs column, identity trust
+  // and ids as service_completion so consent, STOP, suppression and the send
+  // window behave exactly like the completion text it follows.
+  lawn_watering_instruction: {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,

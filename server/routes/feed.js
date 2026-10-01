@@ -6,6 +6,8 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const localNewsStore = require('../services/local-news-store');
+const { getForecast } = require('../services/pest-forecast/forecast');
+const { LOCATIONS, BY_SLUG, resolveZip } = require('../services/pest-forecast/locations');
 
 router.use(authenticate);
 
@@ -203,6 +205,11 @@ const EXCLUDE_KEYWORDS = /\b(4-h|youth|cooking|nutrition|career|volunteer|obitua
 // =========================================================================
 // GET /api/feed/blog — Waves blog
 // =========================================================================
+// Home keeps the compact six-post response. Learn can explicitly request the
+// expanded list; the full RSS document is cached above and sliced only after
+// lookup, so either request order returns the correct response size.
+const BLOG_FEED_DEFAULT_LIMIT = 6;
+const BLOG_FEED_EXPANDED_LIMIT = 24;
 router.get('/blog', async (req, res, next) => {
   try {
     // The hub is Astro on Cloudflare Pages — its RSS lives at /feed.xml.
@@ -210,8 +217,11 @@ router.get('/blog', async (req, res, next) => {
     // which parsed to zero items and left the Learn tab's blog card empty.
     const data = await fetchWithCache('blog', 'https://www.wavespestcontrol.com/feed.xml');
     const items = parseItems(data?.rss?.channel);
+    const limit = req.query.limit === String(BLOG_FEED_EXPANDED_LIMIT)
+      ? BLOG_FEED_EXPANDED_LIMIT
+      : BLOG_FEED_DEFAULT_LIMIT;
 
-    const posts = await Promise.all(items.slice(0, 6).map(async item => {
+    const posts = await Promise.all(items.slice(0, limit).map(async item => {
       const link = safeLink(item.link) || '';
       return {
         title: item.title || '',
@@ -522,45 +532,40 @@ const FAQ_DATA = [
 // =========================================================================
 router.get('/weather', async (req, res, next) => {
   try {
+    const place = resolveWeatherLocation(req.property, req.customer);
+    const cacheKey = `weather:${place.slug}`;
     const now = Date.now();
-    if (cache.weather && (now - cache.weather.ts) < CACHE_TTL) {
-      return res.json(cache.weather.data);
+    if (cache[cacheKey] && (now - cache[cacheKey].ts) < CACHE_TTL) {
+      return res.json(cache[cacheKey].data);
     }
 
-    const pointRes = await fetch('https://api.weather.gov/points/27.4217,-82.4065', {
-      headers: { 'User-Agent': 'WavesCustomerPortal/1.0 (waves@wavespestcontrol.com)' },
-    });
+    // The website forecast for the same place owns the mosquito number, so
+    // the portal tile and the public widget can never disagree.
+    const mosquitoPromise = loadMosquitoPressure(place);
 
-    if (!pointRes.ok) return res.json(buildFallbackWeather());
+    const periods = await fetchNwsPeriods(place);
+    if (!periods) return res.json(buildFallbackWeather(place, await mosquitoPromise));
 
-    const pointData = await pointRes.json();
-    const forecastUrl = pointData.properties?.forecast;
-    if (!forecastUrl) return res.json(buildFallbackWeather());
+    // Pick by isDaytime, not by index: after dark periods[0] is tonight and
+    // periods[1] is tomorrow's daytime, whose high must not read as "Tonight".
+    const current = periods[0] || {};
+    const nowIsDay = current.isDaytime !== false;
+    const tonight = nowIsDay ? (periods.find((p) => p.isDaytime === false) || {}) : current;
 
-    const forecastRes = await fetch(forecastUrl, {
-      headers: { 'User-Agent': 'WavesCustomerPortal/1.0 (waves@wavespestcontrol.com)' },
-    });
-    if (!forecastRes.ok) return res.json(buildFallbackWeather());
-
-    const forecastData = await forecastRes.json();
-    const periods = forecastData.properties?.periods || [];
-    const today = periods[0] || {};
-    const tonight = periods[1] || {};
-
-    const temp = today.temperature || 85;
-    const humidity = today.relativeHumidity?.value || 70;
-    const wind = today.windSpeed || '5 mph';
-    const shortForecast = today.shortForecast || 'Partly Cloudy';
+    const temp = current.temperature || 85;
+    const humidity = current.relativeHumidity?.value || 70;
+    const wind = current.windSpeed || '5 mph';
+    const shortForecast = current.shortForecast || 'Partly Cloudy';
     const nightTemp = tonight.temperature || 72;
 
     const result = {
-      location: 'Lakewood Ranch, FL',
+      location: place.label,
       temp, nightTemp, humidity, wind,
       forecast: shortForecast,
-      detailedForecast: today.detailedForecast || '',
-      isDaytime: today.isDaytime !== false,
+      detailedForecast: current.detailedForecast || '',
+      isDaytime: nowIsDay,
       pestPressure: {
-        mosquito: calcMosquitoPressure(temp, humidity, shortForecast),
+        mosquito: (await mosquitoPromise) || seasonalMosquito(),
         fungus: calcFungusPressure(temp, humidity, nightTemp),
         chinch: calcChinchPressure(temp, humidity),
       },
@@ -568,19 +573,75 @@ router.get('/weather', async (req, res, next) => {
       updatedAt: new Date().toISOString(),
     };
 
-    cache.weather = { data: result, ts: now };
+    cache[cacheKey] = { data: result, ts: now };
     res.json(result);
   } catch (err) { next(err); }
 });
 
-function calcMosquitoPressure(temp, humidity, forecast) {
-  let score = 0;
-  if (temp >= 80) score += 3; else if (temp >= 70) score += 2; else score += 1;
-  if (humidity >= 75) score += 3; else if (humidity >= 60) score += 2; else score += 1;
-  if (/rain|storm|shower/i.test(forecast)) score += 2;
-  if (score >= 7) return { level: 'HIGH', color: '#E53935', advice: 'Peak mosquito activity — avoid standing water, barrier treatment is critical' };
-  if (score >= 5) return { level: 'MODERATE', color: '#FF9800', advice: 'Moderate mosquito activity — empty saucers and bird baths after rain' };
-  return { level: 'LOW', color: '#4CAF50', advice: 'Low mosquito pressure — great conditions to enjoy the lanai' };
+// The curated forecast location the logged-in customer's weather is read for.
+// Selected property first (multi-property accounts), then the customer row:
+// city name against the curated list, then the zip prefix. Nothing resolving
+// falls back to Lakewood Ranch, and the response says so via `location`.
+const WEATHER_FALLBACK_LOCATION = BY_SLUG.get('lakewood-ranch-fl');
+
+function normalizeCity(city) {
+  return String(city || '').trim().toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ');
+}
+
+function resolveWeatherLocation(...sources) {
+  for (const src of sources) {
+    if (!src) continue;
+    const city = normalizeCity(src.city);
+    if (city) {
+      const byCity = LOCATIONS.find((l) => normalizeCity(l.label.replace(/, FL$/, '')) === city);
+      if (byCity) return byCity;
+    }
+    const byZip = resolveZip(src.zip);
+    if (byZip) return byZip;
+  }
+  return WEATHER_FALLBACK_LOCATION;
+}
+
+async function fetchNwsPeriods(place) {
+  const headers = { 'User-Agent': 'WavesCustomerPortal/1.0 (waves@wavespestcontrol.com)' };
+  const pointRes = await fetch(`https://api.weather.gov/points/${place.lat},${place.lng}`, { headers });
+  if (!pointRes.ok) return null;
+  const forecastUrl = (await pointRes.json()).properties?.forecast;
+  if (!forecastUrl) return null;
+  const forecastRes = await fetch(forecastUrl, { headers });
+  if (!forecastRes.ok) return null;
+  return (await forecastRes.json()).properties?.periods || [];
+}
+
+const PRESSURE_COLORS = { HIGH: '#E53935', MODERATE: '#FF9800', LOW: '#4CAF50' };
+
+// The pest-forecast model's 5 levels onto the tile's 3.
+function portalPressureLevel(level) {
+  if (level === 'high') return 'HIGH';
+  if (level === 'elevated' || level === 'moderate') return 'MODERATE';
+  return 'LOW';
+}
+
+// Mosquito pressure from the same service as GET /api/public/pest-forecast.
+// null when that forecast is unavailable (callers show a seasonal read).
+async function loadMosquitoPressure(place) {
+  try {
+    const forecast = await getForecast({ location: place.slug });
+    const m = (forecast.pests || []).find((p) => p.key === 'mosquitoes');
+    if (!m) return null;
+    const level = portalPressureLevel(m.level);
+    return { level, color: PRESSURE_COLORS[level], advice: m.note, score10: m.score10, forecastLevel: m.level };
+  } catch (err) {
+    logger.warn(`[feed] mosquito forecast unavailable for ${place.slug}: ${err.message}`);
+    return null;
+  }
+}
+
+function seasonalMosquito() {
+  const month = new Date().getMonth();
+  return month >= 5 && month <= 9
+    ? { level: 'HIGH', color: '#E53935', advice: 'Peak mosquito season' }
+    : { level: 'MODERATE', color: '#FF9800', advice: 'Moderate activity' };
 }
 
 function calcFungusPressure(temp, humidity, nightTemp) {
@@ -610,16 +671,16 @@ function calcIrrigation(temp, forecast, humidity) {
   return { inches: '0.25', note: 'Cool day — reduce irrigation to prevent overwatering' };
 }
 
-function buildFallbackWeather() {
+function buildFallbackWeather(place = WEATHER_FALLBACK_LOCATION, mosquito = null) {
   const month = new Date().getMonth();
   const isSummer = month >= 5 && month <= 9;
   return {
-    location: 'Lakewood Ranch, FL', temp: isSummer ? 89 : 78, nightTemp: isSummer ? 75 : 62,
+    location: place.label, temp: isSummer ? 89 : 78, nightTemp: isSummer ? 75 : 62,
     humidity: isSummer ? 80 : 60, wind: '8 mph',
     forecast: isSummer ? 'Scattered Thunderstorms' : 'Partly Sunny',
     detailedForecast: '', isDaytime: true,
     pestPressure: {
-      mosquito: isSummer ? { level: 'HIGH', color: '#E53935', advice: 'Peak mosquito season' } : { level: 'MODERATE', color: '#FF9800', advice: 'Moderate activity' },
+      mosquito: mosquito || seasonalMosquito(),
       fungus: { level: 'MODERATE', color: '#FF9800', advice: 'Monitor for large patch' },
       chinch: isSummer ? { level: 'HIGH', color: '#E53935', advice: 'Watch sunny spots' } : { level: 'LOW', color: '#4CAF50', advice: 'Low risk' },
     },

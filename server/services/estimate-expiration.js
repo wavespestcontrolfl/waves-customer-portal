@@ -80,6 +80,9 @@ async function flipExpiredBatch(buildQuery, columns, now) {
           category: row.category || null,
           service_interest: row.service_interest || null,
           expires_at: row.expires_at || null,
+          // The flip's own instant: the expiry date stand-in for an estimate
+          // with no expires_at (Rule 1), so a replay derives the same run key.
+          flipped_at: row.updated_at || null,
         },
       })));
       for (const intent of intents) intentIdByEstimateId.set(String(intent.entity_id), intent.id);
@@ -94,7 +97,7 @@ async function runEstimateExpiration() {
   const now = new Date();
   // archived_at + estimate_data feed the shared follow-up rule
   // (estimateFollowupBlockedReason) for the estimate.expired automation.
-  const flippedColumns = ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition', 'customer_id', 'customer_email', 'category', 'service_interest', 'expires_at', 'archived_at', 'estimate_data'];
+  const flippedColumns = ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition', 'customer_id', 'customer_email', 'category', 'service_interest', 'expires_at', 'updated_at', 'archived_at', 'estimate_data'];
 
   // Rule 1: aged-out — sent/viewed with sent_at older than the cutoff and
   // no accept/decline yet. Only flips live rows. Archived rows are parked

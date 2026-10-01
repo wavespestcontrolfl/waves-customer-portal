@@ -632,6 +632,7 @@ module.exports = {
   buildWhatToExpect,
   buildPestExpectations,
   toExpectationProduct,
+  isExteriorApplicationArea,
   formatRainfastMinutes,
   formatInches,
 };

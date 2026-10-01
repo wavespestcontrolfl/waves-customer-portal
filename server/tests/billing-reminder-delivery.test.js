@@ -1,9 +1,16 @@
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(),
   claimAttempt: jest.fn(),
   markDelivered: jest.fn(),
   markSendFailed: jest.fn(),
+  releaseHeldReservation: jest.fn(),
 }));
 jest.mock('../services/billing-email-reservation', () => ({
   repairAcceptedBillingEmailReservations: jest.fn(async () => new Set()),
@@ -75,6 +82,11 @@ describe('billing reminder per-channel delivery progress', () => {
     });
     ContactLedger.markSendFailed.mockImplementation(async (entry, extra) => {
       Object.assign(rows.find((candidate) => candidate.id === entry.id).metadata, { send_failed: true, ...extra });
+      return true;
+    });
+    // Mirrors the real release: the unsettled reservation row is deleted.
+    ContactLedger.releaseHeldReservation.mockImplementation(async (entry) => {
+      rows.splice(rows.findIndex((candidate) => candidate.id === entry.id), 1);
       return true;
     });
   });
@@ -593,5 +605,36 @@ describe('billing reminder per-channel delivery progress', () => {
     collectionsChannelPermitted.mockResolvedValue(false);
     await expect(deliver(['email', 'push', 'sms'], send, 'global-hold')).resolves.toMatchObject({ complete: false });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  // Dispute hold (owner ruling 2026-09-30) placed AFTER the rail-guard consult, before the send:
+  // the customer-message boundary / email authority refuse it. That is a WAIT - the reservation is
+  // released (no failed row, nothing resolved), the episode stays open, and the leg goes out on the
+  // first run after the release. Covers the balance-reminder workflow legs and the previsit legs,
+  // which both deliver through sendReminderChannels.
+  describe.each([
+    ['a Text/App leg refused at the customer-message boundary', 'sms',
+      { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' }],
+    ['an App leg refused at the customer-message boundary', 'push',
+      { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' }],
+    ['an Email leg refused at the billing email authority', 'email',
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'COLLECTION_HOLD_DEFER' }],
+  ])('%s', (_label, channel, heldResult) => {
+    test('is released, not failed or resolved; the same leg sends after the release', async () => {
+      const send = jest.fn()
+        .mockResolvedValueOnce(heldResult)
+        .mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted' });
+
+      const held = await deliver([channel], send, `hold-${channel}`);
+      expect(held).toMatchObject({ complete: false, deliveredNow: [] });
+      expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
+      expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+      expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+      expect(rows).toEqual([]); // no row left behind: no failed stamp, no spacing-window contact
+
+      const released = await deliver([channel], send, `hold-${channel}`);
+      expect(released).toMatchObject({ complete: true, deliveredNow: [channel] });
+      expect(send).toHaveBeenCalledTimes(2);
+    });
   });
 });

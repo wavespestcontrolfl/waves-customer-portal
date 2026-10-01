@@ -602,6 +602,62 @@ function InsightLine({ label, value, strong }) {
   );
 }
 
+// ── Watering banner (GATE_LAWN_WATERING_RULE) ────────────────────────────────
+// The server-built instruction for THIS visit (reportV2.banner): up to three
+// finished lines with absolute clock times. Live view: once expiresAt passes
+// the lines give way to a fine-print "ended" note (report links are permanent).
+// Print / PDF always keeps the lines — a printed record is read later and its
+// clock times stay true. No animation anywhere in this block.
+const BANNER_HOLD_STATES = ['hold', 'hold_then_water_in'];
+export function LawnWateringBanner({ banner, style = null }) {
+  const print = usePrint();
+  const printing = usePrintRequested();
+  const expiresMs = banner?.expiresAt ? Date.parse(banner.expiresAt) : NaN;
+  // An open tab crosses the deadline too: re-render once when it passes
+  // (setTimeout's ceiling is ~24.8 days; a later expiry re-arms on reload).
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!Number.isFinite(expiresMs)) return undefined;
+    const wait = expiresMs - Date.now() + 1000;
+    if (wait <= 0 || wait > 2147483647) return undefined;
+    const timer = setTimeout(() => setTick((n) => n + 1), wait);
+    return () => clearTimeout(timer);
+  }, [expiresMs]);
+  const watering = !!banner && Array.isArray(banner.lines) && banner.lines.length > 0;
+  // A label mow hold (banner.mowHold.line) is its own last line. It is part of
+  // the visit record, so it stays after the watering note has ended.
+  const mowLine = typeof banner?.mowHold?.line === 'string' && banner.mowHold.line ? banner.mowHold.line : null;
+  if (!watering && !mowLine) return null;
+  const [heading, ...rest] = watering ? banner.lines : [mowLine];
+  const ended = watering && !(print || printing) && Number.isFinite(expiresMs) && Date.now() > expiresMs;
+  const hold = watering && BANNER_HOLD_STATES.includes(banner.state);
+  const mowAsBody = watering && mowLine;
+  return (
+    <Card style={{ ...(hold ? { background: COLORS.sand } : {}), ...(style || {}) }}>
+      <div data-testid="lawn-watering-banner" data-state={banner.state ?? 'mow'} data-ended={ended ? 'true' : 'false'}>
+        <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+          {watering ? 'Watering after today’s visit' : 'Mowing after today’s visit'}
+        </div>
+        {ended ? (
+          <div data-testid="lawn-watering-banner-ended" style={{ fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
+            This watering note was for the day of your visit.
+          </div>
+        ) : (
+          <>
+            <h2 data-testid="lawn-watering-banner-heading" style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.25, color: TEXT, margin: 0 }}>{heading}</h2>
+            {rest.map((line) => (
+              <p key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{line}</p>
+            ))}
+          </>
+        )}
+        {mowAsBody && (
+          <p data-testid="lawn-watering-banner-mow" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{mowLine}</p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 const PLAN_CONDITION_COPY = {
   review: 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.',
   hold: 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.',
@@ -638,10 +694,15 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
   // that old restriction. Legacy payloads without membership keep the safer
   // current-week interpretation. The note itself remains visible below.
   const aftercareAppliesToPlanWeek = weekPlan.visitInPlanWeek !== false;
-  const planCondition = aftercareAppliesToPlanWeek ? PLAN_CONDITION_COPY[verdict] : null;
+  const planCondition = aftercareAppliesToPlanWeek && !(verdict === 'hold' && weekPlan.afterHold?.title) ? PLAN_CONDITION_COPY[verdict] : null;
   const visitCredit = canCreditWaterIn && weekPlan.visitInPlanWeek === true;
   const credited = visitCredit && weekPlan.prescribesRun === true && weekPlan.afterTreatment;
-  const shown = credited ? weekPlan.afterTreatment : weekPlan;
+  // Mirror of the server's renderedWeekPlan (lawn-aftercare.js): a credited
+  // water-in shows the reduced plan; a product hold shows the plan with its
+  // "not before" sentence (afterHold) when the server sent one.
+  const holdOverlay = !credited && aftercareAppliesToPlanWeek && verdict === 'hold' && weekPlan.afterHold?.title
+    ? weekPlan.afterHold : null;
+  const shown = credited ? weekPlan.afterTreatment : (holdOverlay || weekPlan);
   const planCreditState = weekPlan.prescribesRun === true ? 'run' : 'hold';
 
   return (

@@ -2662,12 +2662,12 @@ describe('prompt rules and hand-off narrowing', () => {
 
   test('prompt version: _cfl, prefix kept, fits the column with all four tags', () => {
     process.env[GATE] = 'true';
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers_cfl');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers_cfl');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers2_cfl');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers2_cfl');
     expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
-    expect(all).toBe('house_voice_v12_real_answers_cfl+bclm');
+    expect(all).toBe('house_voice_v12_real_answers2_cfl+bclm');
     expect(all.length).toBeLessThanOrEqual(40);
   });
 });
@@ -2699,7 +2699,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
-    expect(r.promptVersion).toBe('house_voice_v12_real_answers_cfl');
+    expect(r.promptVersion).toBe('house_voice_v12_real_answers2_cfl');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);
   });
@@ -2745,18 +2745,19 @@ describe('sealed-eval fact contract for the _cfl version', () => {
   const { requiredFactMarkers, forbiddenFactMarkers, itemCompatibleWith } = require('../services/sms-sealed-eval');
   const { COMPANY_FACTS_HEADER, renderCompanyFactsSection } = require('../services/sms-company-facts');
   const { LABEL_FACTS_MARKER, LABEL_FACTS_NONE_SECTION } = labelFactsLib;
-  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour\n';
-  const CF = 'house_voice_v12_real_answers_cf';
-  const CFL = 'house_voice_v12_real_answers_cfl';
-  const OLD = 'house_voice_v12_real_answers';
+  // the rendered order (sms-shadow-drafter buildFactsBlock): SLA line, FREE RE-SERVICE line, COMPANY FACTS, LABEL FACTS, BILLING:
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour\nFREE RE-SERVICE: not eligible (no recurring plan on file)\n';
+  const CF = 'house_voice_v12_real_answers2_cf';
+  const CFL = 'house_voice_v12_real_answers2_cfl';
+  const OLD = 'house_voice_v12_real_answers2';
   const cf = `X\n${SLA}${renderCompanyFactsSection()}BILLING:\n- x\n`;
   const cfl = `X\n${SLA}${renderCompanyFactsSection()}${LABEL_FACTS_NONE_SECTION}BILLING:\n- x\n`;
 
   test('_cfl requires BOTH headers; _cf, the bare identity and v11 forbid LABEL FACTS', () => {
-    expect(requiredFactMarkers(CFL)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER]);
-    expect(requiredFactMarkers(`${CFL}+c`)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, 'FREE RE-SERVICE:']);
-    expect(requiredFactMarkers(CF)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', COMPANY_FACTS_HEADER]);
-    for (const v of [CF, OLD, 'house_voice_v11']) expect(forbiddenFactMarkers(v)).toContain(LABEL_FACTS_MARKER);
+    expect(requiredFactMarkers(CFL)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:', COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER]);
+    expect(requiredFactMarkers(`${CFL}+c`)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:', COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER]);
+    expect(requiredFactMarkers(CF)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:', COMPANY_FACTS_HEADER]);
+    for (const v of [CF, OLD, 'house_voice_v12_real_answers_cf', 'house_voice_v12_real_answers', 'house_voice_v11']) expect(forbiddenFactMarkers(v)).toContain(LABEL_FACTS_MARKER);
     expect(forbiddenFactMarkers(CFL)).not.toContain(LABEL_FACTS_MARKER);
     expect(forbiddenFactMarkers(CFL)).not.toContain(COMPANY_FACTS_HEADER);
   });
@@ -2778,7 +2779,7 @@ describe('sealed-eval fact contract for the _cfl version', () => {
     const B = 'BILLING:\n- x\nRECENT SMS THREAD:\n';
     const filled = labelFactsLib.renderLabelFactsSection(labelFacts([product({ rainfastMinutes: 180 })]));
     expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}${filled}${B}`, CFL)).toBe(true);
-    // no booking line exists any more: anything between the sections breaks the structure
+    // anything between the company and label sections breaks the structure
     expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}RE-SERVICE BOOKING: x\n${filled}${B}`, CFL)).toBe(false);
     expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}${filled}${B}`, CF)).toBe(false); // has LABEL FACTS
     // a header typed into an SMS (after the real BILLING:) proves nothing
@@ -2796,6 +2797,10 @@ describe('sealed-eval fact contract for the _cfl version', () => {
     const q = compatibleWhereRaw([COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER]);
     expect(q.sql.match(/split_part/g)).toHaveLength(2);
     expect(q.bindings.filter((b) => typeof b === 'string' && b.endsWith('$'))).toHaveLength(2);
+    // ...and the FREE RE-SERVICE twin peels the SAME exact company (+ label) structure off before testing the re-service line
+    const rs = compatibleWhereRaw(['FREE RE-SERVICE:']);
+    expect(rs.sql).toMatch(/regexp_replace\(split_part/);
+    expect(rs.bindings).toContain(require('../services/sms-company-facts').exactStructureRegexSource('optional'));
   });
 
   test('every real gate-on facts block satisfies the live contract, with or without label facts', () => {
