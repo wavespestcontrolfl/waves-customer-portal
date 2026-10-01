@@ -17,7 +17,11 @@ function builder(rows) {
   return q;
 }
 const mockQueue = [];
-jest.mock('../models/db', () => jest.fn(() => { const b = mockQueue.shift(); mockCalls.push(b); return b; }));
+jest.mock('../models/db', () => {
+  const fn = jest.fn(() => { const b = mockQueue.shift(); mockCalls.push(b); return b; });
+  fn.raw = jest.fn((sql) => ({ raw: sql }));
+  return fn;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const { _private } = require('../services/agent-activity');
@@ -40,6 +44,18 @@ test('pinned rows are loaded without the window, merged with windowed rows, dedu
   expect(windowed._ops.some((o) => o[0] === 'where' && o[1] === 'created_at' && o[2] === '>=')).toBe(true);
 });
 
+test('every digest select (pinned, windowed, focus) carries the shared content-version expression AS version', async () => {
+  const { NOTIFICATION_VERSION_SQL } = require('../services/notification-service')._private;
+  const pinned = builder([]); const windowed = builder([]); const focused = builder([]);
+  mockQueue.push(pinned, windowed, focused);
+  const db = require('../models/db');
+  await _private.loadDigestRows(db, new Date('2026-09-10T00:00:00Z'), 'some-id');
+  for (const q of [pinned, windowed, focused]) {
+    const select = q._ops.find((o) => o[0] === 'select');
+    expect(select).toEqual(expect.arrayContaining([{ raw: `${NOTIFICATION_VERSION_SQL} AS version` }]));
+  }
+});
+
 test('the pinned predicate keeps unresolved FIX rows only when something can resolve them (source ops-crons or fallOff), else the read-or-window rule; cleared rows re-enter via resolvedAt', () => {
   const pinned = builder([]); const windowed = builder([]);
   mockQueue.push(pinned, windowed);
@@ -52,7 +68,7 @@ test('the pinned predicate keeps unresolved FIX rows only when something can res
       "metadata->>'source' = 'ops-crons'",
       "metadata->>'fallOff' = 'true'", // the in-process senders that call retireIfClean stamp this
     ]));
-    expect(pinned._ops.filter((o) => o[0] === 'whereNull' && o[1] === 'read_at').length).toBe(2); // ACT/[Review] rule + legacy FIX rule
+    expect(pinned._ops.filter((o) => o[0] === 'whereNull' && o[1] === 'read_at').length).toBe(1); // legacy FIX rule only: an opened ACT/[Review] stays pinned until done (read is not done)
     // the windowed query admits rows resolved inside the window
     expect(windowed._ops.some((o) => o[0] === 'orWhereRaw' && /resolvedAt/.test(String(o[1])))).toBe(true);
   });

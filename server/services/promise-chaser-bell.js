@@ -362,11 +362,11 @@ async function ringForCall(call, now = new Date()) {
   // A bell this callback already has for a DIFFERENT identity — another
   // promise that has since been kept, or an older version of this one — is
   // stale now that this promise is the one owed (Codex #5019 r21 P2).
-  await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' }).whereNull('read_at')
+  await require('./notification-service')._private.openToCloser(db('notifications').where({ recipient_type: 'admin', category: 'missed_call' }), 'promise-chaser')
     .whereRaw("metadata->>'triggerKey' = 'promise_chaser'")
     .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(call.id)])
     .whereRaw("metadata->>'dedupeKey' IS DISTINCT FROM ?", [dedupeKey])
-    .update({ read_at: new Date() })
+    .update(require('./notification-service')._private.doneColumns({ by: 'promise-chaser', resolution: 'Replaced by a newer reminder for this call', keepExisting: true, conn: db }))
     .catch((err) => logger.warn(`[promise-chaser-bell] failed to retire a superseded bell for call ${call.id}: ${err.message}`));
 
   // The canonical "already delivered" check missed-call-bell.js and

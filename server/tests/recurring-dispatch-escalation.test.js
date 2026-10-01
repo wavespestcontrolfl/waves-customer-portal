@@ -1,6 +1,10 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // A system retire closes the card done (read is not done).
+  _private: { doneColumns: jest.fn(({ by, resolution, at }) => ({ done_at: at, done_by: by, resolution, read_at: at })) },
+}));
 
 const db = require('../models/db');
 const notifications = require('../services/notification-service');
@@ -60,7 +64,7 @@ test('a visit placed after the scan raises no alert and is not counted as flagge
 test('a pass with no pending placement still retires obsolete lane alerts', async () => {
   const now = new Date('2026-08-05T16:00:00Z');
   expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(0);
-  expect(retire).toHaveBeenCalledWith(expect.objectContaining({ read_at: now, title: 'Recurring placement alert resolved' }));
+  expect(retire).toHaveBeenCalledWith(expect.objectContaining({ done_at: now, done_by: 'auto-dispatch', title: 'Recurring placement alert resolved' }));
   expect(notifications.notifyAdmin).not.toHaveBeenCalled();
   const { sql, bindings } = retireStatements[0];
   expect(sql).toContain('not exists (select "s"."id" from "scheduled_services" as "s"');

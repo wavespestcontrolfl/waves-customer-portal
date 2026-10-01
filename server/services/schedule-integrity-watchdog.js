@@ -1003,7 +1003,7 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, s
     return (await alertEpisodes.openAdminAlertKeys(db, prefix)).filter((key) => !liveKeys.has(key));
   };
   const close = async (keys, reason) => (keys.length
-    ? Number(await alertEpisodes.closeAdminAlertKeys(db, keys, reason, { now })) || 0
+    ? Number(await alertEpisodes.closeAdminAlertKeys(db, keys, reason, { now, resolution: reason.charAt(0).toUpperCase() + reason.slice(1) })) || 0
     : 0);
   let closed = 0;
 
