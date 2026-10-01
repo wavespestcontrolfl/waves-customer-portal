@@ -163,7 +163,6 @@
             "A thinning strip along the driveway edge",
             "Early gray leaf spot in the shaded back corner"
           ],
-          "mainWatch": "A thinning strip along the driveway edge where the turf shows heat stress first.",
           "wavesNext": "We’ll spot-check the driveway strip and re-treat for chinch bugs if activity shows before the next scheduled visit.",
           "customerAction": "Raise the mower one setting and check that the sprinkler zone by the driveway reaches the edge evenly.",
           "noActionNeeded": false,
@@ -356,7 +355,6 @@
           "reentry": "Keep people and pets off the lawn until the application is watered in and the turf is dry.",
           "waterInRequired": true
         },
-        "seasonalNote": "It’s peak heat-and-pest season for your St. Augustine lawn in Southwest Florida — some edge stress and faster drying are normal this time of year, and we’re watching for it.",
         "smsSummary": "Your St. Augustine lawn report is ready: stable — watching thin areas. Raise the mower one setting and check sprinkler coverage by the driveway.",
         "trends": {
           "overall": [
