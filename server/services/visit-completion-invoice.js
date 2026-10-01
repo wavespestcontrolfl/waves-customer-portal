@@ -118,6 +118,22 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
   return built;
 }
 
+// True when this member's estimate deferred its setup fee onto the series
+// (estimate_data.setupFeeDeferredToFirstVisit, stamped by the accept) AND the
+// series parent still carries that claim (positive = queued, negative = a
+// completion mid-mint).
+async function deferredSetupClaimStillQueued(trx, member) {
+  const estimate = await trx('estimates').where({ id: member.source_estimate_id }).first('estimate_data');
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  if (!data || data.setupFeeDeferredToFirstVisit !== true) return false;
+  const parent = await trx('scheduled_services')
+    .where({ id: member.recurring_parent_id || member.id })
+    .first('pending_setup_fee');
+  const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : 0;
+  return Number.isFinite(stamp) && stamp !== 0;
+}
+
 async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
   const billed = [];
   const feeReviewCandidates = [];
@@ -235,6 +251,15 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
     }
   }
   for (const member of [...billed.map((entry) => entry.member), ...feeReviewCandidates]) {
+    // A setup fee DEFERRED to the first performed visit (GATE_PAF_SETUP_FEE:
+    // the accept stamped scheduled_services.pending_setup_fee instead of
+    // minting an invoice) is consumed ONLY by the single-visit completion
+    // mint. This combined-packet mint carries no setup line, so letting it
+    // proceed would silently push the fee to a later visit — send the closeout
+    // to the office instead, never "deferred, therefore fine".
+    if (member.source_estimate_id && await deferredSetupClaimStillQueued(trx, member)) {
+      return office('setup_fee_deferred_claim', member.id);
+    }
     // A canceled fee is treated as covered with completing-visit context only
     // because the billed application's prior-invoice lane parks that case.
     // A zero-price member skips that lane, so its canceled fee remains owed.
@@ -482,4 +507,4 @@ async function createVisitCompletionInvoice(packetId, database = db) {
   return database.isTransaction ? run(database) : database.transaction(run);
 }
 
-module.exports = { createVisitCompletionInvoice };
+module.exports = { createVisitCompletionInvoice, deferredSetupClaimStillQueued };

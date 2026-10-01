@@ -3066,10 +3066,18 @@ function buildStandardPayPerApplicationInvoiceCopy({
   // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): true only for a
   // customer on the card rail (card saved, nothing charged or sent before the
   // first visit). Every other customer keeps today's wording. The SETUP-ONLY
-  // shape never takes the new wording: its invoice is minted unattached and
-  // still delivered as a pay link at accept (see the standard accept mint),
-  // so "billed at your first visit" would be untrue for it.
+  // shape ignores this flag: unless the accept defers its fee (see
+  // payAfterSetupFee below) its invoice is minted unattached and delivered
+  // as a pay link at accept, so "billed at your first visit" would be untrue.
   payAfterFirstVisit = false,
+  // GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): true only when the
+  // accept will DEFER the setup-only shape's fee onto the first visit
+  // (card rail + pafSetupFeeLive() + pure WaveGuard setup, no first-
+  // application line). Then the setup-only wording says nothing is charged
+  // today and the setup fee is billed with the first visit — true because
+  // the accept stamps the fee on the series instead of minting a payable
+  // invoice. Read ONLY by the setup-only branch below.
+  payAfterSetupFee = false,
 } = {}) {
   const setup = roundPositiveMoney(setupAmount);
   const firstApplication = roundPositiveMoney(firstApplicationAmount);
@@ -3101,9 +3109,15 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; after you confirm, we send the ${setupLabel} invoice for ${fmtMoney(setup)} so you can pay before service.`,
-      payPrefCardSub: `Invoice includes ${setupLabel} (${fmtMoney(setup)}).`,
-      billingSmall: `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
+      payAfterBody: payAfterSetupFee
+        ? `Approve now; nothing is charged today. The ${fmtMoney(setup)} ${setupLabel} fee is billed with your first visit.`
+        : `Approve now; after you confirm, we send the ${setupLabel} invoice for ${fmtMoney(setup)} so you can pay before service.`,
+      payPrefCardSub: payAfterSetupFee
+        ? `The ${setupLabel} fee (${fmtMoney(setup)}) is billed with your first visit.`
+        : `Invoice includes ${setupLabel} (${fmtMoney(setup)}).`,
+      billingSmall: payAfterSetupFee
+        ? `No payment is charged on this page. The ${fmtMoney(setup)} setup fee is billed with your first visit.`
+        : `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
     };
   }
 
@@ -5472,12 +5486,26 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     && firstServiceVisitTotal > 0
     ? firstServiceVisitTotal
     : 0;
+  // GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): the setup-only shape on
+  // the card rail has its fee STAMPED on the first visit's series at accept
+  // (no payable invoice, no pay link) and billed with the first performed
+  // visit — so the page may say so. Pure WaveGuard setup only: a rodent
+  // bait-station setup rides today's invoice, and a first-application line
+  // means the shape is not setup-only. Same rail predicate as
+  // payAfterFirstVisitCopy (card capture required / enrolled), so the page
+  // and the accept (estimate-public accept, setup-fee deferral) agree.
+  const payAfterSetupFeeCopy = payAfterFirstVisitCopy
+    && require('../config/feature-gates').pafSetupFeeLive()
+    && setupDueToday > 0
+    && rodentSetupDueToday <= 0
+    && !(standardInvoiceFirstApplicationAmount > 0);
   const standardInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy({
     setupAmount: standardSetupDue,
     setupLabel: standardSetupLabel,
     firstApplicationAmount: standardInvoiceFirstApplicationAmount,
     fallbackNoPaymentCopy: pageCopy.noPaymentCopy,
     payAfterFirstVisit: payAfterFirstVisitCopy,
+    payAfterSetupFee: payAfterSetupFeeCopy,
   });
   const standardInvoiceTotal = standardInvoiceCopy.totalAmount;
   const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
@@ -5486,7 +5514,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ? `No payment is charged on this page. The setup plus first application, totaling ${standardInvoiceDynamicTotalHtml}, is billed at your first visit.`
       : `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`)
     : (standardInvoiceCopy.hasSetup
-        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`
+        ? (payAfterSetupFeeCopy
+          ? `No payment is charged on this page. The ${fmtMoney(standardSetupDue)} setup fee is billed with your first visit.`
+          : `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`)
         : (standardInvoiceCopy.hasFirstApplication
             ? (payAfterFirstVisitCopy
               ? `No payment is charged on this page. The first application (${standardInvoiceDynamicTotalHtml}) is billed at your first visit.`
@@ -5596,7 +5626,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const standardInvoiceLede = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
     ? 'Pay per application with a setup + first application invoice after confirmation.'
     : (standardInvoiceCopy.hasSetup
-        ? 'Pay per application with a setup invoice after confirmation.'
+        ? (payAfterSetupFeeCopy
+          ? 'Pay per application; nothing is charged today and the setup fee is billed with your first visit.'
+          : 'Pay per application with a setup invoice after confirmation.')
         : (standardInvoiceCopy.hasFirstApplication
             ? 'Pay per application with a first application invoice after confirmation.'
             : 'Pay per application after completion.'));
@@ -5618,12 +5650,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>` : ''}
           ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong data-rodent-setup-due="${Number(rodentSetupDueToday)}">${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
-          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
+          ${standardInvoiceTotal > 0 && !payAfterSetupFeeCopy ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
         ${membershipSetupWaivedForExistingCustomer && !locked ? `<p class="billing-small">Setup waived &mdash; you're already a Waves customer.</p>` : ''}
         <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="pay_at_visit">Choose pay per application</button>
-        <p class="billing-small">${payAfterFirstVisitCopy && !(standardInvoiceCopy.hasSetup && !standardInvoiceCopy.hasFirstApplication) ? 'Next: pick a time, then confirm. Nothing is charged today.' : 'Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.'}</p>
+        <p class="billing-small">${payAfterFirstVisitCopy && (!(standardInvoiceCopy.hasSetup && !standardInvoiceCopy.hasFirstApplication) || payAfterSetupFeeCopy) ? 'Next: pick a time, then confirm. Nothing is charged today.' : 'Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.'}</p>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
@@ -6969,6 +7001,7 @@ ${shellQuestionsBar()}
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
   const PAY_AFTER_FIRST_VISIT_COPY = ${payAfterFirstVisitCopy ? 'true' : 'false'};
+  const PAY_AFTER_SETUP_FEE_COPY = ${payAfterSetupFeeCopy ? 'true' : 'false'};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
@@ -7271,6 +7304,9 @@ ${shellQuestionsBar()}
       return 'No payment is charged here. After confirmation, we open an invoice for setup plus the first application totaling ' + standardInvoiceTotalText() + '; choose a service window to continue.';
     }
     if (hasSetup) {
+      if (PAY_AFTER_SETUP_FEE_COPY) {
+        return 'No payment is charged here. Your ' + fmt(setupDue) + ' setup fee is billed with your first visit; choose a service window to continue.';
+      }
       return 'No payment is charged here. After confirmation, we open the setup invoice for ' + fmt(setupDue) + '; choose a service window to continue.';
     }
     if (hasFirstApplication) {
@@ -12324,6 +12360,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       let standardConversionResult = null;
       let standardInvoiceMinted = false;
       let standardInvoiceAttached = false;
+      // GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): true when the
+      // setup-only shape's fee was STAMPED on the first visit's series
+      // (scheduled_services.pending_setup_fee) instead of minted as a payable
+      // unattached invoice — the first PERFORMED completion bills it on the
+      // same invoice as the visit and charges the saved card once.
+      let setupFeeDeferredToFirstVisit = false;
       if (customerId && !treatAsOneTime && !annualPrepaySelected) {
         const EstimateConverter = require('../services/estimate-converter');
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
@@ -12448,7 +12490,60 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // not mint (codex #3591 r59 P1); the recurring conversion path is
           // the only one that owes it.
           const acceptedRodentSetupAmount = treatAsOneTime ? 0 : EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
-          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
+          // Pay after the first visit — monthly-tier (setup-only) shape. On the
+          // card rail with GATE_PAF_SETUP_FEE live, a pure WaveGuard setup fee
+          // (no first-application line, no rodent bait-station setup) is not
+          // minted as a payable unattached invoice. It is stamped on the first
+          // visit's series parent instead — the SAME durable claim
+          // (scheduled_services.pending_setup_fee) the secure plan-choice
+          // lane uses — and the first performed completion adds it as a line
+          // to the visit's own mint (complete-scheduled-service.js, "Secure
+          // plan-choice setup fee" block), so setup + visit are one invoice
+          // and one saved-card charge. Nothing is charged, sent or linked at
+          // accept. Falls back to today's unattached payable invoice (never a
+          // silently dropped fee) when there is no series parent to carry the
+          // stamp or the parent already carries a different claim.
+          let deferSetupFeeStamp = null;
+          if (shouldCreateStandardDraftInvoice && setupFeeApplies && !includesFirstApplicationLine
+            && !(acceptedRodentSetupAmount > 0)
+            && require('../config/feature-gates').pafSetupFeeLive()
+            && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicy)) {
+            const deferFeeAmount = Math.round(Number(EstimateConverter.frozenSetupFeeAmount(conversionEstData)) * 100) / 100;
+            const deferAnchorId = standardConversionResult?.firstScheduledServiceId || null;
+            if (deferFeeAmount > 0 && deferAnchorId) {
+              const deferAnchor = await trx('scheduled_services').where({ id: deferAnchorId })
+                .first('id', 'recurring_parent_id', 'customer_id', 'source_estimate_id');
+              const deferSeriesParentId = deferAnchor
+                ? (deferAnchor.recurring_parent_id || deferAnchor.id)
+                : null;
+              if (deferSeriesParentId && String(deferAnchor.customer_id) === String(customerId)) {
+                // Compare-and-swap from NULL (the same shape invoice.js and
+                // admin-schedule stamp with): never overwrites another claim.
+                const stampedRows = await trx('scheduled_services')
+                  .where({ id: deferSeriesParentId })
+                  .whereNull('pending_setup_fee')
+                  .update({ pending_setup_fee: deferFeeAmount, updated_at: new Date() });
+                if (stampedRows === 1) {
+                  deferSetupFeeStamp = { parentId: deferSeriesParentId, amount: deferFeeAmount };
+                } else {
+                  const existingClaim = await trx('scheduled_services').where({ id: deferSeriesParentId }).first('pending_setup_fee');
+                  if (existingClaim && Math.round(Number(existingClaim.pending_setup_fee) * 100) === Math.round(deferFeeAmount * 100)) {
+                    // The identical claim is already on the series: idempotent.
+                    deferSetupFeeStamp = { parentId: deferSeriesParentId, amount: deferFeeAmount };
+                  } else {
+                    logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — series ${deferSeriesParentId} already carries a different setup claim; minting the payable setup invoice as before`);
+                  }
+                }
+              }
+            }
+            if (!deferSetupFeeStamp) {
+              logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} could not be deferred to the first visit (no series parent to carry it) — minting the payable setup invoice as before`);
+            }
+          }
+          if (deferSetupFeeStamp) {
+            setupFeeDeferredToFirstVisit = true;
+            logger.info(`[estimate-accept] setup fee $${deferSetupFeeStamp.amount.toFixed(2)} for estimate ${estimate.id} stamped on series ${deferSetupFeeStamp.parentId} — billed with the first performed visit, no accept-time invoice`);
+          } else if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];
             // Frozen-disclosure resolver — bill (and narrate) exactly what
@@ -12662,7 +12757,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (typeof stampBase === 'string') {
           try { stampBase = JSON.parse(stampBase); } catch { stampBase = null; }
         }
-        const stamped = { ...(stampBase && typeof stampBase === 'object' ? stampBase : {}), recurringCardLaneAccepted: true };
+        const stamped = {
+          ...(stampBase && typeof stampBase === 'object' ? stampBase : {}),
+          recurringCardLaneAccepted: true,
+          // Persisted so an already-accepted retry describes this accept as it
+          // was ("setup fee billed with your first visit"), not a missing invoice.
+          ...(setupFeeDeferredToFirstVisit ? { setupFeeDeferredToFirstVisit: true } : {}),
+        };
         await trx('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stamped) });
       }
 
@@ -12736,6 +12837,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversion: standardConversionResult,
         standardInvoiceMinted,
         standardInvoiceAttached,
+        setupFeeDeferredToFirstVisit,
       };
     }).catch((txErr) => {
       // PG 40P01 (deadlock_detected): Postgres aborted this transaction to
@@ -12904,7 +13006,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // off whether the charge plan resolved — the snapshot must match
           // the checkbox the customer saw even when the quote step degraded.
           consentVariant: annualPrepaySelected && recurringCardLaneActive
-            && RecurringCards.isPrepayCardAndChargeEnabled() ? 'prepay_card' : null,
+            && RecurringCards.isPrepayCardAndChargeEnabled()
+            ? 'prepay_card'
+            // Setup fee deferred to the first visit (GATE_PAF_SETUP_FEE): the
+            // capture UI rendered the after-first-visit authorization, so that
+            // is the snapshot of record (recorded under the v12 label).
+            : (txResult.setupFeeDeferredToFirstVisit === true ? 'after_visit_card' : null),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
@@ -14622,6 +14729,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           : null,
         prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
         invoiceKind,
+        setupFeeDeferred: txResult.setupFeeDeferredToFirstVisit === true,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -14690,6 +14798,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ? prepayChargePlan.quote.totalCents / 100
         : null,
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
+      setupFeeAfterFirstVisit: txResult.setupFeeDeferredToFirstVisit === true,
       }),
     });
   } catch (err) {
@@ -19492,6 +19601,10 @@ function buildAcceptSuccessPayload({
   // the success copy must confirm the credit coverage, never promise a
   // receipt (Codex r9).
   prepayCoveredByCredit = false,
+  // GATE_PAF_SETUP_FEE: the setup fee was stamped on the first visit rather
+  // than invoiced at accept — the success card says it is billed with that
+  // visit. Present in the payload only when true (gate-off byte-identical).
+  setupFeeAfterFirstVisit = false,
 } = {}) {
   let nextStep = 'confirmed';
   // A narrow low-confidence commercial estimate is approved online but its first
@@ -19556,6 +19669,7 @@ function buildAcceptSuccessPayload({
     prepayChargeStatus,
     prepayChargedTotal,
     prepayCoveredByCredit,
+    ...(setupFeeAfterFirstVisit ? { setupFeeAfterFirstVisit: true } : {}),
   };
 }
 
@@ -19852,6 +19966,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       treatAsOneTime,
       reservationCommitted,
       siteConfirmationHold,
+      setupFeeAfterFirstVisit: rawEstData?.setupFeeDeferredToFirstVisit === true,
       // An unresolved auto-charge job renders as a confirmed outcome with
       // no pay step — the sweep owns the resolution (hook P0 r13). A
       // 'pending' stamp means no attempt is in flight (initial state, or a
@@ -19979,6 +20094,9 @@ function buildAcceptNotificationPayload({
   // 'annual_prepay_deferred' = a termite annual-plan accept parked for the
   // customer's signature — nothing is billed, booked or approved yet.
   invoiceKind = null,
+  // GATE_PAF_SETUP_FEE: the accept stamped the setup fee on the first visit
+  // instead of minting a payable invoice — nothing is due or sent today.
+  setupFeeDeferred = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -20224,6 +20342,19 @@ function buildAcceptNotificationPayload({
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
+    };
+  }
+
+  // Setup fee deferred to the first visit (GATE_PAF_SETUP_FEE): no invoice or
+  // pay link exists, so the generic "Invoice follow-up needed" fallthrough
+  // would be wrong in both directions.
+  if (setupFeeDeferred && !invoiceMode && !invoicePayUrl) {
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Card saved; setup fee stamped on the first visit and billed with it. No invoice or pay link sent.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Nothing is charged today — your setup fee is billed with your first visit.`,
+      customerLink: '/?tab=billing',
     };
   }
 
@@ -28066,6 +28197,16 @@ async function composeEstimateDataPayload(estimate, {
         // carries). PLUMBING ONLY: no client code reads it yet. Present only
         // when true so every gate-off response stays byte-identical.
         ...(RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData) ? { payAfterFirstVisit: true } : {}),
+        // GATE_PAF_SETUP_FEE (PR-C): on the same rail, the monthly-tier
+        // (setup-only) shape's fee is stamped on the first visit instead of
+        // invoiced at accept. The client applies its "setup fee billed with
+        // your first visit" copy (and the after-visit consent text) only when
+        // this is true AND its own selection resolves to the setup-only
+        // shape (setup row, no first-visit amount, no bait-station setup row).
+        // Present only when true so every gate-off response stays byte-identical.
+        ...(require('../config/feature-gates').pafSetupFeeLive()
+          && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData)
+          ? { setupFeeAfterFirstVisit: true } : {}),
       },
       estimate: {
         id: estimate.id,

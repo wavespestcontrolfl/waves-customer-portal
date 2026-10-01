@@ -7842,6 +7842,100 @@ describe('public estimate one-time breakdown', () => {
     expect(on).toContain('After confirmation, your annual prepay invoice totals');
   });
 
+  // GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): the accept stamps the
+  // setup-only shape's fee on the first visit instead of minting a payable
+  // invoice, so ONLY when payAfterSetupFee is passed does the setup-only
+  // wording say nothing is charged today and the fee bills with the first visit.
+  test('setup-only wording: payAfterSetupFee says the setup fee is billed with the first visit; without it, today\'s invoice wording', () => {
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      setupLabel: 'WaveGuard setup',
+      firstApplicationAmount: 0,
+      payAfterFirstVisit: true,
+      payAfterSetupFee: true,
+    })).toEqual(expect.objectContaining({
+      hasSetup: true,
+      hasFirstApplication: false,
+      payAfterBody: 'Approve now; nothing is charged today. The $99.00 WaveGuard setup fee is billed with your first visit.',
+      payPrefCardSub: 'The WaveGuard setup fee ($99.00) is billed with your first visit.',
+      billingSmall: 'No payment is charged on this page. The $99.00 setup fee is billed with your first visit.',
+    }));
+    // The flag never leaks into the other shapes.
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99, firstApplicationAmount: 89, payAfterFirstVisit: true, payAfterSetupFee: true,
+    }).payAfterBody).toBe('Approve now; nothing is charged today. The setup + first application total of $188.00 is billed at your first visit.');
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99, setupLabel: 'WaveGuard setup', firstApplicationAmount: 0,
+    })).toEqual(expect.objectContaining({
+      payAfterBody: 'Approve now; after you confirm, we send the WaveGuard setup invoice for $99.00 so you can pay before service.',
+    }));
+  });
+
+  describe('server-rendered setup-only (monthly-tier) card: GATE_PAF_SETUP_FEE', () => {
+    const savedEnv = {};
+    beforeEach(() => {
+      for (const k of ['GATE_PAY_AFTER_FIRST_VISIT', 'GATE_PAF_SETUP_FEE']) savedEnv[k] = process.env[k];
+    });
+    afterEach(() => {
+      for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    });
+    // A monthly-billed mosquito tier: WaveGuard setup row, NO first-application amount.
+    const tierEstimate = {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St', monthlyTotal: 96, annualTotal: 1152, onetimeTotal: 0, tier: 'Bronze',
+      pricingBundle: {
+        waveGuardTier: 'Bronze',
+        frequencies: [{ key: 'monthly12', label: 'Monthly', serviceCategory: 'mosquito', monthly: 96, annual: 1152, billingFrequencyKey: 'monthly' }],
+      },
+    };
+    const tierData = {
+      result: {
+        recurring: { services: [{ service: 'mosquito', name: 'Mosquito Control', mo: 96 }] },
+        oneTime: { items: [], membershipFee: 99, specItems: [] },
+        specItems: [],
+        results: {},
+      },
+    };
+
+    test('sub-gate on + card rail: nothing charged today, setup fee billed with the first visit, no Invoice total row, no pay-link wording', () => {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      process.env.GATE_PAF_SETUP_FEE = 'true';
+      const on = renderPage('paf-setup-on', tierEstimate, tierData, null, { payAfterFirstVisitCopy: true });
+      expect(on).toContain('<p class="payment-choice-body">Approve now; nothing is charged today. The $99.00 WaveGuard setup fee is billed with your first visit.</p>');
+      expect(on).toContain('No payment is charged on this page. The $99.00 setup fee is billed with your first visit.');
+      expect(on).toContain('Pay per application; nothing is charged today and the setup fee is billed with your first visit.');
+      expect(on).toContain('Next: pick a time, then confirm. Nothing is charged today.');
+      expect(on).toContain('const PAY_AFTER_SETUP_FEE_COPY = true;');
+      expect(on).not.toContain('we open the $99.00 setup invoice');
+      expect(on).not.toContain('Pay per application with a setup invoice after confirmation.');
+      expect(on).not.toContain('<span>Invoice total</span><strong data-standard-invoice-total');
+    });
+
+    test('sub-gate OFF (master on): the setup-only card is byte-for-byte today\'s wording', () => {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      delete process.env.GATE_PAF_SETUP_FEE;
+      const html = renderPage('paf-setup-subgate-off', tierEstimate, tierData, null, { payAfterFirstVisitCopy: true });
+      expect(html).toContain('we send the WaveGuard setup invoice for $99.00 so you can pay before service.');
+      expect(html).toContain('we open the $99.00 setup invoice so you can pay in-flow.');
+      expect(html).toContain('Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.');
+      expect(html).toContain('<span>Invoice total</span><strong data-standard-invoice-total');
+      expect(html).toContain('const PAY_AFTER_SETUP_FEE_COPY = false;');
+      // (the page JS always carries its own copy branch; only the rendered card matters)
+      expect(html).not.toContain('The $99.00 WaveGuard setup fee is billed with your first visit.');
+      expect(html).not.toContain('No payment is charged on this page. The $99.00 setup fee is billed with your first visit.');
+    });
+
+    test('not on the card rail (payAfterFirstVisitCopy false): today\'s wording even with both gates on', () => {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      process.env.GATE_PAF_SETUP_FEE = 'true';
+      const html = renderPage('paf-setup-exempt', tierEstimate, tierData, null, {});
+      expect(html).toContain('we send the WaveGuard setup invoice for $99.00 so you can pay before service.');
+      expect(html).toContain('const PAY_AFTER_SETUP_FEE_COPY = false;');
+      // (the page JS always carries its own copy branch; only the rendered card matters)
+      expect(html).not.toContain('The $99.00 WaveGuard setup fee is billed with your first visit.');
+      expect(html).not.toContain('No payment is charged on this page. The $99.00 setup fee is billed with your first visit.');
+    });
+  });
+
   test('standalone non-member rodent estimate: displayed invoice totals carry the frozen $99 bait-station setup in BOTH payment modes (codex #3591 r9 P1)', () => {
     const html = renderPage('rodent-setup-token', {
       id: 'estimate-rodent-setup',

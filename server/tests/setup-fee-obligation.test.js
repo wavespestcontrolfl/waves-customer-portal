@@ -490,3 +490,62 @@ test('customer mismatch (re-linked visit) — not owed', async () => {
 test('missing sourceEstimateId — not owed, no reads', async () => {
   expect((await findUnmintedSetupFeeObligation({})).owed).toBe(false);
 });
+
+// Pay after the first visit (GATE_PAF_SETUP_FEE): the accept stamps the fee on
+// the first visit's series parent (scheduled_services.pending_setup_fee) and
+// mints NO invoice, so the note-based "accepted estimate #<id>" checks above
+// would call it "never minted" and park the first visit for manual billing.
+// A live claim at the frozen fee — or the immutable setup_fee_claims record of
+// a live series invoice — is "deferred / billed", not "missing".
+describe('fee deferred to the first performed visit (series claim)', () => {
+  const ROOT = (overrides = {}) => ({ id: 'ss-root', status: 'confirmed', pending_setup_fee: 99, ...overrides });
+  const run = (extra = {}) => findUnmintedSetupFeeObligation({
+    sourceEstimateId: EST_ID, customerId: CUST_ID, excludeScheduledServiceId: 'ss-root', ...extra,
+  });
+
+  test('a positive claim at the frozen fee on a live series parent is deferred — not owed', async () => {
+    mockTables = baseTables({ scheduled_services: [ROOT()] });
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
+  test('the NEGATIVE in-progress marker (a completion mid-mint) is deferred too', async () => {
+    mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: -99 })] });
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
+  test('a stamp at a DIFFERENT amount is someone else\'s claim — the obligation survives', async () => {
+    mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 49 })] });
+    expect((await run()).owed).toBe(true);
+  });
+
+  test('a parent with no stamp and no claim record is still owed (gate off / pre-feature accepts keep parking)', async () => {
+    mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: null })] });
+    expect((await run()).owed).toBe(true);
+  });
+
+  test('a completed parent whose claim is queued is consumed by a LATER visit of the series (the completing child counts as a live consumer)', async () => {
+    mockTables = baseTables({ scheduled_services: [ROOT({ status: 'completed' })] });
+    expect(await run({ excludeScheduledServiceId: 'ss-child', visitPlanRow: { is_recurring: true, recurring_parent_id: 'ss-root' } }))
+      .toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
+  test('the consumed claim: a live series invoice with an immutable setup_fee_claims record at the fee is billed — not owed', async () => {
+    mockTables = baseTables({
+      scheduled_services: [ROOT({ pending_setup_fee: null })],
+      setup_fee_claims: [{ invoice_id: 'inv-9', amount: '99.00' }],
+      // The completion invoice carries no "accepted estimate #" notes stamp, so
+      // the note-based checks see no fee here — only the claim record does.
+      invoices: { id: 'inv-9', status: 'paid', line_items: APP_ONLY_LINE },
+    });
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
+  test('a claim record whose invoice was voided is NOT proof of billing — the obligation survives', async () => {
+    mockTables = baseTables({
+      scheduled_services: [ROOT({ pending_setup_fee: null })],
+      setup_fee_claims: [{ invoice_id: 'inv-9', amount: '99.00' }],
+      invoices: { id: 'inv-9', status: 'void', line_items: APP_ONLY_LINE },
+    });
+    expect((await run()).owed).toBe(true);
+  });
+});

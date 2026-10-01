@@ -51,10 +51,10 @@ import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -3048,7 +3048,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
 // method" after a capture already succeeded — the parent retires the saved
 // intent and remounts this modal with a fresh one.
-function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false }) {
+function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisitSetup = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
   const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
@@ -3231,9 +3231,13 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
               ? (bank
                 ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
                 : 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
-              : (bank
-                ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
-                : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`)}
+              : (afterVisitSetup
+                ? (bank
+                  ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After your first visit is completed, that visit and your one-time setup fee are debited automatically, then each completed service after that. Bank transfers have no added card surcharge.'
+                  : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After your first visit is completed, your card is charged for that visit and your one-time setup fee, then for each completed service after that.`)
+                : (bank
+                  ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
+                  : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`))}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -3247,7 +3251,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
           <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
             {prepay
               ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
-              : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
+              : (bank ? ACH_CONSENT_TEXT : (afterVisitSetup ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
           </span>
         </label>
         {error ? (
@@ -4219,6 +4223,13 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         // payload with alreadyAccepted: true — say so plainly.
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           This estimate was already accepted — you're all set.
+        </div>
+      ) : null}
+      {acceptResult?.setupFeeAfterFirstVisit ? (
+        // GATE_PAF_SETUP_FEE: the setup fee was stamped on the first visit
+        // (no invoice, no pay link) — say when it is billed.
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          Nothing is charged today — your setup fee is billed with your first visit.
         </div>
       ) : null}
       {isAnnualPrepay && acceptResult?.invoiceSettled && acceptResult?.prepayChargeStatus ? (
@@ -8293,6 +8304,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const rodentSetupInvoiceRows = Number(pricing?.rodentBaitSetupFee?.amount) > 0
     ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
     : [];
+  // GATE_PAF_SETUP_FEE: this selection is the setup-only (monthly-tier) shape
+  // on the card rail — the accept stamps the setup fee on the first visit and
+  // bills it with that visit, so the capture copy and consent text say so.
+  const setupFeeAfterVisitCopy = paymentPreference !== 'prepay_annual' && setupFeeBilledWithFirstVisit({
+    enabled: !!data?.recurringCardPolicy?.setupFeeAfterFirstVisit,
+    serviceMode,
+    invoiceMode: !!estimate.billByInvoice,
+    siteConfirmationHold: !!estimate.siteConfirmationHold,
+    setupFee: setupFeeEffective,
+    extraInvoiceRows: rodentSetupInvoiceRows,
+    selectedFrequency: combinedFrequency,
+  });
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -9034,6 +9057,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
+                setupFeeAfterFirstVisit={!!data?.recurringCardPolicy?.setupFeeAfterFirstVisit}
               />
             </>
           ) : null}
@@ -9189,7 +9213,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                       ? (inlineCardState.methodType === 'us_bank_account'
                         ? 'Bank transfers have no added card surcharge.'
                         : CARD_SURCHARGE_DISCLOSURE)
-                      : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`))
+                      : (setupFeeAfterVisitCopy
+                        ? `Nothing is charged today. Your card on file is charged after your first visit is completed — that visit's amount plus your one-time setup fee — and after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`
+                        : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`)))
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
               <InlineAutoPayCapture
@@ -9207,6 +9233,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 onStateChange={handleInlineCardState}
                 onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}
+                afterVisitSetup={setupFeeAfterVisitCopy}
               />
             ) : null}
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
@@ -9302,6 +9329,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               onCancel={handleRecurringCardCancel}
               onReplace={handleReplacePaymentMethod}
               prepay={paymentPreference === 'prepay_annual'}
+              afterVisitSetup={setupFeeAfterVisitCopy}
             />
           ) : null}
           {websiteMode ? null : aiPanelBlock}
@@ -9373,6 +9401,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
+                setupFeeAfterFirstVisit={!!data?.recurringCardPolicy?.setupFeeAfterFirstVisit}
               />
             </div>
           ) : null

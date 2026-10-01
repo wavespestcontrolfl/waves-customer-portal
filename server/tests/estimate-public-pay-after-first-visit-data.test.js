@@ -169,3 +169,57 @@ describe('GET /:token/data — recurringCardPolicy.payAfterFirstVisit', () => {
     expect(p).not.toHaveProperty('payAfterFirstVisit');
   });
 });
+
+// GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): the setup-only (monthly-tier)
+// shape's fee is stamped on the first visit instead of invoiced at accept. The
+// client applies its "setup fee billed with your first visit" copy and the
+// after-visit consent text only when this flag is true (and its own selection
+// resolves to that shape).
+describe('GET /:token/data — recurringCardPolicy.setupFeeAfterFirstVisit', () => {
+  beforeEach(() => {
+    dbRows = {};
+    process.env.RECURRING_CARD_ON_FILE = 'true';
+    delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+    delete process.env.GATE_PAF_SETUP_FEE;
+  });
+  afterEach(() => {
+    delete process.env.RECURRING_CARD_ON_FILE;
+    delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+    delete process.env.GATE_PAF_SETUP_FEE;
+  });
+
+  async function policyFor(policy) {
+    RecurringCards.resolveRecurringCardPolicyForEstimate.mockResolvedValue(policy);
+    const row = estimateRow({ id: 'est-paf-setup', token: 'payaftersetuptoken' });
+    dbRows = { estimates: row };
+    return withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data`);
+      expect(res.status).toBe(200);
+      return (await res.json()).recurringCardPolicy;
+    });
+  }
+
+  const CAPTURE = { enforced: true, required: true, exemptReason: null };
+
+  test('master gate on, sub-gate off: the key is absent (payload only gains payAfterFirstVisit)', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    const p = await policyFor(CAPTURE);
+    expect(p.payAfterFirstVisit).toBe(true);
+    expect(p).not.toHaveProperty('setupFeeAfterFirstVisit');
+  });
+
+  test('sub-gate on without the master gate: absent', async () => {
+    process.env.GATE_PAF_SETUP_FEE = 'true';
+    expect(await policyFor(CAPTURE)).not.toHaveProperty('setupFeeAfterFirstVisit');
+  });
+
+  test('both gates on: true on the card rail (capture required or already enrolled), absent for every exempt customer', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    process.env.GATE_PAF_SETUP_FEE = 'true';
+    expect((await policyFor(CAPTURE)).setupFeeAfterFirstVisit).toBe(true);
+    expect((await policyFor({ enforced: true, required: false, exemptReason: 'saved_method_consented' })).setupFeeAfterFirstVisit).toBe(true);
+    for (const exemptReason of ['existing_plan_customer', 'autopay_paused', 'payer_billed', 'invoice_mode', 'commercial_manual_billing']) {
+      expect(await policyFor({ enforced: true, required: false, exemptReason })).not.toHaveProperty('setupFeeAfterFirstVisit');
+    }
+  });
+});

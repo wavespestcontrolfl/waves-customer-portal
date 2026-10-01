@@ -137,6 +137,47 @@ function isPlanApplicationRow(row) {
   return !!(row && row.is_recurring);
 }
 
+// True when this estimate's own series carries the setup fee as a durable
+// per-series claim: a live stamp at exactly `expectedFeeCents` on a series
+// parent that can still consume it (a NEGATIVE stamp is a completion's
+// in-progress marker and always counts — resume mints or heals it), or the
+// immutable setup_fee_claims record of a non-dead invoice on such a series
+// (the claim consumed by the first performed completion; a stamp never
+// outlives the mint, the record does). Query failures propagate: the caller
+// fails CLOSED exactly as it does for the invoice reads below.
+async function deferredSetupFeeCovers(conn, estimate, expectedFeeCents, { completingVisitId = null, completingParentId = null } = {}) {
+  if (!(expectedFeeCents > 0)) return false;
+  const roots = await conn('scheduled_services')
+    .where({ source_estimate_id: estimate.id, customer_id: estimate.customer_id })
+    .whereNull('recurring_parent_id')
+    .select('id', 'status', 'pending_setup_fee');
+  const rootRows = (Array.isArray(roots) ? roots : []).filter((r) => r && r.id != null);
+  if (!rootRows.length) return false;
+  const { seriesCanStillConsume } = require('./secure-appointment-plans');
+  for (const root of rootRows) {
+    const stamp = root.pending_setup_fee != null ? Number(root.pending_setup_fee) : NaN;
+    if (!Number.isFinite(stamp) || stamp === 0) continue;
+    if (Math.round(Math.abs(stamp) * 100) !== expectedFeeCents) continue;
+    // The completing visit is itself a live consumer of its own series: a
+    // parent already completed (a declined first visit) with the claim still
+    // queued is consumed by THIS child, whatever status the row reads mid-
+    // completion.
+    const completingIsMember = String(completingVisitId || '') === String(root.id)
+      || String(completingParentId || '') === String(root.id);
+    if (stamp < 0 || completingIsMember || await seriesCanStillConsume(conn, root)) return true;
+  }
+  const claims = await conn('setup_fee_claims')
+    .whereIn('scheduled_service_id', rootRows.map((r) => r.id))
+    .select('invoice_id', 'amount');
+  for (const claim of Array.isArray(claims) ? claims : []) {
+    if (!claim || Math.round(Number(claim.amount) * 100) < expectedFeeCents) continue;
+    const invoice = await conn('invoices').where({ id: claim.invoice_id }).first('status');
+    const status = String(invoice?.status || '').toLowerCase();
+    if (invoice && !require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES.includes(status) && status !== 'void') return true;
+  }
+  return false;
+}
+
 /**
  * @param {object} params
  * @param {string} params.sourceEstimateId  the visit's source_estimate_id
@@ -329,6 +370,24 @@ async function findUnmintedSetupFeeObligation({
   const deadInvoice = stampedRows.find((r) => DEAD_STATUSES.has(String(r.status || '').toLowerCase())
     && invoiceHasPositiveSetupFeeLine(r)) || null;
 
+  // Fee DEFERRED to the first performed visit (pay after first visit,
+  // GATE_PAF_SETUP_FEE): the accept stamped the fee on the series parent
+  // (scheduled_services.pending_setup_fee) instead of minting an invoice
+  // whose notes say "accepted estimate #<id>", so the note-based checks above
+  // would call it "never minted" and park the first visit for manual billing
+  // while completion is about to bill it on the visit's own invoice. A live
+  // claim (positive = queued, negative = a completion mid-mint) at exactly
+  // the frozen fee, or the immutable setup_fee_claims record of a live
+  // series invoice that already carries it, is "deferred / billed", not
+  // "missing". Deliberately NOT behind the sub-gate: it only ever matches a
+  // stamp this estimate's own series carries, and a stamp written while the
+  // gate was on must stay recognised after a flip back off.
+  if (await deferredSetupFeeCovers(conn, estimate, expectedFeeCents, {
+    completingVisitId: excludeScheduledServiceId,
+    completingParentId: visitPlanRow?.recurring_parent_id || null,
+  })) {
+    return { owed: false, deferredToFirstVisit: true };
+  }
   // Converter provenance: the accept actually ran the conversion (tier
   // flip, activity row) and still minted nothing. Accepts that never
   // converted (legacy paths, pre-converter rows) are out of scope.

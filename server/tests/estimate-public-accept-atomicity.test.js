@@ -2356,3 +2356,243 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 });
+
+// ── Pay after the first visit — monthly-tier (setup-only) setup fee ─────────
+// GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): on the card rail, the
+// setup-only shape's WaveGuard setup fee is STAMPED on the first visit's
+// series parent (scheduled_services.pending_setup_fee) instead of minted as a
+// payable unattached invoice. The shape is forced at the route's own decision
+// point (resolveFirstApplicationAmount → 0) rather than rebuilt through the
+// tier-pricing ladder in this fake-knex harness; the tier derivation
+// (selectedServiceTierBillsMonthly → firstApplicationInvoiceAmount null) is
+// unchanged by this lane.
+describe('PAF setup fee — setup-only accept stamps the series instead of minting an invoice', () => {
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const NotificationService = require('../services/notification-service');
+  const SAVED_RAIL_POLICY = { enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1' };
+  const FRESH_CAPTURE_POLICY = { enforced: true, required: true, exemptReason: null };
+  const savedEnv = {};
+  let policySpy;
+
+  function setupOnlyFixture(id, { withAnchor = true, parentId = null } = {}) {
+    resetStore(recurringPestEstimate({ id, token: `tok-${id}-x0123456789` }));
+    db.__state.tables.scheduled_services = withAnchor ? [
+      ...(parentId ? [{ id: parentId, customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null }] : []),
+      { id: `ss-${id}`, customer_id: 'customers-1', recurring_parent_id: parentId, pending_setup_fee: null },
+    ] : [];
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: withAnchor ? `ss-${id}` : null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+    return `tok-${id}-x0123456789`;
+  }
+
+  beforeEach(() => {
+    for (const k of ['RECURRING_CARD_ON_FILE', 'GATE_PAY_AFTER_FIRST_VISIT', 'GATE_PAF_SETUP_FEE']) savedEnv[k] = process.env[k];
+    process.env.RECURRING_CARD_ON_FILE = 'true';
+    jest.spyOn(EstimateConverter, 'resolveFirstApplicationAmount').mockReturnValue(0);
+    policySpy = jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ ...SAVED_RAIL_POLICY });
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    jest.restoreAllMocks();
+  });
+
+  function gateOn() {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    process.env.GATE_PAF_SETUP_FEE = 'true';
+  }
+
+  test('gate OFF: exactly today — the unattached payable setup invoice is minted and its pay link delivered', async () => {
+    const token = setupOnlyFixture('paf-off');
+    const response = await putAccept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(InvoiceService.create.mock.calls[0][0].scheduledServiceId).toBeUndefined();
+    expect(response.data.invoiceMode).toBe(true);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    const stamp = db.__state.ops.find((op) => op.type === 'update' && op.table === 'scheduled_services' && op.data && 'pending_setup_fee' in op.data);
+    expect(stamp).toBeUndefined();
+  });
+
+  test('master gate on but the setup-fee sub-gate off: still today\'s payable invoice', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    delete process.env.GATE_PAF_SETUP_FEE;
+    const token = setupOnlyFixture('paf-subgate-off');
+    const response = await putAccept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+  });
+
+  test('gate ON: no invoice minted, nothing delivered, the fee is stamped on the series parent, the customer is told it bills with the first visit', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-on');
+    const response = await putAccept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+    expect(response.data.invoiceMode).toBe(false);
+    expect(response.data.invoiceId).toBeNull();
+    expect(response.data.invoicePayUrl).toBeFalsy();
+    expect(response.data.nextStep).toBe('confirmed');
+    expect(response.data.setupFeeAfterFirstVisit).toBe(true);
+    // The durable claim the first PERFORMED completion consumes.
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(99);
+    // Persisted so an already-accepted retry describes the same accept.
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.recurringCardLaneAccepted).toBe(true);
+    expect(stored.setupFeeDeferredToFirstVisit).toBe(true);
+    const customerNote = NotificationService.notifyCustomer.mock.calls.map((c) => c[3]).join(' ');
+    expect(customerNote).toMatch(/Nothing is charged today/);
+    expect(customerNote).toMatch(/setup fee is billed with your first visit/);
+    expect(customerNote).not.toMatch(/pay link/i);
+  });
+
+  test('gate ON: the stamp lands on the SERIES PARENT when the first visit is a follow-up child', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-child', { parentId: 'ss-parent-1' });
+    const response = await putAccept(token);
+
+    expect(response.status).toBe(200);
+    const rows = db.__state.tables.scheduled_services;
+    expect(rows.find((r) => r.id === 'ss-parent-1').pending_setup_fee).toBe(99);
+    expect(rows.find((r) => r.id === 'ss-paf-child').pending_setup_fee).toBeNull();
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: a capture-required accept records the after_visit_card consent variant', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_1', paymentMethodId: 'pm_paf_1', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-consent');
+    const response = await putAccept(token, { recurringCardSetupIntentId: 'seti_paf_1' });
+
+    expect(response.status).toBe(200);
+    expect(enroll).toHaveBeenCalledTimes(1);
+    expect(enroll.mock.calls[0][0].consentVariant).toBe('after_visit_card');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  test('gate ON but no first visit exists to carry the stamp: falls back to today\'s payable invoice — a fee is never dropped', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-noanchor', { withAnchor: false });
+    const response = await putAccept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+  });
+
+  test('gate ON but the series already carries a DIFFERENT setup claim: never overwritten — the payable invoice is minted', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-occupied');
+    db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
+    const response = await putAccept(token);
+
+    expect(response.status).toBe(200);
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate ON but not on the card rail (exempt customer): today\'s payable invoice', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+    const token = setupOnlyFixture('paf-exempt');
+    const response = await putAccept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+  });
+
+  test('retry of the deferred accept says the same thing and never produces a pay link', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-retry');
+    const first = await putAccept(token);
+    expect(first.status).toBe(200);
+    const retry = await putAccept(token);
+
+    expect(retry.status).toBe(200);
+    expect(retry.data.alreadyAccepted).toBe(true);
+    expect(retry.data.setupFeeAfterFirstVisit).toBe(true);
+    expect(retry.data.invoicePayUrl).toBeFalsy();
+    expect(retry.data.nextStep).toBe('confirmed');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  test('R9 (route): a multi-program accept with the claim stamped mints no combined invoice, never calls the stamper, and puts the claim on the anchor parent ONLY', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-multi');
+    db.__state.tables.scheduled_services.push({ id: 'ss-member-2', customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null });
+    // Re-arm the converter result with a combined-invoice sibling (setupOnlyFixture queued one already).
+    EstimateConverter.convertEstimate.mockReset();
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: 'ss-paf-multi',
+      combinedInvoiceMemberIds: ['ss-member-2'],
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+    const response = await putAccept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).not.toHaveBeenCalled();
+    const rows = db.__state.tables.scheduled_services;
+    expect(rows.find((r) => r.id === 'ss-paf-multi').pending_setup_fee).toBe(99);
+    expect(rows.find((r) => r.id === 'ss-member-2').pending_setup_fee).toBeNull();
+  });
+
+  // R9 (plan §7): a multi-program first visit shares a combined invoice. The
+  // stamp rides the anchor's series PARENT; the combined-invoice stamper only
+  // writes first_application_invoice_id, so it never reads, clears or
+  // overwrites the claim. (The stamper itself is the real implementation here.)
+  test('R9: stampCombinedFirstApplicationInvoiceCoverage on an anchor carrying the claim leaves pending_setup_fee untouched', async () => {
+    const actual = jest.requireActual('../services/estimate-converter');
+    const rows = [
+      { id: 'anchor-1', customer_id: 'c1', source_estimate_id: 'e1', is_recurring: true, recurring_parent_id: null, estimated_price: 40, pending_setup_fee: 99, first_application_invoice_id: null },
+      { id: 'member-2', customer_id: 'c1', source_estimate_id: 'e1', is_recurring: true, recurring_parent_id: null, estimated_price: null, pending_setup_fee: null, first_application_invoice_id: null },
+    ];
+    const updates = [];
+    const trx = (table) => {
+      const q = { table, ids: null };
+      const chain = {
+        where: () => chain,
+        whereNull: () => chain,
+        whereIn: (col, ids) => { q.ids = ids; return chain; },
+        first: async () => (q.table === 'scheduled_services' ? { customer_id: 'c1', source_estimate_id: 'e1' } : undefined),
+        select: async () => (q.ids ? rows.filter((r) => q.ids.includes(r.id) && r.estimated_price == null).map((r) => ({ id: r.id })) : []),
+        update: async (patch) => { updates.push({ ids: q.ids, patch }); return (q.ids || []).length; },
+      };
+      return chain;
+    };
+    await actual.stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId: 'inv-9', anchorId: 'anchor-1', memberIds: ['member-2'] });
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0].ids).toEqual(['anchor-1', 'member-2']);
+    expect(updates[0].patch).toEqual({ first_application_invoice_id: 'inv-9' });
+    expect(rows[0].pending_setup_fee).toBe(99);
+  });
+});
