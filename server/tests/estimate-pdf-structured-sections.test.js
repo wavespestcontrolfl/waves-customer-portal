@@ -212,6 +212,25 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).not.toContain('Rate reviewed yearly');
   });
 
+  test('billing.withholdRateReviewTerms forces the rate review line off (the /pdf route could not prove its evidence durable)', async () => {
+    const pest = {
+      id: 'ordinary-current-pest',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 55 }],
+        result: { recurringServices: [{ service: 'pest_control', name: 'Pest Control' }] },
+      },
+    };
+    const withheld = extractPdfText(await buildEstimateProposalPDFBuffer(pest, { billsPerApplication: false, withholdRateReviewTerms: true }));
+    expect(withheld).toContain('Pest Control');
+    expect(withheld).toContain('callback guarantee between scheduled visits');
+    expect(withheld).not.toContain('Rate reviewed yearly');
+  });
+
   test('an ordinary synthesized pest proposal keeps its callback guarantee and price', async () => {
     const pest = {
       id: 'ordinary-current-pest',

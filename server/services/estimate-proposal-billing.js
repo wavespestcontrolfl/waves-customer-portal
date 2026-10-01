@@ -255,9 +255,6 @@ async function recordRateReviewTermsServedOutcome(estimate, { database = db } = 
     return 'failed';
   }
 }
-async function recordRateReviewTermsServed(estimate, options = {}) {
-  return (await recordRateReviewTermsServedOutcome(estimate, options)) === 'persisted';
-}
 // Whether the document THIS server prints for an open estimate carries the
 // line right now — the /pdf route's question for both renderers: the same
 // decision /data projects to the browser document and the pdfkit fallback
@@ -308,8 +305,9 @@ async function ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing = n
       logger.warn(`[estimate-proposal] could not re-read estimate ${estimate.id} after a zero-row evidence write: ${err.message}`);
     }
   }
-  // 'failed', 'frozen' with an open-looking row, or a zero-row write on a
-  // row that is not provably frozen: persistence unproven ⇒ withhold.
+  // 'failed', or a zero-row write that cannot be shown to have hit a frozen
+  // row (re-read failed, missing, or still open): persistence unproven ⇒
+  // withhold.
   logger.warn(`[estimate-proposal] rate review evidence unproven for estimate ${estimate.id} (${outcome}) — the document is rendered without the line`);
   return { estimate, withholdRateReviewTerms: true };
 }
@@ -515,7 +513,6 @@ module.exports = {
   documentCarriesRateReviewTerms,
   documentPrintsRateReviewTerms,
   rateReviewTermsServedIsCurrent,
-  recordRateReviewTermsServed,
   recordRateReviewTermsServedOutcome,
   ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,

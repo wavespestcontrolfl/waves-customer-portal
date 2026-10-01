@@ -1596,6 +1596,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <SaveCardConsent
             checked={!!saveCard}
             locked={saveCardLocked}
+            // No toggle while a charge or an intent sync is in flight — the
+            // save choice would diverge from the intent's consent stamp
+            // (Sonnet fallback audit on #5434).
+            disabled={processing || syncingAmount}
             collapsible
             style={PAY_BOX}
             headline={saveCardLocked

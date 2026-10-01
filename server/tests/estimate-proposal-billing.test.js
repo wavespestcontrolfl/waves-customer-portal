@@ -40,7 +40,6 @@ const {
   commercialTermLines,
   documentCarriesRateReviewTerms,
   rateReviewTermsServedIsCurrent,
-  recordRateReviewTermsServed,
   recordRateReviewTermsServedOutcome,
   ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,
@@ -510,7 +509,7 @@ describe('served-disclosure evidence (estimate_data.rateReviewTermsServed)', () 
   test('an open estimate is stamped with the current version under the frozen-status guards', async () => {
     const update = jest.fn(async () => 1);
     const chain = stubEstimatesUpdate(update);
-    await expect(recordRateReviewTermsServed({ id: 'e1', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe(true);
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e1', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe('persisted');
     expect(chain.where).toHaveBeenCalledWith({ id: 'e1' });
     expect(chain.whereNull).toHaveBeenCalledWith('price_locked_at');
     expect(chain.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['accepted', 'declined']));
@@ -522,16 +521,16 @@ describe('served-disclosure evidence (estimate_data.rateReviewTermsServed)', () 
   test('a frozen estimate, or one already marked at the current version, is never written', async () => {
     const update = jest.fn(async () => 1);
     stubEstimatesUpdate(update);
-    await expect(recordRateReviewTermsServed({ id: 'e2', status: 'accepted', price_locked_at: null, estimate_data: '{}' })).resolves.toBe(false);
-    await expect(recordRateReviewTermsServed({ id: 'e3', status: 'sent', price_locked_at: '2026-09-01T00:00:00Z', estimate_data: '{}' })).resolves.toBe(false);
-    await expect(recordRateReviewTermsServed({ id: 'e4', status: 'sent', price_locked_at: null, estimate_data: { rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION } })).resolves.toBe(false);
-    await expect(recordRateReviewTermsServed(null)).resolves.toBe(false);
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e2', status: 'accepted', price_locked_at: null, estimate_data: '{}' })).resolves.toBe('frozen');
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e3', status: 'sent', price_locked_at: '2026-09-01T00:00:00Z', estimate_data: '{}' })).resolves.toBe('frozen');
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e4', status: 'sent', price_locked_at: null, estimate_data: { rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION } })).resolves.toBe('current');
+    await expect(recordRateReviewTermsServedOutcome(null)).resolves.toBe('failed');
     expect(update).not.toHaveBeenCalled();
   });
 
   test('a database failure is swallowed — the page or download never fails on the marker', async () => {
     stubEstimatesUpdate(jest.fn(async () => { throw new Error('db down'); }));
-    await expect(recordRateReviewTermsServed({ id: 'e5', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe(false);
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e5', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe('failed');
   });
 });
 
@@ -580,6 +579,20 @@ describe('ensureRateReviewTermsEvidenceBeforeRender (the /pdf pre-render step)',
     await expect(recordRateReviewTermsServedOutcome(estimate)).resolves.toBe('failed');
     stubEstimates({ updateResult: 0, fresh: { ...estimate } });
     await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: true });
+  });
+
+  test('an eligibility check that throws withholds the line without touching the database (fail closed)', async () => {
+    const { update, first } = stubEstimates({ updateResult: 1 });
+    mockEstimateMakesNoGuaranteeClaim.mockImplementation(() => { throw new Error('policy lookup exploded'); });
+    const estimate = openPlan();
+    // proposalMakesNoGuaranteeClaim swallows its own error as "no claim" → not
+    // eligible → passthrough; a throw from normalizeProposal's inputs is the
+    // real fail-closed path: feed it an estimate whose data cannot be read.
+    const unreadable = { ...estimate, estimate_data: 'not json' };
+    const result = await ensureRateReviewTermsEvidenceBeforeRender(unreadable, { billing });
+    expect(result.estimate).toBe(unreadable);
+    expect(update).not.toHaveBeenCalled();
+    expect(first).not.toHaveBeenCalled();
   });
 
   test('already current: no write, no re-read; ineligible (frozen, or no line): passthrough without touching the database', async () => {

@@ -3156,12 +3156,15 @@ set) and re-renders from the current row instead of sending HTML that shows
 a term the accept never recorded — bounded to one hop, because a frozen row
 never enters that branch: an accepted page has no plan-terms card and a
 declined page prints no rate review item at all (it keeps its cancel/refund
-card; "declined never acquires it" holds on the legacy page too). A write
-that FAILS (as opposed to matching zero rows) leaves persistence unproven,
-and the line is withheld rather than shown without evidence: the `/pdf`
-download serves the pdfkit document without the line (the browser renderer
-reads the row itself and cannot be told), and the legacy page re-renders
-without the item. Plan eligibility alone never stamps: an accept from a tab that rendered
+card; "declined never acquires it" holds on the legacy page too). Persistence
+unproven — a write that FAILS, an eligibility check that errors, or a
+zero-row write that cannot be shown to have hit a frozen row (re-read failed,
+row missing or still open) — withholds the line rather than showing it
+without evidence: the `/pdf` download serves the pdfkit document without the
+line (the browser renderer reads the row itself and cannot be told), the
+legacy page re-renders without the item, and a `/data?mode=pdf` document pass
+(the headless capture, or a customer's bare `?mode=pdf` view) runs the same
+pre-render step and projects `rateReviewTermsEligible: false`. Plan eligibility alone never stamps: an accept from a tab that rendered
 no rate copy (a bundle that predates the line with the gate off, the
 terms-neutral annual prepay lane with nothing downloaded) leaves the frozen
 document without the line rather than claiming a disclosure that was never

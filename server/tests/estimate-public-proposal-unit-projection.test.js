@@ -44,6 +44,7 @@ function chainFor(result) {
     where: jest.fn(() => chain),
     whereIn: jest.fn(() => chain),
     whereNull: jest.fn(() => chain),
+    whereNotIn: jest.fn(() => chain),
     whereNotNull: jest.fn(() => chain),
     whereRaw: jest.fn(() => chain),
     andWhere: jest.fn(() => chain),

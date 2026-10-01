@@ -5710,7 +5710,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Served-disclosure evidence (pre-push Codex on #5434's merge head): tell
   // the caller when this render PRINTS the "Rate reviewed once a year" item,
   // so the view handler persists that the customer was shown it
-  // (recordRateReviewTermsServed) — the accept's frozen-document stamp keys
+  // (recordRateReviewTermsServedOutcome) — the accept's frozen-document stamp keys
   // on that marker, never on plan eligibility alone. Callback, not a return
   // value: renderPage stays a pure HTML builder for every other caller.
   // A declined page keeps its cancel/refund card but never acquires the
@@ -9153,9 +9153,11 @@ async function handleEstimateView(req, res, next) {
       // ONE 303 to the same URL (query preserved) and re-render from the row
       // as it is now. Bounded to one hop: the redirected request reads a
       // frozen row, which never enters this branch (an accepted page has no
-      // plan-terms card; a declined page prints no rate item). The
-      // freshness read is best-effort — a failure falls through to the
-      // page, never a 500.
+      // plan-terms card; a declined page prints no rate item). A zero-row
+      // write that cannot be shown to have hit a frozen row (freshness read
+      // failed, row missing or still open) is persistence unproven, exactly
+      // like a failed write: the page is re-rendered WITHOUT the item,
+      // never a 500 (Sonnet fallback audit on #5434).
       const billingMod = require('../services/estimate-proposal-billing');
       const outcome = await billingMod.recordRateReviewTermsServedOutcome(estimate);
       if (outcome === 'failed') {
@@ -9178,6 +9180,7 @@ async function handleEstimateView(req, res, next) {
             .set('Expires', '0')
             .redirect(303, req.originalUrl);
         }
+        pageHtml = renderLegacyPage({ withholdRateReviewTerms: true });
       }
     }
     sendEstimatePageHtml(res, pageHtml);
@@ -27900,6 +27903,7 @@ async function composeEstimateDataPayload(estimate, {
         const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
         const {
           proposalCarriesPlanTerms, proposalMakesNoGuaranteeClaim, proposalRateReviewTermsEligible, proposalRowTermsScope,
+          ensureRateReviewTermsEvidenceBeforeRender,
           resolveProposalBillingContext,
         } = require('../services/estimate-proposal-billing');
         const proposalBilling = await resolveProposalBillingContext(estimate);
@@ -27908,6 +27912,16 @@ async function composeEstimateDataPayload(estimate, {
           livePricing: proposalBilling?.livePricing || null,
         });
         const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
+        // A document render pass (the headless capture, or a customer's bare
+        // ?mode=pdf view) is a customer-facing document: make the served
+        // evidence durable BEFORE projecting the line, exactly like /pdf
+        // (Sonnet fallback audit on #5434). The headless pass finds the
+        // marker already current (the /pdf route wrote it); unproven
+        // persistence withholds the line; a row that froze under us is
+        // projected as the frozen row it now is.
+        const documentEvidence = isPdfRenderPass
+          ? await ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing: proposalBilling })
+          : null;
         proposalPublicView = {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
@@ -27920,7 +27934,9 @@ async function composeEstimateDataPayload(estimate, {
           // own narrower taxonomy (codex #5434 r1 P1 — a "Weed Control"
           // row is lawn here and was unclassifiable there). Explicit
           // boolean, like noGuaranteeClaims.
-          rateReviewTermsEligible: proposalRateReviewTermsEligible(proposalForView, estimate.id, { estimate, acceptance: acceptanceRecord }),
+          rateReviewTermsEligible: documentEvidence?.withholdRateReviewTerms === true
+            ? false
+            : proposalRateReviewTermsEligible(proposalForView, estimate.id, { estimate: documentEvidence?.estimate || estimate, acceptance: acceptanceRecord }),
           // Drives the commercial inclusions/terms stacks client-side — see
           // proposalPestRecurringOnly's truth-scope classification.
           pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),

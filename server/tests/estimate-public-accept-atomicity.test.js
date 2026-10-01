@@ -278,6 +278,12 @@ jest.mock('../services/estimate-card-holds', () => ({
 // The public /pdf download, pdfkit path: the real generator streams a PDF
 // through pdfkit; here it only needs to end the response so the served
 // marker written beside it can be asserted.
+// The browser document renderer: never reachable in tests (no headless
+// browser); the mock lets the /pdf route tests pin WHEN it is attempted.
+jest.mock('../services/pdf/estimate-doc-pdf', () => {
+  const actual = jest.requireActual('../services/pdf/estimate-doc-pdf');
+  return { ...actual, renderEstimateDocumentPdf: jest.fn(async () => { throw new Error('no browser in tests'); }) };
+});
 jest.mock('../services/pdf/estimate-pdf', () => ({
   generateEstimateProposalPDF: jest.fn((estimate, res) => {
     res.set('Content-Type', 'application/pdf');
@@ -1766,9 +1772,13 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
     });
     seed({ id: 'est-pdf-1', token: 'tok-pdf-1-x0123456789', estimate_data: documentData });
+    const renderDoc = require('../services/pdf/estimate-doc-pdf').renderEstimateDocumentPdf;
+    renderDoc.mockClear();
     const open = await fetch(`${base}/api/estimates/tok-pdf-1-x0123456789/pdf`);
     expect(open.status).toBe(200);
     expect(servedOps()).toHaveLength(1);
+    // Evidence proven → the browser renderer was attempted (and fell back).
+    expect(renderDoc).toHaveBeenCalledTimes(1);
     expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
     // Frozen: still downloadable, but the marker is never written.
     seed({ id: 'est-pdf-2', token: 'tok-pdf-2-x0123456789', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData });
@@ -1849,10 +1859,14 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       estimateTouches += 1;
       if (estimateTouches === 2) throw new Error('db down'); // the evidence UPDATE
     };
+    const renderDoc = require('../services/pdf/estimate-doc-pdf').renderEstimateDocumentPdf;
+    renderDoc.mockClear();
     const res = await fetch(`${base}/api/estimates/tok-pdf-fail-x0123456789/pdf`);
     db.__state.onTable = null;
     expect(res.status).toBe(200);
     expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    // Withholding: the browser renderer (which cannot be told) is skipped.
+    expect(renderDoc).not.toHaveBeenCalled();
     const [renderedEstimate, , renderedBilling] = generate.mock.calls.at(-1);
     expect(renderedEstimate.status).toBe('sent');
     expect(renderedBilling.withholdRateReviewTerms).toBe(true);
