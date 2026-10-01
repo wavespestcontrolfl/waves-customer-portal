@@ -3,7 +3,8 @@
     "st_augustine": {
       "name": "St. Augustine Lawn Care Protocol",
       "notes": [
-        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf. Do not apply to St. Augustinegrass during spring green-up or the fall-to-winter transition.",
+        "⚠ LESCO Chelated Iron Plus is 12-0-0 (quick-release urea N): it counts as nitrogen. NEVER Jun 1–Sep 30 anywhere, or Apr 1–Sep 30 in North Port. For color in those months use a 0-N micro (High Mn Combo, Chelated AM + Micros).",
+        "⚠ SpeedZone Southern: NEVER on Floratam or Bitterblue St. Augustine (label exclusion); treat an unknown St. Augustine cultivar as Floratam and use Celsius WG instead. Apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf. Do not apply to St. Augustinegrass during spring green-up or the fall-to-winter transition.",
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
         "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
@@ -218,6 +219,7 @@
     "bermuda": {
       "name": "Bermuda Lawn Care Protocol",
       "notes": [
+        "⚠ LESCO Chelated Iron Plus is 12-0-0 (quick-release urea N): it counts as nitrogen. NEVER Jun 1–Sep 30 anywhere, or Apr 1–Sep 30 in North Port. For color in those months use a 0-N micro (High Mn Combo, Chelated AM + Micros).",
         "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf.",
         "⚠ NO Atrazine on Bermuda — Atrazine is ST. AUGUSTINE ONLY.",
         "⚠ PGR: Primo Maxx every 3-4 weeks Mar-Oct. Document growth response each visit. Bermuda grows aggressively.",
@@ -427,6 +429,7 @@
     "zoysia": {
       "name": "Zoysia Protocol",
       "notes": [
+        "⚠ LESCO Chelated Iron Plus is 12-0-0 (quick-release urea N): it counts as nitrogen. NEVER Jun 1–Sep 30 anywhere, or Apr 1–Sep 30 in North Port. For color in those months use a 0-N micro (High Mn Combo, Chelated AM + Micros).",
         "⚠ N budget: 2.0-3.0 lb N/K/yr MAX (UF/IFAS). Excess N = explosive thatch → severe Large Patch in fall.",
         "⚠ PGR: Primo Maxx at CONSERVATIVE rates only. Document response. Over-regulation = months of thin turf.",
         "⚠ Large Patch (Rhizoctonia): Zoysia is HIGHLY susceptible. Preventive fungicide Oct-Mar with FRAC rotation.",
@@ -636,6 +639,7 @@
     "bahia": {
       "name": "Bahia Protocol",
       "notes": [
+        "⚠ LESCO Chelated Iron Plus is 12-0-0 (quick-release urea N): it counts as nitrogen. NEVER Jun 1–Sep 30 anywhere, or Apr 1–Sep 30 in North Port. For color in those months use a 0-N micro (High Mn Combo, Chelated AM + Micros).",
         "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf.",
         "⚠ Bahia is LOW-INPUT turf. 2.0 lb N/K/yr MAX. More N = more mowing, NOT better quality.",
         "⚠ Mole cricket is THE primary insect threat — not chinch bugs. Soapy flush scout, not leaf inspection.",
