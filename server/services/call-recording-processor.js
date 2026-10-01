@@ -2124,6 +2124,25 @@ function callerIdNameForPrompt(call) {
  * The caller must still run demoteFailOpenOnV1AddressConflict on the result,
  * exactly as the live path does — the two are one contract.
  */
+// The commercial dictated booking options the audits hand canAutoRoute: the processor
+// lanes' context, with the trusted-label gate, the routed transcript, the call's own
+// START (callStartedAt: a post-call fallback row's created_at is after the call ended;
+// codex #5377 r12 P2) and the audit's catalog-aware quote check.
+function auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices }) {
+  const routedTranscript = transcript !== undefined ? transcript : call.transcription;
+  return {
+    commercialDictatedBooking: true,
+    transcriptLabelsTrusted: (gates?.isEnabled || isEnabled)('callAgentCommitTrustedLabels') === true,
+    transcript: routedTranscript,
+    callStartedAt: callStartedAt(call) || call.created_at,
+    commercialQuoteBookable: auditCommercialQuoteBookableFor({
+      extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
+      transcription: routedTranscript,
+      services: bookableServices,
+    }),
+  };
+}
+
 function buildFailOpenRoutingContext({
   call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
   unclearServiceAssessmentEnabled = false,
@@ -2167,20 +2186,7 @@ function buildFailOpenRoutingContext({
       // trusted-label gate, the transcript and the call time the grounding reads
       // off the call row every audit already has. Absent when the gate is off,
       // so the options shape the audits compare is unchanged gate-off.
-      ...(commercialDictatedBookingActive(call, gates) ? {
-        commercialDictatedBooking: true,
-        transcriptLabelsTrusted: (gates?.isEnabled || isEnabled)('callAgentCommitTrustedLabels') === true,
-        transcript: transcript !== undefined ? transcript : call.transcription,
-        // The call's own START (callStartedAt: a post-call fallback row's created_at is
-        // after the call ended), the extraction path's helper — slot dates resolve
-        // from it (codex #5377 r12 P2).
-        callStartedAt: callStartedAt(call) || call.created_at,
-        commercialQuoteBookable: auditCommercialQuoteBookableFor({
-          extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
-          transcription: transcript !== undefined ? transcript : call.transcription,
-          services: bookableServices,
-        }),
-      } : {}),
+      ...(commercialDictatedBookingActive(call, gates) ? auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices }) : {}),
     },
   };
 }
@@ -6485,7 +6491,12 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
       const finalView = v2BookingServiceView(extracted || {}, v2Extraction);
       if (finalView) views.push(finalView);
       if (views.some((view) => hasCallReServiceIntent(view))) return false;
-      return views.every((view) => {
+      // The approved booking re-asserts the owner's recurring-intent rule over the
+      // V2-merged service before it books (the singular-to-program override): judge
+      // each view as the booking will book it, so a one-time pick that becomes a
+      // quarterly program (which drops the quote) holds here (codex #5377 local r1 P1).
+      const serviceNames = services.map((s) => s.name).filter(Boolean);
+      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every((view) => {
         const coarse = resolveSchedulableCallService(view, { transcription });
         const row = resolveCallBookingCatalogService({
           extracted: view,

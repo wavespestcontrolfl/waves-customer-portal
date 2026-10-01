@@ -445,34 +445,41 @@ function normalizeAgreedSlotWords(value) {
   return `${day || ''}|${hour}|${period || ''}`;
 }
 
+// Field-specific normalizers (wrapped so the lookups resolve at call time).
+const FIELD_NORMALIZERS = {
+  agreed_slot_words: (v) => normalizeAgreedSlotWords(v),
+  address_line1: (v) => normalizeString(normalizeStreetLine(v)),
+  phone: (v) => normalizePhone(v),
+  email: (v) => normalizeString(v),
+  preferred_date_time: (v) => normalizeDateTime(v),
+  proposed_start_at: (v) => normalizeDateTime(v),
+};
+// Booleans compared as they are, null kept distinct from false:
+//   - price_accepted is a tri-state (true/false/null): unlike
+//     agent_committed_booking, null is NOT collapsed into false — "acceptance
+//     never at issue" is a distinct state from "the caller declined".
+//   - caller_id_disclaimed is the same tri-state shape as price_accepted — the
+//     schema never sets it false (see call-extraction.model-output.schema.json),
+//     so null (not addressed) must stay distinct from a hypothetical false.
+//   - sms_declined (schema 1.19.0) is the same tri-state shape — null (never
+//     judged, including every pre-1.19 row) must stay distinct from an
+//     explicit false, which the booking-link staging check treats very
+//     differently (null fails closed; false does not block).
+const BOOL_FIELDS = new Set([
+  'appointment_confirmed', 'is_spam', 'is_voicemail', 'price_accepted', 'caller_id_disclaimed',
+  'sms_declined', 'definite_commitment', 'relative_date_used', 'moved_appointment_relative_date_used',
+  'price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final', 'staff_accepted_proposed_slot',
+]);
+// agent_committed_booking postdates every legacy extraction: absent/null
+// means "not committed", identical to false — collapse them so replays
+// don't report a spurious high-severity delta on every pre-1.8.0 row
+// (codex P2). A genuine true↔false disagreement still surfaces.
+const COLLAPSED_BOOL_FIELDS = new Set(['agent_committed_booking', 'caller_accepted_slot']);
+
 function normalizeField(field, value) {
-  if (field === 'agreed_slot_words') return normalizeAgreedSlotWords(value);
-  if (field === 'address_line1') return normalizeString(normalizeStreetLine(value));
-  if (field === 'phone') return normalizePhone(value);
-  if (field === 'email') return normalizeString(value);
-  if (field === 'appointment_confirmed' || field === 'is_spam' || field === 'is_voicemail') return normalizeBool(value);
-  // price_accepted is a tri-state (true/false/null): unlike
-  // agent_committed_booking, null is NOT collapsed into false — "acceptance
-  // never at issue" is a distinct state from "the caller declined".
-  if (field === 'price_accepted') return normalizeBool(value);
-  // caller_id_disclaimed is the same tri-state shape as price_accepted — the
-  // schema never sets it false (see call-extraction.model-output.schema.json),
-  // so null (not addressed) must stay distinct from a hypothetical false.
-  if (field === 'caller_id_disclaimed') return normalizeBool(value);
-  // sms_declined (schema 1.19.0) is the same tri-state shape — null (never
-  // judged, including every pre-1.19 row) must stay distinct from an
-  // explicit false, which the booking-link staging check treats very
-  // differently (null fails closed; false does not block).
-  if (field === 'sms_declined' || field === 'definite_commitment' || field === 'relative_date_used'
-    || field === 'moved_appointment_relative_date_used' || field === 'price_offered_by_staff'
-    || field === 'price_accepted_by_caller' || field === 'price_is_final'
-    || field === 'staff_accepted_proposed_slot') return normalizeBool(value);
-  // agent_committed_booking postdates every legacy extraction: absent/null
-  // means "not committed", identical to false — collapse them so replays
-  // don't report a spurious high-severity delta on every pre-1.8.0 row
-  // (codex P2). A genuine true↔false disagreement still surfaces.
-  if (field === 'agent_committed_booking' || field === 'caller_accepted_slot') return normalizeBool(value) === true;
-  if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
+  if (Object.hasOwn(FIELD_NORMALIZERS, field)) return FIELD_NORMALIZERS[field](value);
+  if (BOOL_FIELDS.has(field)) return normalizeBool(value);
+  if (COLLAPSED_BOOL_FIELDS.has(field)) return normalizeBool(value) === true;
   return normalizeString(value);
 }
 

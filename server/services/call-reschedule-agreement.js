@@ -1044,32 +1044,40 @@ const SPOKEN_TEENS = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 
 const SPOKEN_TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
 const isSpokenNumberWord = (w) => Object.hasOwn(SPOKEN_UNITS, w) || Object.hasOwn(SPOKEN_TEENS, w) || Object.hasOwn(SPOKEN_TENS, w) || w === 'hundred' || w === 'thousand';
 
+// The kinds of number word each kind may NOT directly follow ("one fifty", "two thirty":
+// a unit or teen right before a tens word is ambiguous; "hundred hundred" is malformed).
+const SPOKEN_FORBIDDEN_PREV = {
+  unit: new Set(['unit', 'teen']),
+  teen: new Set(['unit', 'teen', 'tens', 'tens-unit']),
+  tens: new Set(['unit', 'teen', 'tens', 'tens-unit']),
+  hundred: new Set(['hundred', 'thousand']),
+  thousand: new Set(),
+};
+const SPOKEN_VALUES = { unit: SPOKEN_UNITS, teen: SPOKEN_TEENS, tens: SPOKEN_TENS };
+const spokenKind = (w) => (w === 'hundred' || w === 'thousand' ? w
+  : Object.keys(SPOKEN_VALUES).find((kind) => Object.hasOwn(SPOKEN_VALUES[kind], w)));
+
 function evaluateSpokenRun(words) {
   let total = 0;
   let group = 0; // the part below 1000 being built
-  let prev = null; // 'unit' | 'teen' | 'tens' | 'hundred' | 'thousand'
+  let prev = null; // 'unit' | 'teen' | 'tens' | 'tens-unit' | 'hundred' | 'thousand'
   let sawHundredInGroup = false;
   let sawThousand = false;
   for (const w of words) {
-    if (Object.hasOwn(SPOKEN_UNITS, w)) {
-      // a unit may follow a tens ("forty nine"), a hundred/thousand, or start the run
-      if (prev === 'unit' || prev === 'teen') return NaN;
-      if (prev === 'tens' && group % 10 !== 0) return NaN;
-      group += SPOKEN_UNITS[w]; prev = prev === 'tens' ? 'tens-unit' : 'unit';
-    } else if (Object.hasOwn(SPOKEN_TEENS, w)) {
-      if (prev === 'unit' || prev === 'teen' || prev === 'tens' || prev === 'tens-unit') return NaN;
-      group += SPOKEN_TEENS[w]; prev = 'teen';
-    } else if (Object.hasOwn(SPOKEN_TENS, w)) {
-      // "one fifty" / "two thirty": a unit or teen directly before a tens word is ambiguous
-      if (prev === 'unit' || prev === 'teen' || prev === 'tens' || prev === 'tens-unit') return NaN;
-      group += SPOKEN_TENS[w]; prev = 'tens';
-    } else if (w === 'hundred') {
-      if (sawHundredInGroup || group < 1 || group > 99 || prev === 'hundred' || prev === 'thousand') return NaN;
-      group *= 100; sawHundredInGroup = true; prev = 'hundred';
-    } else if (w === 'thousand') {
+    const kind = spokenKind(w);
+    if (SPOKEN_FORBIDDEN_PREV[kind].has(prev)) return NaN;
+    if (kind === 'hundred') {
+      if (sawHundredInGroup || group < 1 || group > 99) return NaN;
+      group *= 100; sawHundredInGroup = true;
+    } else if (kind === 'thousand') {
       if (sawThousand || group < 1) return NaN;
-      total += group * 1000; group = 0; sawHundredInGroup = false; sawThousand = true; prev = 'thousand';
+      total += group * 1000; group = 0; sawHundredInGroup = false; sawThousand = true;
+    } else {
+      // a unit may follow a tens word only to complete it ("forty nine")
+      if (kind === 'unit' && prev === 'tens' && group % 10 !== 0) return NaN;
+      group += SPOKEN_VALUES[kind][w];
     }
+    prev = kind === 'unit' && prev === 'tens' ? 'tens-unit' : kind;
   }
   return total + group;
 }

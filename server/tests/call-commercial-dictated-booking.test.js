@@ -357,6 +357,22 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
     expect(at('one hundred fifty dollars and fifteen cents', 150).reason).toBe('price_not_stated_by_staff');
     // an unreadable compound fails closed
     expect(at('one hundred fifty dollars and a few cents', 150).reason).toBe('price_not_stated_by_staff');
+    // the dollars are the figure right before "dollars and", not an earlier one (codex #5377 local r1 P2)
+    expect(at('for twenty rooms 150 dollars and fifty cents', 150.5).ok).toBe(true);
+    expect(at('for twenty rooms 150 dollars and fifty cents', 150).reason).toBe('price_not_stated_by_staff');
+    expect(at('for 20 rooms one hundred fifty dollars and fifty cents', 150.5).ok).toBe(true);
+  });
+
+  test('a quote clipped inside the spoken amount does not ground the shorter amount (codex #5377 local r1 P1)', () => {
+    const clipped = (turnText, quoteText) => {
+      const t = TRANSCRIPT.split(PRICE_TALK).join(turnText);
+      const ex = extraction({ priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', quoteText), PRICE_EVIDENCE[1]] });
+      return grounded(ex, t);
+    };
+    expect(clipped('The quarterly service for the office is $150.50, does that work?', 'The quarterly service for the office is $150').reason).toBe('price_not_stated_by_staff');
+    expect(clipped('The quarterly service for the office is one hundred fifty dollars and fifty cents, does that work?', 'The quarterly service for the office is one hundred fifty dollars').reason).toBe('price_not_stated_by_staff');
+    // the whole amount, quoted whole, still grounds
+    expect(clipped('The quarterly service for the office is $150, does that work?', 'The quarterly service for the office is $150').ok).toBe(true);
   });
 
   test('a multi-term accepted price ("$150 to start plus $50/month") goes to the office (codex #5377 r3 P1)', () => {
@@ -899,6 +915,17 @@ describe('the quote must survive the catalog-aware price resolver (codex #5377 r
       transcription: TRANSCRIPT, services: [ONE_TIME_ROW, RECURRING_ROW],
     });
     expect(f(150, ex)).toBe(false);
+  });
+
+  test('each view is judged as the booking books it, after the recurring-intent override (codex #5377 local r1 P1)', () => {
+    const QUARTERLY = { id: 'svc-pest-q2', service_key: 'pest_quarterly', name: 'Quarterly Pest Control Service', short_name: 'Pest Quarterly', billing_type: 'recurring', pricing_type: 'variable', base_price: '65.00' };
+    const roach = { is_lead: true, matched_service: ONE_TIME_ROW.name, requested_service: ONE_TIME_ROW.name, specific_service_name: ONE_TIME_ROW.name };
+    const services = [ONE_TIME_ROW, QUARTERLY];
+    const oneTimeCall = 'Caller: I have roaches in the office kitchen.\nAgent: We can do that.';
+    const planCall = 'Caller: I have roaches in the office and I want the quarterly pest control plan going forward.\nAgent: We can do that.';
+    expect(commercialQuoteBookableFor({ extracted: roach, transcription: oneTimeCall, services })(150, null)).toBe(true);
+    // the booking turns the one-time pick into the quarterly program, which drops the quote
+    expect(commercialQuoteBookableFor({ extracted: roach, transcription: planCall, services })(150, null)).toBe(false);
   });
 
   test('the audits rebuild the pre-adoption view from the recorded V1 service fields (codex #5377 r17 P1)', () => {

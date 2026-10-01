@@ -83,6 +83,16 @@ function centsIn(phrase) {
   const ones = CENT_ONES.indexOf(words[1]);
   return words.length === 2 && ones >= 1 && ones <= 9 ? tens * 10 + ones : null;
 }
+// The amount written immediately before a position ("For twenty rooms it is 150" -> 150,
+// "... one hundred fifty" -> 150): the digit group or the run of number words that ends the
+// text, never an earlier figure in the sentence.
+const NUMBER_WORD_RUN = /((?:\b(?:a|and|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b[\s-]*)+)$/i;
+function amountEndingAt(prefix) {
+  const digits = /(\d{1,3}(?:,\d{3})+|\d+)\s*$/.exec(prefix);
+  if (digits) return Number(digits[1].replace(/,/g, ''));
+  const words = NUMBER_WORD_RUN.exec(prefix);
+  return words ? spokenFiguresIn(words[1]).at(-1) ?? null : null;
+}
 function statesAmount(text, amount) {
   const str = String(text || '');
   const amounts = amountsIn(str);
@@ -91,7 +101,7 @@ function statesAmount(text, amount) {
   // after it become ONE amount (150.05), and neither part counts on its own. A compound
   // that cannot be read fails closed: the quote does not state the amount.
   for (const m of str.matchAll(/\bdollars?\s+and\s+([a-z0-9 -]+?)\s+cents?\b/gi)) {
-    const dollars = amountsIn(str.slice(0, m.index)).at(-1);
+    const dollars = amountEndingAt(str.slice(0, m.index));
     const cents = centsIn(m[1]);
     if (dollars == null || cents == null) return false;
     for (const part of [dollars, ...amountsIn(m[1])]) {
@@ -120,33 +130,32 @@ function priceGrounded(v2, transcript, amount) {
   const pinned = (path, speaker) => (Array.isArray(v2.evidence) ? v2.evidence : [])
     .filter((e) => e?.field_path === path && e.speaker === speaker && typeof e.quote === 'string')
     .flatMap((e) => turnsHolding(turns, e.quote, speaker).map((turn) => ({ turn, quote: e.quote })));
+  // The quote AND its whole turn state the amount: a quote clipped inside the spoken
+  // amount ("The service is $150" from "The service is $150.50.") reads 150 while the
+  // turn reads 150.50, so it does not ground $150 (codex #5377 local r1 P1).
   const offers = pinned('/service_request/price_offered_by_staff', 'agent')
-    .filter(({ quote }) => statesAmount(quote, amount));
+    .filter(({ quote, turn }) => statesAmount(quote, amount) && statesAmount(turn.raw, amount));
   if (!offers.length) return 'price_not_stated_by_staff';
   const accepted = pinned('/service_request/price_accepted_by_caller', 'caller')
     .some(({ turn }) => offers.some((offer) => turns.indexOf(turn) > turns.indexOf(offer.turn)));
   return accepted ? null : 'price_not_accepted_by_caller';
 }
 
-function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable } = {}) {
-  const fail = (reason) => ({ ok: false, reason });
-  const scheduling = v2?.scheduling;
-  if (!scheduling || typeof scheduling !== 'object') return fail('no_scheduling');
-  if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return fail('not_confirmed');
+// The agreed-price terms, checked in order; the first that fails is the reason.
+// `t` carries { v2, agreed, quoted, entry, quoteBookable }.
+const PRICE_TERM_CHECKS = [
   // A price was agreed on the call. A range ("$90 to $100") is not one price.
-  const agreed = resolveCallAgreedPrice(v2);
-  if (!agreed) return fail('no_price_agreed');
-  if (agreed.amountMax != null || (agreed.additionalTerms || []).some((t) => t.amountMax != null)) return fail('price_is_a_range');
+  ['no_price_agreed', (t) => !t.agreed],
+  ['price_is_a_range', (t) => [t.agreed, ...(t.agreed.additionalTerms || [])].some((term) => term.amountMax != null)],
   // More than one accepted term ("$150 to start plus $50/month") is not one
   // price either: booking stamps quoted_price_usd only, so the extra accepted
   // charge would never reach the appointment. The office books it.
-  if ((agreed.additionalTerms || []).length) return fail('price_has_multiple_terms');
+  ['price_has_multiple_terms', (t) => (t.agreed.additionalTerms || []).length > 0],
   // Booking stamps the visit price from quoted_price_usd alone (one accepted
   // total, extraction-compat's quoted_price); an accepted price entry with a
   // billing unit and no quoted total would unlock the booking without that
   // amount ever reaching the appointment, so it is not enough.
-  const quoted = v2.service_request?.quoted_price_usd;
-  if (typeof quoted !== 'number' || !(quoted > 0) || agreed.amount !== quoted) return fail('no_quoted_total');
+  ['no_quoted_total', (t) => typeof t.quoted !== 'number' || !(t.quoted > 0) || t.agreed.amount !== t.quoted],
   // The booked row carries one per-visit price. A recurring billing unit
   // ("$150 a month") stamped as that price would lose the recurring term, so
   // only a one-time / per-application / unitless amount books here. The
@@ -155,25 +164,39 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quot
   // resolveCallAgreedPrice synthesizes a unitless term from quoted_price_usd
   // when no entry matches, so a missing, unaccepted or unit-less entry would
   // otherwise let "$150 a month" book as a bare $150 visit (codex #5377 r15 P1).
-  const svc = v2.service_request || {};
-  const entries = Array.isArray(svc.prices) && svc.prices.length ? svc.prices : [svc.price];
-  const entry = entries.find((e) => e && e.accepted === true && e.amount_usd === quoted && !(e.amount_max_usd > e.amount_usd));
-  if (!entry) return fail('no_accepted_price_entry');
-  if (!['one_time', 'per_application', 'unknown'].includes(entry.unit)) return fail('price_unit_not_bookable');
+  ['no_accepted_price_entry', (t) => !t.entry],
+  ['price_unit_not_bookable', (t) => !['one_time', 'per_application', 'unknown'].includes(t.entry.unit)],
   // The booking path discards a total outside its accepted range (or with
   // sub-cent precision) and books at the catalog price or none, so the
   // caller's accepted amount would never reach the appointment: the office
   // books it instead.
-  if (sanitizeQuotedCallPrice(quoted) !== quoted) return fail('quoted_total_not_bookable');
+  ['quoted_total_not_bookable', (t) => sanitizeQuotedCallPrice(t.quoted) !== t.quoted],
   // ...and the catalog-aware half of the same resolver (resolveCallBookingPrice):
   // it discards every quote when the resolved catalog row is recurring or a
   // covered re-service. The caller supplies the check (it alone can load and
   // resolve the catalog row the way the booking does); without one, or when the
   // quote does not survive it, the office books it.
-  if (typeof quoteBookable !== 'function' || quoteBookable(quoted, v2) !== true) return fail('price_not_bookable_for_service');
+  ['price_not_bookable_for_service', (t) => typeof t.quoteBookable !== 'function' || t.quoteBookable(t.quoted, t.v2) !== true],
+];
+
+// The accepted price entry for exactly this total (no range), or undefined.
+function acceptedEntryFor(svc, quoted) {
+  const entries = Array.isArray(svc.prices) && svc.prices.length ? svc.prices : [svc.price];
+  return entries.find((e) => e && e.accepted === true && e.amount_usd === quoted && !(e.amount_max_usd > e.amount_usd));
+}
+
+function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable } = {}) {
+  const fail = (reason) => ({ ok: false, reason });
+  const scheduling = v2?.scheduling;
+  if (!scheduling || typeof scheduling !== 'object') return fail('no_scheduling');
+  if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return fail('not_confirmed');
+  const svc = v2.service_request || {};
+  const terms = { v2, agreed: resolveCallAgreedPrice(v2), quoted: svc.quoted_price_usd, entry: acceptedEntryFor(svc, svc.quoted_price_usd), quoteBookable };
+  const failedTerm = PRICE_TERM_CHECKS.find(([, fails]) => fails(terms));
+  if (failedTerm) return fail(failedTerm[0]);
   const grounding = groundNewBookingAgreement({ v2, transcript, callStartedAt });
   if (!grounding.ok) return fail(grounding.reason);
-  const priceFailure = priceGrounded(v2, transcript, quoted);
+  const priceFailure = priceGrounded(v2, transcript, terms.quoted);
   if (priceFailure) return fail(priceFailure);
   return { ok: true, reason: 'dictated_booking_grounded', mode: grounding.mode };
 }
