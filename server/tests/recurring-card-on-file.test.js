@@ -118,6 +118,7 @@ const {
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
   payAfterFirstVisitCardRail,
+  payAfterFirstVisitInvoiceRail,
   _private: { recurringCardIntentMatchesEstimate, classifyDeliveryOutcome },
 } = require('../services/recurring-card-on-file');
 
@@ -225,6 +226,57 @@ describe('GATE_PAY_AFTER_FIRST_VISIT (payAfterFirstVisitCardRail)', () => {
     const payer = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
     expect(payer.exemptReason).toBe('payer_billed');
     expect(payAfterFirstVisitCardRail(payer)).toBe(false);
+  });
+});
+
+// payAfterFirstVisitInvoiceRail: the ONE "this accept's invoice rides the card
+// lane" predicate shared by estimate-public.js's three consumers. PR-A: it is
+// exactly the inline predicate they used before (no gate, no flag, no
+// `enforced` read), so it must not move with GATE_PAY_AFTER_FIRST_VISIT.
+describe('payAfterFirstVisitInvoiceRail (shared lane predicate)', () => {
+  afterEach(() => { delete process.env.GATE_PAY_AFTER_FIRST_VISIT; });
+
+  const CASES = [
+    [{ required: true, exemptReason: null }, true],
+    [{ required: false, exemptReason: 'saved_method_consented' }, true],
+    [{ required: false, exemptReason: 'autopay_already_active' }, true],
+    [{ required: false, exemptReason: 'existing_plan_customer' }, false],
+    [{ required: false, exemptReason: 'autopay_paused' }, false],
+    [{ required: false, exemptReason: 'payer_billed' }, false],
+    [{ required: false, exemptReason: 'payer_check_uncertain' }, false],
+    [{ required: false, exemptReason: 'commercial_manual_billing' }, false],
+    [{ required: false, exemptReason: 'prepay_annual' }, false],
+    [{ required: false, exemptReason: 'feature_disabled' }, false],
+    [{ required: false, exemptReason: null }, false],
+    [null, false],
+    [undefined, false],
+  ];
+
+  it('matches the pre-existing inline predicate for every policy shape', () => {
+    const inline = (policy) => policy.required
+      || ['saved_method_consented', 'autopay_already_active'].includes(policy.exemptReason || '');
+    for (const [policy, expected] of CASES) {
+      expect(payAfterFirstVisitInvoiceRail(policy)).toBe(expected);
+      if (policy) expect(!!inline(policy)).toBe(expected);
+    }
+  });
+
+  it('does not move with the master gate (gate on or off, same answer)', () => {
+    for (const gate of [undefined, 'true']) {
+      if (gate) process.env.GATE_PAY_AFTER_FIRST_VISIT = gate; else delete process.env.GATE_PAY_AFTER_FIRST_VISIT;
+      for (const [policy, expected] of CASES) {
+        expect(payAfterFirstVisitInvoiceRail(policy)).toBe(expected);
+      }
+    }
+  });
+
+  it('payAfterFirstVisitCardRail is this predicate plus the gate, the card lane, and an enforced policy', () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    for (const [policy, expected] of CASES) {
+      const enforced = policy ? { ...policy, enforced: true } : policy;
+      expect(payAfterFirstVisitCardRail(enforced)).toBe(expected);
+    }
+    expect(payAfterFirstVisitCardRail({ required: true, exemptReason: null, enforced: false })).toBe(false);
   });
 });
 

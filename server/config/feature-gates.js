@@ -116,6 +116,7 @@
  *     invoice-and-pay-link behavior. isPrepayCardAndChargeEnabled() enforces
  *     the conjunction; the flip checklist is all three vars.)
  *   GATE_PAY_AFTER_FIRST_VISIT=true (owner ruling 2026-09-30, "customers should save card, and then pay after first visit, throughout": the estimate page tells a customer on the card-on-file rail that nothing is charged today and the setup + first application are billed at the first visit — that is what the rail already does for the pay-per-application self-pay accept (card saved at accept, invoice attached to the first visit with no pay link, charged at completion). Customers OUTSIDE the rail (plan members, payer-billed, invoice-mode, commercial manual billing, one-time) and the setup-only shape keep today's wording. Needs RECURRING_CARD_ON_FILE. Moves NO money and sends NO message by itself; the setup-only and annual-prepay accepts are NOT changed by this gate (see estimate-public.js accept notes). Read at call time via payAfterFirstVisitLive(); strict 'true', dark in every environment. Off = byte-identical to today.)
+ *   GATE_PAF_EXISTING_CUSTOMERS / GATE_PAF_SETUP_FEE / GATE_PAF_PREPAY / GATE_PAF_TERMITE =true (per-item rollout switches for the pay-after-first-visit program, owner ruling 2026-09-30; each is live only when BOTH GATE_PAY_AFTER_FIRST_VISIT and its own var are exactly 'true': existing customers adding a service, the monthly-tier setup fee, annual prepay charged after the first visit, termite annual charged after installation. Read at call time via pafExistingCustomersLive() / pafSetupFeeLive() / pafPrepayLive() / pafTermiteLive(); dark in every environment. Plumbing only until each item's own PR lands: reading them moves NO money and sends NO message.)
  *   GATE_ANNUAL_PREPAY_ADDON_BILLING=true (completing an annual-prepay-covered visit with no invoice at all and clearly priced add-ons bills them as their own invoice with the pay link and the unpaid completion text; any invoice already on the visit — never collected by the completion — an issued invoice missing an add-on, or an unclear amount — a visit-wide discount, an add-on awaiting its price — gets one office alert instead, ADMIN-BUG-R13, owner ruling 2026-09-26; read at call time and frozen on the service record at the first gate-on pass; dark = today's behavior: the covered visit bills nothing for its add-ons and an office invoice carrying them is voided)
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
@@ -582,6 +583,16 @@ const gates = {
   // payAfterFirstVisitLive() below (strict 'true'), so a flip needs no
   // redeploy. Off = byte-identical to today.
   payAfterFirstVisit: process.env.GATE_PAY_AFTER_FIRST_VISIT === 'true',
+  // Per-item sub-gates of the pay-after-first-visit program (owner ruling
+  // 2026-09-30), so each item can roll out on its own. Map entries are for
+  // logGateStatus only — the canonical CALL-TIME readers are
+  // pafExistingCustomersLive() / pafSetupFeeLive() / pafPrepayLive() /
+  // pafTermiteLive() below, each of which ALSO requires the master
+  // GATE_PAY_AFTER_FIRST_VISIT. Off = byte-identical to today.
+  pafExistingCustomers: process.env.GATE_PAF_EXISTING_CUSTOMERS === 'true',
+  pafSetupFee: process.env.GATE_PAF_SETUP_FEE === 'true',
+  pafPrepay: process.env.GATE_PAF_PREPAY === 'true',
+  pafTermite: process.env.GATE_PAF_TERMITE === 'true',
   // Product-copy lines on the service report (owner-approved 2026-09-28) —
   // "How it works" / "Also labeled for" / "Pets & kids" per applied product,
   // matched against the static reviewed config in
@@ -4126,6 +4137,23 @@ function payAfterFirstVisitLive() {
   return process.env.GATE_PAY_AFTER_FIRST_VISIT === 'true';
 }
 
+// Per-item sub-gates of GATE_PAY_AFTER_FIRST_VISIT, read at CALL time — each
+// strict `=== 'true'` on its own var AND the master gate, so one item can
+// roll out (or be killed) without the others and nothing is live while the
+// master is off. Dark in every environment.
+function pafExistingCustomersLive() {
+  return payAfterFirstVisitLive() && process.env.GATE_PAF_EXISTING_CUSTOMERS === 'true';
+}
+function pafSetupFeeLive() {
+  return payAfterFirstVisitLive() && process.env.GATE_PAF_SETUP_FEE === 'true';
+}
+function pafPrepayLive() {
+  return payAfterFirstVisitLive() && process.env.GATE_PAF_PREPAY === 'true';
+}
+function pafTermiteLive() {
+  return payAfterFirstVisitLive() && process.env.GATE_PAF_TERMITE === 'true';
+}
+
 // ADMIN_ALERT_RELEVANCE read at CALL time — the one lane that ships LIVE:
 // on unless set to exactly 'off', 'false' or '0' (case-insensitive), so an
 // unset env is the live state and the env is a pure kill switch (owner
@@ -4317,5 +4345,9 @@ module.exports.multiTechConfirmLive = multiTechConfirmLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.payAfterFirstVisitLive = payAfterFirstVisitLive;
+module.exports.pafExistingCustomersLive = pafExistingCustomersLive;
+module.exports.pafSetupFeeLive = pafSetupFeeLive;
+module.exports.pafPrepayLive = pafPrepayLive;
+module.exports.pafTermiteLive = pafTermiteLive;
 module.exports.adminBodyGuardAllLive = adminBodyGuardAllLive;
 // gates 1775330914

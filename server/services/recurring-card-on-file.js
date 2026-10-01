@@ -113,7 +113,25 @@ function payAfterFirstVisitCardRail(policy) {
   if (!require('../config/feature-gates').payAfterFirstVisitLive()) return false;
   if (!isRecurringCardOnFileEnabled()) return false;
   if (!policy || policy.enforced !== true) return false;
-  return policy.required === true
+  return payAfterFirstVisitInvoiceRail(policy);
+}
+
+// The ONE predicate for "this accept's invoice rides the card lane": the
+// policy either captures a card at accept (required) or the customer already
+// has an enrolled/consented method (saved_method_consented /
+// autopay_already_active). In-lane, the accept's first-visit invoice is
+// attached to the first visit with no pay link and charged at completion.
+// estimate-public.js's three consumers (the accept's recurringCardLaneActive,
+// the legacy-vs-React renderer pick, and the /data lane flag) all call this so
+// they cannot drift. Deliberately NOT gated on GATE_PAY_AFTER_FIRST_VISIT or
+// the card lane's own flag and does not read `enforced`: it is exactly the
+// inline predicate those three sites used before, so it changes nothing by
+// itself. payAfterFirstVisitCardRail() layers the gate on top for copy.
+// PR-B (existing customers adding a service) widens the policy resolver, not
+// this predicate.
+function payAfterFirstVisitInvoiceRail(policy) {
+  if (!policy) return false;
+  return !!policy.required
     || ['saved_method_consented', 'autopay_already_active'].includes(policy.exemptReason || '');
 }
 
@@ -1677,6 +1695,7 @@ module.exports = {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   payAfterFirstVisitCardRail,
+  payAfterFirstVisitInvoiceRail,
   resolveRecurringCardPolicyForEstimate,
   resolveGroupedEstimateOwnerId,
   resolvePrepayChargeMethod,

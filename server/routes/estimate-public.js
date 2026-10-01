@@ -8688,7 +8688,7 @@ async function handleEstimateView(req, res, next) {
         // React view implements the quote acknowledgement, so lane-active
         // estimates must land there while the prepay gate is on.
         return RecurringCards.isPrepayCardAndChargeEnabled()
-          && ['saved_method_consented', 'autopay_already_active'].includes(viewPolicy.exemptReason || '');
+          && RecurringCards.payAfterFirstVisitInvoiceRail(viewPolicy);
       })();
     // ?adminPreview=1 is the staff draft-preview param (the estimate tool's
     // "Customer View" + the estimates list's Preview). The param is NOT
@@ -9922,8 +9922,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       recurringCardPolicy.required = false;
       recurringCardPolicy.exemptReason = 'commercial_manual_billing';
     }
-    const recurringCardLaneActive = recurringCardPolicy.required
-      || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicy.exemptReason || '');
+    const recurringCardLaneActive = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicy);
     // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit
     // accept-gate (ensureDepositSatisfied + the 402 DEPOSIT_REQUIRED
     // contract) is removed — resolveDepositPolicy is permanently
@@ -27517,8 +27516,7 @@ async function composeEstimateDataPayload(estimate, {
     // client keys the deposit modal off this policy, so during the rollout
     // window with both flags on it must see required:false or the "$0
     // today" story breaks (Codex #2680).
-    const recurringCardLaneActiveForData = recurringCardPolicyForData.required
-      || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicyForData.exemptReason || '');
+    const recurringCardLaneActiveForData = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData);
     if (recurringCardLaneActiveForData && depositPolicy.required) {
       // Prepay accepts sit OUTSIDE the card lane only while the legacy
       // carve-out is in force (the resolver exempts prepay_annual before any
@@ -28058,6 +28056,14 @@ async function composeEstimateDataPayload(estimate, {
         // NOT advertise a charge the accept route deliberately skips
         // (Codex r9). The accept gate re-resolves authoritatively either way.
         prepayInLane: recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled(),
+        // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): this customer
+        // is on the card rail AND the gate is on — the same predicate that
+        // drives the server-rendered "nothing is charged today" wording
+        // (payAfterFirstVisitCardRail, minus the page's invoice-mode /
+        // one-time / commercial short-circuits, which the policy above already
+        // carries). PLUMBING ONLY: no client code reads it yet. Present only
+        // when true so every gate-off response stays byte-identical.
+        ...(RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData) ? { payAfterFirstVisit: true } : {}),
       },
       estimate: {
         id: estimate.id,
