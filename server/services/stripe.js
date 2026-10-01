@@ -19,6 +19,15 @@ const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-met
 function consentVersionStamp(saveCard, consentTextVersion) {
   return { [CONSENT_VERSION_METADATA_KEY]: saveCard && consentTextVersion ? String(consentTextVersion) : '' };
 }
+// The same stamp as an idempotency-key part: the stamp is a create
+// parameter, so a key that ignored it would make a retry across a copy
+// change (or across this stamp's own rollout) a changed-parameters
+// rejection — payment setup blocked until the key expired (pre-push Codex
+// on #5434). 'nocv' for a non-saving mint keeps today's keys for those.
+function consentVersionKeyPart(saveCard, consentTextVersion) {
+  const stamp = consentVersionStamp(saveCard, consentTextVersion)[CONSENT_VERSION_METADATA_KEY];
+  return stamp ? `cv-${stamp}` : 'nocv';
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Lazy-init Stripe client — don't crash if key is missing
@@ -4319,7 +4328,10 @@ const StripeService = {
         const allocKeyPart = combinedAllocation
           ? require('crypto').createHash('sha1').update(PayCombined.encodeAllocation(combinedAllocation)).digest('hex').slice(0, 10)
           : 'single';
-        const idempotencyKey = `invoice_pi_${invoiceId}_${baseCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}_${allocKeyPart}`;
+        // Consent-version-salted too (pre-push Codex on #5434): the stamp is a
+        // create parameter, so a save-the-method mint retried after a copy
+        // change (or after this stamp's own rollout) needs a fresh key.
+        const idempotencyKey = `invoice_pi_${invoiceId}_${baseCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}_${allocKeyPart}_${consentVersionKeyPart(saveCard, opts.consentTextVersion)}`;
         paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
         if (paymentIntent.status === 'canceled') {
@@ -4899,8 +4911,11 @@ const StripeService = {
       const replaceAllocPart = metadata?.combined_allocation
         ? require('crypto').createHash('sha1').update(String(metadata.combined_allocation)).digest('hex').slice(0, 10)
         : 'single';
+      // The replacement inherits the old PI's stamp via ctx.metadata; salt
+      // its key with it for the same reason as the setup key.
+      const replaceConsentPart = metadata?.[CONSENT_VERSION_METADATA_KEY] ? `cv-${metadata[CONSENT_VERSION_METADATA_KEY]}` : 'nocv';
       newIntent = await stripe.paymentIntents.create(piParams, {
-        idempotencyKey: `invoice_pi_replace_${invoiceId}_${oldPaymentIntentId}_${paymentMethodTypes.join('-')}_${saveFlag}_${baseCents}_${replaceAllocPart}`,
+        idempotencyKey: `invoice_pi_replace_${invoiceId}_${oldPaymentIntentId}_${paymentMethodTypes.join('-')}_${saveFlag}_${baseCents}_${replaceAllocPart}_${replaceConsentPart}`,
       });
 
       const invoiceUpdated = await trx('invoices')

@@ -243,6 +243,29 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(result.paymentIntentId).toBe('pi_fresh');
   });
 
+  // codex #5434 r1 P1 (pre-push hook r6): the consent-version stamp is a
+  // create parameter, so the deterministic key is salted with it — a
+  // save-the-method mint retried across a copy change (or across the stamp's
+  // own rollout) gets a fresh key instead of a changed-parameters rejection.
+  test('a save-the-method mint stamps the attested consent version and salts the idempotency key with it', async () => {
+    const StripeService = require('../services/stripe');
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    // A save-the-method mint resolves the Stripe customer first.
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: true, consentTextVersion: CONSENT_VERSION });
+    const [params, opts] = stripeClient.paymentIntents.create.mock.calls[0];
+    expect(params.metadata).toEqual(expect.objectContaining({ save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION }));
+    expect(opts.idempotencyKey).toContain(`_cv-${CONSENT_VERSION}`);
+  });
+
+  test('a non-saving mint carries an empty stamp (clears any stale one) and keeps the nocv key part', async () => {
+    const StripeService = require('../services/stripe');
+    await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: false });
+    const [params, opts] = stripeClient.paymentIntents.create.mock.calls[0];
+    expect(params.metadata).toEqual(expect.objectContaining({ save_card_opt_in: 'false', consent_text_version: '' }));
+    expect(opts.idempotencyKey).toMatch(/_nocv$/);
+  });
+
   test('does not return a canceled idempotency replay when replacing an invoice PaymentIntent', async () => {
     const StripeService = require('../services/stripe');
     const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);
