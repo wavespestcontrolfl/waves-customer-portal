@@ -75,6 +75,11 @@ const SELECTORS = [
   // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
   // through llm/call.js#dispatch and sends the visit's photos.
   { key: 'LAWN_ASSESSMENT_REFEREE', env: 'MODEL_LAWN_ASSESSMENT_REFEREE', description: 'Lawn visit assessment name referee (owner ruling 2026-09-29: Fable 5.1, effort high; dark behind GATE_LAWN_ASSESSMENT_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
+  // deep: true — its only call site (campaign-advisor.js, TEXT_POLICIES.adsAdvisor)
+  // goes through llm/call.js#dispatch, which floors max_tokens for always-thinking
+  // models and reads past thinking blocks; its default (Fable 5.1) is itself a
+  // requires:'deep' catalog model.
+  { key: 'ADS_ADVISOR', env: 'MODEL_ADS_ADVISOR', description: 'Daily Google Ads advisor (owner ruling 2026-10-01: Fable 5.1, effort high)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'SMS_SONNET', env: 'MODEL_SMS_SONNET', description: 'Every SMS draft route', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'CALL_EXTRACTION_ANTHROPIC', env: 'MODEL_CALL_EXTRACTION_ANTHROPIC', description: 'Call extraction Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 25-call bake-off route; run a new bake-off to move it' } },
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
@@ -122,6 +127,7 @@ const POLICY_SELECTOR = {
   customerCopy: { primary: 'FLAGSHIP', fallback: 'OPENAI_BALANCED' },
   contentDraft: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
+  adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   askWaves: { primary: 'OPENAI_BALANCED', fallback: 'VOICE' },
@@ -479,7 +485,7 @@ const LANES = [
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
-  L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
+  L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('adsAdvisor', 'primary'), P('adsAdvisor', 'fallback')),
   L('chart_builder_image', 'AI chart builder · image intent read', 'ai-chart-builder.js', 'qa', T('GEMINI_VISION_BEST'), T('FLAGSHIP'), { note: 'image-backed charts only; stage 1 of 2' }),
   L('chart_builder_sql', 'AI chart builder · SQL + chart spec', 'ai-chart-builder.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'every chart; stage 2' }),
 

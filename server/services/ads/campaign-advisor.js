@@ -9,6 +9,13 @@ const { dispatchWithFallback } = require('../llm/call');
 // The SDK path ran on its 10-minute default request timeout; keep that as the
 // shared two-leg ceiling.
 const ADVISOR_TIMEOUT_MS = 10 * 60 * 1000;
+// Fable always thinks; thinking tokens count against max_tokens (call.js floors
+// it at 8192 for such models). Leave room for the thinking AND the full JSON
+// report so a thorough day is not truncated into a rejected leg.
+const ADVISOR_MAX_TOKENS = 16000;
+// Search terms with spend, passed to the model so waste detection is complete
+// (bounded: the query below also caps the rows it reads).
+const ADVISOR_MAX_SEARCH_TERMS = 100;
 
 
 let TwilioService;
@@ -119,7 +126,7 @@ class CampaignAdvisor {
 
     const searchTerms = await db('ad_search_terms')
       .orderBy('cost', 'desc')
-      .limit(100);
+      .limit(ADVISOR_MAX_SEARCH_TERMS);
 
     const serviceAttribution = await db('ad_service_attribution')
       .where('lead_date', '>=', d30);
@@ -214,15 +221,23 @@ class CampaignAdvisor {
     }
 
     try {
-      // FLAGSHIP first, Sol on a miss. timeoutMs keeps the SDK's old 10-minute
+      // Fable (adsAdvisor policy, owner ruling 2026-10-01) first, Sol on a miss. timeoutMs keeps the SDK's old 10-minute
       // ceiling as the shared budget across both legs — a verbose day's
       // report needs more than the dispatcher's 2-minute-per-leg default.
-      const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.adsAdvisor, {
         laneId: 'ads_advisor',
-        maxTokens: 4000,
+        maxTokens: ADVISOR_MAX_TOKENS,
         jsonMode: true,
         timeoutMs: ADVISOR_TIMEOUT_MS,
         system: `You are a digital marketing performance analyst specializing in pest control and lawn care businesses in Southwest Florida. You review Google Ads, Google Search Console (organic SEO), and Google Business Profile data daily and provide specific, actionable recommendations across BOTH paid and organic channels.
+
+RECOMMENDATION QUALITY RULES (these override everything below):
+- Recommend ONLY changes that are real, supported by the numbers in this data, and worth doing at THIS account's scale. Judge the account by its actual spend and conversion volume, not by generic best practice.
+- There is no quota. Zero recommendations is a valid and often correct answer (return "recommendations": []); one strong recommendation beats six weak ones. Never pad the list, never add filler, and never add a generic best-practice tip that the numbers do not support.
+- Every recommendation MUST cite the specific numbers it rests on (spend, clicks, conversions, CPA/ROAS, impression share, budget) in its "reasoning".
+- When data volume is too small to conclude anything (a handful of conversions, a few dollars of spend, a short window), say so plainly in overall_assessment and do not recommend a change that only makes sense with more data.
+- Do NOT recommend something that has already been done: RECENT BUDGET CHANGES lists what was changed in the last 7 days — never repeat or reverse a change made there without new evidence.
+- The secondary lists (waste_alerts, scaling_opportunities, capacity_warnings, insights, seo_insights) follow the same rule: leave them as empty arrays unless there is a real, number-backed item. Never emit placeholder or template rows.
 
 PAID ADS RULES:
 - Be specific with numbers. Don't say "consider increasing budget" — say "increase Pest Bradenton budget from $20 to $30/day based on 7.0x ROAS and 25% lost IS (budget)"
@@ -259,8 +274,8 @@ Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary
 CAMPAIGN PERFORMANCE:
 ${JSON.stringify(campaignSummaries, null, 2)}
 
-TOP SEARCH TERMS (by spend, last 30 days):
-${JSON.stringify(searchTerms.slice(0, 30).map(t => ({
+SEARCH TERMS WITH SPEND (by spend, up to ${ADVISOR_MAX_SEARCH_TERMS}, last 30 days — this is the complete list of terms that cost money):
+${JSON.stringify(searchTerms.filter((t) => Number(t.cost) > 0).slice(0, ADVISOR_MAX_SEARCH_TERMS).map(t => ({
   term: t.search_term, clicks: t.clicks, spend: Number(t.cost),
   conversions: Number(t.conversions), convValue: Number(t.conversion_value), roas: Number(t.roas),
 })), null, 2)}
@@ -298,7 +313,7 @@ GOOGLE BUSINESS PROFILE (last 30 days):
 ${JSON.stringify(gbpSummary, null, 2)}
 ` : '(No GBP data available)'}
 
-Analyze BOTH paid ads and organic SEO performance. Provide specific recommendations for each.`,
+Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, number-backed, and worth doing at this account's scale; an empty recommendations list is a valid answer.`,
       }, {
         // The dispatcher's loose parse accepts any JSON value; the old
         // utils/llm-json parser accepted only a non-array object. Keep that
@@ -319,6 +334,10 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
       const advice = normalizeAdsReport(res.json);
 
       advice.date = etDateString(now);
+      // Which model actually wrote this report (primary or backup leg) — the
+      // PPC page shows it. Stored inside report_data, so no migration.
+      if (res.model) advice.model = res.model;
+      if (res.provider) advice.provider = res.provider;
       this.normalizeRecommendations(advice, campaigns);
       await this.storeReport(advice);
       await this.sendSummary(advice);
@@ -483,8 +502,10 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     if (!TwilioService || !process.env.ADAM_PHONE) return;
     try {
       const topRecs = (advice.recommendations || []).slice(0, 3).map(r => `• ${r.action}`).join('\n');
+      // An empty list is a valid "nothing worth changing" report.
+      const actionsBlock = topRecs ? `Top actions:\n${topRecs}` : 'No changes recommended today.';
       await TwilioService.sendSMS(process.env.ADAM_PHONE,
-        `📊 Daily Ads Report — Grade: ${advice.grade || '?'}\n${advice.overall_assessment || ''}\n\nTop actions:\n${topRecs}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
+        `📊 Daily Ads Report — Grade: ${advice.grade || '?'}\n${advice.overall_assessment || ''}\n\n${actionsBlock}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
         { messageType: 'internal_alert' }
       );
     } catch (err) {

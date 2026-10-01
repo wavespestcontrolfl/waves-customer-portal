@@ -903,23 +903,34 @@ function ServiceLinesTab() {
 // =========================================================================
 // AI ADVISOR TAB
 // =========================================================================
-function AdvisorTab() {
+// Exported for direct tests of the Advisor panel
+export function AdvisorTab() {
   const [report, setReport] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [applied, setApplied] = useState({});
+  // A failed load/generate shows inline instead of reading as "No Reports Yet".
+  const [loadError, setLoadError] = useState(null);
+  const [generateError, setGenerateError] = useState(null);
   useEffect(() => {
     Promise.all([
       adminFetch("/admin/ads/advisor"),
       adminFetch("/admin/ads/advisor/history"),
     ])
       .then(([r, h]) => {
+        // adminFetch does not check r.ok: a 401/500 body is {error}.
+        if (!r || r.error || !("report" in r)) {
+          throw new Error(r?.error || "unexpected response");
+        }
         setReport(r.report);
-        setHistory(h.reports || []);
+        setHistory(h?.reports || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setLoadError("Couldn't load the advisor report -- reload to try again.");
+        setLoading(false);
+      });
   }, []);
 
   // Apply state belongs to ONE report: regenerating replaces the rec list, so
@@ -936,13 +947,21 @@ function AdvisorTab() {
     // (Apply buttons are also disabled while generating.)
     reportGenRef.current += 1;
     setApplied({});
+    setGenerateError(null);
     try {
       const r = await adminPost("/admin/ads/advisor/generate", {});
+      if (!r || !r.report) {
+        throw new Error(r?.error || "The advisor returned no report.");
+      }
       setReport({
         report_data: r.report,
         date: etDateString(),
         grade: r.report?.grade,
       });
+    } catch (err) {
+      setGenerateError(
+        `Couldn't regenerate the report: ${err?.message || "request failed"}`,
+      );
     } finally {
       // A failed generation must not leave every Apply button disabled until
       // a page reload — generating gates them while true.
@@ -1079,9 +1098,23 @@ function AdvisorTab() {
           disabled={generating}
           variant="secondary"
         >
-          {generating ? "Generating..." : "Generate Report"}
+          {generating ? "Regenerating..." : "Regenerate"}
         </Button>{" "}
       </div>
+      {generating && (
+        <div role="status" className="text-ui-body text-ink-secondary">
+          The advisor is analyzing the account. This can take a few minutes --
+          keep this page open.
+        </div>
+      )}
+      {(loadError || generateError) && (
+        <div
+          role="alert"
+          className="rounded-md bg-red-100 text-red-800 text-ui-body [padding:8px_12px]"
+        >
+          {generateError || loadError}
+        </div>
+      )}
       {!report ? (
         <UiCard className="text-center [padding:60px]">
           {" "}
@@ -1090,8 +1123,8 @@ function AdvisorTab() {
             No Reports Yet
           </div>{" "}
           <div className="text-ui-body text-ink-secondary">
-            Click "Generate Report" to run the AI advisor, or wait for the daily
-            8 AM auto-run.
+            Click "Regenerate" to run the AI advisor, or wait for the daily 8 AM
+            auto-run.
           </div>{" "}
         </UiCard>
       ) : (
@@ -1119,10 +1152,30 @@ function AdvisorTab() {
                 <div className="text-ui-body text-zinc-900 [line-height:1.5]">
                   {data.overall_assessment}
                 </div>{" "}
+                {data.model && (
+                  <div
+                    data-qa="advisor-model"
+                    className="text-ui-body text-ink-secondary [margin-top:6px]"
+                  >
+                    Written by {data.model}
+                    {data.provider ? ` (${data.provider})` : ""}
+                  </div>
+                )}
               </div>{" "}
             </div>{" "}
           </UiCard>
-          {/* Recommendations */}
+          {/* Recommendations: the advisor may recommend nothing, and that is a
+              valid answer, so say so instead of leaving a blank page. */}
+          {(data.recommendations || []).length === 0 && (
+            <UiCard data-qa="advisor-empty" className="p-6">
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
+                No recommendations today
+              </div>
+              <div className="text-ui-body text-ink-secondary">
+                No recommendations today — nothing worth changing.
+              </div>
+            </UiCard>
+          )}
           {(data.recommendations || []).length > 0 && (
             <UiCard className="p-6">
               {" "}
@@ -1313,6 +1366,25 @@ function AdvisorTab() {
                   </div>
                 ))}
               </div>{" "}
+            </UiCard>
+          )}
+
+          {/* SEO / GBP insights */}
+          {(data.seo_insights || []).length > 0 && (
+            <UiCard className="p-6">
+              {" "}
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+                SEO Insights
+              </div>
+              {data.seo_insights.map((s, i) => (
+                <div
+                  key={i}
+                  className="text-ui-body text-zinc-900 [padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
+                >
+                  {s.detail}
+                  {s.action ? ` — ${s.action}` : ""}
+                </div>
+              ))}
             </UiCard>
           )}
 
