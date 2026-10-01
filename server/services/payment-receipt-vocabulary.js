@@ -24,6 +24,7 @@
 // my Zelle payment!"/"Thank you, the payment cleared" is historical receipt
 // wording exactly like "we received your payment" is, whichever side typed
 // it and whichever of the two callers above is asking.
+const { CARD_BRAND_WORD_ALT } = require('./card-brands');
 const RECEIPT_VERBS = ['received', 'processed', 'went through', 'got', 'came through', 'cleared', 'posted', 'arrived', 'applied'];
 
 // Escapes the one thing that varies between entries — internal whitespace in
@@ -454,7 +455,7 @@ const BENIGN_INVOICE_PREDICATE_RE = /\b(?:attached|enclosed|ready|below|above|in
 // A card / tender as the grammatical SUBJECT of a predicate ("Your card got sorted out", "Your Apple Pay went
 // fine") — not the saved-method facts ("your card on file is a Visa ending 4242").
 const TENDER_SUBJECT_STATUS_RE = new RegExp(`\\b(?:your|the|our|my)\\s+(?:\\w+\\s+){0,2}?${TENDER_SUBJECT_ALT}\\b(?:\\s+[\\w']+){0,3}?\\s+(?:is|was|has|have|are|were|got|went|didn['\u2019]t|wasn['\u2019]t|hasn['\u2019]t|failed|declined)\\b`, 'i');
-const BENIGN_TENDER_PREDICATE_RE = /\b(?:on\s+file|ending|expires?|expiring|expired|last\s+four|brand|saved|updated|added|removed|visa|mastercard|amex|discover|autopay|default|primary|active)\b/i;
+const BENIGN_TENDER_PREDICATE_RE = new RegExp(`\\b(?:on\\s+file|ending|expires?|expiring|expired|last\\s+four|brand|saved|updated|added|removed|${CARD_BRAND_WORD_ALT}|autopay|default|primary|active)\\b`, 'i');
 // The "on file / ending / expires" exemption is for clauses that ONLY describe the stored method. Any status
 // predicate ("Your card on file didn't work", "…was declined / bounced / rejected / went through") is an assertion
 // again (Codex round-29 P1).

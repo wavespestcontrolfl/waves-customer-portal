@@ -7,6 +7,8 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+// the LIVE linkage (loadLivePayerLinkage — round-41/42) also asks the shared live-ownership verdict; these cases have no live-owned invoices
+jest.mock('../services/invoice-payer-ownership', () => ({ liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })) }));
 const { buildPayerLinkage, loadPayerLinkage } = require('../services/payer-linkage');
 const { loadPaymentHistory } = require('../services/payment-history');
 
@@ -75,9 +77,10 @@ describe('the authoritative payment history drops payer-linked rows through EVER
   function history(rows, opts = {}) {
     const q = {};
     ['where', 'whereNot', 'whereNull', 'whereRaw', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.modify = jest.fn((fn) => { fn(q); return q; }); // excludeNeverAttemptedDeferrals / excludeLiveOwnedPayerPayments (round-37..42)
     q.then = (res, rej) => Promise.resolve(rows).then(res, rej);
     const inv = {};
-    ['where', 'select', 'whereNotNull', 'orWhere'].forEach((m) => { inv[m] = jest.fn(() => inv); });
+    ['where', 'select', 'whereNotNull', 'whereNull', 'orWhere'].forEach((m) => { inv[m] = jest.fn(() => inv); });
     inv.catch = (h) => (opts.linkageFails ? Promise.resolve(h(new Error('down'))) : Promise.resolve([PAYER_INV]));
     return jest.fn((table) => (table === 'invoices' ? inv : q));
   }

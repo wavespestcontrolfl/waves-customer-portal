@@ -12,7 +12,7 @@
 // customer_id — same rule as the aggregator), so `complete` is exact:
 // complete = ownRows <= cap.
 const db = require('../models/db');
-const { loadLivePayerLinkage } = require('./payer-linkage');
+const { loadLivePayerLinkage, uuidFromMetadata, excludeLiveOwnedPayerPayments } = require('./payer-linkage');
 const logger = require('./logger');
 const { excludeNeverAttemptedDeferrals } = require('./failed-payments');
 const { containsAbsencePhrase } = require('./payment-receipt-vocabulary');
@@ -20,29 +20,6 @@ const { containsAbsencePhrase } = require('./payment-receipt-vocabulary');
 const PAYMENT_HISTORY_CAP = 200;
 // most rows surfaceReferencedPayments adds to the model-facing window
 const SURFACED_PAYMENTS_MAX = 5;
-
-// payments.metadata->>'invoice_id' as a uuid, or NULL when it is not one. invoices.id is a
-// uuid PRIMARY KEY (20260401000082_invoices), so comparing the uuid directly lets the planner
-// use the key instead of casting the indexed column to text; the CASE guarantees the cast is
-// only evaluated for a well-formed value (a malformed metadata string can never throw).
-function uuidFromMetadata(alias) {
-  const v = `${alias}.metadata->>'invoice_id'`;
-  return `(CASE WHEN ${v} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (${v})::uuid END)`;
-}
-
-function excludeLiveOwnedPayerPayments(qb, linkage) {
-  const rows = linkage.liveOwnedRows || [];
-  if (!rows.length) return qb;
-  const ph = (n) => Array.from({ length: n }, () => '?').join(', ');
-  const ids = rows.map((r) => String(r.id));
-  const mdId = uuidFromMetadata('payments');
-  qb.whereRaw(`(${mdId} IS NULL OR ${mdId}::text NOT IN (${ph(ids.length)}))`, ids);
-  const pis = rows.map((r) => r.stripe_payment_intent_id).filter(Boolean);
-  if (pis.length) qb.whereRaw(`(payments.stripe_payment_intent_id IS NULL OR payments.stripe_payment_intent_id NOT IN (${ph(pis.length)}))`, pis);
-  const chs = rows.map((r) => r.stripe_charge_id).filter(Boolean);
-  if (chs.length) qb.whereRaw(`(payments.stripe_charge_id IS NULL OR payments.stripe_charge_id NOT IN (${ph(chs.length)}))`, chs);
-  return qb;
-}
 
 // { rows, complete } or null when the read failed (unknown => callers fail closed).
 async function loadPaymentHistory(customerId, dbh = db) {

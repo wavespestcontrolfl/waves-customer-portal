@@ -2639,6 +2639,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
+const { CARD_BRAND_SPOKEN, canonicalCardBrand } = require('./card-brands');
 const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, inboundNamesInvoice, pronounSubjectAt, unrecognizedPaymentAssertion, residualPaymentAssertion, headlessPredicateClause, isModalNonAssertive, recognizedMatchIsHypothetical, refundSubjectAt, subclauseRanges, isNonAssertivePaymentClause, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
@@ -2825,11 +2826,8 @@ const TENDER_VOCABULARY = [
   // Codex round-40 P1: a NAMED card brand is part of the claimed tender identity ('card:visa'), never flattened to 'card' — a
   // Mastercard row must not ground "Your Visa payment cleared". A generic "card" claim still matches any card row;
   // tenderMatches (below) is the ONE comparator every binder uses.
-  { word: 'american express', label: 'card:amex', manual: false },
-  { word: 'mastercard', label: 'card:mastercard', manual: false },
-  { word: 'master card', label: 'card:mastercard', manual: false },
-  { word: 'visa', label: 'card:visa', manual: false },
-  { word: 'amex', label: 'card:amex', manual: false },
+  // the brand list is ONE shared table (services/card-brands.js — Codex round-42 P1): every brand a payments row can store is named here
+  ...CARD_BRAND_SPOKEN.map(({ word, id }) => ({ word, label: `card:${id}`, manual: false })),
   { word: 'card', label: 'card', manual: false },
   { word: 'ach', label: 'bank/ACH', manual: false },
   { word: 'bank transfer', label: 'bank/ACH', manual: false },
@@ -2913,7 +2911,8 @@ function tenderLabelsIn(text) {
 function cardBrandOfRow(p) {
   const raw = String(p?.card_brand || '').toLowerCase().replace(/[^a-z]/g, '');
   if (!raw || raw === 'unknown') return null;
-  return raw === 'americanexpress' ? 'amex' : (raw === 'master' ? 'mastercard' : raw);
+  // a listed brand -> its canonical id (shared table); an unlisted stored brand keeps its squashed text (it can only equal itself)
+  return canonicalCardBrand(p.card_brand) || raw;
 }
 // ONE tender comparator (Codex round-40 P1 class: tender identity must be compared the same way everywhere): does this payment
 // ROW satisfy the claimed tender label? A brand-specific claim ('card:visa') needs a card row whose card_brand IS that brand
@@ -3250,18 +3249,31 @@ function paymentClaimBinding(clauseText, inboundText, { multiDate = false } = {}
   // Codex round-41 P1: EVERY date the reply names is an asserted payment date — never "the first date". Several distinct dates
   // ("Sep 1 through Sep 2") are several payments: only a caller that resolves each one (multiDate => bindAllTargets' `dates`)
   // may proceed; everyone else fails closed.
-  const replyDates = allClaimedPaymentDates(clauseText);
-  if (replyDates.length > 1 && !multiDate) return null;
-  const replyDate = replyDates.length === 1 ? replyDates[0] : null;
+  const replyDatesRaw = allClaimedPaymentDates(clauseText);
+  if (replyDatesRaw.length > 1 && !multiDate) return null;
   // Codex round-35 P1: SEVERAL distinct dates in the customer's message ("Sep 1 or Sep 2") are several payments. The reply
   // must name one explicitly (and it must be one of them); silent, the identity is ambiguous — never "the first date".
   const inboundDates = inboundText ? allClaimedPaymentDates(inboundText) : [];
   if (inboundDates.length > 1) {
-    if (!replyDates.length || !replyDates.every((rd) => inboundDates.some((d) => claimedDatesAgree(d, rd)))) return null;
+    if (!replyDatesRaw.length || !replyDatesRaw.every((rd) => inboundDates.some((d) => claimedDatesAgree(d, rd)))) return null;
   }
   const inboundDate = inboundDates.length === 1 ? inboundDates[0] : null;
   // the reply's identity must AGREE with the date the customer asked about, for EVERY date it names
-  if (inboundDate && replyDates.some((rd) => !claimedDatesAgree(rd, inboundDate))) return null;
+  if (inboundDate && replyDatesRaw.some((rd) => !claimedDatesAgree(rd, inboundDate))) return null;
+  // Codex round-42 P1: a YEAR the customer named is part of the payment identity. A reply that repeats only month and day agrees
+  // with it (claimedDatesAgree treats a missing year as compatible) but must not DROP it: the year is merged into the reply date,
+  // so "Sep 12, 2025" asked + "Sep 12" answered binds only a 2025 row. Two inbound years for the same month/day (Sep 12 2025 and
+  // Sep 12 2026) leave a yearless reply ambiguous => fail closed. A reply year that conflicts was rejected above.
+  const withInboundYear = (rd) => {
+    if (rd.year != null) return rd;
+    const sameDay = inboundDates.filter((d) => claimedDatesAgree(d, rd) && d.year != null);
+    const years = new Set(sameDay.map((d) => d.year));
+    if (years.size > 1) return undefined;
+    return years.size === 1 ? { ...rd, year: [...years][0] } : rd;
+  };
+  const replyDates = replyDatesRaw.map(withInboundYear);
+  if (replyDates.some((d) => d === undefined)) return null;
+  const replyDate = replyDates.length === 1 ? replyDates[0] : null;
   if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
   if (claimedTender === TENDER_AMBIGUOUS) return null;
   const claimedDate = replyDate || inboundDate || null;

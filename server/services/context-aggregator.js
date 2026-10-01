@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { loadPayerLinkage } = require('./payer-linkage');
+const { loadLivePayerLinkage, excludeLiveOwnedPayerPayments } = require('./payer-linkage');
 const { loadFailedPaymentFacts, standaloneFailedTotal, excludeNeverAttemptedDeferrals } = require('./failed-payments');
 // the payments display read over-fetches so payer-linked rows can be dropped without starving the window
 const PAYMENT_OVERFETCH = 40;
@@ -551,8 +551,15 @@ class ContextAggregator {
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
     // never throws — null on failure) starts NOW so it overlaps the fetches below instead of
     // adding a serial round trip; it is awaited where hasProcessingPayment is derived.
-    const inFlightMoneyPromise = require('./payment-history').hasInFlightMoney(customer.id);
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile, payerLinkage, failedFacts] = await Promise.all([
+    const paymentHistoryService = require('./payment-history');
+    const inFlightMoneyPromise = paymentHistoryService.hasInFlightMoney(customer.id);
+    // ONE LIVE payer-linkage verdict (Codex round-42 P1, PR #5331) — the same loadLivePayerLinkage the authoritative payment history and
+    // the in-flight probe use: an invoice that resolves to a payer TODAY (payer_id still NULL) owns its payments through the metadata
+    // invoice, alias, PaymentIntent, charge and "Invoice <n> —" description alike. It is loaded BEFORE the payments read so the
+    // live-owned rows are also dropped IN SQL (before the over-fetch cap), and it gates BOTH the recent-payments window and the
+    // failed-payment total below. A lookup / resolver failure => `failed` => billing unavailable (fail closed).
+    const payerLinkage = await loadLivePayerLinkage(customer.id);
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile, failedFacts] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
       // #4331 P2): an in-flight, unconfirmed placeholder must not read as a
       // message Waves definitely sent, nor displace a real row out of this
@@ -572,7 +579,7 @@ class ContextAggregator {
       // then id break the tie, so the same rows are shown (and hidden) on every read, draft and send.
       // A never-attempted dispute-hold deferral is not a payment the customer made: out of the recent-payments sample
       // (SQL, so it cannot use up one of the 5 rows), consistent with the failed-payment ledger below.
-      excludeNeverAttemptedDeferrals(db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }), 'payments').orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').limit(PAYMENT_OVERFETCH),
+      excludeNeverAttemptedDeferrals(excludeLiveOwnedPayerPayments(db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }), payerLinkage), 'payments').orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').limit(PAYMENT_OVERFETCH),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -643,8 +650,7 @@ class ContextAggregator {
         // hits the same table; an error sentinel here forces the UNKNOWN
         // autopay rendering below.
         .catch(() => 'unavailable'),
-      // ONE shared payer-linkage predicate (services/payer-linkage.js, extracted from billing-v2) — Codex round-28 P1.
-      loadPayerLinkage(customer.id),
+      // (payer linkage: loaded above — the LIVE form, Codex round-42 P1)
       // EVERY unsuperseded failed / pending / overdue payment (main's status set, over the complete ledger — services/failed-payments.js) — NOT the
       // 5-row display slice: an older failure behind five newer paid rows is still owed (Codex round-35 P1).
       // null = the read failed => the money picture is unknowable (billing unavailable).
