@@ -475,6 +475,26 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // Pre-push audit: the draft bills under the COMPLETING visit's Bill-To (payer,
+  // PO, self-pay override) without being linked to that visit.
+  test('a setup-fee draft resolves its Bill-To from the completing visit and is not linked to it', async () => {
+    const f = await seed();
+    const InvoiceService = require('../services/invoice');
+    const createSpy = jest.spyOn(InvoiceService, 'create');
+    try {
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ source_estimate_id: null, status: 'completed' });
+      await mockPg('scheduled_services').where({ id: f.childIds[0] }).update({ estimated_price: 0 });
+      await makeDue(f.childIds[0]);
+      expect(await complete(f, f.childIds[0])).toMatchObject({ status: 200 });
+      const draftCall = createSpy.mock.calls.map((c) => c[0]).find((a) => a?.title === 'One-time setup fee');
+      expect(draftCall).toBeTruthy();
+      expect(draftCall.billToScheduledServiceId).toBe(f.childIds[0]);
+      expect(draftCall.scheduledServiceId).toBeUndefined();
+      const draft = (await mockPg('invoices').where({ customer_id: f.customerId })).find((row) => setupLines(row).length);
+      expect(draft).toMatchObject({ status: 'draft', scheduled_service_id: null });
+    } finally { createSpy.mockRestore(); await cleanup(f); }
+  });
+
   // Codex #5485 r3 P1: the refund path's rodent-setup restoration must never
   // re-arm a pay-after-first-visit fee (a refunded claim-backed fee stays
   // resolved; the next completion must not bill it again).

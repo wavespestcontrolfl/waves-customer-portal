@@ -175,6 +175,7 @@ async function consumeQueuedSetupClaimsForOffice(trx, members, { packet, visit }
       parentId: claim.parentId, rawAmount: claim.raw, customerId: member.customer_id,
       estimateId: member.source_estimate_id || null, origin: 'grouped closeout handed to the office',
       alertContext: { visitId: visit.id, packetId: packet.id, serviceId: member.id },
+      billToScheduledServiceId: member.id,
     });
     if (draft) drafts.push({ invoiceId: draft.invoiceId, invoiceNumber: draft.invoiceNumber, amount: draft.amount });
   }

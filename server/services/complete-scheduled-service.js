@@ -8891,6 +8891,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             customerId: svc.customer_id,
             estimateId: obligation.estimateId || svc.source_estimate_id,
             origin: `visit ${svc.id}`,
+            billToScheduledServiceId: svc.id,
           });
           if (drafts.length) {
             logger.warn(`[dispatch] visit ${svc.id}: consumed ${drafts.length} unconsumable setup-fee stamp(s) on estimate ${obligation.estimateSlug || obligation.estimateId} into draft invoice(s) ${drafts.map((d) => d.invoiceId).join(', ')} — the office reviews and sends the draft`);
@@ -11137,6 +11138,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             estimateId: svc.source_estimate_id || null,
             origin: `first performed visit ${svc.id} did not bill the fee`,
             alertContext: { visitId: svc.id, serviceId: svc.id },
+            billToScheduledServiceId: svc.id,
           }));
           if (feeDraft) logger.warn(`[dispatch] visit ${svc.id} did not bill its queued setup fee ($${feeDraft.amount}) — consumed into draft invoice ${feeDraft.invoiceId} for office review`);
         }

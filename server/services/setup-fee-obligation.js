@@ -252,7 +252,7 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
 // no "accepted estimate #" stamp on purpose: the estimate link is the claim's
 // estimate_id, and a stamped note would route this create through the
 // accepted-estimate coverage/packet-ownership checks.
-async function consumeSetupFeeStampIntoDraftInvoice(trx, { parentId, rawAmount, customerId, estimateId = null, origin = '', alertContext = null } = {}) {
+async function consumeSetupFeeStampIntoDraftInvoice(trx, { parentId, rawAmount, customerId, estimateId = null, origin = '', alertContext = null, billToScheduledServiceId = null } = {}) {
   if (!parentId || !customerId || !(Number(rawAmount) > 0)) return null;
   const amount = Math.round(Number(rawAmount) * 100) / 100;
   const updated = await trx('scheduled_services')
@@ -264,6 +264,10 @@ async function consumeSetupFeeStampIntoDraftInvoice(trx, { parentId, rawAmount, 
     database: trx,
     customerId,
     title: 'One-time setup fee',
+    // The completing visit's Bill-To (payer, PO, self-pay override) — never
+    // the series parent's, which can carry another payer — without linking the
+    // draft to the visit.
+    billToScheduledServiceId: billToScheduledServiceId || parentId,
     lineItems: [{
       description: 'One-time setup fee',
       quantity: 1,
@@ -293,12 +297,12 @@ async function consumeSetupFeeStampIntoDraftInvoice(trx, { parentId, rawAmount, 
 // Consumes every unconsumable positive stamp the detector reported into its
 // own draft invoice + claim (one transaction per stamp, so a failure rolls the
 // stamp back and propagates: the caller fails CLOSED). Returns the drafts made.
-async function consumeUnconsumableSetupFeeStamps(db, stamps, { customerId, estimateId = null, origin = '' } = {}) {
+async function consumeUnconsumableSetupFeeStamps(db, stamps, { customerId, estimateId = null, origin = '', billToScheduledServiceId = null } = {}) {
   const drafts = [];
   for (const stamp of Array.isArray(stamps) ? stamps : []) {
     if (!stamp?.parentId || !(Number(stamp.rawAmount) > 0)) continue;
     const draft = await db.transaction((trx) => consumeSetupFeeStampIntoDraftInvoice(trx, {
-      parentId: stamp.parentId, rawAmount: stamp.rawAmount, customerId, estimateId, origin,
+      parentId: stamp.parentId, rawAmount: stamp.rawAmount, customerId, estimateId, origin, billToScheduledServiceId,
     }));
     if (draft) drafts.push(draft);
   }
