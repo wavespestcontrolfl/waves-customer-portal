@@ -246,7 +246,7 @@ describe('buildActivity digests', () => {
     expect(items.map((i) => [i.id, i.status, i.title, i.agent])).toEqual([
       ['digest:n1', 'awaiting_review', '3 promised quotes never went out — oldest 4d', 'Waves Ops'],
       ['digest:n2', 'failed', 'lead-to-cash invariants — 2 violations', 'Waves Ops'],
-      ['digest:n3', 'completed', 'brain review — 1 blocked', 'Waves Ops'],
+      ['digest:n3', 'awaiting_review', 'brain review — 1 blocked', 'Waves Ops'], // read is not done
       ['digest:n4', 'completed', 'autopay charge on a card hold', 'Waves Ops'],
       ['digest:n5', 'awaiting_review', 'Price-match draft ready — 3 opportunities for Mark', 'Waves Ops'],
     ]);
@@ -258,6 +258,29 @@ describe('buildActivity digests', () => {
     // never truncated — in-app mode this is the only copy of the digest
     const long = 'x'.repeat(5000);
     expect(buildActivity({ digests: [{ id: 'n5', title: 'ACT: long', body: long, created_at: '2026-09-02T05:00:00Z' }] }).items[0].detail).toHaveLength(5000);
+  });
+
+  it('read is not done: an opened ACT/REVIEW digest stays pending until done_at or a resolution closes it', () => {
+    const base = { body: 'x', created_at: '2026-09-02T06:00:00Z', read_at: '2026-09-02T09:00:00Z' };
+    const { items, summary } = buildActivity({
+      digests: [
+        { ...base, id: 'read-act', title: 'Read ACT', metadata: { kind: 'ACT', opsKey: 'a' } },
+        { ...base, id: 'read-review', title: 'Read review', metadata: { kind: 'REVIEW', opsKey: 'b' } },
+        { ...base, id: 'done-act', title: 'Done ACT', metadata: { kind: 'ACT', opsKey: 'c' }, done_at: '2026-09-02T10:00:00Z', done_by: '7' },
+        { ...base, id: 'resolved-act', title: 'Resolved ACT', metadata: { kind: 'ACT', opsKey: 'd', resolved: true, resolvedAt: '2026-09-02T11:00:00Z' } },
+        { ...base, id: 'read-fyi', title: 'Read FYI', metadata: { kind: 'FYI', opsKey: 'e' } },
+      ],
+    });
+    const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+    for (const id of ['digest:read-act', 'digest:read-review']) {
+      expect(byId[id]).toMatchObject({ status: 'awaiting_review', finishedAt: null, stepsDone: 0, doneAt: null });
+      expect(byId[id].subtitle).toMatch(/needs you$/);
+    }
+    expect(byId['digest:done-act']).toMatchObject({ status: 'completed', finishedAt: '2026-09-02T10:00:00.000Z', stepsDone: 1 });
+    expect(byId['digest:resolved-act']).toMatchObject({ status: 'completed', finishedAt: '2026-09-02T11:00:00.000Z' });
+    // FYI has nothing to act on: reading it finishes it.
+    expect(byId['digest:read-fyi']).toMatchObject({ status: 'completed', finishedAt: '2026-09-02T09:00:00.000Z' });
+    expect(summary).toMatchObject({ awaiting_review: 2, completed: 3 });
   });
 
   it('a resolved finding (fall-off rule) reads as completed · cleared, even a FIX', () => {

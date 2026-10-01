@@ -80,6 +80,14 @@ const NOTIFICATION_VERSION_SQL = "md5(concat_ws('|', title, body, link, detail, 
 const MAX_RESOLUTION_CHARS = 200;
 const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
 
+// A PERSON closed the row: done_by is a technician/admin id (a uuid; plain
+// digits too, for legacy ids) or 'claude' (an agent acting for a person).
+// Anything else is a system component ('episodes', 'relevance', 'ops-crons',
+// 'supersede', 'dispatch', 'backfill', ...). Only a person's Done can be put
+// back: a system close leaves state behind that a reopen cannot restore (an
+// ops digest keeps metadata.resolved, its dedupeKey is dropped, ...).
+const PERSON_DONE_BY_SQL = "(done_by ~ '^[0-9]+$' OR done_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' OR done_by = 'claude')";
+
 function cleanResolution(text) {
   const plain = String(stripEmoji(text) || '').replace(/\s+/g, ' ').trim();
   return plain ? truncateAtWord(plain, MAX_RESOLUTION_CHARS) : null;
@@ -787,17 +795,20 @@ const NotificationService = {
 
   // Get notifications for admin
   // before ({ at, id }): keyset cursor — rows strictly after it in feed
-  // order, which is created_at to the millisecond (what a cursor can carry
-  // through JSON) then id, so the cursor and the ORDER BY always agree.
+  // order, plain created_at DESC, id DESC (indexable: notifications_admin_open_keyset_idx).
+  // The query also selects created_at_cursor (created_at::text, microseconds
+  // and offset included) so the route can build a cursor that never rounds
+  // away the sub-millisecond part: the ::timestamptz it round-trips through
+  // is exact, so rows sharing a millisecond are never skipped or repeated.
   async getAdminNotifications(limit = 50, offset = 0, { role, before = null } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
     ));
-    if (before) query.whereRaw("(date_trunc('milliseconds', created_at), id) < (?::timestamptz, ?::uuid)", [before.at, before.id]);
+    if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
     return query
-      .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
-      .orderByRaw("date_trunc('milliseconds', created_at) DESC, id DESC")
+      .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'))
+      .orderByRaw('created_at DESC, id DESC')
       .limit(limit).offset(offset);
   },
 
@@ -814,18 +825,24 @@ const NotificationService = {
 
   // Recently done admin rows (the "Recently done" list, so an accidental Done
   // can be reopened). Scoped exactly like the bell list; newest done first,
-  // keyset-paged on (done_at to the millisecond, id) like the bell list, so
-  // every row in the window stays reachable however many closed after it.
+  // keyset-paged on (done_at, id) like the bell list, so every row in the
+  // window stays reachable however many closed after it. done_at_token is
+  // done_at::text at full precision: the cursor source, and the fence a
+  // reopen must echo back (see reopenAdminDone). reopenable: a person closed it.
   async getAdminDoneNotifications({ role, limit = 20, days = 7, before = null } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at'),
       role,
     ))
       .whereRaw("done_at >= now() - (? * interval '1 day')", [days]);
-    if (before) query.whereRaw("(date_trunc('milliseconds', done_at), id) < (?::timestamptz, ?::uuid)", [before.at, before.id]);
+    if (before) query.whereRaw('(done_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
     return query
-      .select('id', 'title', 'body', 'link', 'category', 'done_at', 'done_by', 'resolution', 'created_at')
-      .orderByRaw("date_trunc('milliseconds', done_at) DESC, id DESC")
+      .select(
+        'id', 'title', 'body', 'link', 'category', 'done_at', 'done_by', 'resolution', 'created_at',
+        db.raw('done_at::text AS done_at_token'),
+        db.raw(`COALESCE(${PERSON_DONE_BY_SQL}, false) AS reopenable`),
+      )
+      .orderByRaw('done_at DESC, id DESC')
       .limit(limit);
   },
 
@@ -906,11 +923,28 @@ const NotificationService = {
   },
 
   // Put a done admin row back in the bell (read_at is left as it is).
-  async reopenAdminDone(notificationId, connection = db) {
+  // expectedDoneAt (required): the done_at token the Recently-done list served
+  // (done_at::text, full precision). A stale list must not clear a NEWER
+  // completion of the same row, so the row is reopened only while its done_at
+  // still equals the token. Only a row a PERSON closed can be reopened
+  // (PERSON_DONE_BY_SQL). Returns 'reopened', 'changed' (still done, but not
+  // by the close the caller saw), 'not_reopenable' (a system close) or
+  // 'not_found' (missing, or not done any more).
+  async reopenAdminDone(notificationId, { expectedDoneAt } = {}, connection = db) {
+    if (expectedDoneAt == null || expectedDoneAt === '') return 'changed';
     const updated = await connection('notifications')
-      .where({ id: notificationId, recipient_type: 'admin' }).whereNotNull('done_at')
+      .where({ id: notificationId, recipient_type: 'admin' })
+      .whereNotNull('done_at')
+      .whereRaw('done_at = ?::timestamptz', [String(expectedDoneAt)])
+      .whereRaw(PERSON_DONE_BY_SQL)
       .update(DONE_CLEARED);
-    return updated > 0;
+    if (updated > 0) return 'reopened';
+    const row = await connection('notifications')
+      .where({ id: notificationId, recipient_type: 'admin' })
+      .first('done_at', connection.raw('done_at = ?::timestamptz AS fence_ok', [String(expectedDoneAt)]));
+    if (!row || row.done_at == null) return 'not_found';
+    if (!row.fence_ok) return 'changed';
+    return 'not_reopenable';
   },
 
   // Mark all read for admin
@@ -1015,6 +1049,7 @@ module.exports._private = {
   excludeActivityOnlyFromBell,
   NOTIFICATION_VERSION_SQL,
   doneColumns,
+  PERSON_DONE_BY_SQL,
   DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,
   MAX_ADMIN_BODY_CHARS,

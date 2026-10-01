@@ -12,29 +12,47 @@ jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: jest.fn(), req
 
 let mockRows = [];
 jest.mock('../models/db', () => {
+// Microsecond-resolution instant of an ISO or Postgres timestamptz text
+// ("2026-09-30 12:00:00.123456+00"), as a BigInt: a plain Date would round to
+// the millisecond and hide exactly the skip the full-precision cursor prevents.
+const micros = (text) => {
+  const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}(?::?\d{2})?)$/.exec(String(text));
+  if (!m) return BigInt(Date.parse(text)) * 1000n;
+  const zone = m[4] === 'Z' ? 'Z' : m[4].length === 3 ? `${m[4]}:00` : m[4].replace(/^([+-]\d{2})(\d{2})$/, '$1:$2');
+  const ms = BigInt(Date.parse(`${m[1]}T${m[2]}${zone}`));
+  return ms * 1000n + BigInt((m[3] || '').padEnd(6, '0'));
+};
+// A row's full-precision value for a column: the *_cursor / *_token text the
+// real query selects (a fixture may set it), else the column itself.
+const fullAt = (r, col) => micros(r[col === 'done_at' ? 'done_at_token' : 'created_at_cursor'] ?? r[col]);
+const PERSON = /^([0-9]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|claude)$/i;
 const makeQuery = () => {
   let rows = [...mockRows];
   const sorts = [];
   let limit = Infinity;
   let offset = 0;
   let selectsVersion = false;
+  const rawSelected = [];
   const q = {
     where(filters) { rows = rows.filter(r => Object.entries(filters).every(([k, v]) => r[k] === v)); return q; },
     // The bell list leaves done rows out (done_at).
     whereNull(key) { rows = rows.filter(r => r[key] == null); return q; },
     whereNotNull(key) { rows = rows.filter(r => r[key] != null); return q; },
-    select(...cols) { if (cols.some((c) => c && c.__raw)) selectsVersion = true; return q; },
+    select(...cols) {
+      for (const c of cols) if (c && c.__raw) { selectsVersion = true; rawSelected.push(c.sql); }
+      return q;
+    },
     first(...cols) { return Promise.resolve(rows[0] ? { done_at: rows[0].done_at ?? null, version: rows[0].version ?? null } : undefined); },
     // The one raw predicate the bell list adds: Activity-only rows
     // (metadata.feed = 'activity') never reach the bell.
     whereRaw(sql, bindings) {
-      // The keyset cursor: (created_at to the ms, id) strictly after it.
-      const cursor = /date_trunc\('milliseconds', (created_at|done_at)\), id\) </.exec(sql);
+      // The keyset cursor: (created_at, id) strictly after it, at full precision.
+      const cursor = /^\((created_at|done_at), id\) < \(\?::timestamptz, \?::uuid\)$/.exec(sql);
       if (cursor) {
         const col = cursor[1];
         const [at, id] = bindings;
-        const atMs = Date.parse(at);
-        rows = rows.filter(r => Date.parse(r[col]) < atMs || (Date.parse(r[col]) === atMs && r.id < id));
+        const atUs = micros(at);
+        rows = rows.filter(r => fullAt(r, col) < atUs || (fullAt(r, col) === atUs && r.id < id));
         return q;
       }
       // The Recently done window: done_at within the last N days.
@@ -52,25 +70,36 @@ const makeQuery = () => {
       else sorts.push([key, direction]);
       return q;
     },
-    // The feed order: created_at to the millisecond, then id, both DESC.
+    // The feed order: plain created_at (or done_at) DESC, id DESC: no
+    // date_trunc, so an index on the column can serve it.
     orderByRaw(sql) {
-      const m = /date_trunc\('milliseconds', (created_at|done_at)\) DESC, id DESC/.exec(sql);
+      const m = /^(created_at|done_at) DESC, id DESC$/.exec(sql);
       if (!m) throw new Error(`unexpected orderByRaw: ${sql}`);
-      sorts.push([m[1], 'desc'], ['id', 'desc']);
+      sorts.push([m[1], 'desc', true], ['id', 'desc']);
       return q;
     },
     limit(n) { limit = n; return q; },
     offset(n) { offset = n; return q; },
     then(resolve, reject) {
       rows.sort((a, b) => {
-        for (const [key, direction] of sorts) {
-          const comparison = String(a[key]).localeCompare(String(b[key]));
+        for (const [key, direction, full] of sorts) {
+          let comparison;
+          if (full) { const x = fullAt(a, key); const y = fullAt(b, key); comparison = x < y ? -1 : x > y ? 1 : 0; }
+          else comparison = String(a[key]).localeCompare(String(b[key]));
           if (comparison) return direction === 'desc' ? -comparison : comparison;
         }
         return 0;
       });
       const out = rows.slice(offset, offset + limit);
-      return Promise.resolve(selectsVersion ? out.map(r => ({ ...r, version: `v-${r.id}` })) : out).then(resolve, reject);
+      // What the real select adds: version, the full-precision cursor text, the reopen flag.
+      const shaped = (r) => ({
+        ...r,
+        ...(selectsVersion ? { version: `v-${r.id}` } : {}),
+        ...(rawSelected.some((x) => /created_at::text AS created_at_cursor/.test(x)) ? { created_at_cursor: r.created_at_cursor ?? r.created_at } : {}),
+        ...(rawSelected.some((x) => /done_at::text AS done_at_token/.test(x)) ? { done_at_token: r.done_at_token ?? r.done_at } : {}),
+        ...(rawSelected.some((x) => /AS reopenable/.test(x)) ? { reopenable: PERSON.test(r.done_by ?? '') } : {}),
+      });
+      return Promise.resolve(out.map(shaped)).then(resolve, reject);
     },
   };
   return q;
@@ -186,6 +215,39 @@ describe('keyset cursor', () => {
     expect(new Set(all).size).toBe(35);
   });
 
+  test('rows in the same millisecond but different microseconds page by their microseconds, none skipped or repeated', async () => {
+    // Every row serializes to one millisecond; only created_at_cursor (what the real query selects as created_at::text) tells them apart.
+    mockRows.forEach((r, i) => {
+      r.created_at = '2026-09-30T12:00:00.123Z';
+      r.created_at_cursor = `2026-09-30 12:00:00.123${String(900 - i * 10).padStart(3, '0')}+00`;
+    });
+    const first = await list({ limit: '10' });
+    expect(first.notifications.map(n => n.id)).toEqual(Array.from({ length: 10 }, (_, i) => uuid(i)));
+    // The cursor carries the microseconds (and the offset), not the rounded millisecond.
+    expect(first.next).toBe(`${mockRows[9].created_at_cursor}~${uuid(9)}`);
+    const seen = first.notifications.map(n => n.id);
+    let next = first.next;
+    while (next) {
+      const page = await list({ limit: '10', before: next });
+      seen.push(...page.notifications.map(n => n.id));
+      next = page.next;
+    }
+    expect(seen).toEqual(Array.from({ length: 35 }, (_, i) => uuid(i)));
+    // The bell payload does not leak the cursor helper column.
+    expect(first.notifications.every(n => !('created_at_cursor' in n))).toBe(true);
+  });
+
+  test('a cursor needs a zone and a real timestamp: a naive time or garbage is a 400', async () => {
+    for (const bad of [`2026-09-30 12:00:00~${uuid(1)}`, `junk~${uuid(1)}`, `2026-09-30T12:00:00.123456789Z~${uuid(1)}`, `2026-09-30T12:00:00Z~not-a-uuid`]) {
+      const res = { json: jest.fn(), status: jest.fn(() => res) };
+      await handler({ query: { limit: '30', before: bad }, techRole: 'admin' }, res, (err) => { throw err; });
+      expect(res.status).toHaveBeenCalledWith(400);
+    }
+    // A Postgres-text cursor is accepted.
+    const ok = await list({ limit: '30', before: `2026-09-30 12:00:00.123456+00~${uuid(1)}` });
+    expect(Array.isArray(ok.notifications)).toBe(true);
+  });
+
   test('a malformed cursor is a 400, not a silent first page', async () => {
     const res = { json: jest.fn(), status: jest.fn(() => res) };
     await handler({ query: { limit: '30', before: 'not-a-cursor' }, techRole: 'admin' }, res, (err) => { throw err; });
@@ -248,13 +310,50 @@ describe('PUT /:id/done and /:id/reopen', () => {
     expect(done).not.toHaveBeenCalled();
   });
 
-  test('reopen: clears the done fields of one admin row, and is behind requireAdmin', async () => {
-    const reopen = jest.spyOn(NotificationService, 'reopenAdminDone').mockResolvedValue(true);
-    const layer = router.stack.find(l => l.route?.path === '/:id/reopen' && l.route.methods.put);
-    expect(layer.route.stack).toHaveLength(2); // requireAdmin, then the handler
-    const res = await call(routeHandler('/:id/reopen', 'put'), { params: { id: 'n1' }, techRole: 'admin', technicianId: 1 });
-    expect(reopen).toHaveBeenCalledWith('n1');
-    expect(res.json).toHaveBeenCalledWith({ success: true, updated: true });
+  describe('reopen', () => {
+    const TOKEN = '2026-09-30 12:00:00.123456+00';
+    const reopenCall = (body) => call(routeHandler('/:id/reopen', 'put'), { params: { id: 'n1' }, body, techRole: 'admin', technicianId: 1 });
+
+    test('clears the done fields of one admin row under the served done_at token, and is behind requireAdmin', async () => {
+      const reopen = jest.spyOn(NotificationService, 'reopenAdminDone').mockResolvedValue('reopened');
+      const layer = router.stack.find(l => l.route?.path === '/:id/reopen' && l.route.methods.put);
+      expect(layer.route.stack).toHaveLength(2); // requireAdmin, then the handler
+      const res = await reopenCall({ doneAt: TOKEN });
+      expect(reopen).toHaveBeenCalledWith('n1', { expectedDoneAt: TOKEN });
+      expect(res.json).toHaveBeenCalledWith({ success: true, updated: true });
+    });
+
+    test('a missing or unparseable doneAt is refused before any write', async () => {
+      const reopen = jest.spyOn(NotificationService, 'reopenAdminDone').mockResolvedValue('reopened');
+      for (const body of [{}, { doneAt: '' }, { doneAt: 'nope' }, { doneAt: 123 }, { doneAt: '2026-09-30 12:00:00' }, { doneAt: null }]) {
+        const res = await reopenCall(body);
+        expect(res.status).toHaveBeenCalledWith(400);
+      }
+      const noBody = await call(routeHandler('/:id/reopen', 'put'), { params: { id: 'n1' }, body: undefined, techRole: 'admin', technicianId: 1 });
+      expect(noBody.status).toHaveBeenCalledWith(400);
+      expect(reopen).not.toHaveBeenCalled();
+    });
+
+    test('a row done again since the list was served answers 409 changed (a stale list cannot clear a newer completion)', async () => {
+      jest.spyOn(NotificationService, 'reopenAdminDone').mockResolvedValue('changed');
+      const res = await reopenCall({ doneAt: TOKEN });
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({ error: 'changed' });
+    });
+
+    test('a system-closed row answers 409 not_reopenable', async () => {
+      jest.spyOn(NotificationService, 'reopenAdminDone').mockResolvedValue('not_reopenable');
+      const res = await reopenCall({ doneAt: TOKEN });
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({ error: 'not_reopenable' });
+    });
+
+    test('a row that is gone or no longer done keeps the plain updated:false answer', async () => {
+      jest.spyOn(NotificationService, 'reopenAdminDone').mockResolvedValue('not_found');
+      const res = await reopenCall({ doneAt: TOKEN });
+      expect(res.status).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith({ success: true, updated: false });
+    });
   });
 });
 
@@ -301,6 +400,34 @@ describe('GET /done (Recently done list)', () => {
     const second = (await call({ techRole: 'admin', query: { before: first.next } })).json.mock.calls[0][0];
     expect(second.notifications.map(n => n.id)).toEqual([20, 21, 22, 23, 24].map(uuid));
     expect(second).toMatchObject({ hasMore: false, next: null });
+  });
+
+  test('rows done in the same millisecond but different microseconds page by the full-precision done_at token, none skipped', async () => {
+    const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    const base = Date.now() - 3600000;
+    const ms = new Date(base - (base % 1000) + 123).toISOString(); // one serialized millisecond
+    const stamp = ms.replace('T', ' ').replace('Z', '');
+    mockRows = Array.from({ length: 25 }, (_, i) => ({
+      id: uuid(i), recipient_type: 'admin', title: `Done ${i}`, done_by: '7', created_at: iso(day),
+      done_at: ms, done_at_token: `${stamp}${String(900 - i * 10).padStart(3, '0')}+00`,
+    }));
+    const first = (await call({ techRole: 'admin' })).json.mock.calls[0][0];
+    expect(first.notifications.map(n => n.id)).toEqual(Array.from({ length: 20 }, (_, i) => uuid(i)));
+    expect(first.next).toBe(`${mockRows[19].done_at_token}~${uuid(19)}`);
+    const second = (await call({ techRole: 'admin', query: { before: first.next } })).json.mock.calls[0][0];
+    expect(second.notifications.map(n => n.id)).toEqual([20, 21, 22, 23, 24].map(uuid));
+  });
+
+  test('every row carries the reopen fence (done_at_token) and reopenable: only a person-closed row can be put back', async () => {
+    const closed = (id, by) => ({ id, recipient_type: 'admin', title: id, done_at: iso(1000), done_by: by, created_at: iso(day) });
+    mockRows = [
+      closed('by-uuid', '6f1c2d9e-4b7a-4c1e-9a3b-0d5e7f8a9b10'), closed('by-digits', '7'), closed('by-claude', 'claude'),
+      closed('by-episodes', 'episodes'), closed('by-ops', 'ops-crons'), closed('by-backfill', 'backfill'), closed('by-nobody', null),
+    ];
+    const rows = (await call({ techRole: 'admin' })).json.mock.calls[0][0].notifications;
+    const flags = Object.fromEntries(rows.map(n => [n.id, n.reopenable]));
+    expect(flags).toEqual({ 'by-uuid': true, 'by-digits': true, 'by-claude': true, 'by-episodes': false, 'by-ops': false, 'by-backfill': false, 'by-nobody': false });
+    expect(rows.every(n => typeof n.done_at_token === 'string')).toBe(true);
   });
 
   test('a malformed cursor is a 400', async () => {

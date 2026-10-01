@@ -195,6 +195,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [doneLoading, setDoneLoading] = useState(false);
   const [doneError, setDoneError] = useState(null);
   const [doneNext, setDoneNext] = useState(null); // the server's cursor for older done rows
+  const [doneNote, setDoneNote] = useState(null); // short inline note after a stale Reopen
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
   // hides itself once the user grants permission.
@@ -536,16 +537,27 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const toggleDone = () => {
     const next = !doneOpen;
     setDoneOpen(next);
+    setDoneNote(null);
     if (next) loadDone();
   };
 
   // Reopen puts the row back in the bell: it leaves this list once the server
-  // accepts it, then the main list and the badge are re-read.
+  // accepts it, then the main list and the badge are re-read. `doneAt` is the
+  // full-precision done_at token the list served for this row: the server
+  // reopens only while the row is still done by that close, so a stale list
+  // can never clear a NEWER completion. A 409 means the row changed (or is no
+  // longer reopenable): the list is re-read and a short note says so.
   const reopenDone = async (n) => {
     setDoneError(null);
+    setDoneNote(null);
     try {
-      await requestJson(`${basePath}/${n.id}/reopen`, { method: 'PUT' });
-    } catch {
+      await requestJson(`${basePath}/${n.id}/reopen`, { method: 'PUT', body: JSON.stringify({ doneAt: n.done_at_token }) });
+    } catch (err) {
+      if (err?.status === 409) {
+        loadDone();
+        setDoneNote('That alert changed \u2014 the list was refreshed.');
+        return;
+      }
       setDoneError('reopen');
       return;
     }
@@ -643,6 +655,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               {doneError === 'reopen' ? 'Couldn\u2019t reopen that alert. Try again.' : 'Couldn\u2019t load recently done alerts.'}
             </div>
           )}
+          {doneNote && (
+            <div role="status" style={{ padding: '8px 0', fontSize: 14, color: colors.text }}>{doneNote}</div>
+          )}
           {!doneLoading && !doneError && doneRows.length === 0 && (
             <div style={{ padding: '8px 0', fontSize: 14, color: colors.muted }}>Nothing marked done in the last 7 days.</div>
           )}
@@ -657,10 +672,13 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   {n.resolution || 'Marked done'} · {timeAgo(n.done_at)}
                 </div>
               </div>
-              <button type="button" className="waves-focus-ring" onClick={() => reopenDone(n)} style={{
-                padding: '0 12px', minHeight: 44, border: 0, background: 'none', cursor: 'pointer',
-                fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.text,
-              }}>Reopen</button>
+              {/* Only a row a person marked done can be put back; a system close stays listed with its resolution. */}
+              {n.reopenable && (
+                <button type="button" className="waves-focus-ring" onClick={() => reopenDone(n)} style={{
+                  padding: '0 12px', minHeight: 44, border: 0, background: 'none', cursor: 'pointer',
+                  fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.text,
+                }}>Reopen</button>
+              )}
             </div>
           ))}
           {!doneLoading && doneNext && (

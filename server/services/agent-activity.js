@@ -297,8 +297,9 @@ function jobItem(job) {
 // services/ops-digest.js and routes/ops-digest-ingest.js since the
 // admin-alerts-brevity scope (2026-09-28). Older rows carry no metadata.kind
 // at all: fall back to the subject-prefix grammar their TITLE was written
-// with (ACT:/FIX:/FIRST:/[Review]) before that scope stripped it off. A
-// read ACT/REVIEW row is done.
+// with (ACT:/FIX:/FIRST:/[Review]) before that scope stripped it off. Read is
+// not done: an opened ACT/REVIEW row still needs the owner until a person
+// marks it done or its check clears it (done_at / metadata.resolved).
 const ACTION_PREFIX = /^(ACT:|\[Review\])/i;
 const DIGEST_PREFIX = /^(ACT:|FIX:|FIRST:|FYI:|OK:|\[Review\])\s*/i;
 function legacyKindFromTitle(subject) {
@@ -319,7 +320,7 @@ function digestItem(row) {
   const resolved = meta.resolved === true;
   // Done (docs/admin-notifications.md section 4.3) reads as handled, never "failed".
   const done = Boolean(row.done_at);
-  const status = resolved || done ? 'completed' : isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
+  const status = resolved || done ? 'completed' : isFix ? 'failed' : isAct ? 'awaiting_review' : 'completed';
   return {
     id: `digest:${row.id}`,
     kind: 'digest',
@@ -333,7 +334,10 @@ function digestItem(row) {
     subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : done ? 'done' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
     status,
     startedAt: iso(row.created_at),
-    finishedAt: resolved && meta.resolvedAt ? iso(meta.resolvedAt) : done ? iso(row.done_at) : row.read_at ? iso(row.read_at) : null,
+    // Only a completed row has a finish time. An opened ACT/REVIEW (or FIX)
+    // row is still pending, so its read time is not a finish; an FYI row
+    // finishes when it is read.
+    finishedAt: resolved && meta.resolvedAt ? iso(meta.resolvedAt) : done ? iso(row.done_at) : status === 'completed' && row.read_at ? iso(row.read_at) : null,
     durationMs: null,
     steps: [],
     stepsDone: status === 'completed' ? 1 : 0,

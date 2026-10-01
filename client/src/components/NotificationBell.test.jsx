@@ -898,7 +898,8 @@ describe('NotificationBell admin "Recently done" (reopen an accidental Done)', (
   const staffToken = (role) => `h.${btoa(JSON.stringify({ role })).replace(/=+$/, '')}.s`;
   const alive = { id: 'a1', category: 'schedule', title: 'Open alert', body: 'Still open.', link: null, created_at: new Date().toISOString(), read_at: null };
   const doneRow = { id: 'd9', category: 'schedule', title: 'Closed by mistake', body: 'Oops.', link: null,
-    created_at: new Date(Date.now() - 86400000).toISOString(), done_at: new Date(Date.now() - 5 * 60000).toISOString(), done_by: '1', resolution: null };
+    created_at: new Date(Date.now() - 86400000).toISOString(), done_at: new Date(Date.now() - 5 * 60000).toISOString(), done_by: '1', resolution: null,
+    done_at_token: '2026-09-30 12:00:00.123456+00', reopenable: true };
 
   const setup = () => {
     let reopened = false;
@@ -925,12 +926,59 @@ describe('NotificationBell admin "Recently done" (reopen an accidental Done)', (
       expect(screen.getByText(/Marked done · 5m ago/)).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Reopen' }));
       await waitFor(() => expect(global.fetch.mock.calls.some(([url, o]) => String(url).endsWith('/admin/notifications/d9/reopen') && o?.method === 'PUT')).toBe(true));
+      // The reopen is fenced on the full-precision done_at token the list served.
+      const put = global.fetch.mock.calls.find(([url, o]) => String(url).endsWith('/admin/notifications/d9/reopen') && o?.method === 'PUT');
+      expect(JSON.parse(put[1].body)).toEqual({ doneAt: '2026-09-30 12:00:00.123456+00' });
       // Gone from the done list, back in the main list.
       await waitFor(() => expect(screen.queryByRole('button', { name: 'Reopen' })).toBeNull());
       expect(await screen.findByText('Closed by mistake')).toBeInTheDocument();
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
     }
+  });
+
+  it('offers Reopen only on a row a person closed: a system-closed row stays listed with its resolution and no button', async () => {
+    localStorage.setItem('waves_admin_token', staffToken('admin'));
+    const system = { ...doneRow, id: 'd-system', title: 'Cleared by the system', done_by: 'episodes', resolution: 'The condition that raised this alert cleared', reopenable: false };
+    global.fetch = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 0 });
+      if (u.endsWith('/admin/notifications/done')) return jsonResponse({ notifications: [system] });
+      return jsonResponse({ notifications: [alive] });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Open alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Recently done' }));
+    expect(await screen.findByText('Cleared by the system')).toBeInTheDocument();
+    expect(screen.getByText(/The condition that raised this alert cleared/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reopen' })).toBeNull();
+  });
+
+  it('a Reopen from a stale list (409 changed) re-reads the done list and says so, without the generic error', async () => {
+    localStorage.setItem('waves_admin_token', staffToken('admin'));
+    let doneReads = 0;
+    global.fetch = vi.fn(async (url, options = {}) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 0 });
+      if (options.method === 'PUT') return { ok: false, status: 409, json: async () => ({ error: 'changed' }) };
+      if (u.endsWith('/admin/notifications/done')) {
+        doneReads += 1;
+        return jsonResponse({ notifications: [{ ...doneRow, done_at_token: doneReads > 1 ? '2026-09-30 12:30:00.654321+00' : doneRow.done_at_token }] });
+      }
+      return jsonResponse({ notifications: [alive] });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Open alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Recently done' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reopen' }));
+    const note = await screen.findByText('That alert changed \u2014 the list was refreshed.');
+    expect(note).toBeInTheDocument();
+    expect(parseFloat(window.getComputedStyle(note).fontSize)).toBeGreaterThanOrEqual(14);
+    expect(screen.queryByText(/couldn.t reopen/i)).toBeNull();
+    await waitFor(() => expect(doneReads).toBe(2));
+    expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
   });
 
   it('Load more done continues from the server cursor and appends the older page', async () => {

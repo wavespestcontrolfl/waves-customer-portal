@@ -95,20 +95,34 @@ function notificationIssueLimit(value) {
   return Math.min(Math.max(parseInt(value, 10) || 50, 1), 200);
 }
 
-// Keyset cursor for the bell list: "<created_at to the millisecond>~<id>".
-// The feed is ordered by the same millisecond-truncated created_at, so a
-// cursor built from a serialized (millisecond) timestamp sits exactly in it.
+// Keyset cursor for the bell and Recently-done lists: "<timestamp>~<id>".
+// The feed is ordered by plain created_at (done_at) DESC, id DESC, so the
+// cursor must carry the column at FULL precision: the service selects
+// created_at::text AS created_at_cursor (done_at::text AS done_at_token),
+// Postgres text with microseconds and offset, which ::timestamptz round-trips
+// exactly. A JS Date would round to the millisecond and skip or repeat rows
+// that share one. Without that field (a row from elsewhere) the ISO string of
+// the Date is the fallback.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function formatCursor(row, column = 'created_at') {
+// ISO-8601 or Postgres timestamptz text: date, 'T' or space, time, optional
+// fraction (up to microseconds), and a zone (never a naive time: it would be
+// read in the session zone). Anything else is not a cursor.
+const TIMESTAMP_TEXT_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:?\d{2})?)$/;
+function formatCursor(row, column = 'created_at', fullColumn = `${column}_cursor`) {
+  const full = row[fullColumn];
+  if (typeof full === 'string' && TIMESTAMP_TEXT_RE.test(full)) return `${full}~${row.id}`;
   const at = new Date(row[column]);
   return Number.isNaN(at.getTime()) ? null : `${at.toISOString()}~${row.id}`;
 }
 function parseCursor(raw) {
   if (typeof raw !== 'string' || !raw) return null;
   const [at, id] = raw.split('~');
-  const date = new Date(at);
-  if (!id || !UUID_RE.test(id) || Number.isNaN(date.getTime())) return null;
-  return { at: date.toISOString(), id };
+  if (!id || !UUID_RE.test(id) || !TIMESTAMP_TEXT_RE.test(at) || Number.isNaN(new Date(at).getTime())) return null;
+  return { at, id };
+}
+// Served rows carry the cursor text only to build `next`; the client never needs it.
+function withoutCursorFields({ created_at_cursor, ...row }) {  
+  return row;
 }
 
 // GET /api/admin/notifications — list with pagination.
@@ -142,7 +156,7 @@ router.get('/', async (req, res, next) => {
     const dedupedPersisted = persisted.slice(0, limit).filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
     const lastServed = persisted.slice(0, limit).at(-1);
     res.json({
-      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...dedupedPersisted],
+      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...dedupedPersisted.map(withoutCursorFields)],
       page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
     });
@@ -161,7 +175,8 @@ router.get('/done', requireAdmin, async (req, res, next) => {
     res.json({
       notifications: page,
       hasMore: rows.length > limit,
-      next: rows.length > limit ? formatCursor(page[page.length - 1], 'done_at') : null,
+      // done_at_token (done_at::text) is the cursor source AND the reopen fence.
+      next: rows.length > limit ? formatCursor(page[page.length - 1], 'done_at', 'done_at_token') : null,
     });
   } catch (err) { next(err); }
 });
@@ -512,10 +527,20 @@ router.put('/:id/done', async (req, res, next) => {
 });
 
 // PUT /api/admin/notifications/:id/reopen — put a done row back in the bell.
+// `doneAt` (required): the done_at_token the Recently-done list served for the
+// row. A stale list cannot clear a NEWER completion: a row that is still done
+// but no longer by that close answers 409 changed, and a row a system
+// component closed (not a person) answers 409 not_reopenable.
 router.put('/:id/reopen', requireAdmin, async (req, res, next) => {
   try {
-    const updated = await NotificationService.reopenAdminDone(String(req.params.id));
-    res.json({ success: true, updated });
+    const doneAt = req.body?.doneAt;
+    if (typeof doneAt !== 'string' || !TIMESTAMP_TEXT_RE.test(doneAt) || Number.isNaN(new Date(doneAt).getTime())) {
+      return res.status(400).json({ error: 'doneAt is required' });
+    }
+    const result = await NotificationService.reopenAdminDone(String(req.params.id), { expectedDoneAt: doneAt });
+    if (result === 'changed') return res.status(409).json({ error: 'changed' });
+    if (result === 'not_reopenable') return res.status(409).json({ error: 'not_reopenable' });
+    res.json({ success: true, updated: result === 'reopened' });
   } catch (err) { next(err); }
 });
 
