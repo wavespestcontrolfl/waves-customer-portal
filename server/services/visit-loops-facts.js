@@ -387,18 +387,20 @@ const safeDescription = (value) => clip(require('./context-aggregator').redactAc
 const rowSourceAt = (r) => (r.source === 'human' ? toDate(r.created_at) : null)
   || toDate(r.call_started_at) || toDate(r.sms_started_at) || toDate(r.created_at);
 
-async function loadCommitments({ conn, customerId, now }) {
+async function loadCommitments({ conn, customerId, now, strict }) {
+  // strict (a send-time rebuild): every nested read throws instead of reading as empty
+  const read = strict ? (_field, _fallback, fn) => fn() : safely;
   const rows = [];
   // Call promises: read regardless of GATE_CALL_COMMITMENTS — it gates
   // writing; rows recorded while it was on are still owed after a rollback.
   {
     const { listOpenCommitments } = require('./call-commitments');
     // party 'waves' in the query, so the limit bounds the rows actually rendered
-    const calls = await safely('call commitments', [], () => listOpenCommitments(conn, { customerId, party: 'waves', limit: 50, now }));
+    const calls = await read('call commitments', [], () => listOpenCommitments(conn, { customerId, party: 'waves', limit: 50, now }));
     for (const r of calls) rows.push({ ...r, __source: 'call' });
   }
   // SMS + email rows share one reader; each channel keeps its own gate.
-  await safely('sms/email commitments', null, async () => {
+  await read('sms/email commitments', null, async () => {
     const { smsCommitmentsEnabled, listSmsCommitments } = require('./sms-operational-actions');
     const smsOn = smsCommitmentsEnabled();
     const emailOn = gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
@@ -413,7 +415,7 @@ async function loadCommitments({ conn, customerId, now }) {
     // spoken due text); one keyed read supplies it.
     let contexts = new Map();
     if (kept.length) {
-      contexts = await safely('sms commitment context', new Map(), async () => {
+      contexts = await read('sms commitment context', new Map(), async () => {
         const found = await conn('call_commitments').whereIn('id', kept.map((r) => r.id)).select('id', 'sms_context');
         return new Map((found || []).map((f) => [String(f.id), parseJson(f.sms_context) || {}]));
       });

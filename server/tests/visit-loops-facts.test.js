@@ -90,6 +90,14 @@ describe('loadVisitLoops basics', () => {
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, conn, strict: true, withCommitments: true })).weOwe).toHaveLength(1);
   });
 
+  test('strict + withCommitments: a failing commitment reader throws (never "nothing owed")', async () => {
+    listOpenCommitments.mockRejectedValueOnce(new Error('call reader down'));
+    await expect(loadVisitLoops({ customerId: 'c1', now: NOW, conn: fakeConn({}), strict: true, withCommitments: true })).rejects.toThrow('call reader down');
+    smsCommitmentsEnabled.mockReturnValue(true);
+    listSmsCommitments.mockRejectedValueOnce(new Error('sms reader down'));
+    await expect(loadVisitLoops({ customerId: 'c1', now: NOW, conn: fakeConn({}), strict: true, withCommitments: true })).rejects.toThrow('sms reader down');
+  });
+
   test('strict (send-time rebuild): a failed read throws instead of reading as empty', async () => {
     const conn = () => { throw new Error('db down'); };
     await expect(loadVisitLoops({ customerId: 'c1', now: NOW, conn, strict: true })).rejects.toThrow('db down');
