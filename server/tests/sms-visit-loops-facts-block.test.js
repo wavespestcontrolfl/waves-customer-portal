@@ -70,6 +70,22 @@ describe('renderVisitLoopsSection', () => {
       .toContain('- RUNNING LATE: dispatch flagged this visit as running past its window');
   });
 
+  test('a missing-tracking alert renders as a tracking gap, never RUNNING LATE', () => {
+    const out = renderVisitLoopsSection({ lateAlert: { type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true } });
+    expect(out).toContain("- Tracking gap: no departure or arrival is recorded yet for today's visit");
+    expect(out).not.toContain('RUNNING LATE');
+  });
+
+  test('gate codes and card digits in a live note or commitment are redacted', () => {
+    const out = renderVisitLoopsSection({
+      liveNote: { text: 'Back gate code 4821, dog inside', updatedAt: null },
+      weOwe: [{ kind: 'callback', description: 'Retry card 4242 4242 4242 4242 tonight', dueText: 'today', source: 'call' }],
+    });
+    expect(out).not.toContain('4821');
+    expect(out).not.toContain('4242 4242');
+    expect(out).toContain('[redacted]');
+  });
+
   test('a banned-copy live note is withheld, not rendered', () => {
     const out = renderVisitLoopsSection({ liveNote: { text: 'Sprayed it, now pet-safe and EPA-approved, dry in 30 minutes', updatedAt: null } });
     expect(out).toContain("- Tech's live note: withheld (contains restricted copy)");

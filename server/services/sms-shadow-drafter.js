@@ -4398,8 +4398,18 @@ const VISIT_LOOPS_HEADER = 'VISIT STATUS & OPEN LOOPS:';
 // One internal field → a single capped, injection-screened line fragment ('' when
 // absent or when it reads as a prompt-control attempt). Descriptions of
 // commitments are model-extracted from call/SMS text — untrusted like exemplars.
+// Internal free text (tech notes, commitment descriptions) can hold gate codes or
+// card/SSN digits: the aggregator's shared redactor runs first (lazy require, as
+// elsewhere in this file; fail closed to '' if it cannot load).
+function visitLoopRedact(value) {
+  try {
+    return require('./context-aggregator').redactAccessCodes(value == null ? '' : String(value));
+  } catch {
+    return '';
+  }
+}
 function visitLoopText(value, cap) {
-  const text = sanitizeSingleLine(value, cap).replace(/"/g, "'");
+  const text = sanitizeSingleLine(visitLoopRedact(value), cap).replace(/"/g, "'");
   if (!text || EXEMPLAR_INJECTION_RE.test(text)) return '';
   return text;
 }
@@ -4426,6 +4436,9 @@ function visitLoopTechLine(tp) {
 }
 function visitLoopLateLine(late) {
   if (!late || typeof late !== 'object') return null;
+  if (late.missingTracking === true) {
+    return '- Tracking gap: no departure or arrival is recorded yet for today\'s visit — this is not confirmed lateness; do not say the tech is late or on time, and do not promise an arrival time';
+  }
   const mins = visitLoopMinutes(late.minutesLate);
   return mins != null
     ? `- RUNNING LATE: dispatch flagged this visit ${mins} min past its window — acknowledge the delay plainly, apologize once, never say "on time"`
@@ -4445,7 +4458,7 @@ function visitLoopMissedLine(missed) {
   return `- MISSED VISIT: ${type}${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was not completed — apologize once, offer the earliest OPEN TIMES slot (or say we'll text times today if OPEN TIMES is absent); never point them to a visit weeks out without an apology`;
 }
 function visitLoopNoteLine(liveNote) {
-  const note = liveNote && typeof liveNote === 'object' ? sanitizeSingleLine(liveNote.text, 240) : '';
+  const note = liveNote && typeof liveNote === 'object' ? sanitizeSingleLine(visitLoopRedact(liveNote.text), 240) : '';
   if (!note) return null;
   // The tech's raw text may name chemicals/products or make compliance claims:
   // the shared customer-copy guard decides (fail closed — an unloadable guard

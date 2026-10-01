@@ -184,11 +184,18 @@ async function loadLateAlert(todayRows, { conn }) {
     .orderBy('created_at', 'desc')
     .first('type', 'severity', 'payload');
   if (!alert) return null;
-  const minutes = Number(parseJson(alert.payload)?.delay_minutes);
+  const payload = parseJson(alert.payload);
+  // no-show-detector raises the same two types on missing tracking alone (stage 1
+  // is 45 min into an open window): that is a tracking gap, not confirmed lateness.
+  if (payload?.evidence === 'missing_tracking') {
+    return { type: alert.type, severity: alert.severity || null, minutesLate: null, missingTracking: true };
+  }
+  const minutes = Number(payload?.delay_minutes);
   return {
     type: alert.type,
     severity: alert.severity || null,
     minutesLate: Number.isFinite(minutes) && minutes >= 0 ? Math.round(minutes) : null,
+    missingTracking: false,
   };
 }
 

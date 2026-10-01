@@ -159,9 +159,15 @@ describe('lateAlert', () => {
 
   test('an open alert carries type, severity and minutes from the payload (string or object)', async () => {
     expect((await run({ type: 'tech_late', severity: 'warn', payload: JSON.stringify({ delay_minutes: 35 }) })).lateAlert)
-      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: 35 });
+      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: 35, missingTracking: false });
     expect((await run({ type: 'unassigned_overdue', severity: 'critical', payload: { delay_minutes: '12' } })).lateAlert)
-      .toEqual({ type: 'unassigned_overdue', severity: 'critical', minutesLate: 12 });
+      .toEqual({ type: 'unassigned_overdue', severity: 'critical', minutesLate: 12, missingTracking: false });
+  });
+
+  test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, delay_minutes: 50 };
+    expect((await run({ type: 'tech_late', severity: 'warn', payload })).lateAlert)
+      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true });
   });
 
   test('no minutes in the payload: minutesLate null; no open alert: null', async () => {
