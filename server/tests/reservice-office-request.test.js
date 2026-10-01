@@ -40,9 +40,18 @@ function fakeDb(tables) {
         return q;
       },
       orderBy(col, dir) {
-        rows.sort((x, y) => (dir === 'desc' ? y[col] - x[col] : x[col] - y[col]));
+        const keys = Array.isArray(col) ? col : [{ column: col, order: dir }];
+        rows.sort((x, y) => {
+          for (const { column, order } of keys) {
+            const a = x[column]; const b = y[column];
+            if (a < b) return order === 'desc' ? 1 : -1;
+            if (a > b) return order === 'desc' ? -1 : 1;
+          }
+          return 0;
+        });
         return q;
       },
+      offset(n) { rows = rows.slice(n); return q; },
       limit(n) { rows = rows.slice(0, n); return q; },
       select() { return q; },
       first() { return Promise.resolve(rows[0]); },
@@ -220,5 +229,22 @@ describe('helpers', () => {
     expect(cleanRequestText('  a\r\nb  ')).toBe('a\nb');
     expect(cleanRequestText('')).toBeNull();
     expect(callSuggestionText(null)).toBeNull();
+  });
+});
+
+describe('Codex r1 (#5518)', () => {
+  test.each([
+    [{ call_outcome: 'voicemail' }],
+    [{ answered_by: 'voicemail' }],
+  ])('a voicemail recorded as %j is never suggested', async (extra) => {
+    const db = fakeDb({ sms_log: [], call_log: [call(1, CUST, 1, { call_summary: 'Left a message about ants', ...extra })] });
+    expect(await pickSuggestion(db, CUST, { now: NOW })).toBeNull();
+  });
+
+  test('thirty newer skipped texts never hide an older real request in the window', async () => {
+    const stops = Array.from({ length: 30 }, (_, i) => sms(100 + i, CUST, 'STOP', 1 + i * 0.01));
+    const db = fakeDb({ sms_log: [...stops, sms(1, CUST, 'Ants are back in the kitchen', 40)], call_log: [] });
+    const s = await pickSuggestion(db, CUST, { now: NOW });
+    expect(s).toMatchObject({ kind: 'text', text: 'Ants are back in the kitchen' });
   });
 });

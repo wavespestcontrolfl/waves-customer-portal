@@ -82,7 +82,7 @@ function chain(table, rows) {
   const list = rows === undefined ? [] : (Array.isArray(rows) ? rows : [rows]);
   const builder = {};
   const self = () => builder;
-  for (const m of ['whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw', 'orderBy', 'orderByRaw', 'limit', 'select', 'forUpdate', 'forShare', 'returning', 'leftJoin', 'join', 'groupBy', 'distinct', 'andWhere', 'orWhere', 'modify', 'clone']) {
+  for (const m of ['whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'forUpdate', 'forShare', 'returning', 'leftJoin', 'join', 'groupBy', 'distinct', 'andWhere', 'orWhere', 'modify', 'clone']) {
     builder[m] = jest.fn(self);
   }
   let filtered = list;

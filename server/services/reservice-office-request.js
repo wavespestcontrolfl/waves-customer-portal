@@ -21,14 +21,17 @@ const SUGGESTION_WINDOW_HOURS = 72;
 // Same cap as call-recording-processor's pain_points slice and the column's
 // 400-char contract.
 const REQUEST_MAX_CHARS = 400;
-// Newest rows scanned per source — a handful of skipped opt-out / empty rows
-// must not hide the real message behind them.
-const SCAN_LIMIT = 10;
+// Rows read per page while scanning a source newest-first. Paging continues
+// until an eligible row is found or the 72-hour window runs out, so any
+// number of skipped opt-out / HELP / spam rows never hides the real message.
+const SCAN_PAGE = 25;
 
 // The two catalog rows an office booking may attach words to. rodent_trapping
 // _followup is a callback too (re-service.js) but is not a customer-request
 // lane (the pest/lawn pickers' chips are the only other writers).
 const OFFICE_REQUEST_SERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
+
+const CALL_COLUMNS = ['id', 'call_summary', 'ai_extraction', 'processing_status', 'call_outcome', 'answered_by', 'created_at'];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -71,7 +74,10 @@ function parseExtraction(value) {
 function callSuggestionText(row) {
   if (!row) return null;
   if (['spam', 'voicemail'].includes(String(row.processing_status || '').toLowerCase())) return null;
-  if (String(row.call_outcome || '').toLowerCase() === 'spam') return null;
+  // The voice pipeline records a voicemail in processing_status, call_outcome
+  // or answered_by, so all three are checked.
+  if (['spam', 'voicemail'].includes(String(row.call_outcome || '').toLowerCase())) return null;
+  if (String(row.answered_by || '').toLowerCase() === 'voicemail') return null;
   const extraction = parseExtraction(row.ai_extraction);
   if (extraction.is_spam === true) return null;
   return cleanRequestText(extraction.pain_points) || cleanRequestText(row.call_summary);
@@ -89,30 +95,28 @@ async function pickSuggestion(conn, customerId, { now = Date.now() } = {}) {
   if (!customerId) return null;
   const floor = windowFloor(now);
 
-  const smsRows = await conn('sms_log')
-    .where({ customer_id: customerId, direction: 'inbound' })
-    .where('created_at', '>=', floor)
-    .orderBy('created_at', 'desc')
-    .limit(SCAN_LIMIT)
-    .select('id', 'message_body', 'created_at');
-  const callRows = await conn('call_log')
-    .where({ customer_id: customerId, direction: 'inbound' })
-    .where('created_at', '>=', floor)
-    .orderBy('created_at', 'desc')
-    .limit(SCAN_LIMIT)
-    .select('id', 'call_summary', 'ai_extraction', 'processing_status', 'call_outcome', 'created_at');
+  const newestEligible = async (table, columns, kind, textOf) => {
+    for (let offset = 0; ; offset += SCAN_PAGE) {
+      const rows = await conn(table)
+        .where({ customer_id: customerId, direction: 'inbound' })
+        .where('created_at', '>=', floor)
+        .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+        .offset(offset)
+        .limit(SCAN_PAGE)
+        .select(columns);
+      for (const row of rows || []) {
+        const text = textOf(row);
+        const at = toIso(row.created_at);
+        if (text && at) return { id: String(row.id), kind, text, at };
+      }
+      if (!rows || rows.length < SCAN_PAGE) return null;
+    }
+  };
 
-  const candidates = [];
-  for (const row of smsRows || []) {
-    const text = smsSuggestionText(row);
-    const at = toIso(row.created_at);
-    if (text && at) { candidates.push({ id: String(row.id), kind: 'text', text, at }); break; }
-  }
-  for (const row of callRows || []) {
-    const text = callSuggestionText(row);
-    const at = toIso(row.created_at);
-    if (text && at) { candidates.push({ id: String(row.id), kind: 'call', text, at }); break; }
-  }
+  const candidates = [
+    await newestEligible('sms_log', ['id', 'message_body', 'created_at'], 'text', smsSuggestionText),
+    await newestEligible('call_log', CALL_COLUMNS, 'call', callSuggestionText),
+  ].filter(Boolean);
   if (!candidates.length) return null;
   candidates.sort((a, b) => new Date(b.at) - new Date(a.at));
   return candidates[0];
@@ -145,7 +149,7 @@ async function resolveCustomerRequest(conn, customerId, input, { now = Date.now(
       const row = await conn('call_log')
         .where({ id, customer_id: customerId, direction: 'inbound' })
         .where('created_at', '>=', floor)
-        .first('id', 'call_summary', 'ai_extraction', 'processing_status', 'call_outcome', 'created_at');
+        .first(CALL_COLUMNS);
       suggested = row ? callSuggestionText(row) : null;
     }
     return { text, source: suggested && suggested === text ? kind : 'office' };
