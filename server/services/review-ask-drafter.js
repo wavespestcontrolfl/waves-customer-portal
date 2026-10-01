@@ -860,14 +860,14 @@ const FACT_CHECK_SCHEMA = {
     sentences: {
       type: "array",
       items: {
-        type: "object", additionalProperties: false, required: ["sentence", "ask_only", "greeting_only", "off_limits", "supported", "quote"],
+        type: "object", additionalProperties: false, required: ["sentence", "ask_only", "greeting_only", "off_limits", "supported", "quotes"],
         properties: {
           sentence: { type: "string" },
           ask_only: { type: "boolean" },
           greeting_only: { type: "boolean" },
           off_limits: { type: "boolean" },
           supported: { type: "boolean" },
-          quote: { type: ["string", "null"] },
+          quotes: { type: "array", items: { type: "string" } },
         },
       },
     },
@@ -879,7 +879,7 @@ const FACT_CHECK_SYSTEM = `You check a text a pest-control technician will send 
 - greeting_only: true only if the sentence is nothing but a greeting, a bare thanks with no reason given ("Thanks again."), or the technician giving their own name ("It's Adam."). Otherwise false.
 - off_limits: true if the sentence touches ANY of these, even when the record states it: anyone's health, illness, injury, medical care or body; money, prices, bills, payments, rent or jobs; a product, brand, chemical or pesticide; who else was home, who let the technician in, or what a family member, tenant, cleaner or neighbor did for the visit. Pets, the customer's own plans (a walk, getting to work) and the visit itself are not off limits.
 - supported: true only if EVERY statement in the sentence is backed by the record: what was found or done, what the customer said, did or has, any personal detail, any time or place. A greeting, thanks or the technician giving their own name needs no backing, but anything they say happened does. Do not accept a guess, an embellishment, a result, a promise or a detail the record does not state.
-- quote: when supported, copy the exact words from the record that back it (the most specific line); otherwise null.
+- quotes: when supported, for EACH separate claim in the sentence, copy the exact words from the record that back that claim (the most specific line); otherwise an empty list. A sentence with two claims ("you mentioned the ants and your new puppies") needs a quote for each.
 Each line in the record carries its date and the record states today's date: a statement about timing (today, this morning, yesterday, last week) is supported only when its dated source matches that timing.
 Return the sentences in the same order.`;
 
@@ -902,23 +902,34 @@ function techVoiceSentences(body) {
 
 // A sentence that only asks for the review: says "Google review" and nothing
 // else beyond request words, the link and a name.
+// A request has a request word, and is not a thanks for a review already left.
+const REQUEST_RE = /\b(?:would|could|can|will|please|mind|help|helps|mean|means|appreciate|leave|share|post|give|write|drop)\b/i;
+const THANKS_FOR_REVIEW_RE = /\bthank(?:s| you)?\s+for\s+(?:your|the|leaving|posting|sharing)\b/i;
 function isAskOnlySentence(sentence, names) {
   if (!/google review/i.test(sentence) || COACHED_REVIEW_RE.test(sentence)) return false;
+  if (!REQUEST_RE.test(sentence) || THANKS_FOR_REVIEW_RE.test(sentence)) return false;
   const words = String(sentence).replace(/\{review_url\}/g, " ").toLowerCase().match(/[a-z']+/g) || [];
   return words.every((w) => ASK_WORDS.has(w.replace(/'s$/, "")) || names.has(w));
 }
 
 const GREETING_WORDS = new Set(`hi hey hello thanks thank you again so much a lot it's its it is this i'm i am here`.split(/\s+/));
+const GREETING_STEMS = new Set([...GREETING_WORDS].map(termStem).filter(Boolean));
+const ASK_STEMS = new Set([...ASK_WORDS].map(termStem).filter(Boolean));
 
 // Nothing but greeting / thanks words and names ("Thanks again.", "It's Adam.").
 // A self-introduction ("It's Adam.", "This is Adam here") only counts when it
 // names the technician; "I'm here." alone is a claim, not a greeting.
 const SELF_INTRO_WORDS = new Set(["it's", "its", "it", "is", "this", "i'm", "i", "am", "here"]);
+// An introduction is exactly "(Hi,) It's / This is / I'm <tech name> (here)."
+// — "Adam is here." claims presence and is not one.
+const INTRO_RE = /^(?:(?:hi|hey|hello)\b[\s,!]*)?(?:it's|its|this is|i'm|i am)\s+([a-z'-]+)(?:\s+here)?\s*[.!]?$/i;
 function isGreetingOnlySentence(sentence, names, techNames = names) {
   const words = String(sentence).toLowerCase().match(/[a-z']+/g) || [];
   if (!words.length || !words.every((w) => GREETING_WORDS.has(w) || names.has(w))) return false;
+  if (!words.some((w) => SELF_INTRO_WORDS.has(w))) return true;
   // The customer's name greets ("Hi Marta!"); only the technician's introduces.
-  return !words.some((w) => SELF_INTRO_WORDS.has(w)) || words.some((w) => techNames.has(w));
+  const intro = INTRO_RE.exec(String(sentence).trim());
+  return !!intro && (String(intro[1]).toLowerCase().match(/[a-z']+/g) || []).every((w) => techNames.has(w));
 }
 
 // dispatchWithFallback returns a copy of the winning leg's result, but the
@@ -932,7 +943,9 @@ function legCapture() {
 
 function quoteSharesContent(sentence, quote, names) {
   const nameStems = new Set([...names].map(termStem).filter(Boolean));
-  const words = [...stemSet(sentence)].filter((w) => !isStop(w) && !nameStems.has(w));
+  const words = [...stemSet(sentence)].filter((w) => !isStop(w) && !nameStems.has(w) && !GREETING_STEMS.has(w) && !ASK_STEMS.has(w) && !TIME_STEMS.has(w));
+  // A clause of only greeting / request words and names claims nothing.
+  if (!words.length) return true;
   const quoteWords = stemSet(quote);
   return words.some((w) => quoteWords.has(w));
 }
@@ -949,11 +962,27 @@ function sentenceVerdictReject(j, sentence, { names, techNames }, normRecord) {
   // needs no quote; code confirms it really is only that.
   if (j.ask_only) return isAskOnlySentence(sentence, names) ? null : "fact_check_bad_answer";
   if (j.greeting_only) return isGreetingOnlySentence(sentence, names, techNames) ? null : "fact_check_bad_answer";
-  const quote = normalizeForMatch(j.quote);
-  if (!j.supported || quote.length < 3 || !normRecord.includes(quote)) return "unsupported_sentence";
-  // The quote must actually be about the sentence: they share a content word
-  // (not "the", not a name), so a stray common word can never vouch.
-  return quoteSharesContent(sentence, j.quote, names) ? null : "unsupported_sentence";
+  const quotes = Array.isArray(j.quotes) ? j.quotes.filter((q) => typeof q === "string") : [];
+  if (!j.supported || !quotes.length) return "unsupported_sentence";
+  if (quotes.some((q) => normalizeForMatch(q).length < 3 || !normRecord.includes(normalizeForMatch(q)))) return "unsupported_sentence";
+  // Every clause must be backed: each one shares a content word (not filler,
+  // not a name) with a cited quote, so "ants and your new baby" cannot ride
+  // on a quote about the ants alone.
+  return sentenceClauses(sentence, names).every((clause) => quoteSharesContent(clause, quotes.join(" "), names)) ? null : "unsupported_sentence";
+}
+
+// A sentence's clauses, for per-claim evidence. Clauses with no content words
+// ("thanks", "so") are dropped; they claim nothing.
+// Timing words are judged by the checker against the record's dates; no
+// quote shares them, so they are not content for clause coverage.
+const TIME_STEMS = new Set(`today morning afternoon evening tonight yesterday week weeks day days month ago since
+  first last again still`.split(/\s+/).map(termStem).filter(Boolean));
+const CLAUSE_SPLIT_RE = /[,;:]|\s+-\s+|\s+(?:and|but|so|while|when|because|since|after|before|plus|then|also)\s+/i;
+function sentenceClauses(sentence, names = new Set()) {
+  const nameStems = new Set([...names].map(termStem).filter(Boolean));
+  const filler = (w) => isStop(w) || GREETING_STEMS.has(w) || ASK_STEMS.has(w) || nameStems.has(w) || TIME_STEMS.has(w);
+  return String(sentence).split(CLAUSE_SPLIT_RE)
+    .filter((clause) => [...stemSet(clause)].some((w) => !filler(w)));
 }
 
 // The fact check starts on the provider the writer did NOT use, so a writer
@@ -1203,7 +1232,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;

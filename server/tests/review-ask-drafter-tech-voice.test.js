@@ -94,8 +94,8 @@ const approveAll = (req) => ({
   ok: true,
   json: {
     sentences: factInput(req).sentences.map((sentence) => (/google review/i.test(sentence) && !/work|sink/i.test(sentence)
-      ? { sentence, ask_only: true, off_limits: false, supported: false, quote: null }
-      : { sentence, ask_only: false, off_limits: false, supported: true, quote: /sink/i.test(sentence) ? 'Moisture under the kitchen sink' : 'I need to go to work' })),
+      ? { sentence, ask_only: true, off_limits: false, supported: false, quotes: [] }
+      : { sentence, ask_only: false, off_limits: false, supported: true, quotes: [/sink/i.test(sentence) ? 'Moisture under the kitchen sink' : "Are you coming? I can't wait too long, I need to go to work"] })),
   },
 });
 
@@ -167,6 +167,15 @@ describe('draftTechVoice', () => {
       ],
     };
     mockDispatch.mockResolvedValueOnce(reply(email));
+    // A quote per claim: the treatment (report recap) and the sink (observations).
+    mockFactCheck.mockImplementation(async (_p, req) => ({
+      ok: true,
+      json: { sentences: factInput(req).sentences.map((sentence) => (/sink/i.test(sentence)
+        ? { sentence, ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ['first of two treatments', 'Moisture under the kitchen sink'] }
+        : /work/i.test(sentence)
+          ? { sentence, ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ["I can't wait too long, I need to go to work"] }
+          : { sentence, ask_only: true, greeting_only: false, off_limits: false, supported: false, quotes: [] })) },
+    }));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 2, channel: 'email' })).toBe(email.body);
   });
 });
@@ -195,7 +204,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
   test('an invented personal detail is refused: redraft once, then the template', async () => {
     const baby = { body: "It's Adam, I know you had to get to work. So happy about your new baby! A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
     mockDispatch.mockResolvedValue(reply(baby));
-    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: false, quote: null }, { ask_only: true, supported: false, quote: null }]);
+    judge([{ ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: false, supported: false, quotes: [] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
     expect(mockDispatch).toHaveBeenCalledTimes(2);
     expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence)');
@@ -203,14 +212,14 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
 
   test('the checker cannot vouch with a quote that is not in the record', async () => {
     mockDispatch.mockResolvedValue(reply(GOOD));
-    judge([{ ask_only: false, supported: true, quote: 'she just had a baby' }, { ask_only: false, supported: true, quote: 'Moisture under the kitchen sink' }, { ask_only: true, supported: false, quote: null }]);
+    judge([{ ask_only: false, supported: true, quotes: ['she just had a baby'] }, { ask_only: false, supported: true, quotes: ['Moisture under the kitchen sink'] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
   });
 
   test('a sentence with content can never pass as a bare review request', async () => {
     const sneaky = { ...GOOD, body: "It's Adam, I know you had to get to work. Congrats on the baby, a Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
     mockDispatch.mockResolvedValue(reply(sneaky));
-    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: true, supported: false, quote: null }]);
+    judge([{ ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
     const { isAskOnlySentence } = Drafter.__private;
     expect(isAskOnlySentence('Marta, a Google review would really help: {review_url}', new Set(['marta']))).toBe(true);
@@ -226,7 +235,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     mockFactCheck.mockImplementation(async (_p, req) => ({
       ok: true,
       json: { sentences: factInput(req).sentences.map((sentence, i) => (i === 1
-        ? { sentence: 'I need to go to work.', ask_only: false, off_limits: false, supported: true, quote: 'I need to go to work' }
+        ? { sentence: 'I need to go to work.', ask_only: false, off_limits: false, supported: true, quotes: ['I need to go to work'] }
         : approveAll(req).json.sentences[i])) },
     }));
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
@@ -234,7 +243,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
 
   test('Codex r2: a record-backed but off-limits sentence (household, health, product) is refused by the checker verdict', async () => {
     mockDispatch.mockResolvedValue(reply(GOOD));
-    judge([{ ask_only: false, off_limits: true, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: true, quote: 'Moisture under the kitchen sink' }, { ask_only: true, supported: false, quote: null }]);
+    judge([{ ask_only: false, off_limits: true, supported: true, quotes: ['I need to go to work'] }, { ask_only: false, supported: true, quotes: ['Moisture under the kitchen sink'] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
     expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (off limits topic)');
     // A missing off_limits verdict counts as off limits (fail closed).
@@ -272,7 +281,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
   test('terminal pass 5: a bare thanks needs no quote, but a thanks with a claim still does', async () => {
     const thanks = { ...GOOD, body: "It's Adam, I know you had to get to work. Thanks again. A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
     mockDispatch.mockResolvedValue(reply(thanks));
-    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: false, greeting_only: true, supported: true, quote: null }, { ask_only: true, supported: false, quote: null }]);
+    judge([{ ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: false, greeting_only: true, supported: true, quotes: [] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBe(thanks.body);
     const { isGreetingOnlySentence } = Drafter.__private;
     expect(isGreetingOnlySentence('Thanks again.', new Set())).toBe(true);
@@ -297,7 +306,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
   test('terminal pass 6: a hyphenated name passes the greeting check end to end', async () => {
     const hi = { ...GOOD, body: "Hi Mary-Jane. I know you had to get to work. A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
     mockDispatch.mockResolvedValue(reply(hi));
-    judge([{ ask_only: false, greeting_only: true, supported: true, quote: null }, { ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: true, supported: false, quote: null }]);
+    judge([{ ask_only: false, greeting_only: true, supported: true, quotes: [] }, { ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Mary-Jane', customer: { id: 'cust-1', first_name: 'Mary-Jane' } })).toBe(hi.body);
   });
 
@@ -416,7 +425,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const baby = { body: "It's Adam, I know you had to get to work. So happy about your new baby! A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
     mockDispatch.mockResolvedValue(reply(baby));
     // The checker wrongly vouches for the invented sentence with a real but unrelated line.
-    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: true, supported: false, quote: null }]);
+    judge([{ ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
     expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence)');
   });
@@ -467,6 +476,32 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(quoteSharesContent('Ants were busy in the kitchen.', 'There were ants in the kitchen', new Set())).toBe(true);
   });
 
+  test('#5524 r3 P1: every clause needs its own backing; a quote for the ants does not cover "your new baby"', async () => {
+    const both = { body: "It's Adam, I know you had to get to work. You mentioned the moisture under the sink and your new baby. A Google review would really help: {review_url}", details: GOOD.details };
+    mockDispatch.mockResolvedValue(reply(both));
+    judge([{ ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: false, supported: true, quotes: ['Moisture under the kitchen sink'] }, { ask_only: true, supported: false, quotes: [] }]);
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+    // A quote per claim, each really in the record, passes.
+    const { sentenceClauses } = Drafter.__private;
+    expect(sentenceClauses('You mentioned the moisture under the sink and your new baby.')).toHaveLength(2);
+    expect(sentenceClauses("It's Adam, thanks again.", new Set(['adam']))).toHaveLength(0);
+  });
+
+  test('#5524 r3: "Adam is here." is not an introduction; "It\'s Adam." is', () => {
+    const { isGreetingOnlySentence } = Drafter.__private;
+    const names = new Set(['marta', 'adam']);
+    const tech = new Set(['adam']);
+    expect(isGreetingOnlySentence('Adam is here.', names, tech)).toBe(false);
+    expect(isGreetingOnlySentence("Hi, it's Adam.", names, tech)).toBe(true);
+    expect(isGreetingOnlySentence('This is Adam here.', names, tech)).toBe(true);
+  });
+
+  test('#5524 r3: a thanks for a review already left is not a request', () => {
+    const { isAskOnlySentence } = Drafter.__private;
+    expect(isAskOnlySentence('Thanks for your Google review. {review_url}', new Set())).toBe(false);
+    expect(isAskOnlySentence('Thanks, a Google review would help: {review_url}', new Set())).toBe(true);
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);
@@ -497,8 +532,8 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
 
   test('a wrong-length answer or an unavailable checker never sends the draft', async () => {
     mockDispatch.mockResolvedValue(reply(GOOD));
-    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }]);
-    mockFactCheck.mockImplementation(async () => ({ ok: true, json: { sentences: [{ sentence: 'x', ask_only: false, supported: true, quote: 'I need to go to work' }] } }));
+    judge([{ ask_only: false, supported: true, quotes: ['I need to go to work'] }]);
+    mockFactCheck.mockImplementation(async () => ({ ok: true, json: { sentences: [{ sentence: 'x', ask_only: false, supported: true, quotes: ['I need to go to work'] }] } }));
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
     mockDispatch.mockReset().mockResolvedValue(reply(GOOD));
     mockFactCheck.mockReset().mockResolvedValue({ ok: false });

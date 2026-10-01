@@ -4648,9 +4648,23 @@ const ReviewService = {
     // A record technician whose name will not resolve gets NO name, never the
     // sequence's cached one (that cache can be a newer visit's technician).
     // A record-scoped cadence whose visit has no technician also gets no name.
+    // The visit a tech-voice draft is about. A cadence with no visit at all
+    // (admin "start sequence", no record or scheduled visit) takes the
+    // customer's newest completed visit from the last 30 days, for drafting
+    // only; none = no draft (fixed copy), never an unscoped history.
+    const voiceVisit = !techVoice ? null
+      : (serviceRecordId || scheduledServiceId) ? { serviceRecordId, serviceDate, technicianId }
+        : await db("service_records")
+          .where({ customer_id: customer.id })
+          .where("service_date", ">=", new Date(Date.now() - 30 * 86400000))
+          .orderBy("service_date", "desc")
+          .first("id", "service_date", "technician_id")
+          .then((sr) => (sr ? { serviceRecordId: sr.id, serviceDate: sr.service_date, technicianId: sr.technician_id } : null))
+          .catch(() => null);
+    const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName
-      : technicianId ? ((await technicianFirstName(technicianId)) || null)
-        : (serviceRecordId ? null : techName);
+      : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)
+        : null;
     const smsTemplateId = canonicalTemplate
       ? null
       : day0Template
@@ -4721,7 +4735,7 @@ const ReviewService = {
           serviceDate,
         };
         const drafted = techVoice
-          ? await Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId, sequenceId, channel: "sms" })
+          ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, sequenceId, channel: "sms" }) : null)
           : await Drafter.draftAskBody(draftInput);
         if (drafted) persistedBody = drafted;
       }
@@ -4784,7 +4798,7 @@ const ReviewService = {
             serviceDate,
           };
           const drafted = techVoice
-            ? await Drafter.draftTechVoice({ ...draftInput, recipientName: emailContact.name, techName: voiceTechName, serviceRecordId, sequenceId, channel: "email" })
+            ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: emailContact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, sequenceId, channel: "email" }) : null)
             : await Drafter.draftEmailIntro(draftInput);
           if (drafted) persistedBody = drafted;
         }
