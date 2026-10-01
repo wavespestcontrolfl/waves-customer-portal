@@ -11358,7 +11358,11 @@ const InvoiceService = {
       const handoffPayload = typeof handoff.payload === "string" ? JSON.parse(handoff.payload || "{}") : (handoff.payload || {});
       // Closed by an earlier reinstatement (not the office): nothing to refuse.
       if (handoffPayload.systemRetired === true) continue;
-      if (!handoff.resolved_at) {
+      // A handoff that lists live partial setup charges (parked as the
+      // remainder) overlaps the fee this invoice would bill again: never
+      // auto-closed — it reads as office action (pre-push audit P0).
+      const overlapsCharges = Array.isArray(handoffPayload.existingSetupCharges) && handoffPayload.existingSetupCharges.length > 0;
+      if (!handoff.resolved_at && !overlapsCharges) {
         const closed = await conn("dispatch_alerts").where({ id: handoff.id }).whereNull("resolved_at").update({
           resolved_at: new Date(),
           payload: conn.raw("coalesce(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ systemRetired: true, retiredBy: `reinstated invoice ${invoiceId}` })]),
@@ -11367,7 +11371,9 @@ const InvoiceService = {
         // write — that is office action, so it falls through to the refusal.
         if (Number(closed) > 0) continue;
       }
-      const message = `The setup fee on invoice ${invoiceId} was handed to the office after it was voided and the office already acted on it — check that fee before restoring this invoice`;
+      const message = overlapsCharges
+        ? `The setup fee on invoice ${invoiceId} was handed to the office after it was voided and other invoices already bill part of it — reconcile those before restoring this invoice`
+        : `The setup fee on invoice ${invoiceId} was handed to the office after it was voided and the office already acted on it — check that fee before restoring this invoice`;
       if (strict) throw new Error(message);
       logger.error(`[invoice] FIX: ${message}`);
     }

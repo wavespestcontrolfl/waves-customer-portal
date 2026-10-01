@@ -571,6 +571,17 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       const closed = await mockPg('dispatch_alerts').where({ id: handoff.id }).first('resolved_at', 'payload');
       expect(closed.resolved_at).not.toBeNull();
       expect(closed.payload.systemRetired).toBe(true);
+
+      // An OPEN handoff that lists live partial setup charges (only the
+      // remainder was parked) is never auto-closed: a strict un-void refuses.
+      const { randomUUID: uuid2 } = require('crypto');
+      await mockPg('dispatch_alerts').where({ id: handoff.id }).update({
+        resolved_at: null,
+        payload: mockPg.raw("(payload - 'systemRetired' - 'retiredBy') || ?::jsonb", [JSON.stringify({ existingSetupCharges: [{ invoiceId: uuid2(), amount: 40 }] })]),
+      });
+      await expect(mockPg.transaction((trx) => Invoices.retireRodentSetupObligationForReinstatedInvoice(trx, inv.id, { strict: true })))
+        .rejects.toThrow(/other invoices already bill part of it/);
+      expect((await mockPg('dispatch_alerts').where({ id: handoff.id }).first('resolved_at')).resolved_at).toBeNull();
     } finally { await cleanup(f); }
   });
 
