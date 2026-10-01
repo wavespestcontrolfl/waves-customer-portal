@@ -775,7 +775,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
   );
 }
 
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card' }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -800,7 +800,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // customer never has to reload the whole page to recover.
   const [loadFailed, setLoadFailed] = useState(false);
   const [loadNonce, setLoadNonce] = useState(0);
-  const [selectedMethod, setSelectedMethod] = useState('card');
+  // A re-mount after a tender replacement starts on the tender the fresh
+  // intent was minted for (initialMethod); a first mount starts on card.
+  const [selectedMethod, setSelectedMethod] = useState(initialMethod || 'card');
   // Initial fallback uses the same two-step rounding as server
   // computeChargeAmount so the customer's first paint matches the
   // PaymentIntent total even if the /update-amount sync fails.
@@ -813,7 +815,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const displayedBaseRef = useRef(amount);
   const [syncingAmount, setSyncingAmount] = useState(false);
   const [amountSyncError, setAmountSyncError] = useState(false);
-  const selectedMethodRef = useRef('card');
+  const selectedMethodRef = useRef(initialMethod || 'card');
   const syncingAmountRef = useRef(false);
   const amountSyncSeqRef = useRef(0);
   // Counts ALL in-flight /update-amount requests, not just the latest sequence.
@@ -2363,7 +2365,7 @@ export default function PayPageV2() {
   // an incompatible PaymentMethod attached). Swap in the fresh clientSecret —
   // PaymentForm is keyed by paymentIntentId, so it fully re-mounts Stripe
   // Elements against the new intent.
-  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount, combined }) => {
+  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount, combined, methodCategory }) => {
     if (!clientSecret || !paymentIntentId) return;
     setPaymentError(null);
     setStripeSetup((prev) => (prev ? {
@@ -2371,6 +2373,10 @@ export default function PayPageV2() {
       clientSecret,
       paymentIntentId,
       baseAmount: baseAmount ?? prev.baseAmount,
+      // The tender the replacement was minted for (codex local max-effort
+      // review on #5434): the re-mounted form starts on it instead of
+      // defaulting to card and syncing a bank intent back to card.
+      ...(methodCategory ? { initialMethod: methodCategory } : {}),
       // undefined = caller didn't carry a verdict; null = clear breakdown.
       ...(combined !== undefined ? { combined } : {}),
     } : prev));
@@ -3035,6 +3041,7 @@ export default function PayPageV2() {
             {paymentState === 'ready' && stripeSetup ? (
               <PaymentForm
                 key={stripeSetup.paymentIntentId}
+                initialMethod={stripeSetup.initialMethod || 'card'}
                 publishableKey={stripeSetup.publishableKey}
                 clientSecret={stripeSetup.clientSecret}
                 amount={stripeSetup.baseAmount}

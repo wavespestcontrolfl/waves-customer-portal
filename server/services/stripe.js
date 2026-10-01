@@ -5009,6 +5009,9 @@ const StripeService = {
       paymentIntentId: newIntent.id,
       clientSecret: newIntent.client_secret,
       replaced: true,
+      // The tender this replacement is locked to — the page re-mounts its
+      // form on it (codex local max-effort review on #5434).
+      methodCategory,
       base,
       surcharge: 0,
       total: base,

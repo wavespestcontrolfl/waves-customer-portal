@@ -650,7 +650,10 @@ in-place re-stamp would let the webhook record the newer version against
 text that tab never rendered. A replacement carries a SUPERSET of the old
 intent's metadata (`waves_customer_id`, `save_card_opt_in`, the consent
 stamp, …) with the new values winning, so the webhook mirrors keyed on
-those stamps keep working across the swap. `/finalize` never re-stamps in
+those stamps keep working across the swap, and the `replaced` response carries
+`methodCategory` (the tender the fresh intent is locked to) so the page
+re-mounts its form on that tender instead of defaulting to card. `/finalize`
+never re-stamps in
 place either: under the invoice lock it reads the PaymentIntent's live stamp
 and refuses with `409 { error, staleBalance: true }` (the page reloads and
 re-syncs through `/setup`) when it differs from the one it would write. `/capture-setup` does the same and stamps the

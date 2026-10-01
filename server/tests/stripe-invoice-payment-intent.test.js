@@ -1266,7 +1266,9 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     }));
     expect(params.customer).toBe('cus_test');
     expect(params.setup_future_usage).toBe('off_session');
-    expect(result).toMatchObject({ paymentIntentId: 'pi_replacement', replaced: true, clientSecret: 'cs_replacement' });
+    // The tender the replacement is locked to rides the response so the page
+    // re-mounts its form on it (codex local max-effort review on #5434).
+    expect(result).toMatchObject({ paymentIntentId: 'pi_replacement', replaced: true, clientSecret: 'cs_replacement', methodCategory: 'card' });
   });
 
   test('an in-place update-amount stamps waves_customer_id too (same block a replacement is minted from)', async () => {
