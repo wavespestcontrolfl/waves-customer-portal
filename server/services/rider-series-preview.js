@@ -155,6 +155,44 @@ function nextRiderDate({
   return next;
 }
 
+// Which series may ride which (owner rulings 2026-10-01). Every pairing uses
+// the one 77/84/105 date rule below, so a 6-week lawn host gives a quarterly
+// rider every 2nd lawn date and a monthly lawn host every 3rd. One table: a
+// later host:rider mix (bi-monthly, semiannual, mosquito riders — they need
+// their own gaps) is one more row here, not another set of call-site tests.
+const QUARTERLY_RIDER_FAMILIES = ['pest_control', 'tree_shrub', 'termite_bait'];
+const RIDER_PAIRINGS = [
+  { host: 'lawn_6wk', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
+  { host: 'lawn_monthly', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
+];
+
+// 'lawn_6wk' | 'lawn_monthly' | null for a series row. Prod stores 6-week lawn
+// three ways: every_6_weeks, custom with a 42-day interval (whatever the
+// catalog key says — the interval is the cadence), and custom with a NULL
+// interval on lawn_care_6week.
+function riderHostKind(row) {
+  if (!row) return null;
+  const { serviceKeyFor } = require('./recurring-appointment-seeder');
+  const snapshot = String(row.service_key_snapshot || '');
+  if (!snapshot.startsWith('lawn_care') && serviceKeyFor({ service_type: row.service_type }) !== 'lawn_care') return null;
+  if (row.recurring_pattern === 'every_6_weeks') return 'lawn_6wk';
+  if (row.recurring_pattern === 'monthly') return 'lawn_monthly';
+  if (row.recurring_pattern !== 'custom') return null;
+  const interval = row.recurring_interval_days;
+  return Number(interval) === 42 || (interval == null && snapshot === 'lawn_care_6week') ? 'lawn_6wk' : null;
+}
+
+// Seeder family key ('pest_control', 'tree_shrub', ...) of a series row.
+function riderFamilyOf(row) {
+  return require('./recurring-appointment-seeder').serviceKeyFor({ service_type: row?.service_type });
+}
+
+function riderPairingEnabled(hostRow, riderFamily, riderPattern) {
+  const host = riderHostKind(hostRow);
+  return !!host && RIDER_PAIRINGS.some((p) => p.host === host
+    && p.riderPattern === riderPattern && p.riderFamilies.includes(riderFamily));
+}
+
 /**
  * Pure date rule — no DB access. Same rule the write engine's own
  * planRiderDates (services/rider-series.js) applies, one step of which
@@ -627,12 +665,14 @@ async function hostReschedulePending(conn, hostParent, cols) {
   return rows.some(isPlanSeriesRow);
 }
 
-async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
+// The host series' live plan rows from today on (the property filter lives in
+// loadHostDates; the extension path trusts the stored rides_parent_id link).
+async function liveHostRows(conn, hostParent, cols, todayStr) {
   const addressCols = [
     'service_address_line1', 'service_address_line2', 'service_address_city',
     'service_address_state', 'service_address_zip',
   ].filter((c) => cols[c]);
-  const hostRowsRaw = await conn('scheduled_services')
+  return conn('scheduled_services')
     .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
     .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
     .modify((q) => {
@@ -646,6 +686,10 @@ async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
       ...(cols.property_id ? ['property_id'] : []), ...addressCols,
     )
     .then((rows) => rows.filter(isPlanSeriesRow));
+}
+
+async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
+  const hostRowsRaw = await liveHostRows(conn, hostParent, cols, todayStr);
   let filtered = hostRowsRaw;
   if (cols.property_id && hostScope?.resolved) {
     // One batched key lookup for the whole host series (withComparableKeys):
@@ -902,6 +946,11 @@ module.exports = {
   MAX_HORIZON_EXTRA_DAYS,
   planRiderDates,
   computeRiderHorizon,
+  riderHostKind,
+  riderFamilyOf,
+  riderPairingEnabled,
+  RIDER_PAIRINGS,
+  liveHostRows,
   previewRiderPair,
   resolveSeriesPropertyScope,
   seriesPropertyVerdict,

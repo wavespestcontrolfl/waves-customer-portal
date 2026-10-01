@@ -992,6 +992,10 @@ async function seriesCandidateDateClashes(conn, template, date) {
     date,
     windowStart: block.start,
     windowEnd: block.end,
+    // The customer's own other visit at this stop is a grouping partner (a
+    // pest visit on its own lawn day), never a clash. Customer-NULL hold
+    // rows still count.
+    excludeCustomerId: template.customer_id,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
   return clash.length > 0;
@@ -18968,6 +18972,40 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
+// GATE_PEST_RIDES_LAWN_AT_ACCEPT: a series parent linked through rides_parent_id
+// to a live lawn series it may ride takes its next dates from the lawn's (the same
+// planRiderDates rule the accept used, which falls back to +84 days on its own
+// when no lawn date is near). null = walk the cadence as before: gate off, no
+// link, host not a matching live series, or any read failing.
+async function riderExtensionDates(conn, parent, cols, latestStr, { skipWeekends, weekendShift, blackoutDates }) {
+  if (!parent.rides_parent_id || !require('../config/feature-gates').pestRidesLawnAtAcceptLive?.()) return null;
+  try {
+    const {
+      planRiderDates, riderPairingEnabled, riderFamilyOf, liveHostRows,
+    } = require('../services/rider-series-preview');
+    const read = (fn) => (conn.isTransaction ? conn.transaction(fn) : fn(conn));
+    const hostRows = await read(async (sp) => {
+      const host = await sp('scheduled_services').where({ id: parent.rides_parent_id }).first();
+      if (!host || String(host.customer_id) !== String(parent.customer_id)
+        || !riderPairingEnabled(host, riderFamilyOf(parent), parent.recurring_pattern)) return [];
+      return liveHostRows(sp, host, cols, etDateString());
+    });
+    if (!hostRows.length) return null;
+    const dates = planRiderDates({
+      hostDates: hostRows.map((r) => r.scheduled_date),
+      lastRiderDate: latestStr,
+      horizonDate: etDateString(addETDays(parseETDateTime(`${latestStr}T12:00`), 1300)),
+      skipWeekends,
+      weekendShift,
+      blackoutDates,
+    });
+    return dates.length ? dates : null;
+  } catch (err) {
+    logger.warn(`[recurring] rider extension dates failed for parent=${parent.id} (walking the cadence): ${err.message}`);
+    return null;
+  }
+}
+
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
@@ -19050,9 +19088,13 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // still null AND hitMaxDate true because the horizon, not a busy
     // calendar, is why nothing more got booked (Codex GitHub r1 P2).
     let hitMaxDate = false;
+    const riderDates = await riderExtensionDates(conn, parent, cols, latestStr, {
+      skipWeekends: skipParent, weekendShift: dirParent, blackoutDates: autoExtendBlackoutDates,
+    });
     while (attempt <= 12) {
-      const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-      const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
+      const candidate = riderDates
+        ? (riderDates[attempt - 1] || null)
+        : seasonalSafeShift(nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts), parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
       if (!candidate) {
         attempt++;
         continue;

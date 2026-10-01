@@ -461,7 +461,13 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   // forward a day at a time (re-applying the weekend shift) until clear —
   // skipping the visit entirely would silently shrink the customer's plan.
   const blackoutDates = opts.blackoutDates instanceof Set ? opts.blackoutDates : null;
-  for (const nextDateStr of recurringDateCandidates(baseDate, pattern, {
+  // opts.overrideDates (rider seeding, GATE_PEST_RIDES_LAWN_AT_ACCEPT): the
+  // caller already decided the dates, so they replace the pattern walk. Every
+  // other field below is built exactly as before.
+  const overrideDates = Array.isArray(opts.overrideDates)
+    ? opts.overrideDates.map(dateOnly).filter((d) => d && !existingDates.has(d))
+    : null;
+  for (const nextDateStr of overrideDates || recurringDateCandidates(baseDate, pattern, {
     recurrenceOptions: rOpts, skipWeekends, weekendShift: shiftDir, existingDates, blackoutDates, maxAttempts,
   })) {
     if (rows.length >= targetNewRows) break;
