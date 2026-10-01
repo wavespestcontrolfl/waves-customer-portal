@@ -34,6 +34,8 @@ jest.mock('../utils/customer-comms-lock', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
 jest.mock('../services/price-change-notices', () => ({ MIN_NOTICE_DAYS: 30 }));
+const mockCloseAlertKeys = jest.fn(async () => 0);
+jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...args) => mockCloseAlertKeys(...args) }));
 jest.mock('../services/annual-prepay-renewals', () => ({
   coveredTermsAsOf: (dbh, today) => dbh('annual_prepay_terms as t')
     .whereIn('t.status', ['active', 'renewal_pending'])
@@ -560,6 +562,19 @@ describe('applyDueRateChanges — per_application', () => {
     expect(visits()[1].estimated_price).toBe('121.00');
     expect(notices()[0]).toMatchObject({ apply_hold_reason: null, apply_attempts: 2 });
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    // the hold's bell closes once the notice applies (never left telling staff to finish it by hand)
+    const closeCall = mockCloseAlertKeys.mock.calls.at(-1);
+    expect(closeCall[1]).toContain(`rate-review-apply-hold:${notices()[0].id}:plan_on_hold`);
+    expect(closeCall[2]).toBe('rate_review_notice_applied');
+  });
+  test('a hold that changes reason closes the earlier reason\'s bell and keeps the current one', async () => {
+    const book = sentBook();
+    book.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'active', resume_on: '2026-12-20' }];
+    await runApply(book);
+    const id = notices()[0].id;
+    const keys = mockCloseAlertKeys.mock.calls.at(-1)[1];
+    expect(keys).not.toContain(`rate-review-apply-hold:${id}:plan_on_hold`);
+    expect(keys).toContain(`rate-review-apply-hold:${id}:rate_moved_since_notice`);
   });
   test('the fee stays untouched when it is not the amount the customer was told (a two-line account), visits still reprice', async () => {
     const book = sentBook({ book: { customer: { per_application_fee: '40.54' } } });
@@ -883,6 +898,13 @@ describe('applyDueRateChanges — annual_prepay', () => {
     expect(copy.length).toBeLessThanOrEqual(110);
     expect(copy).not.toMatch(/_/);
   });
+  test('a legacy UNLABELED term: a named successor of the notice\'s family (no renewed_from link — the admin prepay routes never set one) still counts as created', async () => {
+    const book = prepayBook({ coverage_service_type: null });
+    book.annual_prepay_terms.push({ id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '468.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null });
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['successor_already_created']);
+    expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+  });
   test('the termite program is never reached', async () => {
     const out = await runApply(prepayBook({ annual_plan_version: 'v3' }));
     expect(out.holds.map((h) => h.reason)).toEqual(['termite_program']);
@@ -1028,6 +1050,16 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     mockDb.reset({ annual_prepay_terms: [term({ status: 'renewed', renewal_decision: 'renew' }), { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '484.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) }] });
     expect(await renew(468)).toBeNull();
   });
+  test('a legacy unlabeled predecessor (family from its applied notice): a named successor of that family settles it', async () => {
+    const notice = { id: 'n-legacy', customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-02-01T08:00:00Z'), metadata: JSON.stringify({ term_id: TERM(1) }) };
+    mockDb.reset({ annual_prepay_terms: [term({ coverage_service_type: null })], price_change_notices: [notice] });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    mockDb.reset({
+      annual_prepay_terms: [term({ coverage_service_type: null }), { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '468.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null }],
+      price_change_notices: [notice],
+    });
+    expect(await renew(468)).toBeNull();
+  });
   test('a term cancelled, switched or decided away, or one with no noticed amount, is no predecessor', async () => {
     mockDb.reset({ annual_prepay_terms: [term({ status: 'cancelled' })] });
     expect(await renew(468)).toBeNull();
@@ -1100,12 +1132,15 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
     const route = src.slice(src.indexOf("router.post('/:id/annual-prepay'"), src.indexOf("router.delete('/:id/annual-prepay'"));
-    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || null, today: etDateString(), lock: true })');
+    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true })');
     expect(call).toBeGreaterThan(0);
+    // an edit of the invoice's own term keeps that term's dates (createTermForAnnualPrepay
+    // preserves them when no start is sent), so the guard judges the preserved start, never today
+    expect(route).toMatch(/const linkedTermForNotice = await trx\('annual_prepay_terms'\)\s*\.where\(\{ prepay_invoice_id: invoice\.id \}\)/);
     // after the per-customer annual-prepay advisory lock, before the term write
     expect(route.indexOf('pg_advisory_xact_lock')).toBeLessThan(call);
     expect(call).toBeLessThan(route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay('));
-    expect(route.slice(Math.max(0, call - 400), call)).toMatch(/rateReviewLive\(\)/);
+    expect(route.slice(Math.max(0, call - 900), call)).toMatch(/rateReviewLive\(\)/);
     expect(route).toMatch(/req\.body\?\.acknowledgeNoticedAmount !== true\) throw RateReviewApply\.noticedRenewalAmountError\(noticed\)/);
     expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
   });

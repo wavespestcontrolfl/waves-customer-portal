@@ -2212,7 +2212,13 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         // needs acknowledgeNoticedAmount. Gate off = no read.
         if (require('../config/feature-gates').rateReviewLive()) {
           const RateReviewApply = require('../services/rate-review-apply');
-          const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || null, today: etDateString(), lock: true });
+          // An edit of this invoice's own term with no start sent keeps that
+          // term's dates (createTermForAnnualPrepay preserves them) — judge
+          // the preserved start, never today.
+          const linkedTermForNotice = await trx('annual_prepay_terms')
+            .where({ prepay_invoice_id: invoice.id })
+            .first('term_start');
+          const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true });
           if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
         }
 

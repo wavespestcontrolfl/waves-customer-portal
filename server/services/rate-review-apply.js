@@ -350,14 +350,17 @@ async function resolvePrepayTerm(dbh, { customerId, familyKey, cadence = null, t
 }
 
 // A live or pending term of the same coverage family that starts after
-// this term ends, or one minted as its renewal successor.
-async function successorTermExists(dbh, term) {
+// this term ends, or one minted as its renewal successor. A legacy
+// unlabeled term takes its family from the caller (the notice's family /
+// the family its applied notice named): the admin prepay routes mint a
+// labeled successor with no renewed_from link.
+async function successorTermExists(dbh, term, fallbackFamily = null) {
   const rows = await dbh('annual_prepay_terms')
     .where({ customer_id: term.customer_id })
     .whereNot('id', term.id)
     .whereNotIn('status', ['cancelled', 'canceled', 'refunded'])
     .select('id', 'term_start', 'coverage_service_type', 'renewed_from_term_id');
-  const family = familyOfCoverage(term.coverage_service_type);
+  const family = familyOfCoverage(term.coverage_service_type) || fallbackFamily;
   return rows.some((r) => String(r.renewed_from_term_id || '') === String(term.id)
     || (ymd(r.term_start) > ymd(term.term_end) && familyOfCoverage(r.coverage_service_type) === family));
 }
@@ -874,13 +877,11 @@ async function applyPrepay(trx, ctx) {
   const term = found.term;
   if (term.annual_plan_version) throw hold('termite_program', { termId: term.id });
   if (term.renewal_decision) throw hold('term_not_live', { termId: term.id, decision: term.renewal_decision });
-  // The notice named a renewal day (the successor's start = term_end + 1,
-  // its effective_date) and recorded the term_end it was computed from. A
-  // term whose dates were edited since is a different renewal window — the
-  // old notice (and its 30-day lead) never carries over to it.
-  const renewalDay = addDaysYmd(ymd(term.term_end), 1);
-  if (renewalDay !== ymd(notice.effective_date)
-    || (metadata.term_end != null && ymd(metadata.term_end) !== ymd(term.term_end))) {
+  // The notice named the renewal day (its effective_date = the term_end it
+  // was scheduled from + 1). A term whose dates were edited since is a
+  // different renewal window — the old notice (and its 30-day lead) never
+  // carries over to it.
+  if (addDaysYmd(ymd(term.term_end), 1) !== ymd(notice.effective_date)) {
     throw hold('renewal_window_changed', { termId: term.id, termEnd: ymd(term.term_end), noticedEffectiveDate: ymd(notice.effective_date) });
   }
   // The notice carries the ANNUAL totals: the term's amount the customer
@@ -901,7 +902,7 @@ async function applyPrepay(trx, ctx) {
   // A successor already on the books (a renewal recorded, at whatever
   // amount, or a termite successor minted) makes the predecessor's noticed
   // amount moot — never written after the fact.
-  if (await successorTermExists(trx, term)) throw hold('successor_already_created', { termId: term.id });
+  if (await successorTermExists(trx, term, notice.family_key)) throw hold('successor_already_created', { termId: term.id });
   const nextAmount = dollars(Number(notice.noticed_new_cents));
   if (term.next_term_prepay_amount != null && term.next_term_prepay_amount !== '' && roundMoney(term.next_term_prepay_amount) !== nextAmount) {
     throw hold('rate_moved_since_notice', { nextTermPrepayAmount: Number(term.next_term_prepay_amount) });
@@ -1003,6 +1004,18 @@ async function recordHold(dbh, noticeRow, code, detail, now) {
   });
 }
 
+// Every hold bell of a notice other than `keepCode`'s closes: all of them
+// once the notice applies, the earlier reasons' when a hold changes reason
+// (the bell copy is per reason, so a stale one would ask for the wrong fix).
+async function closeHoldAlerts(dbh, noticeRow, reason, keepCode = null) {
+  try {
+    const keys = Object.keys(HOLD_COPY).filter((c) => c !== keepCode).map((c) => `rate-review-apply-hold:${noticeRow.id}:${c}`);
+    await require('./admin-alert-episodes').closeAdminAlertKeys(dbh, keys, reason);
+  } catch (err) {
+    logger.warn(`[rate-review-apply] hold alert close failed for notice ${noticeRow.id}: ${err.message}`);
+  }
+}
+
 async function raiseHoldAlert(noticeRow, code) {
   try {
     const { raiseAdminAlert } = require('./admin-alert-compose');
@@ -1037,7 +1050,11 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
   const out = { ok: true, asOf: asOfDay, due: due.length, applied: 0, held: 0, skipped: 0, holds: [] };
   for (const noticeRow of due) {
     const result = await applyNotice(noticeRow, { now: at, dbh });
-    if (result.applied) { out.applied += 1; continue; }
+    if (result.applied) {
+      out.applied += 1;
+      await closeHoldAlerts(dbh, noticeRow, 'rate_review_notice_applied');
+      continue;
+    }
     if (result.skipped) { out.skipped += 1; continue; }
     out.held += 1;
     out.holds.push({ noticeId: noticeRow.id, customerId: noticeRow.customer_id, familyKey: noticeRow.family_key, reason: result.hold });
@@ -1047,6 +1064,7 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
       logger.error(`[rate-review-apply] could not record hold for notice ${noticeRow.id}: ${err.message}`);
     }
     await raiseHoldAlert(noticeRow, result.hold);
+    await closeHoldAlerts(dbh, noticeRow, 'rate_review_hold_reason_changed', result.hold);
   }
   logger.info(`[rate-review-apply] ${asOfDay}: ${out.due} due, ${out.applied} applied, ${out.held} held, ${out.skipped} skipped`);
   return out;
@@ -1146,7 +1164,7 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   if (!term) return null;
   // A successor already on the books (whatever its amount) settles the
   // term: the guard protected the renewal that created it.
-  if (await successorTermExists(dbh, term)) return null;
+  if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family)) return null;
   const noticedCents = cents(term.next_term_prepay_amount);
   if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
   return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents) };
