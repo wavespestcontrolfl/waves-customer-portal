@@ -513,3 +513,17 @@ describe('four-section report: allowances stay in their sections', () => {
     expect(writerRulesRejection(report('The treatment keeps working for about 1–2 weeks.', 'Fewer ants.'), { allowedPhrases })).toBe('timeframe');
   });
 });
+
+describe('four-section report: the reach-out date under its own heading', () => {
+  const allowedDates = ['Wednesday, October 14', 'October 14'];
+  const report = (next) => `WHAT WE FOUND\nAnts.\nWHAT WE DID AND WHY\nWe placed bait.\nWHAT TO EXPECT\nFewer ants.\nWHAT'S NEXT\n${next}`;
+
+  test("passes as the first sentence under WHAT'S NEXT, alone or inline", () => {
+    expect(writerRulesRejection(report('If ants are still trailing by Wednesday, October 14, let us know.'), { allowedDates })).toBeNull();
+    expect(writerRulesRejection("WHAT'S NEXT: If ants are still trailing by Wednesday, October 14, let us know.", { allowedDates })).toBeNull();
+  });
+
+  test('still fails when the sentence ties it to a visit', () => {
+    expect(writerRulesRejection(report('Your next visit is Wednesday, October 14.'), { allowedDates })).toBe('date');
+  });
+});

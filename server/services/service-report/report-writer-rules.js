@@ -560,9 +560,16 @@ function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [
   // timeframe and date screens.
   let copy = String(text || '');
   const dates = (Array.isArray(allowedDates) ? allowedDates : []).filter((date) => String(date || '').trim().length >= 3);
+  // Sentences without the section titles: "WHAT'S NEXT" itself carries
+  // "next" and must not read as a visit cue (Codex #5500).
+  const titleFree = copy.split('\n').map((line) => {
+    const title = REPORT_TITLE_LINE_RE.exec(line);
+    return title ? (title[2] || '') : line;
+  }).join('\n');
+  const sentences = titleFree.split(/(?<=[.!?])\s+|\n+/);
   for (const date of dates) {
     const datePattern = new RegExp(`(?<![\\w-])${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
-    if (copy.split(/(?<=[.!?])\s+/).some((sentence) => datePattern.test(sentence) && REACH_OUT_DATE_MISUSE_RE.test(sentence))) {
+    if (sentences.some((sentence) => datePattern.test(sentence) && REACH_OUT_DATE_MISUSE_RE.test(sentence))) {
       return 'date';
     }
   }
