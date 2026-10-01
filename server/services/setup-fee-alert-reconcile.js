@@ -138,7 +138,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                   + ` ALSO: the one-time WaveGuard setup fee ($${(tRemainder / 100).toFixed(2)}${coveredCentsNow > 0 ? ' remaining' : ''}) is still owed — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${meta?.sourceEstimateId || sourceEstimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
                 await trx('notifications').where({ id: row.id }).update({
                   ...NotificationService.adminBodyColumns('billing', rewrittenBody),
-                  read_at: null,
+                  read_at: null, done_at: null, done_by: null, resolution: null,
                   metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false, coveredFeeCents: coveredCentsNow })]),
                 });
                 logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause rewritten — partial coverage, remainder instructed`);
@@ -149,7 +149,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                   .replace(/ ALSO: the one-time WaveGuard setup fee[\s\S]*$/, ' UPDATE: the one-time setup fee is now COVERED by a live invoice — do NOT bill it.');
                 await trx('notifications').where({ id: row.id }).update({
                   ...NotificationService.adminBodyColumns('billing', strippedBody),
-                  read_at: null,
+                  read_at: null, done_at: null, done_by: null, resolution: null,
                   metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: true, ...(coveredCentsNow !== null ? { coveredFeeCents: coveredCentsNow } : {}) })]),
                 });
                 logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause retired — fee coverage proven`);
@@ -168,7 +168,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                   + ` ALSO: the one-time WaveGuard setup fee (${feeAmt}) is OWED AGAIN — its covering invoice is no longer live. Bill it using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${meta?.sourceEstimateId || sourceEstimateId}" in the invoice notes.`;
                 await trx('notifications').where({ id: row.id }).update({
                   ...NotificationService.adminBodyColumns('billing', restoredBody),
-                  read_at: null,
+                  read_at: null, done_at: null, done_by: null, resolution: null,
                   metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false, ...(coveredCentsNow !== null ? { coveredFeeCents: coveredCentsNow } : {}) })]),
                 });
                 logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause REOPENED — coverage regressed`);
@@ -529,14 +529,14 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           } else if (feeProven) {
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...NotificationService.adminBodyColumns('billing', `UPDATE: the one-time setup fee for this estimate is now COVERED by a live invoice — do NOT bill the setup fee again. Still owed: ${appInstruction(effectiveUncoveredIds)}, and include "accepted estimate #${sourceEstimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any other visit.`),
-              read_at: null,
+              read_at: null, done_at: null, done_by: null, resolution: null,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, feeCovered: true, applicationCovered: false, uncoveredVisitIds: effectiveUncoveredIds })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — fee covered, ${uncoveredIds.length} application(s) still owed`);
           } else if (applicationProven) {
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...NotificationService.adminBodyColumns('billing', `UPDATE: every parked visit's application charge for this estimate is now COVERED — do NOT bill an application again. Still owed: ${feeInstruction}, and include "accepted estimate #${sourceEstimateId}" in the invoice notes so the system recognizes it as billed.`),
-              read_at: null,
+              read_at: null, done_at: null, done_by: null, resolution: null,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, applicationCovered: true, feeCovered: false, uncoveredVisitIds: [] })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — application(s) covered, fee still owed`);
@@ -552,7 +552,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               : '';
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...NotificationService.adminBodyColumns('billing', `UPDATE: still owed for this estimate: ${feeInstruction}${appClause}. Include "accepted estimate #${sourceEstimateId}" in the invoice notes so the system recognizes the charges as billed. Do NOT re-bill any covered visit.`),
-              read_at: null,
+              read_at: null, done_at: null, done_by: null, resolution: null,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, feeCovered: false, applicationCovered: false, uncoveredVisitIds: effectiveUncoveredIds })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — fee owed, ${uncoveredIds.length}/${parkedIds.length} application(s) still owed`);

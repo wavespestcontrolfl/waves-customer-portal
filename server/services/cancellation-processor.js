@@ -212,7 +212,7 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
       if (retire.length) {
         await trx('notifications').whereIn('id', retire.map(({ row }) => row.id)).update({ read_at: new Date() });
         const ownRead = (history || []).find((row) => row.read_at != null && String(parseMeta(row).dedupeKey || '') === dedupeKey);
-        if (ownRead) await trx('notifications').where({ id: ownRead.id }).update({ read_at: null });
+        if (ownRead) await trx('notifications').where({ id: ownRead.id }).update({ read_at: null, done_at: null, done_by: null, resolution: null });
       }
     } catch (supersedeErr) {
       // NOT swallowed: raising the new task while a stale one may still

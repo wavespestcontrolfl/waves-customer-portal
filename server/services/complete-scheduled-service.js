@@ -9650,7 +9650,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             await trx('notifications').where({ id: already.id }).update({
               ...require('../services/notification-service').adminBodyColumns('billing', alertBody + crossVisitNote),
               // Newly actionable again — surface in the unread badge.
-              read_at: null,
+              read_at: null, done_at: null, done_by: null, resolution: null,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, expectedSetupFeeCents, expectedApplicationCentsByVisit, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
             });
             return true;
