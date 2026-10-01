@@ -2899,7 +2899,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 // treats a rowless phone as grandfathered-consented, so the claim must exist
 // before any stamp can, never after (pre-push codex P1s). A throw aborts the
 // write before anything lands (fail closed).
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, smsConsentSource = 'call_pipeline_request', beforeStamp = null, onPrimaryOptOutEligible = null } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, smsConsentSource = 'call_pipeline_request', beforeStamp = null, onPrimaryOptOutEligible = null, onSiteGrounded = false } = {}) {
   if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
@@ -3112,8 +3112,12 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // (onPrimaryOptOutEligible); processRecording writes
   // appointment_notify_primary=false once a booking actually lands on this
   // call.
-  const onSiteOwnsTexts = smsConsentExplicit && smsConsentSource === 'call_pipeline_onsite_contact';
-  const primaryOptOutEligible = !!effectivePhone && !hadSlotPhone && onSiteOwnsTexts;
+  // Eligibility follows the GROUNDED on-site rule, not the stamp source: with
+  // explicit V2 consent the stamp source stays 'call_pipeline_request' even for
+  // a grounded on-site spouse, yet they are still the person who gets the texts
+  // (pre-push codex P1). The caller (processRecording) computes onSiteGrounded
+  // from the verified entry.
+  const primaryOptOutEligible = !!onSiteGrounded && !!smsConsentExplicit && !!effectivePhone && !hadSlotPhone;
   if (effectivePhone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
   if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
@@ -3447,10 +3451,18 @@ const ON_SITE_FILLER_WORDS = new Set([
   'yeah', 'yes', 'yep', 'yup', 'ok', 'okay', 'sure', 'right', 'alright', 'absolutely', 'definitely',
   'please', 'that', 'works', 'fine', 'sounds', 'good', 'great', 'thanks', 'thank', 'you', 'uh', 'huh', 'mm', 'hmm', 'mhm', 'it', 'is', 'would', 'be', 'so',
 ]);
+// Phrase-level, not token-level: "Are there termites?" must not ask about
+// presence and "Did you get my message?" must not ask about appointment texts
+// (pre-push codex P1). Texts additionally need a recipient reference in the
+// SAME agent turn (him/her/them/his/your/their/you/cell/phone/number/name).
+// "is/are there" is deliberately NOT a presence phrase ("Are there termites?").
 const ON_SITE_PROMPT_PATTERNS = {
-  wants_appointment_texts: /\b(text|texts|texting|reminder|reminders|tracking|on the way|notification|notifications|message|messages)\b/i,
-  on_site: /\b(there|on site|on-site|at the (house|property|home)|meet|lives?|living|be home|present)\b/i,
+  wants_appointment_texts: /\b(text(s|ing)? (him|her|them|you|his|your|their)|(get|send|receive)s? (a |the )?(text|texts|reminder|reminders|tracking link)|(appointment |visit )?(reminder|reminders)|on (the|his|her|their|our) way|tracking link|notifications?)\b/i,
+  on_site: /\b((?:be|will be|is going to be|he's|she's|they're|he'll be|she'll be|they'll be) (?:there|home)|(?:be|is|are|he's|she's|they're|will be|is going to be) (?:at the (?:house|property|home|address)|on[- ]site|home)|meet (?:the|our|your) (?:tech|technician|inspector)|lives? (?:there|at the (?:house|property))|living there|present (?:at|for)|on[- ]site)\b/i,
 };
+const ON_SITE_RECIPIENT_REFERENCE = /\b(him|her|them|his|your|their|you|cell|phone|number|name)\b/i;
+const onSitePromptAsks = (field, agentText) => ON_SITE_PROMPT_PATTERNS[field].test(agentText)
+  && (field !== 'wants_appointment_texts' || ON_SITE_RECIPIENT_REFERENCE.test(agentText));
 function verifyOnSiteGrounding(contact, transcript) {
   if (!contact || typeof contact !== 'object') return contact;
   const { parseTurns, turnsHolding } = require('./call-reschedule-agreement');
@@ -3474,7 +3486,7 @@ function verifyOnSiteGrounding(contact, transcript) {
     if (!isGenericAffirmation(quote)) return true;
     return holding.some((turn) => {
       const prompt = promptingAgentTurn(turn);
-      return !!prompt && ON_SITE_PROMPT_PATTERNS[field].test(prompt.raw);
+      return !!prompt && onSitePromptAsks(field, prompt.raw);
     });
   };
   return {
@@ -13374,6 +13386,7 @@ const CallRecordingProcessor = {
             smsConsentSource,
             beforeStamp: claimOptinBeforeStamp,
             onPrimaryOptOutEligible: () => { deferPrimaryOptOutCustomerId = customerId; },
+            onSiteGrounded: onSiteNotifyConsent(secondaryEntry),
           });
         } catch (persistErr) {
           // A claim failure aborts BEFORE the stamp (fail closed); the slot is
@@ -13418,7 +13431,7 @@ const CallRecordingProcessor = {
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
-        if (entryConsent && secondaryEntry?.phone && typeof result === 'string' && (result.startsWith('written') || result.startsWith('consent_upgraded') || result.startsWith('skipped_phone_on_record'))) {
+        if (entryConsent && onSiteNotifyConsent(secondaryEntry) && secondaryEntry?.phone && typeof result === 'string' && (result.startsWith('written') || result.startsWith('consent_upgraded') || result.startsWith('skipped_phone_on_record'))) {
           onSiteConsentedPhonesThisCall.add(String(secondaryEntry.phone).replace(/\D/g, '').slice(-10));
         }
         if (['written', 'written_consent_withheld', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow) {
@@ -18135,7 +18148,8 @@ const CallRecordingProcessor = {
               // retry's persist returns skipped_phone_on_record (no callback). So
               // ALSO derive eligibility from the saved state: the row's first slot
               // phone is one of THIS call's grounded on-site contacts and the
-              // row's consent source is the on-site rule.
+              // row's stamp was written during this call (the set only holds
+              // phones of grounded on-site contacts).
               let primaryOptOutFromState = false;
               if (!deferPrimaryOptOutCustomerId && customerId
                   && process.env.GATE_CALL_SECONDARY_CONTACT === 'true'
@@ -18150,7 +18164,6 @@ const CallRecordingProcessor = {
                   const callStartMs = (() => { const at = callStartedAt(call) || call.created_at; const ms = at ? new Date(at).getTime() : NaN; return Number.isFinite(ms) ? ms : null; })();
                   const stampMs = row?.service_contacts_consent_at ? new Date(row.service_contacts_consent_at).getTime() : NaN;
                   primaryOptOutFromState = !!row
-                    && row.service_contacts_consent_source === 'call_pipeline_onsite_contact'
                     && onSiteConsentedPhonesThisCall.has(optLast10(row.service_contact_phone))
                     && callStartMs !== null && Number.isFinite(stampMs) && stampMs >= callStartMs;
                 } catch (stateErr) {

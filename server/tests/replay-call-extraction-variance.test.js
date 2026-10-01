@@ -913,14 +913,22 @@ describe('call extraction replay variance reporting', () => {
         expect(compareFlatFields({ [field]: false }, { [field]: true }, true).find((v) => v.field === field).severity).toBe('high');
       }
     });
+    test('evidence-presence mirrors are high-severity replay fields that collapse absent to false', () => {
+      for (const field of ['secondary_wants_appointment_texts_evidence', 'secondary_on_site_evidence']) {
+        expect(FIELD_GROUPS.high).toContain(field);
+        expect(normalizeField(field, null)).toBe(false);
+        expect(normalizeField(field, true)).toBe(true);
+        expect(compareFlatFields({ [field]: true }, { [field]: false }, true).find((v) => v.field === field).severity).toBe('high');
+      }
+    });
     test('the per-contact consent signature covers every entry and collapses absent to empty', () => {
       const field = 'secondary_contacts_consent_signature';
       expect(FIELD_GROUPS.high).toContain(field);
       expect(normalizeField(field, null)).toBe('');
       expect(normalizeField(field, '')).toBe('');
       // A flip on entry 2 (invisible to the singleton fields) is a high-severity variance.
-      const before = '5550100123:spouse_partner:1:1|other@example.com:tenant:0:0';
-      const after = '5550100123:spouse_partner:1:1|other@example.com:tenant:1:1';
+      const before = '5550100123:spouse_partner:1:1:1:1|other@example.com:tenant:0:0:0:0';
+      const after = '5550100123:spouse_partner:1:1:1:1|other@example.com:tenant:1:1:1:1';
       expect(compareFlatFields({ [field]: before }, { [field]: after }, true).find((v) => v.field === field).severity).toBe('high');
       expect(compareFlatFields({ [field]: before }, { [field]: before }, true).filter((v) => v.field === field)).toEqual([]);
     });

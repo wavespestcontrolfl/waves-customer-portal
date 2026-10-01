@@ -132,12 +132,23 @@ function flatView(extraction) {
     // an SMS consent stamp). False when absent, like agent_committed_booking.
     secondary_wants_appointment_texts: secondary?.wants_appointment_texts === true,
     secondary_on_site: secondary?.on_site === true,
+    // Evidence PRESENCE for those two flags (a caller-speaker evidence[] entry
+    // exists for the path): the flags only authorize SMS consent when pinned,
+    // so a model that stops (or starts) pinning them must show in replay.
+    secondary_wants_appointment_texts_evidence: !!secondary?.wants_appointment_texts_quote,
+    secondary_on_site_evidence: !!secondary?.on_site_quote,
     // Order-stable per-contact signature over the whole secondary_contacts[]
-    // (identity:role:text-intent:on-site, '|'-joined, '' when none) so a flag flipping
+    // (identity:role:text-intent:on-site:text-evidence:on-site-evidence, '|'-joined, '' when none) so a flag flipping
     // on entries 2+ shows in replay variance too (FIELD_GROUPS high).
-    secondary_contacts_consent_signature: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence, extraction.secondary_contact || null)
-      .map((c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`)
-      .join('|'),
+    // Canonical: the array when present, else the singleton as one entry (a
+    // singleton-only payload must not read as "no contacts"). Each entry also
+    // carries its two evidence-presence bits.
+    secondary_contacts_consent_signature: (() => {
+      const list = mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence, extraction.secondary_contact || null);
+      return (list.length ? list : [secondary].filter(Boolean))
+        .map((c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}:${c.wants_appointment_texts_quote ? 1 : 0}:${c.on_site_quote ? 1 : 0}`)
+        .join('|');
+    })(),
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,

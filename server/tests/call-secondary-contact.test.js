@@ -460,25 +460,25 @@ describe('persistCallSecondaryContact', () => {
 
   test('persist never writes the caller opt-out; it only REPORTS eligibility once the slot commits (booking may not land)', async () => {
     const spouseContact = { first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true };
-    const onSiteOpts = { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' };
+    const grounded = { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact', onSiteGrounded: true };
     // 0-row slot race: not eligible, nothing written.
     let eligible = 0;
+    const fire = () => { eligible += 1; };
     const raced = makeDb({ customer: bareCustomer, updateRows: 0 });
-    expect(await persistCallSecondaryContact('cust-1', spouseContact, { ...onSiteOpts, onPrimaryOptOutEligible: () => { eligible += 1; } })).toBe('skipped_slot_race');
+    expect(await persistCallSecondaryContact('cust-1', spouseContact, { ...grounded, onPrimaryOptOutEligible: fire })).toBe('skipped_slot_race');
     expect(eligible).toBe(0);
     // Landed: eligible, and the caller KEEPS the default TRUE flip (no false is ever written here).
     const landed = makeDb({ customer: bareCustomer });
-    expect(await persistCallSecondaryContact('cust-1', spouseContact, { ...onSiteOpts, onPrimaryOptOutEligible: () => { eligible += 1; } })).toBe('written');
+    expect(await persistCallSecondaryContact('cust-1', spouseContact, { ...grounded, onPrimaryOptOutEligible: fire })).toBe('written');
     expect(eligible).toBe(1);
     expect(landed.prefsMerges.map((m) => m.mergePayload)).toEqual([{ appointment_notify_primary: true }]);
-    // An ordinary (non-on-site) first phone is never eligible.
-    const ordinary = makeDb({ customer: bareCustomer });
-    await persistCallSecondaryContact('cust-1', spouseContact, { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request', onPrimaryOptOutEligible: () => { eligible += 1; } });
+    // Not grounded on-site (even with the on-site SOURCE): never eligible.
+    makeDb({ customer: bareCustomer });
+    await persistCallSecondaryContact('cust-1', spouseContact, { ...grounded, onSiteGrounded: false, onPrimaryOptOutEligible: fire });
     expect(eligible).toBe(1);
-    expect(ordinary.prefsMerges.map((m) => m.mergePayload)).toEqual([{ appointment_notify_primary: true }]);
     // Not the FIRST slot phone: never eligible.
     makeDb({ customer: { ...bareCustomer, service_contact_name: 'Other', service_contact_phone: '+15550100777', service_contacts_consent_at: '2026-07-22T00:00:00Z' } });
-    await persistCallSecondaryContact('cust-1', spouseContact, { ...onSiteOpts, onPrimaryOptOutEligible: () => { eligible += 1; } });
+    await persistCallSecondaryContact('cust-1', spouseContact, { ...grounded, onPrimaryOptOutEligible: fire });
     expect(eligible).toBe(1);
   });
 
@@ -1280,6 +1280,19 @@ describe('on-site grounding must be pinned to a CALLER quote that is in the tran
     const presenceQuestion = ['Agent: Will he be there that day?', 'Caller: Yeah.'].join('\n');
     expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Yeah.' }, presenceQuestion).wants_appointment_texts).toBe(false);
     expect(verifyOnSiteGrounding({ ...grounded, on_site_quote: 'Yeah.' }, presenceQuestion).on_site).toBe(true);
+    // Codex counterexamples: topical words in an unrelated question do not ground the field.
+    const termites = ['Agent: Are there termites?', 'Caller: Yes.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, on_site_quote: 'Yes.' }, termites).on_site).toBe(false);
+    const gotMessage = ['Agent: Did you get my message?', 'Caller: Yes.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Yes.' }, gotMessage).wants_appointment_texts).toBe(false);
+    // Texts need a recipient reference in the same agent turn.
+    const noRecipient = ['Agent: We send reminders.', 'Caller: Yes.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Yes.' }, noRecipient).wants_appointment_texts).toBe(false);
+    // The motivating real call, and a presence question, still ground.
+    const real = ["Agent: We could put his cell phone on the account so he'll get the reminders and the certification.", 'Caller: Yeah.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, on_site: false }, real).wants_appointment_texts).toBe(true);
+    const presence = ["Agent: Okay, so he'll be there Tuesday?", 'Caller: Yes.'].join('\n');
+    expect(verifyOnSiteGrounding({ ...grounded, on_site_quote: 'Yes.' }, presence).on_site).toBe(true);
     // Filler-only phrases of 3+ words are still generic ("Yeah, that works").
     const filler = ["Agent: What's the zip code?", 'Caller: Yeah, that works.'].join('\n');
     expect(verifyOnSiteGrounding({ ...grounded, wants_appointment_texts_quote: 'Yeah, that works' }, filler).wants_appointment_texts).toBe(false);
@@ -1400,7 +1413,7 @@ describe('do-not-contact, notify-primary and withheld-consent rules for the on-s
     expect(src).toContain('{ doNotContact: v2DoNotContact }');
   });
 
-  test('on-site first slot phone reports opt-out eligibility (the write itself is deferred to the booking site); any other source does not', async () => {
+  test('eligibility follows the GROUNDED on-site rule, not the stamp source (explicit V2 consent included)', async () => {
     const bare = { id: 'cust-1', phone: '+15550100999', email: null,
       service_contact_name: null, service_contact_phone: null, service_contact_email: null,
       service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
@@ -1411,10 +1424,16 @@ describe('do-not-contact, notify-primary and withheld-consent rules for the on-s
       await persistCallSecondaryContact('cust-1', spouse, { ...opts, onPrimaryOptOutEligible: () => { fired += 1; } });
       return fired;
     };
-    expect(await eligibleFor({ smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' })).toBe(1);
-    expect(await eligibleFor({ smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' })).toBe(0);
-    // The loop passes the on-site SOURCE even when consent is false (non-grounded contact): not eligible.
-    expect(await eligibleFor({ smsConsentExplicit: false, smsConsentSource: 'call_pipeline_onsite_contact' })).toBe(0);
+    // On-site rule source + grounded.
+    expect(await eligibleFor({ smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact', onSiteGrounded: true })).toBe(1);
+    // Explicit V2 consent (source stays call_pipeline_request) + grounded on-site contact: STILL eligible.
+    expect(await eligibleFor({ smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request', onSiteGrounded: true })).toBe(1);
+    // V2-consented but NOT a grounded on-site contact: not eligible.
+    expect(await eligibleFor({ smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request', onSiteGrounded: false })).toBe(0);
+    // The on-site SOURCE alone (not grounded) is not enough.
+    expect(await eligibleFor({ smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact', onSiteGrounded: false })).toBe(0);
+    // Grounded but no consent (do-not-contact): not eligible.
+    expect(await eligibleFor({ smsConsentExplicit: false, smsConsentSource: 'call_pipeline_onsite_contact', onSiteGrounded: true })).toBe(0);
   });
 
   test('the booking site applies the deferred opt-out only after scheduledServiceId lands; persistence never writes false', () => {
@@ -1617,12 +1636,15 @@ describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => 
 // Pre-push codex P1: the deferred opt-out must survive a crash + retry between
 // persistence and booking — the booking site also derives it from saved state.
 describe('deferred caller opt-out is derived from saved state on a retry (#5467)', () => {
-  test('booking site reads the first slot phone + consent source when the in-memory flag is absent', () => {
+  test('booking site reads the first slot phone + stamp time (NOT the stamp source) when the in-memory flag is absent', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const at = src.indexOf('let primaryOptOutFromState = false;');
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at, at + 2600);
-    expect(block).toContain("row.service_contacts_consent_source === 'call_pipeline_onsite_contact'");
+    // Independent of the stamp source: explicit V2 consent keeps 'call_pipeline_request'.
+    expect(block).not.toContain("service_contacts_consent_source === 'call_pipeline_onsite_contact'");
+    expect(src).toContain('onSiteGrounded: onSiteNotifyConsent(secondaryEntry)');
+    expect(src).toContain('if (entryConsent && onSiteNotifyConsent(secondaryEntry) && secondaryEntry?.phone');
     expect(block).toContain('onSiteConsentedPhonesThisCall.has(optLast10(row.service_contact_phone))');
     expect(block).toContain("process.env.GATE_CALL_SECONDARY_CONTACT === 'true'");
     expect(block).toContain('stampMs >= callStartMs');
