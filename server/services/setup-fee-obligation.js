@@ -318,6 +318,29 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
   // it is not the office's.
   if (await prepayWaivesDeferredSetupFee(trx, { seriesId: parentId, visit })) return null;
   const amount = Math.round(Number(rawAmount) * 100) / 100;
+  // Already billed by hand: a live (not void / canceled / refunded) invoice on
+  // the series carries a setup-fee line. That invoice owns the fee: record the
+  // claim against it and retire the stamp (exact value), never ask the office
+  // to bill it again — the same healing the completion mint applies to an
+  // orphaned claim.
+  const billedByHand = await trx('invoices')
+    .whereIn('scheduled_service_id', trx('scheduled_services').select('id').where(function series() {
+      this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
+    }))
+    .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
+    .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
+    .first('id');
+  if (billedByHand) {
+    const retired = await trx('scheduled_services')
+      .where({ id: parentId, pending_setup_fee: rawAmount })
+      .update({ pending_setup_fee: null, updated_at: new Date() });
+    if (retired === 1) {
+      await require('./secure-appointment-plans').recordSetupFeeClaimForInvoice(trx, {
+        invoiceId: billedByHand.id, anchorId: parentId, amount, estimateId,
+      });
+    }
+    return null;
+  }
   const updated = await trx('scheduled_services')
     .where({ id: parentId, pending_setup_fee: rawAmount })
     .update({ pending_setup_fee: null, updated_at: new Date() });

@@ -397,6 +397,28 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  test('a setup fee staff already billed by hand on a series invoice is not handed to the office again (claim recorded, stamp retired)', async () => {
+    const f = await seed();
+    const Obligation = require('../services/setup-fee-obligation');
+    try {
+      const byHand = await require('../services/invoice').create({
+        customerId: f.customerId, scheduledServiceId: f.parentId, title: 'Office bill',
+        lineItems: [
+          { description: 'Visit', quantity: 1, unit_price: VISIT_PRICE },
+          { description: 'One-time setup fee', quantity: 1, unit_price: SETUP_FEE },
+        ],
+      });
+      const visit = await mockPg('scheduled_services').where({ id: f.parentId }).first();
+      const parked = await mockPg.transaction((trx) => Obligation.parkSetupFeeStampForOffice(trx, {
+        parentId: f.parentId, rawAmount: SETUP_FEE, customerId: f.customerId, estimateId: f.estimateId, origin: 'test', visit,
+      }));
+      expect(parked).toBeNull();
+      expect(await officeFeeAlerts(f)).toHaveLength(0);
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+      expect(await mockPg('setup_fee_claims').where({ invoice_id: byHand.id, scheduled_service_id: f.parentId })).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
   // Terminal Codex pass 1 (P2): a NON-recurring booster/add-on under the plan
   // parent is not a plan application, so its completion never takes (or parks)
   // the plan's queued first-visit fee.
