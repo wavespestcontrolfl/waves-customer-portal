@@ -281,8 +281,13 @@ async function repairAcceptedCustomerDunningEmails(rows, database, { readOnly = 
       if (verdict === 'unsent' && metadataOf(hit.row).send_failed === true) continue;
       const written = readOnly || await stampCustomerDunningEmail(message, hit.row, hit.identity, verdict, database);
       if (!written) continue;
-      if (verdict === 'accepted') repaired.add(String(hit.row.id));
-      else reflectDunningOutcome(hit.row, verdict);
+      if (verdict === 'accepted') {
+        repaired.add(String(hit.row.id));
+        // The loaded row keeps its RESERVATION time otherwise: reflect the provider's acceptance time (the value the
+        // stamp wrote) so the progress view's deliveredAt / last_touch_at / final_notice_at carry the real one.
+        const acceptedAt = storedEmailAcceptedAt(message);
+        if (acceptedAt) hit.row.occurred_at = acceptedAt;
+      } else reflectDunningOutcome(hit.row, verdict);
     }
   } catch (err) {
     logger.warn(`[billing-email-reservation] customer dunning evidence repair failed: ${redactContact(err.message)}`);

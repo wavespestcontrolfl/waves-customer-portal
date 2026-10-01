@@ -78,7 +78,7 @@ async function readContextRows(input, database, lockRecipients, lockedInvoice) {
   return { customer, prefs, invoice };
 }
 
-async function contextBlock(input, category, { customer, prefs, invoice }, database) {
+async function contextBlock(input, category, { customer, prefs, invoice }, database, bypassPreferences = false) {
   if (!customer || customer.deleted_at) return { error: blocked('CUSTOMER_NOT_FOUND', 'Customer is unavailable') };
   // Only an explicit billing channel choice without Email refuses. A
   // customer who never chose (no explicit selection for this category, or no
@@ -86,7 +86,9 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
   // sender follows, which this authority now serves too (owner ruling
   // 2026-09-27). The routed Email leg only exists once Email was chosen, so
   // it never reaches this with no choice.
-  if (billingChannelAllowed(prefs || {}, category, 'email') === false) {
+  // `bypassPreferences` is the deliberate OPERATOR send only (customer-dunning send-now): it skips this one gate and
+  // nothing else - recipient, suppression, hold and ownership checks all still run. Every other caller leaves it off.
+  if (!bypassPreferences && billingChannelAllowed(prefs || {}, category, 'email') === false) {
     // This fires both on the FIRST read (loadBillingEmailContext at the top
     // of sendBillingChannelEmail) and on the LOCKED recheck immediately
     // before the provider handoff (verifyAndDispatch below). Only the
@@ -120,13 +122,13 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
   return null;
 }
 
-async function loadBillingEmailContext(input, database = db, { lockRecipients = false, invoice: lockedInvoice = null } = {}) {
+async function loadBillingEmailContext(input, database = db, { lockRecipients = false, invoice: lockedInvoice = null, bypassPreferences = false } = {}) {
   const category = clean(input?.metadata?.billingDeliveryCategory);
   if (!CATEGORY_LABELS[category]) return { error: blocked('INVALID_BILLING_CATEGORY', 'Unknown billing delivery category') };
   if (!input?.customerId) return { error: blocked('CUSTOMER_REQUIRED', 'Billing email requires a customer') };
 
   const rows = await readContextRows(input, database, lockRecipients, lockedInvoice);
-  const invalid = await contextBlock(input, category, rows, database);
+  const invalid = await contextBlock(input, category, rows, database, bypassPreferences);
   if (invalid) return invalid;
 
   const [recipient] = getInvoiceEmailRecipients(rows.customer, rows.prefs || {}).filter((entry) => isEmailLike(entry.email));
@@ -217,9 +219,9 @@ async function dunningHoldBlock({ input, database, invoice, templateKey, holdExe
 
 async function verifyAndDispatch({
   input, trx, invoice, phone, recipientEmail, authorityRecipientEmail,
-  templateKey, emailSuppression, preSendCheck, dispatch, state, holdExempt = null,
+  templateKey, emailSuppression, preSendCheck, dispatch, state, holdExempt = null, operatorBypassPreferences = false,
 }) {
-  const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice });
+  const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice, bypassPreferences: operatorBypassPreferences });
   if (fresh.error) state.boundaryBlock = fresh.error;
   else if (toE164(clean(fresh.customer.phone)) !== phone) {
     state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
@@ -268,7 +270,7 @@ async function verifyAndDispatch({
 
 async function dispatchUnderBillingEmailAuthority({
   input, recipientEmail, authorityRecipientEmail = recipientEmail,
-  templateKey = null, emailSuppression = null, preSendCheck, dispatch, state, holdExempt = null,
+  templateKey = null, emailSuppression = null, preSendCheck, dispatch, state, holdExempt = null, operatorBypassPreferences = false,
 }) {
   try {
     const outcome = await withCustomerCommsLock(db, input.customerId, async (trx) => {
@@ -279,7 +281,7 @@ async function dispatchUnderBillingEmailAuthority({
       if (phone) await lockSmsPhone(trx, phone);
       const verifiedDispatch = (database, invoice) => verifyAndDispatch({
         input, trx: database, invoice, phone, recipientEmail, authorityRecipientEmail,
-        templateKey, emailSuppression, preSendCheck, dispatch, state, holdExempt,
+        templateKey, emailSuppression, preSendCheck, dispatch, state, holdExempt, operatorBypassPreferences,
       });
       return input.invoiceId
         ? require('./estimate-deposits').withInvoiceDepositSettlement(input.invoiceId, verifiedDispatch, trx)

@@ -461,7 +461,7 @@ describe('label mow hold on the report payload (GATE_LAWN_WATERING_RULE)', () =>
   afterEach(() => {
     if (OLD === undefined) delete process.env.GATE_LAWN_WATERING_RULE; else process.env.GATE_LAWN_WATERING_RULE = OLD;
   });
-  const MOW_LINE = 'Mowing: hold off until Fri, 2 days after today\'s treatment.';
+  const MOW_LINE = 'Mowing: hold off until Fri 3 PM, 2 days after today\'s treatment.';
   const withMow = (rule, mowHoldDays) => ({ ...facts(rule), mowHoldDays });
   const serviceFacts = (map) => ({
     ...serviceWith(HOLD),
@@ -474,7 +474,7 @@ describe('label mow hold on the report payload (GATE_LAWN_WATERING_RULE)', () =>
     const banner = data.reportV2.banner;
     expect(banner.state).toBe('hold');
     expect(banner.lines).toEqual(['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.']);
-    expect(banner.mowHold).toEqual({ days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: MOW_LINE });
+    expect(banner.mowHold).toEqual({ days: 2, untilAt: '2026-10-02T19:00:00.000Z', untilDate: '2026-10-02', untilLabel: 'Fri 3 PM', line: MOW_LINE });
     // The frozen instruction carries it too, outside `lines`.
     expect(out.instruction.mowHold).toEqual(banner.mowHold);
     expect(out.instruction.lines.join(' ')).not.toMatch(/mow/i);
@@ -500,13 +500,13 @@ describe('label mow hold on the report payload (GATE_LAWN_WATERING_RULE)', () =>
     });
     const rows = [PRODUCT_ID, second, third].map((id, i) => ({ id: `sp-${i}`, service_record_id: 'svc-lawn-w1', product_id: id, product_name: `P${i}`, created_at: `2026-09-30T18:0${i}:00Z` }));
     const data = await buildReportV1Data(service, 'token-w1', makeKnex({ ...fixtures(), service_products: rows }));
-    expect(data.reportV2.banner.mowHold).toMatchObject({ days: 4, untilDate: '2026-10-04', untilLabel: 'Sun' });
+    expect(data.reportV2.banner.mowHold).toMatchObject({ days: 4, untilDate: '2026-10-04', untilLabel: 'Sun 3 PM' });
   });
 
   test('a visit whose watering rule is unknown still gets its mow line (banner with no watering lines)', async () => {
     const out = {};
     const data = await buildReportV1Data(serviceFacts({ [PRODUCT_ID]: withMow(null, 3) }), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
-    expect(data.reportV2.banner).toMatchObject({ state: null, lines: [], expiresAt: null, mowHold: { days: 3, untilLabel: 'Sat' } });
+    expect(data.reportV2.banner).toMatchObject({ state: null, lines: [], expiresAt: null, mowHold: { days: 3, untilLabel: 'Sat 3 PM' } });
     expect(out.instruction.state).toBeNull();
     // The watering side stays the legacy path.
     expect(data.reportV2.aftercare.evidenceSource).toBeUndefined();
@@ -557,10 +557,17 @@ describe('label mow hold on the report payload (GATE_LAWN_WATERING_RULE)', () =>
     });
 
     test('a state-null frozen instruction is never replayed: the mow line is regenerated from the frozen facts', async () => {
-      const mowOnly = { state: null, lines: [], minutes: {}, mowHold: { days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: MOW_LINE } };
+      const mowOnly = { state: null, lines: [], minutes: {}, mowHold: { days: 2, untilAt: '2026-10-02T19:00:00.000Z', untilDate: '2026-10-02', untilLabel: 'Fri 3 PM', line: MOW_LINE } };
       const service = serviceFacts({ [PRODUCT_ID]: withMow(null, 7) });
       const replay = await buildReportV1Data(frozenWith(service, mowOnly), 'token-w1', makeKnex(fixtures()));
       expect(replay.reportV2.banner).toMatchObject({ state: null, lines: [], mowHold: { days: 7 } });
+    });
+
+    test('a hold frozen with the first mow shape (no untilAt) replays its mow line as written', async () => {
+      const { buildWateringBanner } = require('../services/service-report/report-data');
+      const legacyMow = { days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' };
+      const hold = { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: null, expiresAt: null, ruleSource: 'label', mowHold: legacyMow };
+      expect(buildWateringBanner(hold, null).mowHold).toEqual(legacyMow);
     });
 
     test('a frozen banner with a malformed mow hold prints no mow line', async () => {

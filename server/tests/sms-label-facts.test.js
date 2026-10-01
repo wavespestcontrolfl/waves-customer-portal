@@ -2662,12 +2662,12 @@ describe('prompt rules and hand-off narrowing', () => {
 
   test('prompt version: _cfl, prefix kept, fits the column with all four tags', () => {
     process.env[GATE] = 'true';
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers2_cfl');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers2_cfl');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cfl');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cfl');
     expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
-    expect(all).toBe('house_voice_v12_real_answers2_cfl+bclm');
+    expect(all).toBe('house_voice_v12_real_answers3_cfl+bclm');
     expect(all.length).toBeLessThanOrEqual(40);
   });
 });
@@ -2699,7 +2699,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
-    expect(r.promptVersion).toBe('house_voice_v12_real_answers2_cfl');
+    expect(r.promptVersion).toBe('house_voice_v12_real_answers3_cfl');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);
   });
@@ -2748,7 +2748,7 @@ describe('sealed-eval fact contract for the _cfl version', () => {
   // the rendered order (sms-shadow-drafter buildFactsBlock): SLA line, FREE RE-SERVICE line, COMPANY FACTS, LABEL FACTS, BILLING:
   const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour\nFREE RE-SERVICE: not eligible (no recurring plan on file)\n';
   const CF = 'house_voice_v12_real_answers2_cf';
-  const CFL = 'house_voice_v12_real_answers2_cfl';
+  const CFL = 'house_voice_v12_real_answers3_cfl';
   const OLD = 'house_voice_v12_real_answers2';
   const cf = `X\n${SLA}${renderCompanyFactsSection()}BILLING:\n- x\n`;
   const cfl = `X\n${SLA}${renderCompanyFactsSection()}${LABEL_FACTS_NONE_SECTION}BILLING:\n- x\n`;

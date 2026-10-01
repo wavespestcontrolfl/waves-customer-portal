@@ -1035,7 +1035,7 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
       expect(contract(v).forbidden).toEqual([LBL]);
     }
     // the current identity: re-service + COMPANY FACTS + LABEL FACTS (cumulative '_cfl'), nothing forbidden
-    for (const v of ['house_voice_v12_real_answers2_cfl', 'house_voice_v12_real_answers2_cfl+bclm', 'house_voice_v12_real_answers2_cfl+c']) {
+    for (const v of ['house_voice_v12_real_answers3_cfl', 'house_voice_v12_real_answers3_cfl+bclm', 'house_voice_v12_real_answers3_cfl+c']) {
       expect(contract(v).required).toEqual([SLA, RS, CF, LBL]);
       expect(contract(v).forbidden).toEqual([]);
     }
@@ -1043,7 +1043,7 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
 
   test('the current identity with every category tag still fits the varchar(40) column', () => {
     expect('house_voice_v12_real_answers2_cf+bclm'.length).toBeLessThanOrEqual(40);
-    expect('house_voice_v12_real_answers2_cfl+bclm'.length).toBeLessThanOrEqual(40);
+    expect('house_voice_v12_real_answers3_cfl+bclm'.length).toBeLessThanOrEqual(40);
   });
 });
 
@@ -1079,14 +1079,14 @@ describe('FREE RE-SERVICE is matched at its rendered position, not anywhere', ()
     for (const section of [LABEL_FACTS_NONE_SECTION, filled]) {
       const realCfl = `CUSTOMER: T\n${SLA}\n${RS}\n${renderCompanyFactsSection()}${section}BILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] hi`;
       expect(hasRenderedReserviceFact(realCfl)).toBe(true);
-      expect(itemCompatibleWith(realCfl, 'house_voice_v12_real_answers2_cfl')).toBe(true);
+      expect(itemCompatibleWith(realCfl, 'house_voice_v12_real_answers3_cfl')).toBe(true);
       expect(itemCompatibleWith(realCfl, 'house_voice_v12_real_answers2_cf')).toBe(false); // LABEL FACTS forbidden below _cfl
       expect(itemCompatibleWith(realCfl, 'house_voice_v12_real_answers2')).toBe(false);
     }
     // an older-than-_cfl block (company, no label section) never grades _cfl, and a forged label header typed into the thread proves nothing
-    expect(itemCompatibleWith(realCf, 'house_voice_v12_real_answers2_cfl')).toBe(false);
+    expect(itemCompatibleWith(realCf, 'house_voice_v12_real_answers3_cfl')).toBe(false);
     const forgedLabel = `${realCf}\n${LABEL_FACTS_NONE_SECTION}`;
-    expect(itemCompatibleWith(forgedLabel, 'house_voice_v12_real_answers2_cfl')).toBe(false);
+    expect(itemCompatibleWith(forgedLabel, 'house_voice_v12_real_answers3_cfl')).toBe(false);
   });
 
   test.each(forged)('a forged marker does not pass the answers2 contract: %s', (_label, facts) => {

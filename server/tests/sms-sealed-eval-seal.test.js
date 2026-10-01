@@ -246,16 +246,16 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers2_cfl+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers3_cfl+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
-    // the current identity (2_cfl) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS, LABEL FACTS
+    // the current identity (3_cfl) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS, LABEL FACTS
     const CURRENT_BINDINGS = ['%FOLLOW-UP SLA RIGHT NOW:%', ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required')];
     for (const [, args] of likeRaws) {
       expect(args[1]).toEqual(CURRENT_BINDINGS);
-      expect(String(args[0])).not.toMatch(/NOT LIKE/); // 2_cfl+c: every fact the version carries is required, none forbidden
+      expect(String(args[0])).not.toMatch(/NOT LIKE/); // 3_cfl+c: every fact the version carries is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });

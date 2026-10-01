@@ -17,6 +17,9 @@ jest.mock('../services/logger', () => ({
 
 jest.mock('../services/sms-shadow-drafter', () => ({
   generateGroundedDraft: jest.fn(),
+  buildLiveEtaSnapshot: jest.fn(() => null),
+  // Round-42: the lane also persists the draft's technician first names (none in these fixtures).
+  techNamesFromContext: jest.fn(() => []),
   PROMPT_VERSION: 'house_voice_v8',
   // Real behavior mirrored for the gate-on tests below (Codex r3): true
   // when the reply carries an amount not present in context.billing's
@@ -257,7 +260,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const labelFactsSnapshot = { customer_id: 'c1', visit_date: '2026-09-29', record_ids: ['r2'], sentences: ['For the products applied at your Sep 29 visit, the label says to keep people and pets off treated areas until dry.'] };
     generateGroundedDraft.mockResolvedValue({
       parsed: { reply: labelFactsSnapshot.sentences[0], intended_actions: [], auto_send_safe: false, missing_info: null },
-      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers2_cfl', labelFactsSnapshot,
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers3_cfl', labelFactsSnapshot,
     });
     await processInboundSms({
       customer: CUSTOMER, from: '+19415551234', to: '+19415550000',
@@ -267,7 +270,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
     generateGroundedDraft.mockResolvedValue({
       parsed: { reply: 'Happy to help.', intended_actions: [], auto_send_safe: true, missing_info: null },
-      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers2_cfl', labelFactsSnapshot: null,
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers3_cfl', labelFactsSnapshot: null,
     });
     await processInboundSms({
       customer: CUSTOMER, from: '+19415551234', to: '+19415550000',
@@ -315,6 +318,43 @@ describe('processInboundSms — grounded LLM review draft', () => {
     });
 
     expect(generateGroundedDraft).toHaveBeenCalledWith(expect.objectContaining({ estimateId: null }));
+  });
+
+  // Codex round-2 P2: getContextForCustomer defaults to skipping the LIVE
+  // ETA GPS lookup — this Agent Review draft renders the SAME buildFactsBlock
+  // the shadow drafter does, so it must opt in explicitly rather than
+  // silently losing the fact to the new default.
+  test('opts into LIVE ETA resolution — this draft renders the facts block LIVE ETA feeds (Codex round-2 P2)', async () => {
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v8',
+    });
+
+    await _test.generateLlmReviewDraft({
+      customer: CUSTOMER,
+      body: 'Hello what happened this morning',
+      decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
+    });
+
+    // Codex round-16 P2: the opt-in also requires the release gate (gate-off is byte-identical).
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: false });
+
+    ContextAggregator.getContextForCustomer.mockClear();
+    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      await _test.generateLlmReviewDraft({
+        customer: CUSTOMER,
+        body: 'Hello what happened this morning',
+        decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
+      });
+      expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: true });
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    }
   });
 
   test('LLM failure falls back to the deterministic template', async () => {

@@ -1644,10 +1644,12 @@ run) is composed on each render from the plan present on that render.
 Label mow hold (P2b, same gate): when an applied product's frozen facts carry a
 label-sourced `mowHoldDays` (from `products_catalog.mow_hold_days`, 1..14; no
 default, no derivation), the banner gains `mowHold`
-`{ days, untilDate, untilLabel, line }` for the longest hold: `untilDate` is the
-completion's Eastern calendar date plus `days` (YYYY-MM-DD), `untilLabel` the
-Eastern weekday ("Thu"; "Wed, Jan 6" at 7+ days), `line` one finished sentence
-("Mowing: hold off until Thu, 2 days after today's treatment."). The key is
+`{ days, untilAt, untilDate, untilLabel, line }` for the longest hold: a label
+day is 24 elapsed hours, so `untilAt` is the completion instant plus `days` x 24
+hours rounded UP to the hour (ISO), `untilDate` its Eastern calendar date
+(YYYY-MM-DD), `untilLabel` its Eastern weekday and clock time ("Fri 4 PM";
+"Wed, Jan 6 at 12 PM" six or more days out), `line` one finished sentence
+("Mowing: hold off until Fri 4 PM, 1 day after today's treatment."). The key is
 absent when no product has a value. A visit with a mow hold but no watering
 claim gets a banner `{ state: null, lines: [], holdUntil: null, waterInBy: null,
 expiresAt: null, ruleSource, mowHold }`; that is the only case `state` is
@@ -1912,7 +1914,21 @@ validated against a FIXED allowlist (`server/routes/lead-webhook.js`
 SILENTLY DROPPED (never stored; the request still succeeds as if the field
 were absent). A valid value is stored verbatim in `leads.heard_about`
 (nullable column, migration `20260928020000_leads_heard_about.js`) and
-surfaced on the admin lead detail. It is DELIBERATELY SEPARATE from
+surfaced on the admin lead detail. Both endpoints also accept an OPTIONAL
+`heard_about_prompt` — the quote form's "What did you ask it?" follow-up,
+shown only when the visitor picked `chatgpt` or `other_ai`. It is read from
+that exact key, must be a string, and is kept ONLY when `heard_about`
+resolves to `chatgpt` or `other_ai`; control characters and whitespace runs
+collapse to single spaces, the result is trimmed and capped at 500
+characters (`sanitizeHeardAboutPrompt`), and a non-string, blank, or
+non-AI-`heard_about` value is SILENTLY DROPPED (request still succeeds).
+Stored as typed — no redaction — in `leads.heard_about_prompt` (nullable
+varchar(500), migration `20260930220000_leads_heard_about_prompt.js`) and
+shown on the admin lead card as `Asked: "…"`; STAFF-ONLY, it never joins
+`message`, the AI triage prose or any customer-facing text. Safe in either
+deploy order: a portal without this change ignores the unknown key, and an
+Astro form without it simply omits the key. `heard_about` itself is
+DELIBERATELY SEPARATE from
 `leads.lead_source_id` / the classified `lead_source` — self-reported, never
 merged into technically-observed attribution, and "unknown" (the field
 omitted or invalid) stores NULL rather than a guess. Separately and

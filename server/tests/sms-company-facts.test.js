@@ -53,8 +53,10 @@ describe('gate off — byte-identical to before COMPANY FACTS', () => {
     expect(currentPromptVersion()).toBe(PROMPT_VERSION);
   });
 
-  test('verifier system prompt is untouched (byte-identical to main)', () => {
-    expect(sha(buildVerifierSystemPrompt())).toBe('362e4cac5fd3f73afa1208eb6bfe550ae7de823281731cefb1bcf89c1a2384e8');
+  // Re-pinned in the PR #5334 merge: COMPANY FACTS still leaves the verifier prompt
+  // alone; the hash moved only because #5334 adds the LIVE ETA grounding lines.
+  test('verifier system prompt is untouched by COMPANY FACTS', () => {
+    expect(sha(buildVerifierSystemPrompt())).toBe('0d344c10327046f48e38984936097ebe867e084b14c8dc9da16db188b1ee33f3');
   });
 });
 
@@ -89,9 +91,9 @@ describe('gate on', () => {
   });
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
-    // both cohorts stay distinct: the re-service token (PR #5336), then company facts + LABEL FACTS (cumulative '_cfl')
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers2_cfl');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers2_cfl');
+    // both cohorts stay distinct: the company-facts token, the re-service token (PR #5336) AND the LIVE ETA bump (PR #5334): "3" supersedes "2"
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cfl');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cfl');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
