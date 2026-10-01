@@ -385,6 +385,10 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: null, prepaid_out_of_band: 100 })]).ok).toBe(true);
     // Unpriced, only $10 paid: completion would bill nothing, so it is unpriced.
     expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: null, prepaid_out_of_band: 10 })]))).toEqual(['price_missing']);
+    // No accepted price to compare (lines do not reconcile): the payment proves nothing, still unpriced.
+    const unreconciled = evaluateCombinedBooking({ estimate: estimate([PEST, LAWN], { annual_total: 1000 }),
+      rows: [...pestRows(), ...lawn({ estimated_price: null, prepaid_out_of_band: 1 })], invoices: new Map([['inv-1', goodInvoice()]]) });
+    expect(codes(unreconciled)).toEqual(['price_missing']);
   });
 
   test('prepaid visits are not judged on price', () => {
@@ -467,7 +471,7 @@ describe('postAlert', () => {
       why: 'Lawn priced $0 on 3 visits.',
     });
     expect(spec.detail).toBeUndefined();
-    expect(opts).toMatchObject({ dedupeKey: 'combined-booking-check:estimate-1', refreshOnDedupe: true });
+    expect(opts).toMatchObject({ dedupeKey: 'combined-booking-check:estimate-1', refreshOnDedupe: true, bell: true });
     expect(opts.detail).toContain('- lawn priced $0 on 3 visits');
     expect(opts.metadata).toMatchObject({ estimateId: 'estimate-1', problemCodes: ['price_missing'] });
   });

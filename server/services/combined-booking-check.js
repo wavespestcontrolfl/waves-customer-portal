@@ -70,9 +70,12 @@ const SETTLE_MINUTES = 3;
 // problem the office has lived with is not news, and a first run after
 // deploy must not turn into a backlog scan.
 const LOOKBACK_HOURS = 72;
-// Cap on NEWLY posted rows per run; a standing problem being re-checked never
-// counts against it, so it cannot starve a fresh accept.
+// Cap on NEW per-estimate bells per run (a standing problem being re-checked
+// never counts against it). Every accept is still judged each run: problems
+// past the cap are listed on ONE rolling overflow bell, so a burst (a
+// conversion incident) neither floods the bell nor ages out unreported.
 const MAX_NEW_PER_RUN = 25;
+const OVERFLOW_ID = 'overflow';
 
 const PRICE_TOLERANCE = 0.02;
 // Problems that need an accepted price to compare against: when that price
@@ -132,13 +135,14 @@ function rowPrice(row) {
 //    no price of its own AND the payment meets the ACCEPTED price; a visit
 //    that is priced keeps its price check (completion bills the rest of a
 //    partial payment, and the visit price is what this check verifies).
-//    With no accepted price to compare, the verdict is deferred anyway.
+//    With no accepted price to compare, the payment proves nothing and the
+//    visit stays visible as unpriced.
 function isPrepaid(row, programs) {
   if (row.prepaid_covered === true) return true;
   const paid = Number(row.prepaid_out_of_band);
   if (!(paid > 0) || rowPrice(row) > 0) return false;
   const expected = expectedFor(row, programs);
-  return expected == null || paid + 0.005 >= expected;
+  return expected != null && paid + 0.005 >= expected;
 }
 
 /**
@@ -675,6 +679,9 @@ async function postAlert(estimate, verdict, ctx, { raise, held = [] } = {}) {
   // A held price finding stays on the bell's codes (see heldCodes).
   const codes = [...new Set([...verdict.problems.map((problem) => problem.code), ...held])];
   return raiseAdminAlert(CATEGORY, spec, {
+    // Under GATE_ADMIN_BELL_POLICY the 'alert' category is denied unless the
+    // call site tags it (the schedule-integrity watchdog's own bells do too).
+    bell: true,
     detail,
     dedupeKey: dedupeKeyFor(estimate.id),
     refreshOnDedupe: true,
@@ -703,6 +710,7 @@ async function retireAbandoned(conn) {
     .leftJoin('customers as c', 'c.id', 'e.customer_id')
     .where({ 'n.recipient_type': 'admin', 'n.category': CATEGORY })
     .whereRaw("starts_with(n.metadata->>'dedupeKey', ?)", [`${OPS_KEY}:`])
+    .whereRaw("n.metadata->>'estimateId' IS NOT NULL")
     .where(function goneForGood() {
       this.whereNull('e.id').orWhereNot('e.status', 'accepted').orWhereNotNull('e.archived_at')
         .orWhereNot('c.active', true).orWhereNotNull('c.deleted_at');
@@ -733,6 +741,34 @@ function heldCodes(verdict, standingCodes = []) {
   if (!verdict.pricesHidden) return [];
   const now = new Set(verdict.problems.map((problem) => problem.code));
   return standingCodes.filter((code) => COMPARISON_CODES.has(code) && !now.has(code));
+}
+
+// The rolling bell for problems past the per-run cap: one needs-you row
+// listing each booking, refreshed every run, ringing again only when a booking
+// joins it, closed as done once nothing overflows.
+async function postOverflow(conn, overflow, { raise } = {}) {
+  if (!overflow.length) return retireStanding(conn, [OVERFLOW_ID], RESOLVED_FIXED);
+  const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
+  const ids = overflow.map(({ estimate }) => String(estimate.id));
+  await raiseAdminAlert(CATEGORY, {
+    area: AREA,
+    action: `fix ${overflow.length} more combined booking${overflow.length === 1 ? '' : 's'}`,
+    why: 'More combined bookings need a look than get their own bell in one run, so each one is listed here.',
+    severity: 'needs-you',
+    link: '/admin/customers',
+    subject: { type: 'check', id: OPS_KEY },
+    doneWhen: 'combined_booking_overflow_cleared',
+    who: 'person',
+  }, {
+    bell: true,
+    detail: overflow.map(({ estimate, verdict, ctx }) => `- ${ctx.customerName} (customer ${estimate.customer_id}, estimate ${estimate.id}): `
+      + verdict.problems.map((problem) => problem.text).join('; ')).join('\n'),
+    dedupeKey: dedupeKeyFor(OVERFLOW_ID),
+    refreshOnDedupe: true,
+    ringOnRefresh: (existing, meta) => ids.some((id) => !(meta?.itemKeys || []).includes(id)),
+    metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids },
+  });
+  return 0;
 }
 
 /**
@@ -776,7 +812,10 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, max
     }
     return false;
   }).sort((a, b) => Number(standing.has(String(a.id))) - Number(standing.has(String(b.id))));
-  if (!work.length) return result;
+  if (!work.length) {
+    result.closed += await postOverflow(conn, [], { raise });
+    return result;
+  }
 
   // The shared accepted-plan classifier, with no 24h wait: the same findings
   // the watchdog's accepted-schedule alerts are built from, plus which
@@ -786,10 +825,10 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, max
     .acceptedRecurringScheduleGaps(conn, { now, cutoff: now, estimateIds: work.map((estimate) => estimate.id), coverage });
 
   let posted = 0;
+  const overflow = [];
   for (const estimate of work) {
     const id = String(estimate.id);
     const isNew = !standing.has(id);
-    if (isNew && posted >= maxNew) continue; // the rest post next run
     try {
       const judged = coverage.get(id);
       const checked = await checkEstimate(conn, estimate, {
@@ -806,6 +845,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, max
         continue;
       }
       result.checked += 1;
+      if (isNew && posted >= maxNew) { overflow.push({ estimate, verdict: checked.verdict, ctx: checked.ctx }); continue; }
       const row = await postAlert(estimate, checked.verdict, checked.ctx, { raise, held: heldCodes(checked.verdict, standing.get(id)) });
       if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`); continue; }
       if (isNew) posted += 1;
@@ -815,6 +855,8 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, max
       logger.warn(`[combined-booking-check] estimate ${id} check failed: ${err.message}`);
     }
   }
+  result.overflow = overflow.length;
+  result.closed += await postOverflow(conn, overflow, { raise });
   return result;
 }
 
