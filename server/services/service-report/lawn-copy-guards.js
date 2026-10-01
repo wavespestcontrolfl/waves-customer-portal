@@ -26,15 +26,10 @@
  *                      overnight, wk/hr/min/mo/yr, daily/weekly ...) or
  *                      relative-time word (next, coming, following, within, soon,
  *                      shortly, later, "a while", ago, yesterday, eventually).
- *   numeric            any spelled number word, and any digit or fraction except
- *                      the score allowance: a bare signed integer or "<n>
- *                      points" in a CLOSED form (nothing attached before it; only
- *                      the end, punctuation or "points" after it) whose value,
- *                      sign included, is in
- *                      facts.allowedNumbers ("-5", "minus 5", "down 5 points"
- *                      are -5; "+5", "plus 5", "up 5 points" are 5). The whole
- *                      expression is read first: "1 / 2", "72 / 100", "72 of
- *                      100", "3 - 4", "72 points%" reject whole.
+ *   numeric            NO digits at all: any digit, fraction, spelled number word
+ *                      or ordinal. There is no score allowance; the score ring,
+ *                      trend chart and other deterministic surfaces print every
+ *                      number.
  *   sub_day_duration   any second / minute / hour word anywhere, approved
  *                      sentences included. Absolute.
  *   reentry_figure     keep ... off / stay off / wait / dry in a sentence with ANY
@@ -46,7 +41,9 @@
  *   weekday_clock      G9: weekdays, tomorrow / tonight / noon / weekend, dates,
  *                      clock times (4 PM, 4pm, 16:00).
  *   progress_coupling  G5: improving / worse / on track / behind ... only when
- *                      the supplied progress state says so. "behind" is a
+ *                      the supplied progress state says so. "up" / "down" /
+ *                      "higher" / "lower" in a score or trend sense ("is down",
+ *                      "up since") are progress claims too. "behind" is a
  *                      progress claim unless a spatial noun follows ("behind the
  *                      house"). A negator within three words before one ("not
  *                      improving", "no longer behind", "hasn't improved")
@@ -67,7 +64,7 @@
  *   approvedSentences: string[]  sentences the writer was told to copy verbatim
  *                      from approved rows; exempt from timing, numeric and
  *                      progress rules only (every other rule still applies).
- *   allowedNumbers:    number[]  score values, signed.
+ *   allowedNumbers:    INERT. Accepted and ignored; it can license nothing.
  *   progress:          'up' | 'down' | 'flat' | 'unknown'  overall direction.
  *   progressStates:    string[]  per-item states (on_track, ahead, behind,
  *                      too_early, unclear).
@@ -141,17 +138,31 @@ function canonicalParagraph(paragraph) {
   return paragraph
     .replace(/\s+/g, ' ')
     .replace(/(\d),(?=\d{3}\b)/g, '$1')
-    .replace(/\b([ap])\.\s?m\b\.?/gi, foldMeridiem)
     .replace(/(\d)(?=[a-z])/gi, '$1 ')
+    .replace(/\b([ap])\.\s?m\b\.?/gi, foldMeridiem)
     .trim();
 }
 
-function normalizeCopy(text) {
+function normalizeOnce(text) {
   const t = FOLDS.reduce(
     (acc, [re, fn]) => acc.replace(re, fn),
     String(text == null ? '' : text).replace(VULGAR_RE, (f) => ` ${VULGAR_FRACTIONS[f]} `).normalize('NFKC')
   );
   return t.replace(/\r\n?/g, '\n').split(/\n\s*\n/).map(canonicalParagraph).filter(Boolean).join('\n\n');
+}
+
+// The canonical form is a fixpoint: normalizeCopy(normalizeCopy(x)) ===
+// normalizeCopy(x). The transformations are ordered so one pass is enough (digits
+// are separated from letters before "p.m." folds); the loop, capped at 3, is the
+// belt to that brace, so approval matching and every guard see the same text.
+function normalizeCopy(text) {
+  let current = normalizeOnce(text);
+  for (let i = 0; i < 3; i += 1) {
+    const next = normalizeOnce(current);
+    if (next === current) break;
+    current = next;
+  }
+  return current;
 }
 
 // A sentence ends at . ! ? or a blank line, never at a single newline.
@@ -187,67 +198,24 @@ const TIME_WORDS_SRC = 'seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|w
 const TIME_WORD_RE = new RegExp(`\\b(?:${TIME_WORDS_SRC})\\b`, 'i');
 const RELATIVE_TIME_RE = /\b(?:next|coming|following|within|soon|shortly|later|ago|yesterday|eventually)\b|\ba\s+while\b/i;
 const NUMBER_WORD_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|dozen|half|halves|quarters?|thirds?)\b/i;
-// any time word, relative phrase, number word or digit
+// any time word, relative phrase, number word, ordinal or digit
 const ANY_TIMING_RE = new RegExp([TIME_WORD_RE, RELATIVE_TIME_RE, NUMBER_WORD_RE].map((re) => re.source).concat('\\d').join('|'), 'i');
 
-// The score allowance is a CLOSED form, not a unit list. An integer qualifies
-// only when ALL hold on the normalized sentence:
-//  - it is a single integer (digits joined by spaces or operators, decimals and
-//    fractions are one multi-part expression that rejects whole),
-//  - the character before it (before its sign, if any) is the start of the
-//    sentence, a space or "(" -- so "$72", "#5", "~5", "x5" never qualify,
-//  - what follows is the end of the sentence, punctuation (. , ; : ! ? )) or
-//    the separate word "points" (after which a space or punctuation may follow).
-// Anything else next to it (letters attached or spaced, -, /, %, a degree sign,
-// digits) means it is not a score and it rejects as numeric.
-// The sign is "-", "minus", "+", "plus", or "up"/"down" ("up 5 points" is +5,
-// "down 5" is -5).
-const NUM_TERM_SRC = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)';
-const NUM_JOIN_SRC = '(?:\\s*(?:[/\\-+x\u00d7*:,%\u00b0]|\\bof\\b|\\bout\\s+of\\b|\\bto\\b|\\bor\\b|\\band\\b)\\s*|\\s+)';
-const NUMERIC_EXPR_RE = new RegExp(
-  `(?<![\\w.])(?<sign>[+-]\\s*|minus\\s+|plus\\s+|(?:up|down)\\s+(?:by\\s+)?)?(?<expr>${NUM_TERM_SRC}(?:${NUM_JOIN_SRC}${NUM_TERM_SRC})*)(?<points>\\s+(?:points?|pts)\\b)?`,
-  'gi'
-);
+// No digits, number words, fractions or ordinals at all outside approved
+// sentences. The score ring, trend chart and other deterministic surfaces print
+// every number, so the model never needs to; there is no score allowance (it
+// produced holes four passes in a row). facts.allowedNumbers is accepted and
+// ignored. Fractions are digits after normalization ("1/2"), so they reject too.
+const ORDINAL_WORD_RE = /\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|(?:thir|four|fif|six|seven|eigh|nine)teenth|twentieth|thirtieth|fortieth|fiftieth|hundredth|thousandth)\b/i;
+const NUMBER_FORMS = [
+  { re: /\S*\d\S*/g, detail: 'digit' },
+  { re: new RegExp(NUMBER_WORD_RE.source, 'gi'), detail: 'spelled number' },
+  { re: new RegExp(ORDINAL_WORD_RE.source, 'gi'), detail: 'ordinal' },
+];
 
-function toNumberSet(list) {
-  const set = new Set();
-  (Array.isArray(list) ? list : []).forEach((n) => {
-    const v = typeof n === 'number' ? n : Number(String(n).replace(/\u2212/g, '-').replace(/[^\d.-]/g, ''));
-    if (Number.isFinite(v)) set.add(v);
-  });
-  return set;
-}
-
-const isNegativeSign = (sign) => /^(?:-|minus|down)/i.test(sign || '');
-// only a whole token that is a signed integer, optionally followed by the word
-// "points", qualifies; any attached or following unit rejects the expression
-const PRECEDES_SCORE_RE = /^(?:|[ (])$/;
-const FOLLOWS_SCORE_RE = /^(?:$|[.,;:!?)])/;
-const FOLLOWS_POINTS_RE = /^(?:$|[\s.,;:!?)])/;
-
-function isScoreToken(groups, before, after) {
-  if (!/^\d+$/.test(groups.expr) || !PRECEDES_SCORE_RE.test(before)) return false;
-  return groups.points ? FOLLOWS_POINTS_RE.test(after) : FOLLOWS_SCORE_RE.test(after);
-}
-
-function checkNumericSentence(sentence, allowed) {
-  const reasons = [];
-  const rest = sentence.replace(NUMERIC_EXPR_RE, (full, ...args) => {
-    const groups = args[args.length - 1];
-    const offset = args[args.length - 3];
-    const value = (isNegativeSign(groups.sign) ? -1 : 1) * Number(groups.expr);
-    const ok = isScoreToken(groups, sentence.slice(offset - 1 < 0 ? 0 : offset - 1, offset), sentence.slice(offset + full.length)) && allowed.has(value);
-    if (!ok) reasons.push({ rule: 'numeric', match: full.trim(), detail: 'not a single supplied score value' });
-    return ' ';
-  });
-  (rest.match(/\S*\d\S*/g) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'digits outside the score allowance' }));
-  (rest.match(globalOf(NUMBER_WORD_RE)) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'spelled number' }));
-  return reasons;
-}
-
-function checkNumericWhitelist(input, facts = {}) {
-  const allowed = toNumberSet(facts.allowedNumbers);
-  return sentencesOf(input).flatMap((sentence) => checkNumericSentence(sentence, allowed));
+function checkNumbers(input) {
+  return sentencesOf(input).flatMap((sentence) => NUMBER_FORMS.flatMap(({ re, detail }) => (sentence.match(re) || [])
+    .map((match) => ({ rule: 'numeric', match, detail: `${detail} in model copy` }))));
 }
 
 function checkTimingLanguage(input) {
@@ -303,12 +271,29 @@ function checkWeekdayClockDeny(input) {
 // ---------------------------------------------------------------------------
 // Progress-word coupling (G5)
 
-const UP_WORDS_RE = /\bimprov\w*|\brecover\w*|\bbetter\b|\brespond(?:s|ed|ing)?\b|\brebound\w*|\bbounc\w*\s+back|\bon\s+the\s+mend\b|\bturn(?:ed|ing)?\s+the\s+corner\b|\bgaining\s+ground\b|\bheal(?:s|ed|ing)?\b/i;
-const DOWN_WORDS_RE = /\bworse\w*|\bworsen\w*|\bdeclin\w*|\bdeteriorat\w*|\bregress\w*|\bslipp\w*|\bslid\b|\bdropp\w*|\bgetting\s+worse\b|\bgone\s+downhill\b/i;
+const UP_WORDS_RE = /\bimprov\w*|\brecover\w*|\bbetter\b|\brespond(?:s|ed|ing)?\b|\brebound\w*|\bbounc\w*\s+back|\bon\s+the\s+mend\b|\bturn(?:ed|ing)?\s+the\s+corner\b|\bgaining\s+ground\b|\bheal(?:s|ed|ing)?\b|\bincreas\w*|\brose\b|\brising\b|\brisen\b|\bclimb\w*/i;
+const DOWN_WORDS_RE = /\bworse\w*|\bworsen\w*|\bdeclin\w*|\bdeteriorat\w*|\bregress\w*|\bslipp\w*|\bslid\b|\bdropp\w*|\bgetting\s+worse\b|\bgone\s+downhill\b|\bfell\b|\bfalling\b|\bfallen\b|\bdecreas\w*|\bdip(?:s|ped|ping)?\b|\bsank\b/i;
 // "behind" is a progress claim ("behind schedule", "behind the expected pace")
 // unless a spatial noun follows ("behind the house", "behind the back fence").
 const SPATIAL_NOUNS = '(?:house|home|fence|shed|pool|garage|driveway|patio|deck|hedge|tree|building|wall|gate|mailbox|lanai)s?';
 const BEHIND_PROGRESS_RE = new RegExp(`\\bbehind\\b(?!\\s+(?:(?:the|your|our|a|an|this|that|each|every)\\s+)?(?:[\\w'-]+\\s+){0,2}?${SPATIAL_NOUNS}\\b)`, 'i');
+// "up" / "down" count as a progress claim only in a score or trend sense: after
+// a copula or movement word ("is down", "went up", "is not down") or before a
+// comparison ("up from", "down since", "up a bit"). Phrasal uses ("pick up
+// debris") are not claims. Comparatives count only after a copula or before "than".
+const DIRECTION_RE = /\b(?:up|down)\b/gi;
+const DIRECTION_BEFORE_RE = /\b(?:is|are|was|were|be|been|being|am|went|go|goes|going|gone|moved|moves|moving|trending|trended|stayed|stays|staying|got|gets|getting|come|came|comes|coming|ticked|swung|not|never|no|only|just|still|now|currently)\b|\b\w+n't\b/i;
+const DIRECTION_AFTER_RE = /^\s+(?:from|since|over|compared|versus|vs|again|overall|slightly|somewhat|by|this|today|a\s+(?:bit|little|touch))\b/i;
+const HIGHER_RE = /\b(?:is|are|was|were)\s+(?:\w+\s+)?higher\b|\bhigher\s+than\b/i;
+const LOWER_RE = /\b(?:is|are|was|were)\s+(?:\w+\s+)?lower\b|\blower\s+than\b/i;
+
+function directionMatches(sentence, word) {
+  return [...sentence.matchAll(DIRECTION_RE)].filter((m) => m[0].toLowerCase() === word).filter((m) => {
+    const before = sentence.slice(0, m.index).split(/[.!?;:]/).pop().trim().split(/\s+/).slice(-3).join(' ');
+    return DIRECTION_BEFORE_RE.test(before) || DIRECTION_AFTER_RE.test(sentence.slice(m.index + m[0].length));
+  });
+}
+
 const ITEM_PHRASES = [
   { state: 'on_track', re: /\bon[- ]track\b/i },
   { state: 'ahead', re: /\bahead\s+of\s+(?:schedule|pace|expectations?|where)\b/i },
@@ -336,17 +321,25 @@ function judgeProgressMatch(m, t, ok, reasonDetail) {
 }
 
 function checkProgressSentence(sentence, checks) {
-  return checks.flatMap(({ re, ok, detail }) => matchesOf(re, sentence).map((m) => judgeProgressMatch(m, sentence, ok, detail)).filter(Boolean));
+  return checks.flatMap(({ find, ok, detail }) => find(sentence).map((m) => judgeProgressMatch(m, sentence, ok, detail)).filter(Boolean));
 }
+
+const byRegex = (re) => (sentence) => matchesOf(re, sentence);
 
 function checkProgressCoupling(input, facts = {}) {
   const dir = stateKey(facts.progress);
   const itemStates = new Set((Array.isArray(facts.progressStates) ? facts.progressStates : []).map(stateKey));
+  const upDetail = `improving word with progress "${dir || 'unknown'}"`;
+  const downDetail = `decline word with progress "${dir || 'unknown'}"`;
   const checks = [
-    { re: UP_WORDS_RE, ok: dir === 'up', detail: `improving word with progress "${dir || 'unknown'}"` },
-    { re: DOWN_WORDS_RE, ok: dir === 'down', detail: `decline word with progress "${dir || 'unknown'}"` },
+    { find: byRegex(UP_WORDS_RE), ok: dir === 'up', detail: upDetail },
+    { find: byRegex(HIGHER_RE), ok: dir === 'up', detail: upDetail },
+    { find: (t) => directionMatches(t, 'up'), ok: dir === 'up', detail: upDetail },
+    { find: byRegex(DOWN_WORDS_RE), ok: dir === 'down', detail: downDetail },
+    { find: byRegex(LOWER_RE), ok: dir === 'down', detail: downDetail },
+    { find: (t) => directionMatches(t, 'down'), ok: dir === 'down', detail: downDetail },
     ...ITEM_PHRASES.map(({ state, re }) => ({
-      re,
+      find: byRegex(re),
       ok: state === 'flat' ? (dir === 'flat' || itemStates.has('flat')) : itemStates.has(state),
       detail: `state "${state}" not supplied`,
     })),
@@ -509,7 +502,7 @@ function checkLawnModelCopy(text, facts = {}) {
   const unapproved = withoutApproved(sentences, f.approvedSentences);
   const reasons = [
     ...checkTimingLanguage(unapproved),
-    ...checkNumericWhitelist(unapproved, f),
+    ...checkNumbers(unapproved),
     ...checkWaterMowDeny(sentences, f),
     ...checkWeekdayClockDeny(sentences),
     ...checkProgressCoupling(unapproved, f),
@@ -525,7 +518,7 @@ function checkLawnModelCopy(text, facts = {}) {
 module.exports = {
   checkLawnModelCopy,
   checkTimingLanguage,
-  checkNumericWhitelist,
+  checkNumbers,
   checkWaterMowDeny,
   checkWeekdayClockDeny,
   checkProgressCoupling,

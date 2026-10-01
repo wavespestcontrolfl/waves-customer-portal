@@ -13,7 +13,7 @@ const { findBannedCustomerCopy } = require('../services/service-report/activity-
 
 const {
   checkLawnModelCopy,
-  checkNumericWhitelist,
+  checkNumbers,
   checkTimingLanguage,
   checkSubDayDuration,
   checkWaterMowDeny,
@@ -55,7 +55,7 @@ describe('module purity', () => {
   });
 
   test('exports the entry point and every individual check', () => {
-    ['checkLawnModelCopy', 'checkNumericWhitelist', 'checkWaterMowDeny', 'checkWeekdayClockDeny',
+    ['checkLawnModelCopy', 'checkNumbers', 'checkWaterMowDeny', 'checkWeekdayClockDeny',
       'checkProgressCoupling', 'checkReentryPattern', 'checkBannedCopy', 'checkOverpromise'].forEach((name) => {
       expect(typeof guards[name]).toBe('function');
     });
@@ -537,8 +537,8 @@ describe('entry point', () => {
 
   test('a clean, fully allowed field passes', () => {
     accepts(
-      `Your score is 72, up 5 points since March. ${APPROVED} The thin edge is the thing to watch.`,
-      { ...ROW, allowedNumbers: [72, 5], progress: 'up' }
+      `Your score is up since March. ${APPROVED} The thin edge is the thing to watch.`,
+      { ...ROW, progress: 'up' }
     );
   });
 
@@ -622,64 +622,8 @@ describe('closed-world timing rule (terminal review)', () => {
       expect(checkLawnModelCopy(sentence, inside(sentence)).ok).toBe(true);
     });
 
-    test('a bare integer is only accepted when its value is a supplied score', () => {
-      ['3', '14', '\uff14', '\u0664'].forEach((d) => {
-        const sentence = `Your score is ${d}.`;
-        const value = Number(String(d).replace(/[\uff10-\uff19]/g, (c) => c.charCodeAt(0) - 0xff10).replace(/[\u0660-\u0669]/g, (c) => c.charCodeAt(0) - 0x660));
-        expect(checkNumericWhitelist(sentence, { allowedNumbers: [value] })).toEqual([]);
-        expect(checkNumericWhitelist(sentence, { allowedNumbers: [value + 1] }).length).toBe(1);
-      });
-    });
-
     test('a clean sentence passes with no facts', () => {
       accepts(CLEAN, {});
-    });
-  });
-
-  describe('signed score allowance', () => {
-    test.each([
-      ['Your score is 72.', [72], true],
-      ['Your score is 72 points.', [72], true],
-      ['Your score changed by -5 points.', [-5], true],
-      ['Your score changed by -5 points.', [5], false],
-      ['Your score changed by -5 points.', [], false],
-      ['Your score changed by −5 points.', [-5], true],
-      ['Your score changed by −5 points.', [5], false],
-      ['Your score changed by minus 5 points.', [-5], true],
-      ['Your score changed by minus 5 points.', [5], false],
-      ['Your score changed by +5 points.', [5], true],
-      ['Your score changed by +5 points.', [-5], false],
-      ['Your score changed by plus 5 points.', [5], true],
-      ['Your score is up 5 points.', [5], true],
-      ['Your score is up by 5 points.', [5], true],
-      ['Your score is up 5 points.', [-5], false],
-      ['Your score is down 5 points.', [-5], true],
-      ['Your score is down 5 points.', [5], false],
-      ['Your score is down by 5 points.', [-5], true],
-      ['Your score is 5.', [5], true],
-      ['Your score is 5.', [-5], false],
-      ['Your score is 72%.', [72], false],
-      ['Your score is 72.5.', [72], false],
-      ['Your score is 72/100.', [72, 100], false],
-      ['Your score is 73.', [72], false],
-    ])('%s with allowedNumbers %j -> %s', (text, allowedNumbers, ok) => {
-      const result = checkNumericWhitelist(text, { allowedNumbers });
-      expect(result.length === 0).toBe(ok);
-    });
-
-    test('"-5" is not "5" and the sign is never dropped', () => {
-      rejects('Your score changed by -5 points.', 'numeric', { allowedNumbers: [5], progress: 'down' });
-      accepts('Your score changed by -5 points.', { allowedNumbers: [-5], progress: 'down' });
-    });
-
-    test('string and unicode-minus entries in allowedNumbers keep their sign', () => {
-      expect(checkNumericWhitelist('Down 5 points.', { allowedNumbers: ['-5'] })).toEqual([]);
-      expect(checkNumericWhitelist('Down 5 points.', { allowedNumbers: ['−5'] })).toEqual([]);
-      expect(checkNumericWhitelist('Down 5 points.', { allowedNumbers: ['5'] }).length).toBe(1);
-    });
-
-    test('a score never licenses a duration word', () => {
-      rejects('Your score is 7 days.', 'timing', { allowedNumbers: [7] });
     });
   });
 
@@ -781,47 +725,11 @@ describe('closed-world timing rule (terminal review)', () => {
 
   test('"12½" is normalized to digits and rejected whole', () => {
     expect(guards.normalizeCopy('12½ days')).toBe('12 1/2 days');
-    expect(checkNumericWhitelist('Expect 12½.', { allowedNumbers: [12, 1, 2] }).length).toBeGreaterThan(0);
+    expect(checkNumbers('Expect 12½.', { allowedNumbers: [12, 1, 2] }).length).toBeGreaterThan(0);
   });
 });
 
 describe('whole numeric expressions, bare dry idiom, negation, line wraps (terminal review pass 2)', () => {
-  describe('numeric expressions are read whole', () => {
-    const facts = { allowedNumbers: [1, 2, 3, 4, 5, 72, 100] };
-    test.each([
-      ['Your score is 1 / 2.', '1 / 2'],
-      ['Your score is 72 / 100.', '72 / 100'],
-      ['Your score is 72/100.', '72/100'],
-      ['Your score is 72 of 100.', '72 of 100'],
-      ['Your score is 72 out of 100.', '72 out of 100'],
-      ['Your score is 3 - 4.', '3 - 4'],
-      ['Your score is 3-4.', '3-4'],
-      ['Your score is 3 to 4.', '3 to 4'],
-      ['Your score is 72 points%.', '72 points%'],
-      ['Your score is 72%.', '72%'],
-      ['Your score is 72 percent.', '72 percent'],
-      ['Your score is 1.5.', '1.5'],
-      ['Your score is 72 100.', '72 100'],
-    ])('%s rejects whole even when every digit is a supplied score', (text) => {
-      const reasons = checkNumericWhitelist(text, facts);
-      expect(reasons.length).toBeGreaterThan(0);
-    });
-
-    test('the rejected match is the whole expression, not a leftover fragment', () => {
-      expect(checkNumericWhitelist('Your score is 72 / 100.', facts)).toEqual([
-        { rule: 'numeric', match: '72 / 100', detail: 'not a single supplied score value' },
-      ]);
-      expect(checkNumericWhitelist('Your score is 72 out of 100.', facts)[0].match).toBe('72 out of 100');
-    });
-
-    test('a single signed integer, optionally with "points", still passes', () => {
-      ['Your score is 72.', 'Your score is 72 points.', 'Your score is up 5 points.', 'Your score is down 5 points.', 'Score 72, up 5 points.']
-        .forEach((text) => {
-          expect(checkNumericWhitelist(text, { allowedNumbers: [72, 5, -5] })).toEqual([]);
-        });
-    });
-  });
-
   describe('"safe once dry" is a bare idiom only', () => {
     const claim = (text) => expect(checkSafetyClaim(text).length).toBeGreaterThan(0);
     const idiom = (text) => expect(checkSafetyClaim(text)).toEqual([]);
@@ -957,36 +865,6 @@ describe('whole numeric expressions, bare dry idiom, negation, line wraps (termi
 });
 
 describe('one canonical normalization feeds every rule (terminal review pass 3)', () => {
-  describe('score allowance: only a whole signed integer, optionally followed by "points"', () => {
-    const facts = { allowedNumbers: [5] };
-    test.each([
-      ['Your score is 5hours.', '5 hours'],
-      ['Your score is 5th.', '5 th'],
-      ['Your score is 5ft.', '5 ft'],
-      ['Your score is 5 ft.', '5 ft'],
-      ['Your score is 5in.', null],
-      ['Your score is 5mm.', '5 mm'],
-      ['Your score is 5lbs.', '5 lbs'],
-      ['Your score is 5 hours.', '5 hours'],
-      ['Your score is 5 inches.', '5 inches'],
-      ['Your score is 5pts%.', null],
-      ['Your score is 5x.', null],
-    ])('%s rejects with allowedNumbers [5]', (text) => {
-      expect(checkNumericWhitelist(text, facts).length).toBeGreaterThan(0);
-    });
-
-    test('digits are separated from attached letters by the canonical form', () => {
-      expect(guards.normalizeCopy('5hours 5th 5ft 4pm')).toBe('5 hours 5 th 5 ft 4 pm');
-      expect(guards.normalizeCopy('５hours')).toBe('5 hours');
-    });
-
-    test('the plain forms still pass', () => {
-      ['Your score is 5.', 'Your score is 5 points.', 'Your score is 5 pts.', 'Your score is up 5 points.'].forEach((text) => {
-        expect(checkNumericWhitelist(text, { allowedNumbers: [5] })).toEqual([]);
-      });
-    });
-  });
-
   describe('vulgar fractions keep their exact value', () => {
     test('1½ and 1¼ are different canonical forms', () => {
       expect(guards.normalizeCopy('1½')).toBe('1 1/2');
@@ -1149,44 +1027,6 @@ describe('one canonical normalization feeds every rule (terminal review pass 3)'
 });
 
 describe('closed score rule, product-scoped organic exception, a.m./p.m. sentence ends (terminal review pass 4)', () => {
-  describe('score allowance is closed: nothing attached before, only end / punctuation / "points" after', () => {
-    const allowed = { allowedNumbers: [5, 72, 100, -5] };
-    const score = (tail) => checkNumericWhitelist(`Your score is ${tail}`, allowed);
-
-    test.each([
-      '5liters.', '5-percent.', '5h.', '$72.', '5 liters.', '5 percent.', '72 in March.', '5x.', '#5.', '~5.', '5/10.',
-      '×5.', 'x5.', '5%.', '5°.', '5 and holding.', '5 today.', '5 ft.', '5th.', '5hours.', '5in.', '72 points%.',
-      '5-5.', '5 - 5.', '5 5.', '72 of 100.', '72/100.', '5.5.', '£72.', '€5.', '5mph.', '5 pts%.',
-    ])('rejects: %s', (tail) => {
-      expect(score(tail).length).toBeGreaterThan(0);
-    });
-
-    test.each([
-      '72.', '5.', '72', '5 points.', '72 points', '5 pts.', 'up 5 points.', 'up by 5 points.', 'down 5 points.', '-5 points.',
-      '+5.', '72, up 5 points.', '72; up 5 points.', '(72).', '72 points since March.', '72 points, up 5 points.', '72!', '72?',
-      '−5.', 'minus 5.', 'plus 5.',
-    ])('passes: %s', (tail) => {
-      expect(score(tail)).toEqual([]);
-    });
-
-    test('a number still needs its value in allowedNumbers, and a sign is part of the value', () => {
-      expect(checkNumericWhitelist('Your score is 71.', allowed).length).toBe(1);
-      expect(checkNumericWhitelist('Your score is down 5 points.', { allowedNumbers: [5] }).length).toBe(1);
-      expect(checkNumericWhitelist('Your score is down 5 points.', { allowedNumbers: [-5] })).toEqual([]);
-    });
-
-    test('a score at the start of a sentence qualifies', () => {
-      expect(checkNumericWhitelist('72 is your score.', allowed).length).toBe(1);
-      expect(checkNumericWhitelist('72.', allowed)).toEqual([]);
-    });
-
-    test('no unit list is left in the source', () => {
-      const src = require('fs').readFileSync(path.join(__dirname, '../services/service-report/lawn-copy-guards.js'), 'utf8');
-      expect(src).not.toMatch(/UNIT_FOLLOW/);
-      expect(src).not.toMatch(/liters|\|ft\||inch\(es\)\?\|yds/);
-    });
-  });
-
   describe('"organic" exception is scoped away from the applied product', () => {
     test.each([
       'Organic matter is building in the thatch layer.',
@@ -1264,6 +1104,147 @@ describe('closed score rule, product-scoped organic exception, a.m./p.m. sentenc
       const monday = 'Stay off the turf until 7 a.m. Monday.';
       expect(checkReentryPattern(monday).length).toBe(1);
       rejects(monday, 'reentry_figure', {});
+    });
+  });
+});
+
+describe('no digits in model copy; normalization is a fixpoint (terminal review pass 5)', () => {
+  describe('no score allowance: any digit, number word, fraction or ordinal rejects', () => {
+    const ALL_NUMBERS = { allowedNumbers: [5, 72, 100, -5, 1, 2, 3, 4, 7, 14, 24] };
+
+    test.each([
+      'Your score is 72.',
+      'Your score is 72 points.',
+      'Your score is up 5 points.',
+      'Your score is down 5 points.',
+      'Your score changed by -5 points.',
+      'Score 72, up 5 points.',
+      'Your score is (72).',
+      '72.',
+      'Your score is 5.',
+      'Your score is 1/2.',
+      'Your score is 72%.',
+      'Your score is five.',
+      'Your score is first.',
+      'This is the third visit.',
+      'It is the 5th time.',
+      'The twentieth spot.',
+    ])('rejects even with every value supplied: %s', (text) => {
+      rejects(text, 'numeric', ALL_NUMBERS);
+    });
+
+    test('allowedNumbers is inert: it licenses nothing, in any shape', () => {
+      [undefined, [], [72], [5, -5], ['72', '-5'], 'y', null, { 0: 72 }].forEach((allowedNumbers) => {
+        const out = checkLawnModelCopy('Your score is 72.', { allowedNumbers });
+        expect(out.ok).toBe(false);
+        expect(rules(out)).toContain('numeric');
+      });
+      expect(checkNumbers('Your score is 72.', { allowedNumbers: [72] })).toEqual(checkNumbers('Your score is 72.', {}));
+      expect(checkLawnModelCopy('Nice and even.', { allowedNumbers: [72] }).ok).toBe(true);
+    });
+
+    test('the numeric rule has one name', () => {
+      checkNumbers('Your score is 72, five, 1/2 and the first.').forEach((r) => expect(r.rule).toBe('numeric'));
+    });
+
+    test('approved sentences still carry their own digits', () => {
+      accepts(APPROVED, ROW);
+      rejects(`${APPROVED} Your score is 72.`, 'numeric', ROW);
+    });
+  });
+
+  describe('the four pass-5 reproductions each reject', () => {
+    test('"down by about 5" is not read as +5', () => {
+      const out = checkLawnModelCopy('Your score is down by about 5 points.', { allowedNumbers: [72, 5], progress: 'up' });
+      expect(out.ok).toBe(false);
+      expect(rules(out)).toEqual(expect.arrayContaining(['numeric', 'progress_coupling']));
+    });
+
+    test('"not down 5 points" and "isn’t up 5 points" reject', () => {
+      const down = checkLawnModelCopy('Your score is not down 5 points.', { allowedNumbers: [72, -5], progress: 'down' });
+      expect(down.ok).toBe(false);
+      expect(down.reasons.some((r) => r.detail === 'negated progress word')).toBe(true);
+      const up = checkLawnModelCopy('Your score isn’t up 5 points.', { allowedNumbers: [72, 5], progress: 'up' });
+      expect(up.ok).toBe(false);
+      expect(up.reasons.some((r) => r.detail === 'negated progress word')).toBe(true);
+    });
+
+    test('"72 points out of 100" and "72 points / 100 points" reject', () => {
+      rejects('Your score is 72 points out of 100.', 'numeric', { allowedNumbers: [72, 100] });
+      rejects('Your score is 72 points / 100 points.', 'numeric', { allowedNumbers: [72, 100] });
+    });
+
+    test('"4p.m." in an approved-sentence reproduction rejects (clock is absolute)', () => {
+      const out = checkLawnModelCopy('Expect color at 4p.m.', { approvedSentences: ['Expect color at 4 pm.'] });
+      expect(out.ok).toBe(false);
+      expect(rules(out)).toContain('weekday_clock');
+    });
+  });
+
+  describe('"up" / "down" in a score sense are progress claims, with negation', () => {
+    test.each([
+      ['Your score is down.', 'down'],
+      ['Your score is up since March.', 'up'],
+      ['Your score went up.', 'up'],
+      ['Your score is down from March.', 'down'],
+      ['Your score is up a bit.', 'up'],
+      ['Your score has gone down overall.', 'down'],
+      ['The trend is up.', 'up'],
+      ['The score is higher than before.', 'up'],
+      ['The score is lower than before.', 'down'],
+      ['The score is higher.', 'up'],
+      ['Weeds fell.', 'down'],
+      ['Density increased.', 'up'],
+    ])('%s needs progress "%s"', (text, direction) => {
+      const other = direction === 'up' ? 'down' : 'up';
+      expect(checkProgressCoupling(text, { progress: direction })).toEqual([]);
+      ['flat', 'unknown', undefined, other].forEach((progress) => {
+        expect(checkProgressCoupling(text, { progress }).length).toBeGreaterThan(0);
+      });
+    });
+
+    test.each([
+      ['Your score is not down.', 'down'],
+      ['Your score isn’t up.', 'up'],
+      ['Your score hasn’t gone up.', 'up'],
+      ['Your score is not up since March.', 'up'],
+      ['Your score is never down.', 'down'],
+      ['Your score is no longer down.', 'down'],
+    ])('negated: %s rejects even when the direction is supplied', (text, direction) => {
+      const out = checkProgressCoupling(text, { progress: direction });
+      expect(out.some((r) => r.detail === 'negated progress word')).toBe(true);
+    });
+
+    test('phrasal "up" and "down" are not claims', () => {
+      ['We pick up the debris.', 'We sweep down the walk.', 'We cleaned up the edge.', 'Weeds grow up through the mulch.']
+        .forEach((text) => expect(checkProgressCoupling(text, {})).toEqual([]));
+    });
+  });
+
+  describe('normalization is a fixpoint', () => {
+    const RAW = [
+      '4p.m.', '4 p.m.', '4 pm.', '5hours', '5th', '5ft', '1½', '12½', '1,000,000', '7 a.m. Monday', '7 p.m. Stay off',
+      '7 A.M. to 9', 'Back by 7 P.M.', 'Stay off\nfor 14 minutes.', 'Stay off.\n\nWait', '  doubled   spaces  ', 'Wed 4 PM',
+      '５٤', 'It’s “quoted” — and − dashed', '4p.m.5th', '3p.m.p.m.', 'a.m.p.m.', '1½2¼3p.m.',
+      '​zero‍width', 'café ﬁx', '10/05/26', '5.5.5', 'x5y6z7', '1e5', '',
+      ' ', '.', '...', 'p.m.', 'a.m. Stay', '9p.m.\nStay', '\n\n\n', '4 p.m.p.m. Stay',
+    ];
+
+    test.each(RAW)('normalize(normalize(x)) === normalize(x): %j', (raw) => {
+      const once = guards.normalizeCopy(raw);
+      expect(guards.normalizeCopy(once)).toBe(once);
+    });
+
+    test('every sample sentence in this suite is a fixpoint, and so are the guard fixtures', () => {
+      [...KEEP_OFF_REJECT, ...BANNER_COPY_ACCEPT, APPROVED].forEach((text) => {
+        const once = guards.normalizeCopy(text);
+        expect(guards.normalizeCopy(once)).toBe(once);
+      });
+    });
+
+    test('"4p.m." and "4 pm." are the same canonical sentence', () => {
+      expect(guards.normalizeCopy('Expect color at 4p.m.')).toBe(guards.normalizeCopy('Expect color at 4 pm.'));
+      expect(guards.normalizeCopy('4p.m.')).toBe('4 pm.');
     });
   });
 });
