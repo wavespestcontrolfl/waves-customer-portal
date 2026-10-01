@@ -1621,10 +1621,11 @@ describe('deferred caller opt-out is derived from saved state on a retry (#5467)
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const at = src.indexOf('let primaryOptOutFromState = false;');
     expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at, at + 1600);
+    const block = src.slice(at, at + 2600);
     expect(block).toContain("row.service_contacts_consent_source === 'call_pipeline_onsite_contact'");
     expect(block).toContain('onSiteConsentedPhonesThisCall.has(optLast10(row.service_contact_phone))');
     expect(block).toContain("process.env.GATE_CALL_SECONDARY_CONTACT === 'true'");
+    expect(block).toContain('stampMs >= callStartMs');
     expect(block).toContain('if (deferPrimaryOptOutCustomerId || primaryOptOutFromState) {');
   });
 });

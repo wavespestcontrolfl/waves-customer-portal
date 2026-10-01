@@ -18142,10 +18142,17 @@ const CallRecordingProcessor = {
                   && onSiteConsentedPhonesThisCall.size) {
                 try {
                   const optLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-                  const row = await db('customers').where({ id: customerId }).first('service_contact_phone', 'service_contacts_consent_source');
+                  const row = await db('customers').where({ id: customerId }).first('service_contact_phone', 'service_contacts_consent_source', 'service_contacts_consent_at');
+                  // Bound to THIS call: the stamp must postdate the call's start.
+                  // A stamp from an earlier call means the opt-out already had
+                  // its chance then; re-applying it now would override an
+                  // office re-enable of the caller in between (pre-push codex P1).
+                  const callStartMs = (() => { const at = callStartedAt(call) || call.created_at; const ms = at ? new Date(at).getTime() : NaN; return Number.isFinite(ms) ? ms : null; })();
+                  const stampMs = row?.service_contacts_consent_at ? new Date(row.service_contacts_consent_at).getTime() : NaN;
                   primaryOptOutFromState = !!row
                     && row.service_contacts_consent_source === 'call_pipeline_onsite_contact'
-                    && onSiteConsentedPhonesThisCall.has(optLast10(row.service_contact_phone));
+                    && onSiteConsentedPhonesThisCall.has(optLast10(row.service_contact_phone))
+                    && callStartMs !== null && Number.isFinite(stampMs) && stampMs >= callStartMs;
                 } catch (stateErr) {
                   logger.warn(`[call-proc] deferred primary opt-out state read failed for ${maskSid(callSid)}: ${safeErrorToken(stateErr)}`);
                 }
