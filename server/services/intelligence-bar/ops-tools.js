@@ -190,6 +190,8 @@ async function railwayGraphQL(query, variables = {}, { forWrite = false } = {}) 
     if (!res.ok) {
       const err = new Error(`Railway API returned HTTP ${res.status}`);
       err.status = res.status;
+      // A 4xx is a definitive refusal; a 5xx may have applied.
+      err.rejected = res.status < 500;
       throw err;
     }
     const json = await res.json();
@@ -199,7 +201,9 @@ async function railwayGraphQL(query, variables = {}, { forWrite = false } = {}) 
         err.writeAccessRequired = true;
         throw err;
       }
-      throw new Error(`Railway API error: ${json.errors[0].message}`);
+      const err = new Error(`Railway API error: ${json.errors[0].message}`);
+      err.rejected = true;
+      throw err;
     }
     return json.data;
   } catch (err) {
@@ -571,6 +575,15 @@ function valueDigest(raw) {
     .update(String(raw)).digest('hex').slice(0, 16);
 }
 
+// The prior state a card pins and a confirm re-checks: its kind, the value
+// only when it is plain 'true' / 'false', and a keyed digest (never the
+// value) when it is anything else.
+function describePrior(raw) {
+  if (raw === undefined || raw === null) return { prior_kind: 'unset', prior_value: null, prior_value_digest: null };
+  if (raw === 'true' || raw === 'false') return { prior_kind: 'boolean', prior_value: raw, prior_value_digest: null };
+  return { prior_kind: 'non_boolean', prior_value: null, prior_value_digest: valueDigest(raw) };
+}
+
 // How the runtime reads a set value: true (on), false (off), or null when
 // that cannot be said for sure. 'true' / 'false' read the same under every
 // reader. Any other value is judged only for a gate this portal reads solely
@@ -623,10 +636,9 @@ async function setRailwayGate(input) {
 
   const target = await resolvePortalProductionTarget();
   const raw = await readOneVariable(target, entry.name);
-  let currentKind;
-  let priorValue = null;
-  if (raw === undefined || raw === null) currentKind = 'unset';
-  else if (raw === 'true' || raw === 'false') { currentKind = 'boolean'; priorValue = raw; } else currentKind = 'non_boolean';
+  const prior = describePrior(raw);
+  const currentKind = prior.prior_kind;
+  const priorValue = prior.prior_value;
 
   // Judge "already set" the way the runtime reads this gate, so '1' / 'on' /
   // 'TRUE' under a gateEnvValue reader count as on (a no-op, not a change
@@ -666,9 +678,7 @@ async function setRailwayGate(input) {
       environment_id: target.environment.id,
       environment: target.environment.name,
     },
-    prior_value: priorValue,
-    prior_kind: currentKind,
-    prior_value_digest: currentKind === 'non_boolean' ? valueDigest(raw) : null,
+    ...prior,
     note: `Set ${entry.name} to ${input.value} on the portal's production service (currently ${currentLabel}).`,
   };
 }
@@ -683,8 +693,7 @@ async function commitRailwayGate(input) {
   const value = input._verified_railway_gate_value;
   const serviceId = input._verified_railway_service_id;
   const environmentId = input._verified_railway_environment_id;
-  const priorKind = input._verified_railway_gate_prior_kind;
-  if (!name || !serviceId || !environmentId || !priorKind || (value !== 'true' && value !== 'false')) {
+  if (!name || !serviceId || !environmentId || !input._verified_railway_gate_prior_kind || !['true', 'false'].includes(value)) {
     return {
       error: 'Missing the verified gate change for this confirmed action — ask again for a fresh confirmation card.',
       code: 'missing_verified_pin',
@@ -692,43 +701,36 @@ async function commitRailwayGate(input) {
   }
   // The gate must still be a known plain on/off gate (a later deploy could
   // have retired it or shown it takes a mode).
-  const entry = require('../../config/feature-gates').knownGateCatalog().get(name);
-  if (!entry || !entry.boolean) {
+  if (!require('../../config/feature-gates').knownGateCatalog().get(name)?.boolean) {
     return { error: `${name} is no longer a plain on/off gate this portal knows, so nothing was written.`, code: 'not_a_boolean_gate' };
   }
   const target = await resolvePortalProductionTarget();
-  if (target.service.id !== serviceId || target.environment.id !== environmentId) {
+  // Compare-and-swap (best effort): the same service + environment, and the
+  // live prior state exactly as the card pinned it.
+  const live = target.service.id === serviceId && target.environment.id === environmentId
+    ? describePrior(await readOneVariable(target, name))
+    : null;
+  if (!live
+    || live.prior_kind !== input._verified_railway_gate_prior_kind
+    || live.prior_value !== (input._verified_railway_gate_prior ?? null)
+    || live.prior_value_digest !== (input._verified_railway_gate_prior_digest ?? null)) {
     return { error: GATE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
   }
-  // Compare-and-swap (best effort): the live prior state must still be the
-  // one the card showed.
-  const raw = await readOneVariable(target, name);
-  let liveKind;
-  if (raw === undefined || raw === null) liveKind = 'unset';
-  else if (raw === 'true' || raw === 'false') liveKind = 'boolean';
-  else liveKind = 'non_boolean';
-  const unchanged = liveKind === priorKind && (
-    (liveKind === 'unset')
-    || (liveKind === 'boolean' && raw === input._verified_railway_gate_prior)
-    || (liveKind === 'non_boolean' && !!input._verified_railway_gate_prior_digest
-      && valueDigest(raw) === input._verified_railway_gate_prior_digest)
-  );
-  if (!unchanged) {
-    return { error: GATE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+  try {
+    await railwayGraphQL(
+      `mutation variableUpsert($input: VariableUpsertInput!) { variableUpsert(input: $input) }`,
+      { input: { projectId: target.projectId, environmentId, serviceId, name, value } },
+      { forWrite: true },
+    );
+  } catch (err) {
+    // A refusal changed nothing; a timeout, network drop or 5xx after the
+    // request went out may have applied it — never report that as failed.
+    if (err.rejected || err.writeAccessRequired) throw err;
+    return {
+      outcome_unknown: true,
+      warning: `Railway did not confirm the change to ${name}. Check the variable in the Railway dashboard before trying again.`,
+    };
   }
-  await railwayGraphQL(
-    `mutation variableUpsert($input: VariableUpsertInput!) { variableUpsert(input: $input) }`,
-    {
-      input: {
-        projectId: target.projectId,
-        environmentId,
-        serviceId,
-        name,
-        value,
-      },
-    },
-    { forWrite: true },
-  );
   return {
     success: true,
     tool: 'set_railway_gate',

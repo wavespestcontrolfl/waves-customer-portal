@@ -208,6 +208,33 @@ describe('set_growthbook_feature_environment', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  // Pass-1 terminal review: a dispatched toggle with no clear answer may have
+  // applied, so it is outcome_unknown — never "failed".
+  test.each([
+    ['a network drop', () => Promise.reject(new Error('socket hang up'))],
+    ['an HTTP 503', () => Promise.resolve(jsonResponse({}, 503))],
+  ])('the toggle ends in %s: outcome_unknown, not failed', async (_label, answer) => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_test';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(featureBody()))
+      .mockImplementationOnce(answer);
+    const result = await commit();
+    expect(result.outcome_unknown).toBe(true);
+    expect(result.error).toBeUndefined();
+    const { executionOutcome } = require('../services/intelligence-bar/outcomes');
+    expect(executionOutcome(result)).toBe('outcome_unknown');
+  });
+
+  test('a 4xx refusal of the toggle is a definite failure (nothing applied)', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_test';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(featureBody()))
+      .mockResolvedValueOnce(jsonResponse({ message: 'needs approval' }, 422));
+    const result = await commit();
+    expect(result.outcome_unknown).toBeUndefined();
+    expect(result.error).toMatch(/HTTP 422/);
+  });
+
   test('a key without Publish access on the toggle: write_access_required, no success', async () => {
     process.env.GROWTHBOOK_API_KEY = 'secret_test';
     global.fetch

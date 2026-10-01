@@ -875,6 +875,36 @@ describe('intelligence bar set_railway_gate', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
+  // Pass-1 terminal review: a dispatched upsert with no clear answer may have
+  // applied, so it is outcome_unknown — never "failed".
+  test.each([
+    ['a network drop', () => Promise.reject(new Error('socket hang up'))],
+    ['an HTTP 502', () => Promise.resolve({ ok: false, status: 502, json: async () => ({}) })],
+  ])('the upsert ends in %s: outcome_unknown, not failed', async (_label, answer) => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'false' }))
+      .mockImplementationOnce(answer);
+    const result = await commit();
+    expect(result.outcome_unknown).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.warning).toMatch(/did not confirm/);
+    const { executionOutcome } = require('../services/intelligence-bar/outcomes');
+    expect(executionOutcome(result)).toBe('outcome_unknown');
+  });
+
+  test('a GraphQL rejection of the upsert is a definite failure (nothing applied)', async () => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'false' }))
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ errors: [{ message: 'Invalid variable name' }] }) });
+    const result = await commit();
+    expect(result.outcome_unknown).toBeUndefined();
+    expect(result.error).toMatch(/Invalid variable name/);
+  });
+
   test('a read-only token on the upsert: write_access_required, no success', async () => {
     configure();
     global.fetch

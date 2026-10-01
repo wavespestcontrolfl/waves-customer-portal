@@ -136,10 +136,15 @@ async function gbPost(path, body) {
       err.writeAccessRequired = true;
       throw err;
     }
-    if (!res.ok) throw new Error(`GrowthBook API returned HTTP ${res.status}`);
+    if (!res.ok) {
+      const err = new Error(`GrowthBook API returned HTTP ${res.status}`);
+      // A 4xx is a definitive refusal; a 5xx may have applied.
+      err.rejected = res.status < 500;
+      throw err;
+    }
     return await res.json();
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error(`GrowthBook API timed out after ${REQUEST_TIMEOUT_MS / 1000}s — the toggle may or may not have applied; check the feature before trying again.`);
+    if (err.name === 'AbortError') throw new Error(`GrowthBook API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
     throw err;
   } finally {
     clearTimeout(timer);
@@ -373,8 +378,7 @@ async function setGrowthbookFeatureEnvironment(input) {
     // without a trailing "_at" so the fingerprint keeps them (it strips volatile
     // timestamp keys).
     prior_enabled: priorEnabled,
-    feature_version: feature.dateUpdated || null,
-    revision_version: feature.revision && feature.revision.version !== undefined ? feature.revision.version : null,
+    ...featureVersion(feature),
     note: `${input.enabled ? 'Enable' : 'Disable'} GrowthBook feature ${feature.id || featureId} in ${environment} (currently ${word(priorEnabled)}).`,
   };
 }
@@ -382,47 +386,69 @@ async function setGrowthbookFeatureEnvironment(input) {
 // Confirmed set_growthbook_feature_environment: acts ONLY on the pins
 // /confirm-action derived from the fingerprint-verified live preview — never
 // on feature_id / environment / enabled from this call's own input.
+// The edit stamps a card pins and a confirm re-checks: an edit made anywhere
+// (including the GrowthBook UI) moves one of them.
+function featureVersion(feature) {
+  return {
+    feature_version: feature.dateUpdated || null,
+    revision_version: feature.revision?.version ?? null,
+  };
+}
+
 async function commitGrowthbookFeatureEnvironment(input) {
   const featureId = input._verified_growthbook_feature_id;
   const environment = input._verified_growthbook_environment;
   const priorEnabled = input._verified_growthbook_prior_enabled;
-  if (!featureId || !FEATURE_ID_RE.test(featureId) || !environment || !ENVIRONMENT_RE.test(environment)
-    || typeof priorEnabled !== 'boolean') {
+  if (!FEATURE_ID_RE.test(featureId || '') || !ENVIRONMENT_RE.test(environment || '') || typeof priorEnabled !== 'boolean') {
     return {
       error: 'Missing the verified feature change for this confirmed action — ask again for a fresh confirmation card.',
       code: 'missing_verified_pin',
     };
   }
-  const enabled = !priorEnabled;
-  let json;
+  const changed = { error: FEATURE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+  let feature;
   try {
-    json = await gbGet(`/api/v1/features/${encodeURIComponent(featureId)}`);
+    ({ feature } = await gbGet(`/api/v1/features/${encodeURIComponent(featureId)}`));
   } catch (err) {
-    if (isNotFound(err)) return { error: FEATURE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+    if (isNotFound(err)) return changed;
     throw err;
   }
-  const feature = json && json.feature;
-  const envs = feature && feature.environments && typeof feature.environments === 'object' ? feature.environments : {};
-  const envCfg = Object.prototype.hasOwnProperty.call(envs, environment) ? envs[environment] : null;
-  const liveRevision = feature && feature.revision && feature.revision.version !== undefined ? feature.revision.version : null;
-  if (!feature || feature.archived || !envCfg || typeof envCfg !== 'object'
-    || Boolean(envCfg.enabled) !== priorEnabled
-    || (feature.dateUpdated || null) !== (input._verified_growthbook_feature_updated ?? null)
-    || liveRevision !== (input._verified_growthbook_revision ?? null)) {
-    return { error: FEATURE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+  // Unarchived, the environment still in the state the card showed, and the
+  // same edit stamps — compared as one key against the pins.
+  const envCfg = feature?.environments?.[environment];
+  const live = feature && !feature.archived && envCfg && typeof envCfg === 'object'
+    ? JSON.stringify([Boolean(envCfg.enabled), featureVersion(feature)])
+    : null;
+  // An absent pin compares as null, the same as a stamp the feature lacks.
+  const pinned = JSON.stringify([priorEnabled, {
+    feature_version: input._verified_growthbook_feature_updated,
+    revision_version: input._verified_growthbook_revision,
+  }], (_key, value) => (value === undefined ? null : value));
+  if (live !== pinned) return changed;
+  const enabled = !priorEnabled;
+  const word = enabled ? 'enabled' : 'disabled';
+  try {
+    await gbPost(`/api/v2/features/${encodeURIComponent(featureId)}/toggle`, {
+      environments: { [environment]: enabled },
+      reason: 'Intelligence Bar: owner-confirmed card',
+      comment: `Intelligence Bar: ${word} in ${environment} (owner-confirmed card)`,
+    });
+  } catch (err) {
+    // A refusal changed nothing; a timeout, network drop or 5xx after the
+    // request went out may have applied it — never report that as failed.
+    if (err.rejected || err.writeAccessRequired) throw err;
+    return {
+      outcome_unknown: true,
+      warning: `GrowthBook did not confirm the toggle of ${featureId} in ${environment}. Check the feature in GrowthBook before trying again.`,
+    };
   }
-  await gbPost(`/api/v2/features/${encodeURIComponent(featureId)}/toggle`, {
-    environments: { [environment]: enabled },
-    reason: 'Intelligence Bar: owner-confirmed card',
-    comment: `Intelligence Bar: ${enabled ? 'enabled' : 'disabled'} in ${environment} (owner-confirmed card)`,
-  });
   return {
     success: true,
     tool: 'set_growthbook_feature_environment',
     feature: featureId,
     environment,
     enabled,
-    note: `Feature ${featureId} is now ${enabled ? 'enabled' : 'disabled'} in ${environment}. SDK clients pick it up on their next feature refresh.`,
+    note: `Feature ${featureId} is now ${word} in ${environment}. SDK clients pick it up on their next feature refresh.`,
   };
 }
 
