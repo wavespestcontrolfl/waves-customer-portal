@@ -27,6 +27,84 @@ function isDoubleOptinEnabled() {
   return isEnabled('recipientDoubleOptin');
 }
 
+// True only when the opt-in rail can actually ASK a recipient: the double
+// opt-in gate is on AND the recipient_optin_request template row exists and is
+// active (the same lookup claimRecipientOptins uses to decide "dark"). The
+// call pipeline's on-site consent rule needs this: with the rail dark, a
+// stamped phone would be texted with no confirmation ever asked (owner
+// 2026-09-30 audit). Any read failure counts as NOT live (fail closed).
+async function isOptinRailLive() {
+  if (!isDoubleOptinEnabled()) return false;
+  try {
+    const row = await db('sms_templates').where({ template_key: OPTIN_TEMPLATE_KEY }).first();
+    return !!row && row.is_active !== false;
+  } catch (err) {
+    logger.warn(`[recipient-optin] rail check failed (${err.code || err.name || 'error'}) — treating as dark`);
+    return false;
+  }
+}
+
+// Durable "demote the caller once THIS recipient confirms" marker, written on
+// the customer row (customers.service_preferences jsonb) by the call pipeline
+// at booking time (owner 2026-09-30: the account holder who booked for an
+// on-site person stops getting appointment texts, but only once that person
+// has actually said YES). Keyed by the recipient's phone so another contact's
+// confirmation never fires it. Every helper is best-effort and savepointed: a
+// marker problem must never block or fail an opt-in transition.
+const DEMOTE_MARKER_KEY = 'demote_primary_on_optin';
+async function withSavepoint(dbh, fn) {
+  try {
+    if (dbh && dbh.isTransaction && typeof dbh.transaction === 'function') return await dbh.transaction(fn);
+    return await fn(dbh);
+  } catch (err) {
+    logger.warn(`[recipient-optin] demote marker step failed (${err.code || err.name || 'error'})`);
+    return null;
+  }
+}
+// Remove the marker when it names this phone (the ask failed or was declined).
+async function clearDemoteMarker(customerId, phoneKey, { dbh = db } = {}) {
+  if (!customerId || !phoneKey) return;
+  await withSavepoint(dbh, (h) => h('customers')
+    .where({ id: customerId })
+    .whereRaw("service_preferences #>> '{demote_primary_on_optin,phone_key}' = ?", [phoneKey])
+    .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) - 'demote_primary_on_optin'") }));
+}
+// A YES confirmed this phone: for each customer whose marker names it, turn the
+// caller's appointment texts OFF and clear the marker.
+async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
+  await withSavepoint(dbh, async (h) => {
+    const rows = await h('recipient_optin').where({ phone_key: phoneKey, status: 'confirmed' }).whereNotNull('customer_id').select('customer_id');
+    for (const { customer_id: customerId } of rows || []) {
+      const customer = await h('customers').where({ id: customerId }).first('service_preferences');
+      const prefs = typeof customer?.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer?.service_preferences;
+      const marker = prefs && prefs[DEMOTE_MARKER_KEY];
+      if (!marker || marker.phone_key !== phoneKey) continue;
+      await h('notification_prefs')
+        .insert({ customer_id: customerId, appointment_notify_primary: false })
+        .onConflict('customer_id')
+        .merge({ appointment_notify_primary: false });
+      await h('customers').where({ id: customerId })
+        .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) - 'demote_primary_on_optin'") });
+    }
+  });
+}
+// A STOP declined this phone everywhere: drop every marker that names it.
+async function clearDemoteMarkersForPhone(phoneKey, { dbh = db } = {}) {
+  await withSavepoint(dbh, async (h) => {
+    const rows = await h('recipient_optin').where({ phone_key: phoneKey }).whereNotNull('customer_id').select('customer_id');
+    for (const { customer_id: customerId } of rows || []) await clearDemoteMarker(customerId, phoneKey, { dbh: h });
+  });
+}
+// The ask for this (customer, phone) never reached the recipient: release the
+// pending row to ask_failed (texts stay held) and drop the marker.
+async function releaseAskFailed(phoneKey, customerId) {
+  await db('recipient_optin')
+    .where({ phone_key: phoneKey, customer_id: customerId, status: 'pending' })
+    .update({ status: 'ask_failed', updated_at: new Date() })
+    .catch(() => {});
+  await clearDemoteMarker(customerId, phoneKey);
+}
+
 // Same last-10 convention as the webhook's phoneLookupKey.
 function recipientPhoneKey(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
@@ -140,7 +218,11 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
         }
       }
     }
-    if (updated) logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
+    if (updated) {
+      if (status === 'confirmed') await applyDemoteMarkersOnConfirm(key, { dbh });
+      else if (status === 'declined') await clearDemoteMarkersForPhone(key, { dbh });
+      logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
+    }
     // Returns the UPDATED COUNT (0 = no recipient rows — the normal case
     // for most phones), reserving FALSE for the swallowed-error path below
     // so transactional callers can distinguish "nothing to decline" from
@@ -347,7 +429,7 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —
         // deleting it would grandfather a phone that never got the ask.
-        await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        await releaseAskFailed(claim.key, claim.customerId);
         logger.warn(`[recipient-optin] request blocked for ***${claim.key.slice(-4)}: ${result.code || 'unknown'}`);
         continue;
       }
@@ -363,7 +445,7 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         .catch(() => {});
       requested += 1;
     } catch (err) {
-      await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+      await releaseAskFailed(claim.key, claim.customerId);
       logger.warn(`[recipient-optin] request failed for ***${claim.key.slice(-4)}: ${err.message}`);
     }
   }
@@ -405,9 +487,7 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       // appointment recipient for this property — release to ask_failed
       // (re-adding them re-claims and asks) instead of texting a stranger.
       if (idx < 0) {
-        await db('recipient_optin')
-          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
-          .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        await releaseAskFailed(row.phone_key, row.customer_id);
         continue;
       }
       // Reconcile before re-texting: if Twilio already accepted an ask to
@@ -484,9 +564,7 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
         .first('status')
         .catch(() => null);
       if (lastAsk && isFailureStatus(lastAsk.status)) {
-        await db('recipient_optin')
-          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
-          .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        await releaseAskFailed(row.phone_key, row.customer_id);
       }
     }
   } catch { /* best-effort */ }
@@ -495,6 +573,10 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
 
 module.exports = {
   OPTIN_TEMPLATE_KEY,
+  isOptinRailLive,
+  clearDemoteMarker,
+  applyDemoteMarkersOnConfirm,
+  clearDemoteMarkersForPhone,
   OPTIN_TEMPLATE_VERSION,
   isDoubleOptinEnabled,
   recipientPhoneKey,

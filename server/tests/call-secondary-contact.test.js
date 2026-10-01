@@ -1433,8 +1433,8 @@ describe('do-not-contact, notify-primary and withheld-consent rules for the on-s
   test('the loop and fan-out gate read the do-not-contact flag', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('const v2DoNotContact = v2CanonicalExtraction?.consent?.do_not_contact_request === true;');
-    expect(src).toContain('!v2DoNotContact && callSecondaryContacts.some(onSiteNotifyConsent)');
-    expect(src).toContain('{ doNotContact: v2DoNotContact }');
+    expect(src).toContain('!v2DoNotContact && optinRailLive && callSecondaryContacts.some(onSiteNotifyConsent)');
+    expect(src).toContain('{ doNotContact: v2DoNotContact, optinRailLive }');
   });
 
   test('eligibility follows the GROUNDED on-site rule, not the stamp source (explicit V2 consent included)', async () => {
@@ -1460,18 +1460,23 @@ describe('do-not-contact, notify-primary and withheld-consent rules for the on-s
     expect(await eligibleFor({ smsConsentExplicit: false, smsConsentSource: 'call_pipeline_onsite_contact', onSiteGrounded: true })).toBe(0);
   });
 
-  test('the booking site applies the deferred opt-out only after scheduledServiceId lands; persistence never writes false', () => {
+  test('the booking site writes a durable demote MARKER (never the pref) after scheduledServiceId lands; persistence never writes false', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain('onPrimaryOptOutEligible: () => { deferPrimaryOptOutCustomerId = customerId; }');
+    expect(src).toContain('deferPrimaryOptOutPhoneKey = String(secondaryEntry.phone');
     const landed = src.indexOf('scheduledServiceId = svc.id;');
-    const applied = src.indexOf('appointment_notify_primary: false }', landed);
+    const marker = src.indexOf('demote_primary_on_optin: {', landed);
     expect(landed).toBeGreaterThan(-1);
-    expect(applied).toBeGreaterThan(landed);
-    expect(applied - landed).toBeLessThan(5200);
-    expect(src.slice(landed, applied)).toContain('if (deferPrimaryOptOutCustomerId || primaryOptOutFromState)');
-    // The ONLY false write in the file is that one statement (insert + merge).
+    expect(marker).toBeGreaterThan(landed);
+    expect(marker - landed).toBeLessThan(5200);
+    const block = src.slice(landed, marker + 400);
+    expect(block).toContain('if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKey)');
+    expect(block).toContain('phone_key: deferPrimaryOptOutPhoneKey');
+    expect(block).toContain('scheduled_service_id: svc.id');
+    expect(block).toContain("COALESCE(service_preferences, \\'{}\\'::jsonb) ||");
+    // The only pref write is the already-confirmed shortcut (one insert + one merge); no state-recovery block remains.
     expect(src.split('appointment_notify_primary: false').length - 1).toBe(2);
-    expect(src.lastIndexOf('appointment_notify_primary: false') - landed).toBeLessThan(5200);
+    expect(src).not.toContain('primaryOptOutFromState');
+    expect(src).not.toContain('onSiteConsentedPhonesThisCall');
   });
 
   test('phone on record + another unconsented slot phone: distinct withheld status (the card says why)', async () => {
@@ -1485,7 +1490,8 @@ describe('do-not-contact, notify-primary and withheld-consent rules for the on-s
     expect(state.updates.some((u) => 'service_contacts_consent_at' in u)).toBe(false);
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain("result === 'skipped_phone_on_record_consent_withheld'");
-    expect(src).toContain('JSON.stringify({ consent_withheld: true })');
+    expect(src).toContain('consent_withheld: consentWithheldMarker');
+    expect(src).toContain("railDarkWithheld ? 'optin_rail_dark'");
   });
 });
 
@@ -1657,21 +1663,115 @@ describe('beforeStamp hook runs before any consent-stamp UPDATE (#5467)', () => 
   });
 });
 
-// Pre-push codex P1: the deferred opt-out must survive a crash + retry between
-// persistence and booking — the booking site also derives it from saved state.
-describe('deferred caller opt-out is derived from saved state on a retry (#5467)', () => {
-  test('booking site reads the first slot phone + stamp time (NOT the stamp source) when the in-memory flag is absent', () => {
+// Round 5 (pre-push codex P1s on #5467).
+describe('round 5: contractions, generic affirmations, subject pronouns', () => {
+  const say = (agent, caller) => [`Agent: ${agent}`, `Caller: ${caller}`].join('\n');
+  const base = {
+    first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true,
+    wants_appointment_texts: true, on_site: true,
+  };
+
+  test('negative contractions never ground', () => {
+    for (const quote of ["He doesn't want appointment texts", "She didn't ask for reminders", "He wouldn't want the tracking link", "He hasn't got a phone", "He isn't going to be there", "They weren't home"]) {
+      expect(verifyOnSiteGrounding({ ...base, wants_appointment_texts_quote: quote, on_site_quote: quote }, say('Should we text him the reminders? Will he be there?', quote))).toMatchObject({ wants_appointment_texts: false, on_site: false });
+    }
+  });
+
+  test('an all-affirmative/filler quote of ANY length is prompt-bound', () => {
+    const t = say('Is the name spelled S-A-M?', "Yes, that's correct.");
+    expect(verifyOnSiteGrounding({ ...base, wants_appointment_texts_quote: "Yes, that's correct" }, t).wants_appointment_texts).toBe(false);
+    const ok = say('Should we text him the appointment reminders?', "Yes, that's correct.");
+    expect(verifyOnSiteGrounding({ ...base, wants_appointment_texts_quote: "Yes, that's correct" }, ok).wants_appointment_texts).toBe(true);
+    // Longer all-filler phrases too.
+    expect(verifyOnSiteGrounding({ ...base, wants_appointment_texts_quote: 'Yes of course that works' }, say('What is your zip code?', 'Yes of course that works.')).wants_appointment_texts).toBe(false);
+    // A substantive quote keeps the plain rule.
+    expect(verifyOnSiteGrounding({ ...base, wants_appointment_texts_quote: 'Please text him the reminders on Tuesday' }, say('What is your zip code?', 'Please text him the reminders on Tuesday.')).wants_appointment_texts).toBe(true);
+  });
+
+  test('subject pronouns count as a recipient reference', () => {
+    const t = say('Should he get appointment reminders?', 'Yes.');
+    expect(verifyOnSiteGrounding({ ...base, wants_appointment_texts_quote: 'Yes.' }, t).wants_appointment_texts).toBe(true);
+    // Still needs a texts phrase: a bare pronoun question is not enough.
+    expect(verifyOnSiteGrounding({ ...base, wants_appointment_texts_quote: 'Yes.' }, say('Is he your husband?', 'Yes.')).wants_appointment_texts).toBe(false);
+  });
+});
+
+describe('round 5: singleton / mirrored array[0] canonicalization', () => {
+  const entry = (flags) => ({
+    name_full: 'Sample Spouse', first_name: 'Sample', last_name: 'Spouse', phone_e164: '+15550100123', email: null,
+    role: 'spouse_partner', wants_notifications: true, ...flags,
+  });
+  const evidence = [
+    { field_path: '/secondary_contacts/0/wants_appointment_texts', quote: 'Yeah.', speaker: 'caller' },
+    { field_path: '/secondary_contacts/0/on_site', quote: 'he will be there all day', speaker: 'caller' },
+  ];
+  test('singleton without the fields + same-person array[0] with both true + evidence -> merged contact qualifies', () => {
+    const v2 = { secondary_contact: entry({}), secondary_contacts: [entry({ wants_appointment_texts: true, on_site: true })], evidence };
+    const merged = resolveCallSecondaryContact({}, v2);
+    expect(merged).toMatchObject({ wants_appointment_texts: true, on_site: true, wants_appointment_texts_quote: 'Yeah.', on_site_quote: 'he will be there all day' });
+    expect(onSiteNotifyConsent(merged)).toBe(true);
+    // resolveCallSecondaryContacts keeps it as entry 0 (no duplicate).
+    expect(resolveCallSecondaryContacts({}, v2)).toHaveLength(1);
+  });
+  test('a DIFFERENT person in array[0] never lends its flags', () => {
+    const other = entry({ wants_appointment_texts: true, on_site: true });
+    other.name_full = 'Other Tenant'; other.first_name = 'Other'; other.last_name = 'Tenant'; other.phone_e164 = '+15550100888';
+    const v2 = { secondary_contact: entry({}), secondary_contacts: [other], evidence };
+    expect(onSiteNotifyConsent(resolveCallSecondaryContact({}, v2))).toBe(false);
+  });
+});
+
+describe('round 5: the on-site rule needs a live opt-in rail', () => {
+  const spouse = { first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true };
+  test('rail dark: no on-site consent (so no stamp and no claim); explicit V2 consent is unaffected', () => {
+    expect(resolveSecondaryConsent(spouse, false, { optinRailLive: false }).smsConsentExplicit).toBe(false);
+    expect(resolveSecondaryConsent(spouse, false, { optinRailLive: true }).smsConsentExplicit).toBe(true);
+    expect(resolveSecondaryConsent(spouse, true, { optinRailLive: false }).smsConsentExplicit).toBe(true);
+    expect(orderSecondaryEntriesForPersistence([{ ...spouse, role: 'lender' }, spouse], false, { optinRailLive: false })[0].role).toBe('lender');
+  });
+  test('rail dark: the slot still writes, with no stamp; rail live: stamp', async () => {
+    const bare = { id: 'cust-1', phone: '+15550100999', email: null,
+      service_contact_name: null, service_contact_phone: null, service_contact_email: null,
+      service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+      service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null };
+    const run = async (optinRailLive) => {
+      const state = statefulDb(bare);
+      const { smsConsentExplicit, smsConsentSource } = resolveSecondaryConsent(spouse, false, { optinRailLive });
+      let claimed = 0;
+      await persistCallSecondaryContact('cust-1', spouse, { smsConsentExplicit, smsConsentSource, beforeStamp: async () => { claimed += 1; } });
+      return { state, claimed };
+    };
+    const dark = await run(false);
+    expect(dark.state.updates[0]).toMatchObject({ service_contact_phone: '+15550100123' });
+    expect(dark.state.updates[0]).not.toHaveProperty('service_contacts_consent_at');
+    expect(dark.claimed).toBe(0);
+    const live = await run(true);
+    expect(live.state.updates[0]).toHaveProperty('service_contacts_consent_at');
+    expect(live.claimed).toBe(1);
+  });
+  test('the loop reads the rail once and marks the card optin_rail_dark', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const at = src.indexOf('let primaryOptOutFromState = false;');
-    expect(at).toBeGreaterThan(-1);
-    const block = src.slice(at, at + 2600);
-    // Independent of the stamp source: explicit V2 consent keeps 'call_pipeline_request'.
-    expect(block).not.toContain("service_contacts_consent_source === 'call_pipeline_onsite_contact'");
-    expect(src).toContain('onSiteGrounded: onSiteNotifyConsent(secondaryEntry)');
-    expect(src).toContain('if (entryConsent && onSiteNotifyConsent(secondaryEntry) && secondaryEntry?.phone');
-    expect(block).toContain('onSiteConsentedPhonesThisCall.has(optLast10(row.service_contact_phone))');
-    expect(block).toContain("process.env.GATE_CALL_SECONDARY_CONTACT === 'true'");
-    expect(block).toContain('stampMs >= callStartMs');
-    expect(block).toContain('if (deferPrimaryOptOutCustomerId || primaryOptOutFromState) {');
+    expect(src).toContain("await require('./recipient-optin').isOptinRailLive()");
+    expect(src).toContain("railDarkWithheld ? 'optin_rail_dark'");
+  });
+  test('isOptinRailLive: gate on AND template active', async () => {
+    jest.resetModules();
+    const dbMock = jest.fn();
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => globalThis.__gateOn) }));
+    const { isOptinRailLive } = require('../services/recipient-optin');
+    const template = (row) => dbMock.mockImplementation(() => ({ where: () => ({ first: async () => row }) }));
+    globalThis.__gateOn = false; template({ is_active: true });
+    expect(await isOptinRailLive()).toBe(false);
+    globalThis.__gateOn = true; template(null);
+    expect(await isOptinRailLive()).toBe(false);
+    template({ is_active: false });
+    expect(await isOptinRailLive()).toBe(false);
+    template({ is_active: true });
+    expect(await isOptinRailLive()).toBe(true);
+    dbMock.mockImplementation(() => { throw new Error('boom'); });
+    expect(await isOptinRailLive()).toBe(false);
+    jest.dontMock('../config/feature-gates');
+    jest.resetModules();
   });
 });

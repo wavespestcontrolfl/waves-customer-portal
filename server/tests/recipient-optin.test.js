@@ -5,6 +5,9 @@ const {
   recipientPhoneKey,
   optinBlocksSend,
   markRecipientOptin,
+  applyDemoteMarkersOnConfirm,
+  clearDemoteMarker,
+  clearDemoteMarkersForPhone,
 } = require('../services/recipient-optin');
 
 describe('recipient double opt-in', () => {
@@ -123,3 +126,89 @@ describe('recipient double opt-in', () => {
     expect(updated).toBe(1);
   });
 });
+
+// Round 5: the call pipeline leaves a durable "demote the caller once this
+// recipient confirms" marker on customers.service_preferences; the YES applies
+// it, a decline / failed ask drops it.
+describe('demote-primary-on-optin marker', () => {
+  const KEY = '9415550123';
+  function fakeDb({ marker, optinRows }) {
+    const state = {
+      customer: { service_preferences: marker ? { other: 1, demote_primary_on_optin: marker } : { other: 1 } },
+      prefs: [], optin: optinRows,
+    };
+    const dbh = jest.fn((table) => {
+      const ctx = { table, filter: {}, rawWhere: null };
+      const q = {
+        where: jest.fn((f) => { if (f && typeof f === 'object') Object.assign(ctx.filter, f); return q; }),
+        whereNot: jest.fn(() => q),
+        whereNotNull: jest.fn(() => q),
+        whereRaw: jest.fn((sql, binds) => { ctx.rawWhere = binds; return q; }),
+        select: jest.fn(async () => state.optin.filter((r) => (!ctx.filter.status || r.status === ctx.filter.status) && r.phone_key === ctx.filter.phone_key)),
+        first: jest.fn(async () => (table === 'customers' ? { service_preferences: state.customer.service_preferences } : null)),
+        update: jest.fn(async (payload) => {
+          if (table === 'customers') {
+            const matches = !ctx.rawWhere || (state.customer.service_preferences.demote_primary_on_optin || {}).phone_key === ctx.rawWhere[0];
+            if (matches) { delete state.customer.service_preferences.demote_primary_on_optin; return 1; }
+            return 0;
+          }
+          if (table === 'recipient_optin') {
+            let n = 0;
+            state.optin.forEach((r) => { if (r.phone_key === ctx.filter.phone_key && r.status === ctx.filter.status) { Object.assign(r, payload); n += 1; } });
+            return n;
+          }
+          return 0;
+        }),
+        insert: jest.fn((row) => ({ onConflict: () => ({ merge: async () => { state.prefs.push(row); } }) })),
+        then: undefined,
+      };
+      return q;
+    });
+    dbh.raw = jest.fn((sql) => sql);
+    return { dbh, state };
+  }
+  const rows = [{ phone_key: KEY, customer_id: 'c1', status: 'confirmed' }];
+
+  test('YES for the marker phone: writes appointment_notify_primary=false and clears the marker (other keys kept)', async () => {
+    const { dbh, state } = fakeDb({ marker: { phone_key: KEY, scheduled_service_id: 's1', set_at: 'x' }, optinRows: rows });
+    await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+    expect(state.customer.service_preferences).toEqual({ other: 1 });
+  });
+
+  test('YES for a DIFFERENT phone leaves the pref and the marker alone', async () => {
+    const { dbh, state } = fakeDb({ marker: { phone_key: '9415550999', scheduled_service_id: 's1', set_at: 'x' }, optinRows: rows });
+    await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.prefs).toEqual([]);
+    expect(state.customer.service_preferences.demote_primary_on_optin.phone_key).toBe('9415550999');
+  });
+
+  test('no marker at all: nothing written', async () => {
+    const { dbh, state } = fakeDb({ marker: null, optinRows: rows });
+    await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.prefs).toEqual([]);
+  });
+
+  test('a failed ask (releaseAskFailed path) and a STOP decline drop the marker', async () => {
+    const a = fakeDb({ marker: { phone_key: KEY }, optinRows: rows });
+    await clearDemoteMarker('c1', KEY, { dbh: a.dbh });
+    expect(a.state.customer.service_preferences.demote_primary_on_optin).toBeUndefined();
+    const b = fakeDb({ marker: { phone_key: KEY }, optinRows: rows });
+    await clearDemoteMarkersForPhone(KEY, { dbh: b.dbh });
+    expect(b.state.customer.service_preferences.demote_primary_on_optin).toBeUndefined();
+    // A marker naming another phone survives a clear for this one.
+    const c = fakeDb({ marker: { phone_key: '9415550999' }, optinRows: rows });
+    await clearDemoteMarker('c1', KEY, { dbh: c.dbh });
+    expect(c.state.customer.service_preferences.demote_primary_on_optin.phone_key).toBe('9415550999');
+  });
+
+  test('wired into the transitions: confirm applies, decline clears, every ask_failed release clears', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/recipient-optin'), 'utf8');
+    expect(src).toContain("if (status === 'confirmed') await applyDemoteMarkersOnConfirm(key, { dbh });");
+    expect(src).toContain("else if (status === 'declined') await clearDemoteMarkersForPhone(key, { dbh });");
+    expect(src.split('await releaseAskFailed(').length - 1).toBe(4);
+    // Marker steps are savepointed and never throw out of an opt-in transition.
+    expect(src).toContain('async function withSavepoint(dbh, fn)');
+  });
+});
+

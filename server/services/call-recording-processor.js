@@ -2662,11 +2662,13 @@ async function quotePromisedAlreadyNotified(callSid, { ignoreNoLead = false } = 
 // when their identities conflict (different phone, email, or first name), the
 // V1 extraction wins unmerged — never chimera two different people.
 function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
-  const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const { canonicalV2Secondary } = require('../utils/extraction-compat');
   const v1 = (extracted.secondary_contact && typeof extracted.secondary_contact === 'object')
     ? extracted.secondary_contact
     : null;
-  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact, { evidence: v2Extraction?.evidence, counterpart: v2Extraction?.secondary_contacts?.[0] || null });
+  // The singleton and the mirrored secondary_contacts[0] are canonicalized first, so
+  // flags/evidence the model put on only one of the two shapes still count.
+  const v2 = canonicalV2Secondary(v2Extraction);
   // V1 has no evidence contract: its on-site consent flags can NEVER authorize
   // the stamp on their own (owner 2026-09-30 audit). Only a valid V2
   // extraction's evidence-pinned flags can — a V1-only (or V1-unmerged)
@@ -3441,12 +3443,12 @@ function onSiteNotifyConsent(contact) {
 // A caller who asked not to be contacted (V2 consent.do_not_contact_request)
 // never earns the on-site stamp or its opt-in claim — the slot may still be
 // written, unstamped (owner 2026-09-30 audit).
-function resolveSecondaryConsent(contact, v2SmsConsentExplicit, { doNotContact = false } = {}) {
+function resolveSecondaryConsent(contact, v2SmsConsentExplicit, { doNotContact = false, optinRailLive = true } = {}) {
   if (v2SmsConsentExplicit) {
     return { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_request' };
   }
   return {
-    smsConsentExplicit: !doNotContact && onSiteNotifyConsent(contact),
+    smsConsentExplicit: !doNotContact && optinRailLive && onSiteNotifyConsent(contact),
     smsConsentSource: 'call_pipeline_onsite_contact',
   };
 }
@@ -13266,11 +13268,15 @@ const CallRecordingProcessor = {
     // phone: the primary's appointment texts are switched off only once a
     // booking succeeds on THIS call (applied where scheduledServiceId lands).
     let deferPrimaryOptOutCustomerId = null;
-    // Phones (last-10) whose on-site consent THIS call's persistence wrote,
-    // upgraded, or found already on record — the only phones the booking-site
-    // state recovery below may act on (pre-push codex P1: scoped to the
-    // originating call and, by construction, to the persistence gate).
-    const onSiteConsentedPhonesThisCall = new Set();
+    let deferPrimaryOptOutPhoneKey = null;
+    // On-site consent needs a LIVE opt-in rail (gate on + request template
+    // active): with it dark nobody would ever be asked, so the rule would stamp
+    // consent for a phone that never confirmed (owner 2026-09-30 audit). Read
+    // once per call, and only when it can matter (V2 explicit consent is
+    // unaffected by the rail).
+    const optinRailLive = (!v2SmsConsentExplicit && callSecondaryContacts.some(onSiteNotifyConsent))
+      ? await require('./recipient-optin').isOptinRailLive()
+      : true;
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
@@ -13283,14 +13289,14 @@ const CallRecordingProcessor = {
       // withholds their phone (see phoneWithheld there) — the stamp is never
       // cleared, on this pass or a reprocess. V2-explicit calls are unaffected
       // (every entry consents).
-      const orderedEntries = orderSecondaryEntriesForPersistence(callSecondaryContacts, v2SmsConsentExplicit, { doNotContact: v2DoNotContact });
+      const orderedEntries = orderSecondaryEntriesForPersistence(callSecondaryContacts, v2SmsConsentExplicit, { doNotContact: v2DoNotContact, optinRailLive });
       for (const secondaryEntry of orderedEntries) {
       try {
         // On-site rule (owner 2026-09-30): consent for THIS contact is explicit
         // V2 consent OR the on-site-contact rule above; the stamp source records
         // which one authorized it.
         const { smsConsentExplicit: entryConsent, smsConsentSource } =
-          resolveSecondaryConsent(secondaryEntry, v2SmsConsentExplicit, { doNotContact: v2DoNotContact });
+          resolveSecondaryConsent(secondaryEntry, v2SmsConsentExplicit, { doNotContact: v2DoNotContact, optinRailLive });
         // Opt-in claim runs INSIDE the persist, right before the stamp UPDATE
         // (beforeStamp): a stamped row with a rowless phone reads as
         // grandfathered to every sender, so the claim must precede the stamp.
@@ -13325,7 +13331,10 @@ const CallRecordingProcessor = {
             smsConsentExplicit: entryConsent,
             smsConsentSource,
             beforeStamp: claimOptinBeforeStamp,
-            onPrimaryOptOutEligible: () => { deferPrimaryOptOutCustomerId = customerId; },
+            onPrimaryOptOutEligible: () => {
+              deferPrimaryOptOutCustomerId = customerId;
+              deferPrimaryOptOutPhoneKey = String(secondaryEntry.phone || '').replace(/\D/g, '').slice(-10);
+            },
             onSiteGrounded: onSiteNotifyConsent(secondaryEntry),
           });
         } catch (persistErr) {
@@ -13349,16 +13358,21 @@ const CallRecordingProcessor = {
           continue;
         }
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
-        if (result === 'skipped_phone_on_record_consent_withheld' || result === 'written_consent_withheld') {
-          // The call grounded this person's consent but the account-wide stamp
-          // can't describe another unconsented slot phone on the row — say so
-          // on the review card so the office sees why no texts will go.
+        // The call grounded this person's consent but it was withheld: either the
+        // account-wide stamp can't describe another unconsented slot phone on the
+        // row (true), or the opt-in rail is dark so nobody could confirm
+        // ('optin_rail_dark'). Say so on the review card so the office sees why
+        // no texts will go.
+        const railDarkWithheld = !optinRailLive && !v2SmsConsentExplicit && !v2DoNotContact && onSiteNotifyConsent(secondaryEntry);
+        const consentWithheldMarker = railDarkWithheld ? 'optin_rail_dark'
+          : ((result === 'skipped_phone_on_record_consent_withheld' || result === 'written_consent_withheld') ? true : null);
+        if (consentWithheldMarker) {
           try {
             await db('triage_items')
               .where({ call_log_id: call.id, reason_code: 'secondary_contact_captured' })
               .whereIn('status', ['open', 'in_progress'])
               .update({
-                payload: db.raw('(coalesce(payload, \'{}\'::jsonb)) || ?::jsonb', [JSON.stringify({ consent_withheld: true })]),
+                payload: db.raw('(coalesce(payload, \'{}\'::jsonb)) || ?::jsonb', [JSON.stringify({ consent_withheld: consentWithheldMarker })]),
                 updated_at: new Date(),
               });
           } catch (triageErr) {
@@ -13371,9 +13385,6 @@ const CallRecordingProcessor = {
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
         // stays async.
-        if (entryConsent && onSiteNotifyConsent(secondaryEntry) && secondaryEntry?.phone && typeof result === 'string' && (result.startsWith('written') || result.startsWith('consent_upgraded') || result.startsWith('skipped_phone_on_record'))) {
-          onSiteConsentedPhonesThisCall.add(String(secondaryEntry.phone).replace(/\D/g, '').slice(-10));
-        }
         if (['written', 'written_consent_withheld', 'consent_upgraded_phone_on_record', 'skipped_phone_on_record_consent_withheld'].includes(result) && claimedOptins.length && claimedCustRow) {
           const { dispatchRecipientOptins } = require('./recipient-optin');
           void dispatchRecipientOptins(claimedOptins, claimedCustRow)
@@ -18079,45 +18090,41 @@ const CallRecordingProcessor = {
               }
               // Deferred caller opt-out (owner 2026-09-30, "the caller is a
               // contact, not the recipient"): the on-site contact became the
-              // first slot phone and a booking has now landed on this call, so
-              // the account holder stops receiving the appointment texts. Their
+              // first slot phone and a booking has now landed on this call. Their
               // own booking confirmation is a separate primary send. An
               // unbooked or held call never reaches this line.
-              // Durable across retries (pre-push codex P1): the in-memory flag is
-              // lost if processing dies between persistence and booking, and the
-              // retry's persist returns skipped_phone_on_record (no callback). So
-              // ALSO derive eligibility from the saved state: the row's first slot
-              // phone is one of THIS call's grounded on-site contacts and the
-              // row's stamp was written during this call (the set only holds
-              // phones of grounded on-site contacts).
-              let primaryOptOutFromState = false;
-              if (!deferPrimaryOptOutCustomerId && customerId
-                  && process.env.GATE_CALL_SECONDARY_CONTACT === 'true'
-                  && onSiteConsentedPhonesThisCall.size) {
+              // The opt-out is NOT written here (pre-push codex P1): the caller
+              // stays subscribed until the on-site recipient actually CONFIRMS
+              // the opt-in ask. A durable marker on the customer row names that
+              // recipient; recipient-optin.js applies appointment_notify_primary
+              // = false when their YES lands (and drops the marker if the ask
+              // fails or they decline). If they already confirmed on an earlier
+              // call there is nothing left to wait for, so it applies now.
+              if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKey) {
                 try {
-                  const optLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-                  const row = await db('customers').where({ id: customerId }).first('service_contact_phone', 'service_contacts_consent_source', 'service_contacts_consent_at');
-                  // Bound to THIS call: the stamp must postdate the call's start.
-                  // A stamp from an earlier call means the opt-out already had
-                  // its chance then; re-applying it now would override an
-                  // office re-enable of the caller in between (pre-push codex P1).
-                  const callStartMs = (() => { const at = callStartedAt(call) || call.created_at; const ms = at ? new Date(at).getTime() : NaN; return Number.isFinite(ms) ? ms : null; })();
-                  const stampMs = row?.service_contacts_consent_at ? new Date(row.service_contacts_consent_at).getTime() : NaN;
-                  primaryOptOutFromState = !!row
-                    && onSiteConsentedPhonesThisCall.has(optLast10(row.service_contact_phone))
-                    && callStartMs !== null && Number.isFinite(stampMs) && stampMs >= callStartMs;
-                } catch (stateErr) {
-                  logger.warn(`[call-proc] deferred primary opt-out state read failed for ${maskSid(callSid)}: ${safeErrorToken(stateErr)}`);
-                }
-              }
-              if (deferPrimaryOptOutCustomerId || primaryOptOutFromState) {
-                try {
-                  await db('notification_prefs')
-                    .insert({ customer_id: deferPrimaryOptOutCustomerId || customerId, appointment_notify_primary: false })
-                    .onConflict('customer_id')
-                    .merge({ appointment_notify_primary: false });
+                  const alreadyConfirmed = await db('recipient_optin')
+                    .where({ phone_key: deferPrimaryOptOutPhoneKey, customer_id: deferPrimaryOptOutCustomerId, status: 'confirmed' })
+                    .first('phone_key');
+                  if (alreadyConfirmed) {
+                    await db('notification_prefs')
+                      .insert({ customer_id: deferPrimaryOptOutCustomerId, appointment_notify_primary: false })
+                      .onConflict('customer_id')
+                      .merge({ appointment_notify_primary: false });
+                  } else {
+                    await db('customers')
+                      .where({ id: deferPrimaryOptOutCustomerId })
+                      .update({
+                        service_preferences: db.raw('COALESCE(service_preferences, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify({
+                          demote_primary_on_optin: {
+                            phone_key: deferPrimaryOptOutPhoneKey,
+                            scheduled_service_id: svc.id,
+                            set_at: new Date().toISOString(),
+                          },
+                        })]),
+                      });
+                  }
                 } catch (prefsErr) {
-                  logger.warn(`[call-proc] deferred primary opt-out failed for ${maskSid(callSid)}: ${safeErrorToken(prefsErr)}`);
+                  logger.warn(`[call-proc] deferred primary opt-out marker failed for ${maskSid(callSid)}: ${safeErrorToken(prefsErr)}`);
                 }
               }
               if (scheduleWasReused && !disputeHeldReuse) {
@@ -19200,7 +19207,7 @@ const CallRecordingProcessor = {
                       // consent artifact and filterRecipientsByOptin the opt-in state,
                       // so widening for an on-site contact (owner 2026-09-30) cannot
                       // text anyone whose slot was not stamped.
-                      const anyOnSiteConsent = !v2DoNotContact && callSecondaryContacts.some(onSiteNotifyConsent);
+                      const anyOnSiteConsent = !v2DoNotContact && optinRailLive && callSecondaryContacts.some(onSiteNotifyConsent);
                       const extraContacts = (!v2SmsConsentExplicit && !anyOnSiteConsent) ? [] : (await filterRecipientsByOptin(
                         getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
                       )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)

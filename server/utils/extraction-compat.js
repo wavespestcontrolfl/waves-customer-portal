@@ -58,7 +58,7 @@ function flatView(extraction, { transcript = null } = {}) {
   const sentiment = extraction.sentiment_and_lead || {};
   const history = extraction.customer_history || {};
   const consent = extraction.consent || {};
-  const secondary = mapSecondaryContactToLegacy(extraction.secondary_contact, { evidence: extraction.evidence, counterpart: extraction.secondary_contacts?.[0] || null });
+  const secondary = canonicalV2Secondary(extraction);
   const hasTranscript = typeof transcript === 'string' && transcript.length > 0;
   const groundedFor = (contact) => {
     if (!hasTranscript || !contact) return null;
@@ -246,6 +246,29 @@ function sameV2Person(a, b) {
   if (a.email && b.email && norm(a.email) === norm(b.email)) return true;
   const an = nameOf(a); const bn = nameOf(b);
   return !!an && an === bn && an.includes(' ');
+}
+
+// The singleton secondary_contact and secondary_contacts[0] mirror each other,
+// and a model may put the on-site flags/evidence on only ONE of the two shapes.
+// When the two V2 shapes positively agree on identity (sameV2Person), the
+// canonical contact takes the flags (OR) and the first non-null quote from
+// whichever shape has them, BEFORE any V1/V2 merge or replay fingerprint
+// (pre-push codex P1). A different person in entry 0 never lends its flags.
+function canonicalV2Secondary(extraction) {
+  const single = mapSecondaryContactToLegacy(extraction?.secondary_contact, {
+    evidence: extraction?.evidence, counterpart: extraction?.secondary_contacts?.[0] || null,
+  });
+  const first = extraction?.secondary_contacts?.[0];
+  if (!single || !first || !sameV2Person(extraction.secondary_contact, first)) return single;
+  const mirror = mapSecondaryContactToLegacy(first, { evidence: extraction.evidence, index: 0, counterpart: extraction.secondary_contact });
+  if (!mirror) return single;
+  return {
+    ...single,
+    wants_appointment_texts: single.wants_appointment_texts || mirror.wants_appointment_texts,
+    on_site: single.on_site || mirror.on_site,
+    wants_appointment_texts_quote: single.wants_appointment_texts_quote || mirror.wants_appointment_texts_quote,
+    on_site_quote: single.on_site_quote || mirror.on_site_quote,
+  };
 }
 
 // Stable identity of a secondary contact for replay signatures: phone last-10,
@@ -809,6 +832,7 @@ function callerIdDisclaimedNoteText(caller, { now = new Date(), ani = null } = {
 
 module.exports = {
   sameV2Person,
+  canonicalV2Secondary,
   secondaryEvidencePrefixes,
   isV2Extraction,
   flatView,

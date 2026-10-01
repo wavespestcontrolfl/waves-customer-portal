@@ -18,11 +18,17 @@
 // A bare affirmation ("Yeah.", "Yes", "Okay", "Sure") proves nothing on its
 // own: it only counts when the IMMEDIATELY preceding agent turn asked about
 // THAT field, so a stray "Yeah." after "What's the zip code?" cannot ground
-// consent. Substantive quotes (3+ words that are not all filler) keep the
-// plain caller-turn rule.
-const FILLER_WORDS = new Set([
-  'yeah', 'yes', 'yep', 'yup', 'ok', 'okay', 'sure', 'right', 'alright', 'absolutely', 'definitely',
-  'please', 'that', 'works', 'fine', 'sounds', 'good', 'great', 'thanks', 'thank', 'you', 'uh', 'huh', 'mm', 'hmm', 'mhm', 'it', 'is', 'would', 'be', 'so',
+// consent. Substantive quotes (at least one content word) keep the plain
+// caller-turn rule.
+// A quote made ONLY of these words (any length) is a generic affirmation and
+// takes the prompt-bound path: "Yes, that's correct" after "is the name
+// spelled S-A-M?" must not ground consent. A quote with at least one content
+// word outside this set is substantive.
+const AFFIRMATIVE_OR_FILLER_WORDS = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'fine', 'correct', 'right', 'thats', 'that', 'is', 'it',
+  'works', 'sounds', 'good', 'great', 'perfect', 'please', 'absolutely', 'definitely', 'of', 'course',
+  'i', 'we', 'he', 'she', 'they', 'do', 'does', 'will', 'can', 'agree', 'thanks', 'thank', 'you',
+  'um', 'uh', 'so', 'well', 'alright', 'all', 'exactly', 'huh', 'mm', 'hmm', 'mhm', 'would', 'be',
 ]);
 
 // Phrase-level, not token-level: "Are there termites?" must not ask about
@@ -33,7 +39,8 @@ const PROMPT_PATTERNS = {
   wants_appointment_texts: /\b(text(s|ing)? (him|her|them|you|his|your|their)|(get|send|receive)s? (a |the )?(text|texts|reminder|reminders|tracking link)|(appointment |visit )?(reminder|reminders)|on (the|his|her|their|our) way|tracking link|notifications?)\b/i,
   on_site: /\b((?:be|will be|is going to be|he's|she's|they're|he'll be|she'll be|they'll be) (?:there|home)|(?:be|is|are|he's|she's|they're|will be|is going to be) (?:at the (?:house|property|home|address)|on[- ]site|home)|meet (?:the|our|your) (?:tech|technician|inspector)|lives? (?:there|at the (?:house|property))|living there|present (?:at|for)|on[- ]site)\b/i,
 };
-const RECIPIENT_REFERENCE = /\b(him|her|them|his|your|their|you|cell|phone|number|name)\b/i;
+// Subject pronouns count too: "Should he get appointment reminders?".
+const RECIPIENT_REFERENCE = /\b(him|her|them|his|your|their|you|cell|phone|number|name|he|she|they|he'll|she'll|they'll|hes|shes)\b/i;
 const promptAsks = (field, agentText) => PROMPT_PATTERNS[field].test(agentText)
   && (field !== 'wants_appointment_texts' || RECIPIENT_REFERENCE.test(agentText));
 
@@ -42,7 +49,7 @@ const promptAsks = (field, agentText) => PROMPT_PATTERNS[field].test(agentText)
 // texts" and "he will not be at the house" are refusals, never grounding.
 // The common affirmative idioms are stripped first ("no problem, text him").
 const AFFIRMATIVE_IDIOMS = /\b(no problem|not a problem|no worries|no trouble)\b/g;
-const NEGATION = /\b(no|nope|not|dont|do not|wont|will not|never|isnt|arent|cant|cannot|nobody|none|rather not|stop)\b/;
+const NEGATION = /\b(no|nope|not|dont|do not|wont|will not|never|isnt|arent|cant|cannot|nobody|none|rather not|stop|doesnt|didnt|shouldnt|wouldnt|couldnt|hasnt|havent|wasnt|werent|mustnt|neednt)\b/;
 // A short affirmation must itself be affirmative.
 const AFFIRMATIVE = /\b(yes|yeah|yep|yup|sure|okay|ok|correct|right|that works|sounds good|please)\b/;
 
@@ -55,9 +62,11 @@ function verifyOnSiteGrounding(contact, transcript) {
   if (!contact || typeof contact !== 'object') return contact;
   const { parseTurns, turnsHolding } = require('../services/call-reschedule-agreement');
   const turns = parseTurns(transcript);
+  // Generic = under 3 words (a lone "Tuesday." proves nothing either), or made
+  // only of affirmative/filler words at ANY length.
   const isGenericAffirmation = (normalized) => {
     const words = normalized.split(' ').filter(Boolean);
-    return words.length < 3 || words.every((w) => FILLER_WORDS.has(w));
+    return words.length < 3 || words.every((w) => AFFIRMATIVE_OR_FILLER_WORDS.has(w));
   };
   // The agent turn right before this caller turn (empty turns skipped).
   const promptingAgentTurn = (turn) => {
