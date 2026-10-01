@@ -192,6 +192,10 @@ async function syncCampaigns({ throwOnError = false } = {}) {
 async function syncCampaignsLocked() {
   try {
     logger.info('[meta-ads] Syncing campaigns');
+    // Rows a local writer (admin create/edit, outside this sync's lock) touches
+    // after this instant are fresher than our Graph snapshot: the removal pass
+    // below leaves them for the next sync (same fence as google-ads.js).
+    const fetchStartedAt = new Date();
     const { rows, complete } = await graphGetPaged('campaigns', {
       fields: 'id,name,status,effective_status,objective,daily_budget',
     });
@@ -221,7 +225,7 @@ async function syncCampaignsLocked() {
     // here) must not reconcile. Rows with a NULL platform_campaign_id are left
     // alone (explicit whereNotNull: knex compiles an empty NOT IN to always-true).
     if (complete) {
-      const removed = await markMissingCampaignsRemoved(rows.map((r) => String(r.id)));
+      const removed = await markMissingCampaignsRemoved(rows.map((r) => String(r.id)), fetchStartedAt);
       if (removed > 0) logger.info(`[meta-ads] Marked ${removed} campaign(s) removed (no longer returned by Meta)`);
     } else {
       // Rows fetched so far are upserted, but the sync is NOT healthy: fail the
@@ -237,12 +241,13 @@ async function syncCampaignsLocked() {
   }
 }
 
-async function markMissingCampaignsRemoved(returnedIds) {
+async function markMissingCampaignsRemoved(returnedIds, fetchStartedAt) {
   const n = await db('ad_campaigns')
     .where({ platform: PLATFORM })
     .whereNotNull('platform_campaign_id')
     .whereNotIn('platform_campaign_id', returnedIds)
     .whereNot('status', 'removed')
+    .where('updated_at', '<', fetchStartedAt)
     .update({ status: 'removed', updated_at: new Date() });
   return Number(n) || 0;
 }

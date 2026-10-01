@@ -6,10 +6,11 @@ const insertCalls = [];
 const updateCalls = [];
 const whereNotInCalls = [];
 const whereNotNullCalls = [];
+const whereArgs = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
-  b.where = jest.fn(() => b);
+  b.where = jest.fn((...args) => { whereArgs.push({ table, args }); return b; });
   b.whereNot = jest.fn(() => b);
   b.whereNotNull = jest.fn((col) => { whereNotNullCalls.push({ table, col }); return b; });
   b.whereNotIn = jest.fn((col, ids) => { whereNotInCalls.push({ table, col, ids }); return b; });
@@ -42,6 +43,7 @@ beforeEach(() => {
   updateCalls.length = 0;
   whereNotInCalls.length = 0;
   whereNotNullCalls.length = 0;
+  whereArgs.length = 0;
   process.env = { ...env, META_ADS_ACCESS_TOKEN: 'tok', META_ADS_ACCOUNT_ID: '1234567890' };
 });
 afterAll(() => { process.env = env; });
@@ -254,6 +256,10 @@ describe('syncCampaigns removed-campaign reconcile', () => {
     expect(whereNotInCalls).toEqual([{ table: 'ad_campaigns', col: 'platform_campaign_id', ids: [] }]);
     // An empty NOT IN compiles to always-true, so manual NULL-id rows need this fence.
     expect(whereNotNullCalls).toEqual([{ table: 'ad_campaigns', col: 'platform_campaign_id' }]);
+    // Rows an admin wrote after the fetch began are fenced out of the removal pass.
+    const fence = whereArgs.find((a) => a.table === 'ad_campaigns' && a.args[0] === 'updated_at');
+    expect(fence.args[1]).toBe('<');
+    expect(fence.args[2]).toBeInstanceOf(Date);
     expect(removedUpdates()).toHaveLength(1);
   });
 
