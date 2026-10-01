@@ -1122,13 +1122,18 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
       // (en_route / on_site / completed) since the stamp committed: un-stamping it would restore a hold the
       // lazy rail and tech-track both refuse, stranding it. An advanced visit KEEPS its approval and its
       // activation_pending marker, and the sweep (resumePendingHoldActivations) finishes the legs.
-      const unstamped = await dbh('scheduled_services')
-        .where({ id: svc.id, customer_confirmed: true, status: 'confirmed' })
-        .where('confirmed_at', stampedAt)
-        .update({ customer_confirmed: false, confirmed_at: null });
+      // The un-stamp and the marker clear are ONE transaction, so a recovery pass never sees the marker on
+      // an unstamped visit (or the stamp without its marker).
+      const unstamped = await dbh.transaction(async (trx) => {
+        const n = await trx('scheduled_services')
+          .where({ id: svc.id, customer_confirmed: true, status: 'confirmed' })
+          .where('confirmed_at', stampedAt)
+          .update({ customer_confirmed: false, confirmed_at: null });
+        if (n > 0 && svc.source_call_log_id) await setHoldActivationPending(trx, svc.source_call_log_id, svc.id, false, mode);
+        return n;
+      });
       if (unstamped > 0) {
         logger.error(`[${routeTag}] hold activation incomplete for ${svc.id} — un-stamped so the activation sweep retries it`);
-        if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false, mode);
         await reopenHoldCardForRestoredVisit(svc.id, dbh);
       } else {
         logger.error(`[${routeTag}] hold activation incomplete for ${svc.id} — visit already advanced or taken: approval and pending marker kept for the sweep`);
