@@ -159,7 +159,10 @@ function visibleText(html) {
 // so an article titled "Why Termites Were Not Found" is not an error page.
 const NOT_FOUND_HEADING_RE = /^(?:(?:oops|sorry|error|http|404)\W+)*not found\b|\b(?:page|file|url|resource|document|listing|profile|business|content)\b(?:\s+\S+){0,4}?\s+not found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
 const HEADING_TAGS = new Set(['title', 'h1']);
-const INERT_TAGS = new Set(['!--', 'script', 'style', 'template']);
+// Raw-text and RCDATA elements: the parser builds no elements inside them, so an <h1> written
+// in a script, iframe fallback or textarea is text, never a heading.
+const RAW_TEXT_TAGS = ['script', 'style', 'iframe', 'textarea', 'xmp', 'noembed', 'noframes'];
+const INERT_TAGS = new Set(['!--', 'template', ...RAW_TEXT_TAGS]);
 const TAG_RE = /<(\/?)(!--|[a-z][a-z0-9-]*)/y;
 const headingText = (inner) => decodeHTML(visibleText(inner)).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -177,8 +180,8 @@ function forwardFinder(lower) {
 }
 
 // Where an inert region opened at `lt` ends (Infinity = runs to end of document): a comment at
-// "-->", script/style at their raw-text close, a template just past its matching close tag (they nest).
-// Comments and script/style bodies inside a template are skipped whole, so a "</template>"
+// "-->", a raw-text element (script, style, iframe, textarea…) at its close, a template just past its matching close tag (they nest).
+// Comments and raw-text bodies inside a template are skipped whole, so a "</template>"
 // written in one never closes it. A tag name counts only when a delimiter follows it, as in the
 // HTML tokenizer: "</scripture>" inside a script string does not end the script.
 const TAG_DELIM_RE = /[\s/>]/;
@@ -189,7 +192,7 @@ const tagAt = (lower, find, needle, from) => {
   }
   return at;
 };
-const TEMPLATE_INNER = ['<template', '</template', '<!--', '<script', '<style'];
+const TEMPLATE_INNER = ['<template', '</template', '<!--', ...RAW_TEXT_TAGS.map((t) => `<${t}`)];
 function inertEnd(lower, find, name, lt, gt) {
   if (name === '!--') return find('-->', lt + 4) + 3;
   if (name !== 'template') return tagAt(lower, find, `</${name}`, gt + 1);

@@ -361,8 +361,12 @@ const STATE_NAME_ALTS = US_STATE_NAMES.flatMap((n) => [n, n.toUpperCase()]).map(
 const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|${STATE_NAME_ALTS})${ZIP_TAIL}`); // our own state in any case
 // A house number shortly before (within 120 characters, not a word count, so long street and
 // city names still count) is address context for any state code or name in any case
-// ("99 palm terrace atlanta ga 30303", "99 Palm Terrace Boise ID 83702").
-const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s[^;!?]{1,120}?\\s(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
+// ("99 palm terrace atlanta ga 30303", "99 Palm Terrace Boise ID 83702"). The number must stand
+// alone: not one group of a phone ("941 318 7612") and not a count ("5 reviews"). A code right
+// after an ID label ("Listing ID 98765", "order id 12345") is that label, not a state.
+const COUNT_NOUNS = 'reviews?|ratings?|photos?|pictures?|videos?|years?|yrs?|stars?|followers?|likes?|jobs?|hires?|views?|answers?|questions?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|miles?|mi|employees?|projects?|results?|listings?|customers?|clients?';
+const ID_LABELS = 'listing|order|account|acct|member|customer|client|ref|reference|user|business|profile|case|ticket|invoice|tax|employer|record|vendor|license|licence|transaction|tracking|item|product|ad|company|provider|location|store|claim|policy|confirmation|booking|job|lead|quote';
+const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS})\\b)[^;!?]{1,120}?(?<!\\b(?:${ID_LABELS}))\\s(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
@@ -401,7 +405,10 @@ function judgeTextAddress(nap, office, entityAddress) {
     const ours = seen.find((m) => normalizeStreet(m) === office.street) || seen[0] || null;
     return { confirmed: true, checked: true, mismatches: [], unconfirmed: null, observed: ours };
   }
-  const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text) || NUMBERED_STATE_ZIP_RE.exec(nap.text);
+  // Phones are blanked to a ';' (which the house-number span cannot cross) padded to the same
+  // length, so a phone is never a house number and match indexes still point into nap.text.
+  const noPhones = nap.text.replace(PHONE_RE, (m) => ';'.padEnd(m.length, ' '));
+  const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text) || NUMBERED_STATE_ZIP_RE.exec(noPhones);
   const first = seen[0] ? seen[0].trim() : (zip ? nap.text.slice(Math.max(0, zip.index - 60), zip.index + zip[0].length).trim() : null);
   // An entity address we could not read (a link to a node not on the page) is stated but
   // unknown: never let it pass as "no address shown".

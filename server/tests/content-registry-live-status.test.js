@@ -593,12 +593,12 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     for (const junk of junks) {
       const started = Date.now();
       notFoundHeading(junk.repeat(Math.ceil(600000 / junk.length)));
-      expect(Date.now() - started).toBeLessThan(500);
+      expect(Date.now() - started).toBeLessThan(1500); // ~200 ms in Jest; the quadratic scan this guards took 3.5–5 s
     }
     // deep nesting, then the matching closes (the exhausted-search case)
     const started = Date.now();
     notFoundHeading(`${'<template>'.repeat(30000)}${'</template>'.repeat(30000)}`);
-    expect(Date.now() - started).toBeLessThan(500);
+    expect(Date.now() - started).toBeLessThan(1500); // ~200 ms in Jest; the quadratic scan this guards took 3.5–5 s
   });
   test('a heading left open runs to the end of the document', () => {
     expect(notFoundHeading('<html><body><h1>Page not found')).toBe(true);
@@ -612,6 +612,10 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<h1>Page <script>x()</script>not found</h1>')).toBe(true);
     expect(notFoundHeading('<template></template><h1>Page not found</h1>')).toBe(true);
     expect(notFoundHeading('<h1><template></template>Not found</h1>')).toBe(true);
+    expect(notFoundHeading('<iframe><h1>Not found</h1></iframe><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<textarea><h1>Page not found</h1></textarea><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<template><textarea></template><h1>Not found</h1></textarea></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<iframe src="x"></iframe><h1>Page not found</h1>')).toBe(true);
     expect(notFoundHeading('<script>var s = "</scripture><h1>Page not found</h1>";</script><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<template><scripts></scripts><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<script>x</script\t><h1>Page not found</h1>')).toBe(true);

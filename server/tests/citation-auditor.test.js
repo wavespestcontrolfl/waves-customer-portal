@@ -444,6 +444,10 @@ describe('classifyListing', () => {
       expect(text('<p>99 palm terrace atlanta ga 30303</p>').status).toBe('unverified'); // lowercase, comma-free
       expect(text('<p>99 palm terrace boise id 83702</p>').status).toBe('unverified');
       expect(text('<p>99 palm terrace atlanta georgia 30303</p>').status).toBe('unverified');
+      expect(text('<p>941 318 7612</p><p>Listing ID 98765</p>').status).toBe('verified'); // a phone group is no house number
+      expect(text('<p>5 reviews</p><p>Listing ID 98765</p>').status).toBe('verified'); // nor a count
+      expect(text('<p>Open 7 days a week</p><p>order id 12345</p>').status).toBe('verified'); // an ID label is no state
+      expect(text('<p>(941) 318-7612 · 12 photos · Listing ID 98765</p>').status).toBe('verified');
       expect(text('<p>Order ID 12345 confirmed</p><p>Open 7 days</p>').status).toBe('verified');
     });
 
