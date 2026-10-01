@@ -4171,6 +4171,15 @@ const StripeService = {
               throw err;
             }
           } else if (activeIntent.status === 'requires_payment_method'
+            // A consent-stamp change takes the cancel-and-replace branch
+            // too (pre-push Codex on #5434): an in-place update would
+            // re-stamp a PI whose client secret a stale tab still holds —
+            // Express Checkout confirms straight with Stripe, and the
+            // webhook would record the NEWER version against text that tab
+            // never rendered. Covers the rollout (no stamp → v12) and any
+            // later copy change.
+            && String(activeIntent.metadata?.[CONSENT_VERSION_METADATA_KEY] || '')
+              === String(piParams.metadata[CONSENT_VERSION_METADATA_KEY] || '')
             && (
               // Single-invoice ↔ single-invoice reuse keeps the original
               // in-place update contract (amount refresh included) — the
@@ -4216,17 +4225,18 @@ const StripeService = {
             await stampCombinedSiblings(paymentIntent.id);
             return;
           } else if (activeIntent.status === 'requires_payment_method') {
-            // Allocation or amount CHANGED on an unconfirmed PI (codex r28
-            // P1): cancel and mint FRESH so every stale tab's client secret
-            // is invalidated — an in-place update would leave the old
-            // secret able to confirm a sibling set/total the first tab
-            // never itemized.
+            // Allocation, amount or consent stamp CHANGED on an unconfirmed
+            // PI (codex r28 P1; pre-push Codex on #5434): cancel and mint
+            // FRESH so every stale tab's client secret is invalidated — an
+            // in-place update would leave the old secret able to confirm a
+            // sibling set/total the first tab never itemized, or a saved
+            // method under a consent version it never displayed.
             try {
               await stripe.paymentIntents.cancel(activeIntent.id);
               await PayCombined.clearPaymentIntentStamps(trx, activeIntent.id);
               await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, updated_at: trx.fn.now() });
               lockedInvoice.stripe_payment_intent_id = null;
-              logger.info(`[stripe] combined allocation/amount changed for invoice ${lockedInvoice.invoice_number} — replaced PI ${activeIntent.id} with a fresh mint`);
+              logger.info(`[stripe] allocation/amount/consent stamp changed for invoice ${lockedInvoice.invoice_number} — replaced PI ${activeIntent.id} with a fresh mint`);
             } catch (e) {
               logger.warn(`[stripe] could not replace changed-allocation PI ${activeIntent.id} for invoice ${invoiceId}: ${e.message}`);
               const err = new Error('Could not prepare your payment — please try again in a moment');
