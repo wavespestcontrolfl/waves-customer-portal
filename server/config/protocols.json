@@ -3,13 +3,14 @@
     "st_augustine": {
       "name": "St. Augustine Lawn Care Protocol",
       "notes": [
-        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf. Do not apply to St. Augustinegrass during spring green-up or the fall-to-winter transition.",
+        "⚠ LESCO Chelated Iron Plus is 12-0-0 (quick-release urea N): it counts as nitrogen. NEVER Jun 1–Sep 30 anywhere, or Apr 1–Sep 30 in North Port. For color in those months use a 0-N micro (High Mn Combo, Chelated AM + Micros).",
+        "⚠ SpeedZone Southern is OFF the St. Augustine track: its label excludes Floratam and Bitterblue, and an unknown cultivar is treated as Floratam. St. Augustine broadleaf = spot Celsius WG (no adjuvant above 90°F).",
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
         "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
         "★ NEW v4: N RATE CONTROL — Explicit lb N/1,000 per visit in Notes. Annual target: Basic/Std 1.5 lb N, Enh/Prem 3.0 lb N.",
         "★ NEW v4: Soil-test branching — P index >80 skip 24-2-11, K >80 ppm skip K-Flow. Chinch IPM ≥20/sq ft threshold + MOA ro",
-        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. SpeedZone Apr weather-gated at 85°F.",
+        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. Celsius WG is the St. Augustine broadleaf product (no SpeedZone).",
         "★ NEW v4: Aug drive-by scout + Dec wellness touchpoint for Basic/Std. Thatch measurement V3+V10. Irrigation VWC audit V2",
         "★ ST. AUGUSTINE IS ONE TRACK: Do not split the protocol into full-sun vs shade programs. Use site observations only as condition checks for stress, disease, irrigation, and herbicide safety."
       ],
@@ -33,7 +34,7 @@
         {
           "visit": 2,
           "month": "Feb",
-          "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\nChelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)",
+          "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\nChelated Iron Plus foliar ($1.52)\nHigh Mn Combo ($1.33)",
           "secondary": "★ Medallion SC (FRAC 12) if large patch active ($8.90)\nIRRIGATION AUDIT #1: probe 3\" depth, VWC >40% = reduce 20%",
           "material_cost": "25.71",
           "labor_cost": "26.96",
@@ -65,9 +66,9 @@
         {
           "visit": 4,
           "month": "Apr",
-          "primary": "Acelepryn Xtra liquid preventive ($6.78)\n★ SpeedZone Southern + NIS WEATHER-GATED ($5.95)\nK-Flow 0-0-25 liquid K ($2.18)",
-          "secondary": "Primo Maxx PGR Premium only ($1.91)\nDismiss if sedge ($4.36)\n★ IF forecast >85°F → Celsius WG instead of SpeedZone\n★ VERIFY turf is past spring green-up — label prohibits SpeedZone on St. Augustine during green-up",
-          "material_cost": "36.13",
+          "primary": "Acelepryn Xtra liquid preventive ($6.78)\nK-Flow 0-0-25 liquid K ($2.18)",
+          "secondary": "Primo Maxx PGR Premium only ($1.91)\nDismiss if sedge ($4.36)\nSpot Celsius WG if broadleaf present ($3.84) — no adjuvant above 90°F; counts toward the 365-day Celsius amount",
+          "material_cost": "30.18",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -75,15 +76,15 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "CRITICAL: Acelepryn before chinch season. N rate: 0 lb N. ★ SpeedZone NOW WEATHER-GATED at 85°F — Celsius WG fallback.",
-          "conditional_cost": "0.55"
+          "notes": "CRITICAL: Acelepryn before chinch season. N rate: 0 lb N. ★ No SpeedZone on St. Augustine (label excludes Floratam/Bitterblue; cultivar unrecorded) — broadleaf = spot Celsius WG.",
+          "conditional_cost": "1.03"
         },
         {
           "visit": 5,
           "month": "May",
-          "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P index ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus ($1.52)",
+          "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P index ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nHigh Mn Combo ($1.33)",
           "secondary": "Dismiss if sedge ($4.36)\nHydretain drought prep Premium ($10.59)",
-          "material_cost": "90.59",
+          "material_cost": "90.40",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -113,7 +114,7 @@
         {
           "visit": 7,
           "month": "Jul",
-          "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo Phyte Plus 0-0-26 ($4.45)",
+          "primary": "BLACKOUT — Celsius WG broadleaf ($3.84) — add NIS only below 90°F\nGreen Flo Phyte Plus 0-0-26 ($4.45)",
           "secondary": "Moisture Manager ($7.45)\n★ Chinch re-check ≥20/sq ft threshold\n★ If Talstar failed Jun: Arena 50 WDG (Group 4A) ($5.20)",
           "material_cost": "10.96",
           "labor_cost": "26.96",
@@ -123,7 +124,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius app 2/3. ★ Chinch MOA rotation: Talstar (3A) → Arena (4A) if no knockdown 7d.",
+          "notes": "Celsius app 2/3 — no adjuvant above 90°F (NIS only below 90°F). ★ Chinch MOA rotation: Talstar (3A) → Arena (4A) if no knockdown 7d.",
           "conditional_cost": "1.30"
         },
         {
@@ -145,9 +146,9 @@
         {
           "visit": 9,
           "month": "Sep",
-          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow\nSpeedZone Southern + NIS ($5.95)",
-          "secondary": "Dismiss for fall sedge ($4.36)\nPre-position for Oct N app",
-          "material_cost": "6.95",
+          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow",
+          "secondary": "Dismiss for fall sedge ($4.36)\nSpot Celsius WG if broadleaf present ($3.84) — no adjuvant above 90°F\nPre-position for Oct N app",
+          "material_cost": "2.18",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -155,8 +156,8 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "K-Flow returns (soil-test gated). SpeedZone ONLY if forecast <85°F — verify, Sep here often exceeds it; Celsius WG fallback. N rate: 0 lb.",
-          "conditional_cost": "0.55"
+          "notes": "K-Flow returns (soil-test gated). No SpeedZone on St. Augustine (Floratam/Bitterblue label exclusion) — broadleaf = spot Celsius WG. N rate: 0 lb.",
+          "conditional_cost": "1.03"
         },
         {
           "visit": 10,
@@ -218,6 +219,7 @@
     "bermuda": {
       "name": "Bermuda Lawn Care Protocol",
       "notes": [
+        "⚠ LESCO Chelated Iron Plus is 12-0-0 (quick-release urea N): it counts as nitrogen. NEVER Jun 1–Sep 30 anywhere, or Apr 1–Sep 30 in North Port. For color in those months use a 0-N micro (High Mn Combo, Chelated AM + Micros).",
         "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf.",
         "⚠ NO Atrazine on Bermuda — Atrazine is ST. AUGUSTINE ONLY.",
         "⚠ PGR: Primo Maxx every 3-4 weeks Mar-Oct. Document growth response each visit. Bermuda grows aggressively.",
@@ -298,7 +300,7 @@
           "visit": 5,
           "month": "May",
           "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nPrimo Maxx PGR ($1.91)",
-          "secondary": "Chelated Iron Plus ($1.52)\nDismiss if sedge ($4.36)\n★ Document PGR response — adjust rate if needed",
+          "secondary": "High Mn Combo ($1.33)\nDismiss if sedge ($4.36)\n★ Document PGR response — adjust rate if needed",
           "material_cost": "44.1",
           "labor_cost": "26.96",
           "tiers": {
@@ -427,6 +429,7 @@
     "zoysia": {
       "name": "Zoysia Protocol",
       "notes": [
+        "⚠ LESCO Chelated Iron Plus is 12-0-0 (quick-release urea N): it counts as nitrogen. NEVER Jun 1–Sep 30 anywhere, or Apr 1–Sep 30 in North Port. For color in those months use a 0-N micro (High Mn Combo, Chelated AM + Micros).",
         "⚠ N budget: 2.0-3.0 lb N/K/yr MAX (UF/IFAS). Excess N = explosive thatch → severe Large Patch in fall.",
         "⚠ PGR: Primo Maxx at CONSERVATIVE rates only. Document response. Over-regulation = months of thin turf.",
         "⚠ Large Patch (Rhizoctonia): Zoysia is HIGHLY susceptible. Preventive fungicide Oct-Mar with FRAC rotation.",
@@ -458,7 +461,7 @@
         {
           "visit": 2,
           "month": "Feb",
-          "primary": "Chelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)\nGreen Flo 6-0-0 Ca ($1.39)",
+          "primary": "Chelated Iron Plus foliar ($1.52)\nHigh Mn Combo ($1.33)\nGreen Flo 6-0-0 Ca ($1.39)",
           "secondary": "★ Medallion SC (FRAC 12) if large patch active ($8.90)\nOR Velista (FRAC 7) if Jan slot was FRAC 11+3 ($67.50)\n★ IRRIGATION AUDIT #1: VWC >40% = reduce 20%",
           "material_cost": "6.87",
           "labor_cost": "26.96",
@@ -506,9 +509,9 @@
         {
           "visit": 5,
           "month": "May",
-          "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus ($1.52)",
+          "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nHigh Mn Combo ($1.33)",
           "secondary": "Dismiss if sedge ($4.36)\nPrimo Maxx PGR conservative ($1.91)\n★ Document PGR response",
-          "material_cost": "38.61",
+          "material_cost": "38.42",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -636,6 +639,7 @@
     "bahia": {
       "name": "Bahia Protocol",
       "notes": [
+        "⚠ LESCO Chelated Iron Plus is 12-0-0 (quick-release urea N): it counts as nitrogen. NEVER Jun 1–Sep 30 anywhere, or Apr 1–Sep 30 in North Port. For color in those months use a 0-N micro (High Mn Combo, Chelated AM + Micros).",
         "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf.",
         "⚠ Bahia is LOW-INPUT turf. 2.0 lb N/K/yr MAX. More N = more mowing, NOT better quality.",
         "⚠ Mole cricket is THE primary insect threat — not chinch bugs. Soapy flush scout, not leaf inspection.",
@@ -670,7 +674,7 @@
         {
           "visit": 2,
           "month": "Feb",
-          "primary": "Chelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)",
+          "primary": "Chelated Iron Plus foliar ($1.52)\nHigh Mn Combo ($1.33)",
           "secondary": "★ MOLE CRICKET SOAP FLUSH #1:\n2 tbsp dish soap/gallon, pour over 2 sq ft\nCount nymphs surfacing in 3 min\nThreshold: ≥2 per 2 sq ft = TREAT\n★ Irrigation check (if irrigated)",
           "material_cost": "4.59",
           "labor_cost": "26.96",
@@ -718,9 +722,9 @@
         {
           "visit": 5,
           "month": "May",
-          "primary": "Chelated Iron Plus ($1.52)\nChelated AM + Micros ($1.40)\n★ IRRIGATED: K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: Fe+micros only, skip K-Flow",
+          "primary": "Chelated AM + Micros ($1.40)\n★ IRRIGATED: K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: Fe+micros only, skip K-Flow",
           "secondary": "Dismiss if sedge ($4.36)\n★ Crabgrass check — if pre-em breaking down:\nNO bahia-safe post-emergent curative for crabgrass\nRely on pre-em timing + scout/manual; nonselective spot only where turf loss is acceptable",
-          "material_cost": "9.12",
+          "material_cost": "7.60",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,

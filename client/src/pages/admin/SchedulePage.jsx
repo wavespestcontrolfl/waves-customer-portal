@@ -24546,38 +24546,38 @@ const PRODUCT_DESCRIPTIONS = {
 const TRACK_SAFETY_RULES = {
   st_augustine: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
+    "SpeedZone: OFF the St. Augustine track \u2014 label excludes Floratam/Bitterblue; unknown cultivar = Floratam. Broadleaf = spot Celsius WG (no adjuvant above 90\u00b0F)",
     "Hold PGR/hot herbicide on stressed turf",
-    "N blackout Jun 1 \u2013 Sep 30",
+    "N blackout Jun 1 \u2013 Sep 30 (North Port Apr 1 \u2013 Sep 30) \u2014 Chelated Iron Plus is 12-0-0 N; use High Mn Combo (0-N) for color",
   ],
   A_St_Aug_Sun: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
+    "SpeedZone: OFF the St. Augustine track \u2014 label excludes Floratam/Bitterblue; unknown cultivar = Floratam. Broadleaf = spot Celsius WG (no adjuvant above 90\u00b0F)",
     "Hold PGR/hot herbicide on stressed turf",
-    "N blackout Jun 1 \u2013 Sep 30",
+    "N blackout Jun 1 \u2013 Sep 30 (North Port Apr 1 \u2013 Sep 30) \u2014 Chelated Iron Plus is 12-0-0 N; use High Mn Combo (0-N) for color",
   ],
   B_St_Aug_Shade: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
+    "SpeedZone: OFF the St. Augustine track \u2014 label excludes Floratam/Bitterblue; unknown cultivar = Floratam. Broadleaf = spot Celsius WG (no adjuvant above 90\u00b0F)",
     "Hold PGR/hot herbicide on stressed turf",
-    "N blackout Jun 1 \u2013 Sep 30",
+    "N blackout Jun 1 \u2013 Sep 30 (North Port Apr 1 \u2013 Sep 30) \u2014 Chelated Iron Plus is 12-0-0 N; use High Mn Combo (0-N) for color",
   ],
   C1_Bermuda: [
     "Celsius WG: MAX 3 apps/year/property",
     "No Atrazine on Bermuda \u2014 EVER",
     "SpeedZone: apply only 50\u201385\u00b0F",
-    "N blackout Jun 1 \u2013 Sep 30",
+    "N blackout Jun 1 \u2013 Sep 30 (North Port Apr 1 \u2013 Sep 30) \u2014 Chelated Iron Plus is 12-0-0 N; use High Mn Combo (0-N) for color",
   ],
   C2_Zoysia: [
     "Celsius WG: MAX 3 apps/year/property",
     "No Atrazine on Zoysia \u2014 EVER",
     "SpeedZone: apply only 50\u201385\u00b0F",
-    "N blackout Jun 1 \u2013 Sep 30",
+    "N blackout Jun 1 \u2013 Sep 30 (North Port Apr 1 \u2013 Sep 30) \u2014 Chelated Iron Plus is 12-0-0 N; use High Mn Combo (0-N) for color",
   ],
   D_Bahia: [
     "Celsius WG: MAX 3 apps/year/property",
     "SpeedZone: apply only 50\u201385\u00b0F",
-    "N blackout Jun 1 \u2013 Sep 30",
+    "N blackout Jun 1 \u2013 Sep 30 (North Port Apr 1 \u2013 Sep 30) \u2014 Chelated Iron Plus is 12-0-0 N; use High Mn Combo (0-N) for color",
   ],
 };
 

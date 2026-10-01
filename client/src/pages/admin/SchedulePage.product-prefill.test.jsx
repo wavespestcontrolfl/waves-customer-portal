@@ -279,7 +279,11 @@ describe("TRACK_SAFETY_RULES — SpeedZone heat limit", () => {
   // strings are what a technician reads in the Protocol Reference tab, and
   // they were left at 90°F when the gates moved — a band the label forbids but
   // the copy still appeared to allow.
-  const rules = Object.entries(TRACK_SAFETY_RULES);
+  const allRules = Object.entries(TRACK_SAFETY_RULES);
+  // St. Augustine tracks no longer carry a SpeedZone temperature window at all:
+  // the label excludes Floratam/Bitterblue, so SpeedZone is off that track.
+  // They are covered by the dedicated test below.
+  const rules = allRules.filter(([t]) => !/st_aug|st_augustine/i.test(t));
 
   it("never shows a SpeedZone limit other than 85°F", () => {
     const wrong = rules.flatMap(([track, list]) =>
@@ -302,13 +306,29 @@ describe("TRACK_SAFETY_RULES — SpeedZone heat limit", () => {
     expect(missingFloor).toEqual([]);
   });
 
-  it("carries the St. Augustine seasonal prohibition on St. Augustine tracks", () => {
-    // Spring green-up and the fall transition are St. Augustine-specific on
-    // the label, so they belong on those tracks and not on bermuda/zoysia.
-    const saTracks = rules.filter(([t]) => /st_aug|st_augustine/i.test(t));
+  it("takes SpeedZone off every St. Augustine track and points at spot Celsius WG", () => {
+    // SpeedZone Southern's label excludes Floratam and Bitterblue; the cultivar
+    // is unrecorded, so unknown is treated as Floratam. No rule may tell a
+    // tech to verify the cultivar and then apply it within a temperature window.
+    const saTracks = allRules.filter(([t]) => /st_aug|st_augustine/i.test(t));
     expect(saTracks.length).toBeGreaterThan(0);
-    const missing = saTracks
-      .filter(([, list]) => !list.some((r) => /green-up/i.test(r)))
+    for (const [track, list] of saTracks) {
+      const sz = list.filter((r) => /speedzone/i.test(r));
+      expect(sz.length, track).toBe(1);
+      expect(sz[0], track).toMatch(/OFF the St\. Augustine track/);
+      expect(sz[0], track).toMatch(/Floratam/);
+      expect(sz[0], track).toMatch(/Celsius WG/);
+      expect(sz[0], track).toMatch(/90\s*°?F|90\\u00b0F/);
+      expect(sz[0], track).not.toMatch(/verify cultivar|apply only 50/i);
+    }
+  });
+
+  it("states the N blackout with the Iron Plus caveat on every lawn track", () => {
+    // Chelated Iron Plus is 12-0-0 urea N: never Jun 1 – Sep 30, never
+    // Apr 1 – Sep 30 in North Port.
+    const missing = allRules
+      .filter(([, list]) => !list.some((r) => /N blackout Jun 1/.test(r)
+        && /North Port Apr 1/.test(r) && /Chelated Iron Plus/.test(r)))
       .map(([t]) => t);
     expect(missing).toEqual([]);
   });
@@ -317,7 +337,7 @@ describe("TRACK_SAFETY_RULES — SpeedZone heat limit", () => {
     // The 85°F broadcast ceiling is product-wide, not a St. Augustine-only
     // rule, so bermuda and zoysia need it too. The cultivar check stays
     // St. Augustine-specific because that is what the label restricts.
-    const missing = rules
+    const missing = allRules
       .filter(([, list]) => !list.some((r) => /speedzone/i.test(r)))
       .map(([track]) => track);
     expect(missing).toEqual([]);
