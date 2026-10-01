@@ -55,9 +55,11 @@ const alertMultiplier = () => positiveEnv('LLM_COST_ALERT_MULTIPLIER', 3);
 // ── Model ids ────────────────────────────────────────────────────────
 
 /**
- * One key for a feed id ("<vendor>/<family>-4.5") and a ledger model
- * ("<family>-4-5-<yyyymmdd>"): lowercase, no provider prefix or ":variant",
- * dots as dashes, no trailing date stamp or "-latest".
+ * One key per model id, feed or ledger: lowercase, no provider prefix,
+ * ":variant" or "-latest", dots as dashes. A trailing date stamp is KEPT:
+ * a dated snapshot can be priced apart from its alias.
+ *   "<vendor>/<family>-4.5"     → "<family>-4-5"
+ *   "<family>-4-5-<yyyymmdd>"   → "<family>-4-5-<yyyymmdd>"
  */
 function normalizeModelId(id) {
   if (typeof id !== 'string' || !id.trim()) return null;
@@ -65,18 +67,36 @@ function normalizeModelId(id) {
   s = s.slice(s.lastIndexOf('/') + 1);
   s = s.split(':')[0];
   s = s.replace(/\./g, '-');
-  s = s.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, '');
   s = s.replace(/-latest$/, '');
   return s || null;
 }
 
-// Preview / experimental builds are billed as their base model when the feed
-// has no row of their own (gemini-3.8-flash-preview-09-2026 → gemini-3.8-flash).
-function lookupKeys(model) {
+// The undated alias a dated key belongs to ("x-20251001" / "x-2025-10-01" → "x").
+function aliasKeyOf(key) {
+  return key.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, '');
+}
+
+const samePrice = (a, b) => ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning'].every((k) => a[k] === b[k]);
+
+/**
+ * The price for a ledger model, or null (unpriced). Its own key first. A
+ * dated model the feed does not list takes its undated alias's price only
+ * while every snapshot the feed lists for that alias costs the same as the
+ * alias: if any differs, which one this model bills as is unknown, so it is
+ * unpriced. Anything else (a preview build, a renamed model) is unpriced —
+ * never priced as a lookalike.
+ */
+function priceFor(prices, model) {
   const key = normalizeModelId(model);
-  if (!key) return [];
-  const base = key.replace(/-(?:preview|exp)(?:-.*)?$/, '');
-  return base && base !== key ? [key, base] : [key];
+  if (!key) return null;
+  if (prices.has(key)) return prices.get(key);
+  const alias = aliasKeyOf(key);
+  if (alias === key || !prices.has(alias)) return null;
+  const aliasPrice = prices.get(alias);
+  for (const [k, p] of prices) {
+    if (k !== alias && aliasKeyOf(k) === alias && !samePrice(p, aliasPrice)) return null;
+  }
+  return aliasPrice;
 }
 
 // ── Price feed ───────────────────────────────────────────────────────
@@ -113,7 +133,7 @@ function parseFeed(body, fetchedAt) {
       reasoning_per_mtok: perMillion(m.pricing?.internal_reasoning),
       fetched_at: fetchedAt,
     };
-    // A dated and an undated id can share a key: the undated (shorter) one is the alias.
+    // Two ids can still share a key ("x" and "x-latest"): keep the shorter.
     const existing = rows.get(key);
     if (!existing || id.length < existing.source_model_id.length) rows.set(key, row);
   }
@@ -155,11 +175,6 @@ async function loadPrices(conn = db) {
     if (!oldest || at < oldest) oldest = at;
   }
   return { map, oldestFetchedAt: oldest };
-}
-
-function priceFor(prices, model) {
-  for (const key of lookupKeys(model)) if (prices.has(key)) return prices.get(key);
-  return null;
 }
 
 // ── Cost ─────────────────────────────────────────────────────────────
@@ -351,7 +366,6 @@ module.exports = {
   runLlmCostCheck,
   // exported for tests
   normalizeModelId,
-  lookupKeys,
   parseFeed,
   priceFor,
   costUsd,

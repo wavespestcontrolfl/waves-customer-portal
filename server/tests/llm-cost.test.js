@@ -42,20 +42,39 @@ function feed(models, extra = llmCost.MIN_FEED_ROWS) {
 const okFetch = (body) => jest.fn(async () => ({ ok: true, status: 200, json: async () => body }));
 
 describe('model ids', () => {
-  test('a feed id and the ledger served model meet on one key', () => {
+  test('a feed id and the ledger served model normalise the same way; a date stamp is kept', () => {
     expect(llmCost.normalizeModelId('anthropic/claude-haiku-4.5')).toBe('claude-haiku-4-5');
-    expect(llmCost.normalizeModelId('claude-haiku-4-5-20251001')).toBe('claude-haiku-4-5');
+    expect(llmCost.normalizeModelId('claude-haiku-4-5-20251001')).toBe('claude-haiku-4-5-20251001');
     expect(llmCost.normalizeModelId('openai/gpt-5.6-sol')).toBe(llmCost.normalizeModelId('gpt-5.6-sol'));
-    expect(llmCost.normalizeModelId('openai/gpt-4o-2024-08-06')).toBe('gpt-4o');
+    expect(llmCost.normalizeModelId('openai/gpt-4o-2024-08-06')).toBe('gpt-4o-2024-08-06');
     expect(llmCost.normalizeModelId('anthropic/claude-sonnet-4.5:thinking')).toBe('claude-sonnet-4-5');
     expect(llmCost.normalizeModelId('')).toBeNull();
     expect(llmCost.normalizeModelId(null)).toBeNull();
   });
 
-  test('a preview build falls back to its base model price', () => {
+  test('a listed snapshot is priced as itself, never as its alias', () => {
+    const prices = new Map([
+      ['gpt-4o', { input: 2.5, output: 10 }],
+      ['gpt-4o-2024-05-13', { input: 5, output: 15 }],
+    ]);
+    expect(llmCost.priceFor(prices, 'gpt-4o-2024-05-13')).toEqual({ input: 5, output: 15 });
+    expect(llmCost.priceFor(prices, 'gpt-4o')).toEqual({ input: 2.5, output: 10 });
+  });
+
+  test('an unlisted snapshot takes its alias price only when no listed snapshot of that alias costs differently', () => {
+    const aliasOnly = new Map([['claude-haiku-4-5', { input: 1, output: 5 }]]);
+    expect(llmCost.priceFor(aliasOnly, 'claude-haiku-4-5-20251001')).toEqual({ input: 1, output: 5 });
+    const agreeing = new Map([['gpt-4o', { input: 2.5, output: 10 }], ['gpt-4o-2024-11-20', { input: 2.5, output: 10 }]]);
+    expect(llmCost.priceFor(agreeing, 'gpt-4o-2024-08-06')).toEqual({ input: 2.5, output: 10 });
+    const disagreeing = new Map([['gpt-4o', { input: 2.5, output: 10 }], ['gpt-4o-2024-05-13', { input: 5, output: 15 }]]);
+    expect(llmCost.priceFor(disagreeing, 'gpt-4o-2024-08-06')).toBeNull();
+  });
+
+  test('a preview build or other lookalike the feed does not list is unpriced', () => {
     const prices = new Map([['gemini-3-8-flash', { input: 0.3, output: 2.5 }]]);
-    expect(llmCost.priceFor(prices, 'gemini-3.8-flash-preview-09-2026')).toEqual({ input: 0.3, output: 2.5 });
+    expect(llmCost.priceFor(prices, 'gemini-3.8-flash-preview-09-2026')).toBeNull();
     expect(llmCost.priceFor(prices, 'gemini-3.8-pro')).toBeNull();
+    expect(llmCost.priceFor(prices, 'gemini-3.8-flash')).toEqual({ input: 0.3, output: 2.5 });
   });
 });
 
@@ -74,11 +93,12 @@ describe('parseFeed', () => {
       ],
     }, at);
     const byKey = Object.fromEntries(rows.map((r) => [r.model_key, r]));
-    expect(Object.keys(byKey).sort()).toEqual(['claude-opus-5-5', 'gemini-3-8-flash', 'gpt-5-6-sol']);
+    expect(Object.keys(byKey).sort()).toEqual(['claude-opus-5-5', 'gemini-3-8-flash', 'gpt-5-6-sol', 'gpt-5-6-sol-2026-08-01']);
     expect(byKey['claude-opus-5-5']).toMatchObject({ provider: 'anthropic', input_per_mtok: 5, output_per_mtok: 25, cache_read_per_mtok: 0.5, cache_write_per_mtok: 6.25, fetched_at: at });
     expect(byKey['gemini-3-8-flash']).toMatchObject({ provider: 'gemini', cache_read_per_mtok: null, reasoning_per_mtok: 2.5 });
-    // the undated alias wins over a dated snapshot with the same key
+    // a dated snapshot keeps its own row and price beside the alias
     expect(byKey['gpt-5-6-sol']).toMatchObject({ source_model_id: 'openai/gpt-5.6-sol', input_per_mtok: 1.5 });
+    expect(byKey['gpt-5-6-sol-2026-08-01']).toMatchObject({ source_model_id: 'openai/gpt-5.6-sol-2026-08-01', input_per_mtok: 2 });
   });
 });
 
