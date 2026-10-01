@@ -15,15 +15,29 @@ let mockRows;
 let mockQueryError;
 let mockPages = null;
 const mockCalls = [];
+let mockServed = [];
 jest.mock('../models/db', () => Object.assign(() => {
+  let textIds = null;
   const q = new Proxy({}, {
     get(_, name) {
       if (name === 'then') {
-        // mockPages (when set) serves one page per query, for the keyset walk.
-        const result = mockPages ? (mockPages.shift() || []) : mockRows;
+        // The page-text read (whereIn ids): the rows served so far, by id.
+        // Otherwise mockPages (when set) serves one page per query, for the keyset walk.
+        let result;
+        if (textIds) {
+          const known = [...mockServed, ...(mockRows || [])];
+          result = textIds.map((id) => known.find((r) => String(r.id) === String(id))).filter(Boolean);
+        } else {
+          result = mockPages ? (mockPages.shift() || []) : mockRows;
+          mockServed = mockServed.concat(result || []);
+        }
         return (resolve, reject) => (mockQueryError ? Promise.reject(mockQueryError) : Promise.resolve(result)).then(resolve, reject);
       }
-      return (...args) => { mockCalls.push([name, ...args]); return q; };
+      return (...args) => {
+        mockCalls.push([name, ...args]);
+        if (name === 'whereIn' && args[0] === 'id') textIds = args[1];
+        return q;
+      };
     },
   });
   return q;
@@ -44,6 +58,7 @@ beforeEach(() => {
   mockRows = [];
   mockQueryError = null;
   mockPages = null;
+  mockServed = [];
   mockCalls.length = 0;
   computeDashboardAlerts.mockReset().mockResolvedValue({ alerts: [] });
   NotificationService.scopeAdminFeedToRole.mockClear();
@@ -237,44 +252,24 @@ test('an older open FIX behind more than a page of newer rows is still listed an
     .toEqual([['2026-09-30 12:00:00.999500+00', 'p00499'], ['2026-09-30 12:00:00.999000+00', 'p00999']]);
 });
 
-test('a scan that reaches the cap says so, and its cursor continues the scan past the cap', async () => {
-  const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-  const at = (n) => `2026-09-30 12:00:00.${String(999999 - n).padStart(6, '0')}+00`;
-  const work = (n) => row({ id: uuid(n), created_at: '2026-09-30T12:00:00Z', created_at_cursor: at(n), metadata: { triggerKey: 'sms_reply' } });
-  const windowPages = () => { let n = 0; return Array.from({ length: 41 }, () => Array.from({ length: 500 }, () => work(n++))); };
-  computeDashboardAlerts.mockResolvedValue({ alerts: [{ id: 'q', severity: 'warn', count: 1, label: 'Queue', href: '/admin/leads' }] });
-
-  mockPages = windowPages();
-  const first = await listNeedsMe({ limit: 5 });
-  expect(first.warnings).toEqual([{ source: 'notifications', error: 'truncated' }]);
-  expect(first.items[0].id).toBe('live:q');
-  expect(decodeCursor(first.next)).toMatchObject({ s: null });
-
-  // The window's last item (same time, lowest id) leaves nothing in the window:
-  // next now starts a new window where the scan stopped (row 19999).
-  mockPages = windowPages();
-  const lastKey = [1, new Date('2026-09-30T12:00:00Z').getTime(), uuid(0)];
-  const end = await listNeedsMe({ limit: 5, after: { k: lastKey, s: null } });
-  expect(end.items).toEqual([]);
-  const resume = decodeCursor(end.next);
-  expect(resume).toEqual({ k: null, s: { at: at(19999), id: uuid(19999) } });
-
-  // The continued window scans from there, holds the rows past the cap, and no standing item repeats.
-  mockPages = [[work(20000), work(20001)]];
-  mockCalls.length = 0;
-  const past = await listNeedsMe({ limit: 5, after: resume });
-  expect(mockCalls.find(([name, sql]) => name === 'whereRaw' && /^\(created_at, id\) </.test(sql))[2]).toEqual([at(19999), uuid(19999)]);
-  expect(past.items.map((i) => i.id)).toEqual([uuid(20001), uuid(20000)]);
-  expect(past.warnings).toEqual([]);
-  expect(past.next).toBeNull();
+test('no scan cap: an old broken finding behind 25,000 newer rows still sorts first, and only the page reads text', async () => {
+  let n = 0;
+  const filler = () => Array.from({ length: 500 }, () => row({ id: `f${String(n++).padStart(6, '0')}`, created_at: '2026-09-30T12:00:00Z', created_at_cursor: '2026-09-30 12:00:00+00', metadata: { triggerKey: 'sms_reply' } }));
+  const oldFix = row({ id: 'old-fix', category: 'ops_digest', body: 'Old report.', detail: 'The full diagnosis.', created_at: '2026-01-01T00:00:00Z', metadata: { kind: 'FIX', audience: 'engineering' } });
+  mockPages = [...Array.from({ length: 50 }, filler), [oldFix]];
+  const out = await listNeedsMe({ limit: 3 });
+  expect(out.warnings).toEqual([]);
+  expect(out.total).toBe(25001);
+  expect(out.items[0]).toMatchObject({ id: 'old-fix', severity: 'broken', detail: 'The full diagnosis.', why: 'Old report.' });
+  // The walk selects no body/detail; one whereIn read fetches them for the 3 page items.
+  const selects = mockCalls.filter((c) => c[0] === 'select');
+  expect(selects.slice(0, 51).every((c) => !c.includes('body') && !c.includes('detail'))).toBe(true);
+  expect(mockCalls.filter((c) => c[0] === 'whereIn')).toEqual([['whereIn', 'id', ['old-fix', 'f024999', 'f024998']]]);
 });
 
-test('a cursor that is not one we issued is refused', () => {
-  const enc = (v) => Buffer.from(JSON.stringify(v)).toString('base64url');
-  expect(decodeCursor(enc([1, 2, 'x']))).toBeNull();
-  expect(decodeCursor(enc({ k: null, s: null }))).toBeNull();
-  expect(decodeCursor(enc({ k: null, s: { at: 'nope', id: 'x' } }))).toBeNull();
-  expect(decodeCursor(enc({ k: [1, 2, 'x'], s: null }))).toEqual({ k: [1, 2, 'x'], s: null });
+test('a digest its check already resolved is excluded by the query, done_at or not', async () => {
+  await listNeedsMe({});
+  expect(mockCalls.find(([name, sql]) => name === 'whereRaw' && /metadata->>'resolved'/.test(sql))).toBeTruthy();
 });
 
 test('the router guards by role as well as authentication', () => {

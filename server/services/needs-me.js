@@ -15,7 +15,6 @@ const { TRIGGER_REGISTRY } = require('./notification-triggers');
 const DEFAULT_LIMIT = 200;
 const ROW_CAP = 500; // most items one response returns
 const PAGE_SIZE = 500;
-const SCAN_CAP = 20000;
 const DETAIL_CHARS = 2000; // the full ops_digest finding, bounded
 const WHY_FROM_DETAIL_CHARS = 200;
 const ACTIVITY_FEED_LINK_RE = /^\/admin\/agents\?tab=activity\b/;
@@ -197,31 +196,47 @@ function mapStanding(alert) {
 // Every open row, walked newest first in (created_at, id) keyset pages — the
 // bell's own order, served by notifications_admin_open_keyset_idx: area, severity and who are judged in JS, so
 // a newest-N read would drop an older open finding from a filtered list and its totals.
-// SCAN_CAP bounds one call, never what is reachable: reaching it is reported as a
-// warning and returns `resumeAt` (the last row read), and the response's `next`
-// cursor carries it so the following page continues the scan past the cap.
-async function openAlertRows(role, start = null) {
+// No cap: the walk selects only what classifying and ordering need (title,
+// link, metadata, times), so every open row joins ONE global order; the long
+// body/detail text is read afterwards for the returned page alone (withText).
+const LIGHT_COLUMNS = ['id', 'category', 'title', 'link', 'metadata', 'created_at', 'read_at'];
+async function openAlertRows(role) {
   // Activity-only rows (feed 'activity': engineering findings, quiet standing digests) are
   // included on purpose: the bell never shows them, but they are open work, and the
   // engineering ones are the Claude work. Each carries activityOnly: true.
   const rows = [];
-  let after = start;
+  let after = null;
   for (;;) {
     const query = NotificationService.scopeAdminFeedToRole(db('notifications').where({ recipient_type: 'admin' }), role);
     if (after) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [after.at, after.id]);
     // The cron's persisted dashboard_alert rows echo the standing conditions below.
+    // A digest its check already resolved (metadata.resolved, stamped before done_at
+    // existed) is closed even when no done_at was ever written for it.
     const page = await query.whereNull('done_at')
       .whereRaw("COALESCE(metadata->>'triggerKey', '') <> 'dashboard_alert'")
+      .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
       .orderByRaw('created_at DESC, id DESC').limit(PAGE_SIZE)
       // created_at::text keeps the microseconds a JS Date would round away, so
       // rows sharing a millisecond are never skipped or repeated.
-      .select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', 'read_at', db.raw('created_at::text AS created_at_cursor'));
+      .select(...LIGHT_COLUMNS, db.raw('created_at::text AS created_at_cursor'));
     rows.push(...page);
-    if (page.length < PAGE_SIZE) return { rows, truncated: false, resumeAt: null };
+    if (page.length < PAGE_SIZE) return rows;
     const last = page[page.length - 1];
     after = { at: last.created_at_cursor, id: last.id };
-    if (rows.length >= SCAN_CAP) return { rows, truncated: true, resumeAt: after };
   }
+}
+
+// The returned page's alert items, re-mapped with their body/detail text.
+async function withText(page, rowsById) {
+  const ids = page.filter((item) => item.kind === 'alert').map((item) => item.id);
+  if (!ids.length) return page;
+  const text = new Map((await db('notifications').whereIn('id', ids).select('id', 'body', 'detail'))
+    .map((r) => [String(r.id), r]));
+  return page.map((item) => {
+    if (item.kind !== 'alert') return item;
+    const t = text.get(String(item.id)) || {};
+    return mapAlertRow({ ...rowsById.get(String(item.id)), body: t.body ?? null, detail: t.detail ?? null });
+  });
 }
 
 // Exact: `claude` is what Claude may fix alone. `either` (Claude drafts, a person approves)
@@ -240,31 +255,20 @@ function compareKeys(a, b) {
   return (a[0] - b[0]) || (b[1] - a[1]) || (a[2] < b[2] ? 1 : a[2] > b[2] ? -1 : 0);
 }
 const compareItems = (a, b) => compareKeys(sortKey(a), sortKey(b));
-// A cursor is { k, s }: k = the last item's sort key in this scan window (null
-// at a window's start), s = where the window's database scan began (null = the
-// newest row). A window ends at SCAN_CAP rows; the next one starts at s.
-const encodeCursor = (cursor) => Buffer.from(JSON.stringify(cursor)).toString('base64url');
-const validKey = (k) => Array.isArray(k) && k.length === 3 && Number.isFinite(k[0]) && Number.isFinite(k[1]) && typeof k[2] === 'string';
-// created_at::text as Postgres prints it (e.g. 2026-09-30 12:00:00.123456+00).
-const PG_TIMESTAMPTZ_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?([+-]\d{2}(:?\d{2})?|Z)$/;
-const validScan = (v) => v && typeof v === 'object' && typeof v.at === 'string' && PG_TIMESTAMPTZ_RE.test(v.at)
-  && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v.id));
+const encodeCursor = (key) => Buffer.from(JSON.stringify(key)).toString('base64url');
 // A cursor from `next`; anything else is null (the route answers 400).
 function decodeCursor(raw) {
   if (typeof raw !== 'string' || !raw) return null;
   try {
-    const c = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
-    if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
-    if (!(c.k === null || validKey(c.k)) || !(c.s === null || validScan(c.s))) return null;
-    if (c.k === null && c.s === null) return null;
-    return { k: c.k, s: c.s };
+    const key = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    const ok = Array.isArray(key) && key.length === 3 && Number.isFinite(key[0]) && Number.isFinite(key[1]) && typeof key[2] === 'string';
+    return ok ? key : null;
   } catch { return null; }
 }
 
 async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
   const generatedAt = new Date();
-  const scanStart = after?.s || null;
-  let resumeAt = null;
+  const rowsById = new Map();
   const warnings = [];
   let items = [];
   const attempt = async (source, load) => {
@@ -274,18 +278,12 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
     }
   };
   await attempt('notifications', async () => {
-    const scan = await openAlertRows(role, scanStart);
-    const { rows, truncated } = scan;
-    resumeAt = scan.resumeAt;
-    if (truncated) {
-      logger.warn(`[needs-me] stopped at ${SCAN_CAP} open notification rows`);
-      warnings.push({ source: 'notifications', error: 'truncated' });
-    }
+    const rows = await openAlertRows(role);
+    for (const r of rows) rowsById.set(String(r.id), r);
     return rows.map(mapAlertRow);
   });
   // Standing conditions carry finance totals and owner-only links: admin only, like the bell overlay.
-  // They belong to the first scan window only, so a continued window never repeats them.
-  if ((!role || role === 'admin') && !scanStart) {
+  if (!role || role === 'admin') {
     await attempt('dashboard_alerts', async () => {
       const result = await computeDashboardAlerts();
       // computeDashboardAlerts fail-softs per generator: a queue that threw is missing from
@@ -304,8 +302,13 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
   const tally = (key) => sorted.reduce((acc, item) => ({ ...acc, [item[key]]: (acc[item[key]] || 0) + 1 }), {});
   const max = Math.min(Math.max(parseInt(limit, 10) || DEFAULT_LIMIT, 1), ROW_CAP);
   // Keyset paging over the same total order: strictly after the cursor's item.
-  const remaining = after?.k ? matching.filter((item) => compareKeys(sortKey(item), after.k) > 0) : matching;
-  const page = remaining.slice(0, max);
+  const remaining = after ? matching.filter((item) => compareKeys(sortKey(item), after) > 0) : matching;
+  let page = remaining.slice(0, max);
+  try { page = await withText(page, rowsById); } catch (err) {
+    // The list still answers; its alerts just lack their why/detail text.
+    logger.error(`[needs-me] text for the page failed: ${err.message}`);
+    warnings.push({ source: 'notifications', error: 'text_unavailable' });
+  }
   return {
     generatedAt: generatedAt.toISOString(),
     // total and counts are the known work; unsorted rows are counted on their own.
@@ -313,10 +316,7 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
     unsortedTotal: matching.length - sorted.length,
     counts: { byArea: tally('area'), byWho: tally('who'), bySeverity: tally('severity') },
     items: page,
-    // More in this window: continue after the last item. Window done but the scan
-    // stopped at the cap: the next window starts where it stopped.
-    next: remaining.length > page.length ? encodeCursor({ k: sortKey(page[page.length - 1]), s: scanStart })
-      : resumeAt ? encodeCursor({ k: null, s: resumeAt }) : null,
+    next: remaining.length > page.length ? encodeCursor(sortKey(page[page.length - 1])) : null,
     warnings,
   };
 }

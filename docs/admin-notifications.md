@@ -163,7 +163,7 @@ may do), and never resolve a `person` item.
 An `ops_digest` row for the `fyi` audience is severity `fyi` and is never listed. An alert
 carries `detail`, the full finding (bounded to 2,000 characters; an engineering digest's
 diagnosis may live only there); when the row has no body, `why` is the first sentence of it.
-One call scans at most 20,000 open rows; past that it warns `truncated`, `total`/`counts` cover the rows scanned, and `next` continues the scan where it stopped, so every row stays reachable. A source that partly fails says so in `warnings`: a dashboard queue that threw is named
+Every open row joins one global order (no scan cap: the walk reads only what classifying and ordering need, and body/detail are read for the returned page alone). A digest already marked `resolved` is closed even without `done_at`. A source that partly fails says so in `warnings`: a dashboard queue that threw is named
 (`{ source: 'dashboard_alerts', generator, error }`) instead of reading as empty.
 
 **Unsorted** (owner 2026-10-01): a raw `notifyAdmin` row with no stamped severity that is
