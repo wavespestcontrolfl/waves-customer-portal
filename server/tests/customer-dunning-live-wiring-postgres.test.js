@@ -363,6 +363,26 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
   });
 
   // ── the kill switch ────────────────────────────────────────────────────
+  describe('a delivered final notice ends the members for good', () => {
+    test('members the final named are marked cadence-exhausted, so the Day 60/90 revival never restarts them', async () => {
+      const c = await customer();
+      // Day 60/90 debt: step 4 is inside the revival range [4, 6)
+      const a = await member(c, { sentDaysAgo: 70, step: 4, due: false });
+      const b = await member(c, { sentDaysAgo: 65, step: 4, due: false });
+      const stamp = new Date(Date.now() - 1000);
+      const schedule = await openSchedule(c, { step_index: 5, touch_claimed_at: stamp });
+      const now = new Date();
+      const out = await Schedule.completeFinal(schedule, {
+        claimStamp: stamp, deliveredAt: now, namedInvoiceIds: [a.invoiceId, b.invoiceId], now,
+      });
+      expect(out.completed).toBe(true);
+      for (const m of [a, b]) expect(await seqRow(m.seq.id)).toMatchObject({ status: 'completed', step_index: 6 });
+      // the invoices are still unpaid (overdue): the per-invoice revival must leave them completed
+      await Followups._test.reviveLegacyFinishedSequences();
+      for (const m of [a, b]) expect(await seqRow(m.seq.id)).toMatchObject({ status: 'completed', next_touch_at: null });
+    });
+  });
+
   describe('releaseIfDark (kill switch)', () => {
     // Every open schedule is the kill switch's; settle the earlier tests' rows first.
     beforeEach(async () => {

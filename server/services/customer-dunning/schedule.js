@@ -523,7 +523,12 @@ async function completeFinal(schedule, {
       await trx('invoice_followup_sequences')
         .where({ customer_id: schedule.customer_id, status: 'active' })
         .whereIn('invoice_id', namedInvoiceIds)
-        .update({ status: 'completed', next_touch_at: null, updated_at: trx.fn.now() });
+        // step_index past the last ladder step: the per-invoice "cadence
+        // exhausted" mark. Both revival passes (Day 60/90 and reopened
+        // low-step) select completed rows INSIDE the ladder, so a member the
+        // final notice named, left on its low promotion-time step, would be
+        // revived next run and dunned again after its final notice.
+        .update({ status: 'completed', step_index: STEPS.length, next_touch_at: null, updated_at: trx.fn.now() });
     }
     return { completed: true, landed: await releaseMembers(trx, schedule, now) };
   });

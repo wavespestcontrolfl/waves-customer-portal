@@ -3035,5 +3035,7 @@ module.exports = {
   adoptOrphanInvoicesLive,
   // Exported for tests only (fireStep + the batch ownership predicate: the
   // customer-dunning PostgreSQL concurrency suite drives them directly).
-  _test: { canSystemResume, isSystemStopStamp, holdTouchUntilNextDay, fireStep, notOwnedByCustomerSchedule },
+  _test: {
+    canSystemResume, isSystemStopStamp, holdTouchUntilNextDay, fireStep, notOwnedByCustomerSchedule, reviveLegacyFinishedSequences,
+  },
 };
