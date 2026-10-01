@@ -7086,6 +7086,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 8:05 AM ET — Typed-decisions review item (shadow lane, dark).
+  // Refreshes unknown outcome evidence, then raises ONE admin item for
+  // yesterday's unreviewed shadow decisions (up to 8 Jev-vs-baseline
+  // disagreements + 2 spot checks). Gated GATE_TYPED_DECISIONS (checked
+  // inside the service); nothing acts on a Jev answer.
+  // =========================================================================
+  cron.schedule('5 8 * * *', async () => {
+    await runExclusive('typed-decisions-daily-review', async () => {
+      try {
+        const { runDailyReviewItem } = require('./typed-decisions/daily-review-item');
+        const result = await runDailyReviewItem();
+        if (result.raised) logger.info(`[typed-decisions] daily review item raised: ${result.disagreements} disagreements, ${result.spotChecks} spot checks`);
+      } catch (e) { logger.error(`Typed-decisions daily review failed: ${e.message}`); }
+    });
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Send scheduled review request SMS
   // Picks up review requests whose scheduled_for has passed.
   // =========================================================================

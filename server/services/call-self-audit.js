@@ -17,7 +17,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, typedDecisionsLive } = require('../config/feature-gates');
 const { createDeepMessage } = require('./llm/deep');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -55,6 +55,66 @@ function callDirectionBlock(direction) {
     : 'CALL DIRECTION: INBOUND — the caller dialed Waves; the person who answered is staff.\n';
 }
 
+// The direction line as the typed-decision package takes it: the same two
+// facts the judge's CALL DIRECTION block carries (who dialed, and that
+// outbound speaker labels can be swapped), without the instructions.
+function compactDirection(direction) {
+  return /^outbound/i.test(String(direction || ''))
+    ? 'OUTBOUND: Waves staff placed the call; the person who answered is the customer. Speaker labels may be swapped, so judge parties by what each says.'
+    : 'INBOUND: the caller dialed Waves; the person who answered is staff.';
+}
+
+// Shadow: put the same call to TypeSafe Jev (call_judge.v2) and record its
+// answers beside production's and the deep judge's in decision_reviews. Dark
+// behind GATE_TYPED_DECISIONS. Never throws and never touches the audit's own
+// findings or counters; it only tallies into `tally` ({ asked, recorded, failed }
+// counts calls, not rows).
+const JEV_SHARED_FIELDS = ['is_lead', 'is_spam', 'is_voicemail', 'appointment_agreed', 'quote_promised'];
+async function shadowJevJudge(call, prod, verdict, tally) {
+  if (!typedDecisionsLive()) return;
+  tally.asked++;
+  const outcome = await askAndRecord(call, prod, verdict);
+  if (outcome === 'recorded') tally.recorded++; else tally.failed++;
+}
+
+// What the production extraction recorded for the call_judge fields.
+function productionAnswers(call) {
+  const ex = safeParse(call.ai_extraction);
+  return {
+    is_lead: ex.is_lead === true,
+    is_spam: call.processing_status === 'spam' || ex.is_spam === true,
+    is_voicemail: call.processing_status === 'voicemail' || ex.is_voicemail === true,
+    appointment_agreed: ex.appointment_confirmed === true,
+    quote_promised: ex.quote_promised === true,
+  };
+}
+
+async function askAndRecord(call, prod, verdict) {
+  try {
+    const { askPackage } = require('./typed-decisions/jev');
+    const { packageFor } = require('./typed-decisions/packages');
+    const { recordDecisions } = require('./typed-decisions/shadow-recorder');
+    const { callSubjectHash, callTranscriptSpan } = require('./typed-decisions/subject-hash');
+    const result = await askPackage('call_judge.v2', {
+      call_direction: compactDirection(call.direction),
+      duration_seconds: call.duration_seconds ?? null,
+      transcript: callTranscriptSpan(call.transcription),
+    });
+    if (!result.ok) return 'failed';
+    const bool = (v) => (typeof v === 'boolean' ? v : undefined);
+    const baselines = { complaint: { deep_judge: bool(verdict.complaint) } };
+    for (const f of JEV_SHARED_FIELDS) baselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
+    const recorded = await recordDecisions({
+      capability: 'call_judge', pkg: packageFor('call_judge.v2'), subjectType: 'call_log', subjectId: call.id, result, baselines,
+      subjectHash: callSubjectHash(call.transcription),
+    });
+    return recorded.recorded > 0 ? 'recorded' : 'failed';
+  } catch (err) {
+    logger.warn(`[self-audit] jev shadow failed for ${call.id}: ${err.message}`);
+    return 'failed';
+  }
+}
+
 // Reserve up to half the sample for each direction; whatever one direction
 // cannot fill goes to the other. Each input is newest-first already.
 function stratifySample({ inbound = [], outbound = [], size = SAMPLE_SIZE } = {}) {
@@ -89,7 +149,9 @@ async function runSelfAudit(depsIn = {}) {
     .where('created_at', '>', db.raw("NOW() - INTERVAL '3 days'"))
     .orderBy('created_at', 'desc')
     .limit(SAMPLE_SIZE)
-    .select('id', 'twilio_call_sid', 'created_at', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'disposition');
+    .select('id', 'twilio_call_sid', 'created_at', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'disposition',
+      // Jev shadow: the call's length is part of call_judge's state.
+      'duration_seconds');
   const [inboundRows, outboundRows] = await Promise.all([
     sampleDirection(INBOUND_DIRECTION_SQL),
     sampleDirection(OUTBOUND_DIRECTION_SQL),
@@ -99,6 +161,7 @@ async function runSelfAudit(depsIn = {}) {
   if (!calls.length) return { sampled: 0 };
 
   let disagreements = 0; let checkedFields = 0; let spamFalsePositives = 0; let dispositionMismatches = 0; let audited = 0;
+  const jev = { asked: 0, recorded: 0, failed: 0 };
   for (const call of calls) {
     let verdict;
     try {
@@ -113,17 +176,13 @@ async function runSelfAudit(depsIn = {}) {
       verdict = JSON.parse((text.match(/\{[\s\S]*\}/) || ['{}'])[0]);
     } catch (err) {
       logger.warn(`[self-audit] audit call failed for ${call.id}: ${err.message}`);
+      // Jev is still asked, against production alone: dropping every call the
+      // deep judge fails on would bias the shadow sample toward easy calls.
+      await shadowJevJudge(call, productionAnswers(call), {}, jev);
       continue;
     }
     audited++;
-    const ex = safeParse(call.ai_extraction);
-    const prod = {
-      is_lead: ex.is_lead === true,
-      is_spam: call.processing_status === 'spam' || ex.is_spam === true,
-      is_voicemail: call.processing_status === 'voicemail' || ex.is_voicemail === true,
-      appointment_agreed: ex.appointment_confirmed === true,
-      quote_promised: ex.quote_promised === true,
-    };
+    const prod = productionAnswers(call);
     const diffs = [];
     for (const f of Object.keys(prod)) {
       checkedFields++;
@@ -157,6 +216,8 @@ async function runSelfAudit(depsIn = {}) {
         .merge(['old_value', 'new_value', 'transcript_excerpt', 'detail'])
         .catch((err) => logger.warn(`[self-audit] finding write failed: ${err.message}`));
     }
+
+    await shadowJevJudge(call, prod, verdict, jev);
   }
 
   const fieldRate = checkedFields ? disagreements / checkedFields : 0;
@@ -186,7 +247,7 @@ async function runSelfAudit(depsIn = {}) {
   } else {
     logger.info(`[self-audit] healthy: ${audited} calls, field rate ${(fieldRate * 100).toFixed(1)}%, 0 spam FPs`);
   }
-  return { sampled: calls.length, audited, fieldRate, spamFalsePositives, dispositionRate, breaches };
+  return { sampled: calls.length, audited, fieldRate, spamFalsePositives, dispositionRate, breaches, jev };
 }
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
