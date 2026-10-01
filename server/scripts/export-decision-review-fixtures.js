@@ -17,11 +17,14 @@ const path = require('path');
 const DEFAULT_STATUSES = ['confirmed_error', 'confirmed_correct'];
 const ALL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
 const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
-// The same integrity contract migration 20261001130000 enforces in the schema,
-// repeated here so the export stays honest against rows older than the CHECKs:
-// a real sha256 hex hash, and for confirmed rows a JSON-object label with a
-// non-blank reviewer and a timestamp.
-const EVIDENCE_PREDICATE = "package_hash ~ '^[0-9a-f]{64}$' AND NOT (label_status IN ('confirmed_error','confirmed_correct') AND (label IS NULL OR jsonb_typeof(label) <> 'object' OR labeled_by IS NULL OR btrim(labeled_by) = '' OR labeled_at IS NULL))";
+// The same contract the schema enforces (migrations 20261001130000 +
+// 20261001140000), repeated here so the export stays honest against rows older
+// than the CHECKs: a real sha256 hex hash, and for confirmed rows a label of the
+// review route's shape ({ verdict: jev_right | jev_wrong | unclear, correct_value
+// required for jev_wrong }) with a non-blank reviewer and a timestamp.
+const LABEL_OK = "(label IS NOT NULL AND jsonb_typeof(label) = 'object' AND label->>'verdict' IN ('jev_right','jev_wrong','unclear') AND (label->>'verdict' <> 'jev_wrong' OR label ? 'correct_value'))";
+const PROVENANCE_OK = "(labeled_by IS NOT NULL AND btrim(labeled_by) <> '' AND labeled_at IS NOT NULL)";
+const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NOT IN ('confirmed_error','confirmed_correct') OR (${LABEL_OK} AND ${PROVENANCE_OK}))`;
 
 // One decision_reviews row -> one fixture case. Picks only the allowed fields,
 // so a column added to the table later can never leak into a fixture.
