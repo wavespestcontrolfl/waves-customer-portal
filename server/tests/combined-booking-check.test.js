@@ -163,6 +163,14 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['lawn_care']) })).toBeNull();
   });
 
+  test('individually priced first visits are judged one by one, even when their sum matches', () => {
+    const pest = pestRows({ invoiceId: null, parentOverrides: { estimated_price: 200 } });
+    const lawn = lawnRows({ invoiceId: null, parentOverrides: { estimated_price: 50 } });
+    const verdict = run([PEST, LAWN], [...pest, ...lawn]);
+    expect(codes(verdict)).toEqual(['first_day_price_mismatch']);
+    expect(verdict.problems[0].detail).toBe('lawn $50.00 vs $100.00; pest $200.00 vs $150.00');
+  });
+
   test('a primary_line_price with no estimated_price is not a price: completion bills nothing from it', () => {
     const lawn = lawnRows({ childOverrides: { estimated_price: null, primary_line_price: 100 } });
     expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual(['price_missing']);

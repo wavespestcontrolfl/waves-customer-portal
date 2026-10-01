@@ -341,11 +341,14 @@ function checkUnstampedFirstDay(unstamped, programs, facts) {
     const named = [...programs.keys()].filter((family) => bare.has(family)).map(lowerLabel);
     return [{ code: 'first_day_uncovered', text: `${named.join(' + ') || 'first-day'} first visit has no price or invoice` }];
   }
-  const perRowOff = priced.length === unstamped.length && !sumMatches && unstamped.some((row) => {
+  // Every row priced itself: completion bills each row's own price, so each is
+  // judged on its own (offsetting errors must not pass on a matching sum).
+  if (priced.length < unstamped.length) return [];
+  const off = unstamped.filter((row) => {
     const rowExpected = expectedFor(row, programs);
     return rowExpected != null && Math.abs(rowPrice(row) - rowExpected) > toleranceFor(row, programs);
-  });
-  return perRowOff ? [{ code: 'first_day_price_mismatch', text: `first visit priced ${money(paid)} \u2260 ${money(expected)}` }] : [];
+  }).map((row) => `${lowerLabel(programRowFamilies(row, programs)[0])} ${money(rowPrice(row))} vs ${money(expectedFor(row, programs))}`);
+  return off.length ? [{ code: 'first_day_price_mismatch', text: `first visit ${off[0]}`, detail: off.join('; ') }] : [];
 }
 
 /**
