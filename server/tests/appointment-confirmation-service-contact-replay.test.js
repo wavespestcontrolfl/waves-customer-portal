@@ -47,8 +47,11 @@ function chain(first) {
   q.first = jest.fn(async () => first);
   return q;
 }
-function wire({ svc = { id: 's1', status: 'confirmed', service_type: 'Pest Control', customer_confirmed: true }, reminder = { appointment_time: future, cancelled: false }, dup = null, prefsRow, prefsFail = false } = {}) {
+const ACCT = { id: 'c1', service_contact_phone: '+15550100123', service_contacts_consent_at: new Date('2026-10-01T00:00:00Z') };
+function wire({ svc = { id: 's1', status: 'confirmed', service_type: 'Pest Control', customer_confirmed: true }, reminder = { appointment_time: future, cancelled: false }, dup = null, prefsRow, prefsFail = false, acct = ACCT, optin = { status: 'confirmed' } } = {}) {
   db.mockImplementation((table) => {
+    if (table === 'customers') return chain(acct);
+    if (table === 'recipient_optin') return chain(optin);
     if (table === 'scheduled_services') return chain(svc);
     if (table === 'notification_prefs') {
       if (prefsFail) { const q = chain(null); q.first = jest.fn(() => Promise.reject(new Error('db down'))); return q; }
@@ -162,6 +165,8 @@ describe('sendConfirmationToServiceContact', () => {
       if (table === 'scheduled_services') return chain({ id: 's1', status: 'confirmed', service_type: 'Pest Control' });
       if (table === 'appointment_reminders') return chain({ appointment_time: future, cancelled: false });
       if (table === 'sms_log') return q;
+      if (table === 'customers') return chain(ACCT);
+      if (table === 'recipient_optin') return chain({ status: 'confirmed' });
       return chain(undefined);
     });
     const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact: { ...contact, phone: '(555) 010-0123' } });
@@ -177,6 +182,8 @@ describe('sendConfirmationToServiceContact', () => {
       if (table === 'scheduled_services') return chain({ id: 's1', status: 'confirmed', service_type: 'Pest Control' });
       if (table === 'appointment_reminders') return chain({ appointment_time: future, cancelled: false });
       if (table === 'sms_log') return q;
+      if (table === 'customers') return chain(ACCT);
+      if (table === 'recipient_optin') return chain({ status: 'confirmed' });
       return chain(undefined);
     });
     const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
@@ -198,5 +205,19 @@ describe('sendConfirmationToServiceContact', () => {
       const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
       expect(res.sent).toBe(false);
     }
+  });
+
+  test('revalidated at send time: phone no longer in a slot, consent withdrawn, or opt-in not confirmed = not sent (terminal)', async () => {
+    for (const [opts, reason] of [
+      [{ acct: { ...ACCT, service_contact_phone: '+15550109999' } }, 'contact_not_in_slot'],
+      [{ acct: { ...ACCT, service_contacts_consent_at: null } }, 'consent_missing'],
+      [{ optin: { status: 'declined' } }, 'optin_not_confirmed'],
+      [{ optin: null }, 'optin_not_confirmed'],
+    ]) {
+      wire(opts);
+      const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+      expect(res).toEqual({ sent: false, reason });
+    }
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });

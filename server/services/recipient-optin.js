@@ -76,7 +76,7 @@ function visitSlotAt(visit) {
 // Replay outcomes that end the obligation (anything else is retried by the sweep).
 // template_unavailable is NOT terminal: the renderer returns null on a
 // transient template-read / render error too, so it is retried.
-const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'confirmation_off', 'sms_not_chosen']);
+const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'confirmation_off', 'sms_not_chosen', 'contact_not_in_slot', 'consent_missing', 'optin_not_confirmed']);
 // A replay claim older than this is a crashed attempt and may be retaken.
 const REPLAY_CLAIM_STALE_MS = 10 * 60 * 1000;
 // Unanswered or undeliverable entries stop being retried after this.

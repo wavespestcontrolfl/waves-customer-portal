@@ -5903,12 +5903,25 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     if (prefs.unavailable) return { sent: false, reason: 'prefs_unavailable' };
     if (!prefs.appointmentConfirmation) return { sent: false, reason: 'confirmation_off' };
     if (!prefs.smsEnabled || apptChannel(prefs.confirmationChannel) === 'email') return { sent: false, reason: 'sms_not_chosen' };
+    // Revalidated at send time (the replay can run from the sweep days after
+    // the YES): this phone must still sit in one of the account's slots, the
+    // account's service-contact consent must still stand, and the phone's
+    // opt-in for THIS customer must still be confirmed.
+    const contactKey = String(contact.phone).replace(/\D/g, '').slice(-10);
+    const acct = await db('customers').where({ id: customerId }).first();
+    const SLOT_PHONES = ['service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+    if (!acct || !SLOT_PHONES.some((col) => String(acct[col] || '').replace(/\D/g, '').slice(-10) === contactKey)) return { sent: false, reason: 'contact_not_in_slot' };
+    if (!acct.service_contacts_consent_at && process.env.DISABLE_CONTACT_CONSENT_GATE !== '1') return { sent: false, reason: 'consent_missing' };
+    const optin = await db('recipient_optin').where({ customer_id: customerId, phone_key: contactKey }).first('status');
+    if (!optin || optin.status !== 'confirmed') return { sent: false, reason: 'optin_not_confirmed' };
     const recentDup = await db('sms_log')
       .where({ message_type: 'confirmation' })
       // sms_log holds the E.164 the sender normalized; the slot phone may be
       // stored formatted — compare last-10 digits.
       .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [String(contact.phone).replace(/\D/g, '').slice(-10)])
       .whereRaw('metadata::text like ?', [`%${scheduledServiceId}%`])
+      // A definitively failed attempt delivered nothing: it does not count.
+      .whereRaw("coalesce(status, '') not in ('failed', 'undelivered', 'canceled')")
       // Visit lifetime, not a window: a reprocess days later must not resend.
       .first('id')
       // An unreadable dedupe fails CLOSED and retries (never a blind send).
