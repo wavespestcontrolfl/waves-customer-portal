@@ -199,6 +199,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     const anchorOcc = result.rescheduledOccurrences.find((o) => String(o.id) === String(anchor.id));
     expect(String(anchorOcc.windowStart).slice(0, 5)).toBe('10:00');
     expect(String(anchorOcc.visitWindowStart).slice(0, 5)).toBe('09:00');
+    expect(anchorOcc.visitId).toBe(String(f.visits[0].id));
     expect(result.carriedVisitMembers.map((k) => String(k.id)).sort()).toEqual(f.pest.map((r) => String(r.id)).sort());
     expect(result.followUpOccurrences.map((k) => String(k.id))).not.toEqual(expect.arrayContaining([String(f.pest[0].id)]));
   });
@@ -214,6 +215,35 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     const refresh = mockEmits.filter((e) => e.event === 'customer:job_update' && String(e.payload.job_id) === String(f.pest[0].id));
     expect(refresh.length).toBeGreaterThan(0);
     for (const e of refresh) expect(e.payload.status).toBe('confirmed');
+  });
+
+  test('a carried partner never lands on a day its own plan already has a visit', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    // A pest booster already sits on the day the first stop would move to.
+    await db('scheduled_services').insert({
+      id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, status: 'pending',
+      recurring_parent_id: f.pestParent.id, recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control',
+      service_id: f.pest[0].service_id, scheduled_date: addDays(dateOnly(f.lawn[0].scheduled_date), 1),
+      window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 30,
+    });
+    const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
+    await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', memberId: f.pest[0].id });
+    const after = await rowsOf([...before.keys()]);
+    for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
+  });
+
+  test('a reviewed move (conflict snapshot) does not carry partners: today\'s refusal stands', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const anchor = f.lawn[0];
+    await expect(rebooker.rescheduleSeries(anchor.id, addDays(dateOnly(anchor.scheduled_date), 1), '09:00-10:00', 'admin', 'admin', {
+      adminWindowRules: true,
+      sourceSurface: 'call_reschedule',
+      notifyRequested: false,
+      overlapAdvisory: true,
+      expectConflictSnapshot: [],
+    })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED' });
   });
 
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {

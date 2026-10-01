@@ -303,6 +303,9 @@ function collectiveMoveGateOn() {
 // today's refusal, as does an explicit single-row member move.
 function seriesCarriesVisitFor(initiatedBy, options = {}) {
   if (options.visitPolicy === 'single') return false;
+  // A reviewed move (call reschedule Apply) approved a conflict snapshot
+  // that never included partner rows — it keeps today's refusal.
+  if (Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) return false;
   const by = String(initiatedBy || '');
   if (/^customer/i.test(by) || by === 'auto_dispatch') return false;
   return require('../config/feature-gates').seriesMoveCarriesVisitLive();
@@ -3058,6 +3061,26 @@ class SmartRebooker {
             ...(techOverride !== undefined ? { technician_id: techOverride } : {}),
           };
           if (techChanges) pUpdate.route_order = null;
+          // The partner's OWN plan must not get two visits on one day — the
+          // same hard block the sweep applies to its own series (seriesClash),
+          // under the date-occupancy lock already held for dateStr.
+          const partnerRoot = partner.recurring_parent_id || (partner.is_recurring ? partner.id : null);
+          if (partnerDateChanges && partnerRoot) {
+            const partnerClash = await trx('scheduled_services')
+              .whereRaw('(id = ? OR recurring_parent_id = ?)', [partnerRoot, partnerRoot])
+              .whereNotIn('id', [...sweptIds, ...carry.partnerIds])
+              .whereNotIn('status', TERMINAL)
+              .where('scheduled_date', dateStr)
+              .first('id');
+            if (partnerClash) {
+              throw Object.assign(new Error('That date lands on another visit in a grouped service\'s own plan — pick a different time'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SLOT_TAKEN',
+                memberId: partner.id,
+              });
+            }
+          }
           if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr);
           if (keptTech) {
             await trx.raw(
@@ -3673,7 +3696,7 @@ class SmartRebooker {
           date,
           windowStart: sibClashBeyondHorizon ? null : occurrenceWindow.start,
           windowEnd: sibClashBeyondHorizon ? null : occurrenceWindow.end,
-          ...(carried?.visitWindowStart ? { visitWindowStart: carried.visitWindowStart } : {}),
+          ...(carried?.visitWindowStart ? { visitId: String(sib.visit_id), visitWindowStart: carried.visitWindowStart } : {}),
           // True only for a BEYOND-horizon occurrence whose projected window
           // held a seeded placeholder — committed at its cadence date
           // WINDOWLESS (see above); near-term clashes and real-booking

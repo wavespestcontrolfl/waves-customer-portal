@@ -4730,7 +4730,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // uses), never a direct customers.phone text: a primary who opted out,
       // has no phone, or routes appointment texts to an authorized service
       // contact gets exactly what the single-visit notice would do.
-      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start');
+      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id');
       const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
       // The text quotes the slot the series move RECORDED for the anchor —
       // date and arrival window. A replayed/retried pass whose anchor was
@@ -4742,10 +4742,19 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       const recordedStart = anchorOcc ? hm(anchorOcc.windowStart) : hm(parseRescheduleWindow(newWindow).start);
       const anchorStillOnRecordedSlot = (row) => String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date || '').slice(0, 10) === String(newDate).split('T')[0]
         && (!anchorOcc || hm(row.window_start) === recordedStart);
+      // A grouped anchor's text quotes its stop's landed start: the anchor
+      // must still sit in that visit, and the visit still start there (a
+      // partner moved or detached since makes the quoted window obsolete).
+      const stopStillOnRecordedStart = async (row) => {
+        if (!anchorOcc?.visitWindowStart) return true;
+        if (String(row.visit_id || '') !== String(anchorOcc.visitId || '')) return false;
+        const visit = await db('service_visits').where({ id: row.visit_id }).first('window_start');
+        return !!visit && hm(visit.window_start) === hm(anchorOcc.visitWindowStart);
+      };
       if (!customer) {
         notificationError = 'Customer not found';
         definitiveNonSend = true;
-      } else if (!anchorStillOnRecordedSlot(svc)) {
+      } else if (!anchorStillOnRecordedSlot(svc) || !(await stopStillOnRecordedStart(svc))) {
         notificationError = 'anchor_changed';
         definitiveNonSend = true;
       } else {
@@ -4805,12 +4814,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             operatorInitiated: STAFF_SERIES_SURFACES.has(markers.source_surface),
             sendOutcome,
             preDispatchCheck: async () => {
-              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
+              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
               if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
               if (['cancelled', 'completed', 'skipped', 'no_show'].includes(String(row.status))) {
                 return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
               }
-              return anchorStillOnRecordedSlot(row)
+              return anchorStillOnRecordedSlot(row) && await stopStillOnRecordedStart(row)
                 ? { ok: true }
                 : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the series text was sent' };
             },

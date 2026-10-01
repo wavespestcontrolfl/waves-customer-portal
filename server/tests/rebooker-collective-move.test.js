@@ -1610,6 +1610,10 @@ describe('caller wiring (source)', () => {
     expect(effects).toContain('for (const occurrence of reminderOccurrences) {');
     expect(effects).toContain('const ownedOccurrences = () => reminderOccurrences.filter(');
     expect(effects).toContain('const startForText = anchorOcc?.visitWindowStart || anchorOcc?.windowStart');
+    // The quoted stop start is rechecked before the send and again at the
+    // provider handoff (a partner moved or detached since makes it obsolete).
+    expect(effects).toContain('!anchorStillOnRecordedSlot(svc) || !(await stopStillOnRecordedStart(svc))');
+    expect(effects).toContain('return anchorStillOnRecordedSlot(row) && await stopStillOnRecordedStart(row)');
     // Partners are not follow-ups (synced notify-off, never closed).
     expect(read('../services/rebooker.js')).not.toMatch(/\.\.\.carriedMembers\.map\(/);
   });
