@@ -180,6 +180,11 @@ describe('recheckPlacements', () => {
     expect(recheckPlacements([placement({ target_domain: 'other.com' })], rows, { now: NOW })).toEqual([]);
   });
 
+  test('a citation older than the placement\'s own 30-day window never defines its questions', () => {
+    const rows = [row({ query: Q1, date: '2026-08-15', urls: [PAGE] }), row({ query: Q1, date: '2026-10-10', urls: [PAGE] })];
+    expect(recheckPlacements([placement()], rows, { now: NOW })).toEqual([]);
+  });
+
   test('citations after the link went live never define the questions', () => {
     const rows = [row({ query: Q1, date: '2026-10-05', urls: [PAGE], named: true })];
     expect(recheckPlacements([placement()], rows, { now: NOW })).toEqual([]);

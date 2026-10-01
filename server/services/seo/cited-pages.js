@@ -275,7 +275,8 @@ function daysBetween(fromDate, toDate) {
  * (id, target_domain, live_url, first_live_at); `rows` are mention rows (any
  * order; only measured ones are read) covering RECHECK_BEFORE_DAYS before the oldest placement.
  * The page is the placement's own live_url; the questions are those whose
- * answers cited that exact page before the link went live. before = those questions' answers in the
+ * answers cited that exact page in the RECHECK_BEFORE_DAYS before the link
+ * went live. before = those questions' answers in the
  * RECHECK_BEFORE_DAYS before; after = their answers from that day on.
  * verdict: too_early (under RECHECK_SETTLE_DAYS live, or no answer since) |
  * named_when_cited (an answer since cites the page and names Waves) |
@@ -294,11 +295,12 @@ function recheckPlacements(placements, rows, { now = new Date() } = {}) {
     // same site (a Yelp listing beside a cited Yelp search) is not this one.
     const liveKey = pl.live_url ? pageKey(pl.live_url) : null;
     if (!liveKey || !(liveKey === host || liveKey.startsWith(`${host}/`) || liveKey.startsWith(`${host}?`))) continue;
-    const before = dated.filter((r) => r.date < liveOn);
-    const cites = (r) => r.keys.has(liveKey);
-    const questions = new Set(before.filter(cites).map((r) => r.query));
-    if (!questions.size) continue; // engines never cited this page before the link went live
+    // every placement gets its OWN window: the rows span the oldest
+    // placement's, so a newer one must not take questions from before its own
     const windowStart = etDateString(addETDays(new Date(`${liveOn}T12:00:00Z`), -RECHECK_BEFORE_DAYS));
+    const cites = (r) => r.keys.has(liveKey);
+    const questions = new Set(dated.filter((r) => r.date >= windowStart && r.date < liveOn && cites(r)).map((r) => r.query));
+    if (!questions.size) continue; // engines did not cite this page in the window before the link went live
     const tally = { before: emptyTally(), after: emptyTally() };
     for (const r of dated) {
       if (!questions.has(r.query) || r.date < windowStart) continue;
