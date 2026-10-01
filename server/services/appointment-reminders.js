@@ -5876,6 +5876,12 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     if (reminder && reminder.cancelled) return { sent: false, reason: 'visit_not_live' };
     const apptTime = composeScheduledApptTime(svc) || (reminder && reminder.appointment_time ? new Date(reminder.appointment_time) : null);
     if (!apptTime || Number.isNaN(apptTime.getTime()) || apptTime.getTime() <= Date.now()) return { sent: false, reason: 'visit_not_future' };
+    // The account's confirmation choices apply to this text exactly as to the
+    // primary's: confirmations off or an email-only channel = no text.
+    const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
+    if (prefs.unavailable) return { sent: false, reason: 'prefs_unavailable' };
+    if (!prefs.appointmentConfirmation) return { sent: false, reason: 'confirmation_off' };
+    if (!prefs.smsEnabled || apptChannel(prefs.confirmationChannel) === 'email') return { sent: false, reason: 'sms_not_chosen' };
     const recentDup = await db('sms_log')
       .where({ to_phone: contact.phone, message_type: 'confirmation' })
       .whereRaw('metadata::text like ?', [`%${scheduledServiceId}%`])

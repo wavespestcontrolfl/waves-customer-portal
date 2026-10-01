@@ -74,7 +74,9 @@ function visitSlotAt(visit) {
   return require('../utils/datetime-et').parseETDateTime(`${datePart}T${timePart}`);
 }
 // Replay outcomes that end the obligation (anything else is retried by the sweep).
-const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'template_unavailable']);
+const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'visit_not_future', 'already_sent', 'template_unavailable', 'confirmation_off', 'sms_not_chosen']);
+// A replay claim older than this is a crashed attempt and may be retaken.
+const REPLAY_CLAIM_STALE_MS = 10 * 60 * 1000;
 // Unanswered or undeliverable entries stop being retried after this.
 const MARKER_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const markerPath = (phoneKey, visitId) => (visitId ? ['demote_primary_on_optin', phoneKey, String(visitId)] : ['demote_primary_on_optin', phoneKey]);
@@ -256,12 +258,27 @@ function runConfirmationReplays(replays, dbh, { inReplyToYes = false } = {}) {
   const run = async () => {
     for (const replay of replays) {
       try {
+        const path = replay.phoneKey ? markerPath(replay.phoneKey, replay.scheduledServiceId) : null;
+        const claimPath = path ? [...path, 'replay_claimed_at'] : null;
+        // Claim the phone+visit entry atomically: the YES handler and a
+        // booking-time reconcile (or the sweep) can queue the same replay,
+        // and the sms_log dedupe is read-only. Exactly one attempt sends; a
+        // claim older than REPLAY_CLAIM_STALE_MS (crashed attempt) is retaken.
+        if (claimPath) {
+          const claimed = await db('customers')
+            .where({ id: replay.customerId })
+            .whereRaw('(service_preferences #> ?::text[]) IS NOT NULL', [path])
+            .whereRaw('COALESCE((service_preferences #>> ?::text[])::timestamptz, \'epoch\'::timestamptz) < ?', [claimPath, new Date(Date.now() - REPLAY_CLAIM_STALE_MS)])
+            .update({ service_preferences: db.raw('jsonb_set(service_preferences, ?::text[], to_jsonb(?::text))', [claimPath, new Date().toISOString()]) });
+          if (!claimed) continue;
+        }
         const AppointmentReminders = require('./appointment-reminders');
         const result = await AppointmentReminders.sendConfirmationToServiceContact({ ...replay, inReplyToYes });
         const final = result.sent || REPLAY_TERMINAL_REASONS.has(result.reason);
-        if (final && replay.phoneKey) {
+        if (path) {
+          // Final: the obligation ends. Retryable: release the claim for the sweep.
           await db('customers').where({ id: replay.customerId })
-            .update({ service_preferences: db.raw("COALESCE(service_preferences, '{}'::jsonb) #- ?::text[]", [markerPath(replay.phoneKey, replay.scheduledServiceId)]) });
+            .update({ service_preferences: db.raw("COALESCE(service_preferences, '{}'::jsonb) #- ?::text[]", [final ? path : claimPath]) });
         }
         logger.info(`[recipient-optin] booking confirmation replay to ***${recipientPhoneKey(replay.contact.phone).slice(-4)}: ${result.sent ? 'sent' : `not sent (${result.reason}${final ? '' : ', will retry'})`}`);
       } catch (err) {

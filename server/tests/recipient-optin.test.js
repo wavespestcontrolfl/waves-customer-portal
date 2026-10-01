@@ -9,6 +9,9 @@ const {
   clearDemoteMarker,
   clearDemoteMarkersForPhone,
 } = require('../services/recipient-optin');
+// The db mock instance recipient-optin was loaded with (later tests reset the
+// module registry, after which require('../models/db') returns a new one).
+const originalDb = require('../models/db');
 
 describe('recipient double opt-in', () => {
   test('recipientPhoneKey matches the webhook last-10 convention', () => {
@@ -421,7 +424,16 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
   test('confirmation replay clears its visit entry only when final; a retryable miss keeps it for the sweep', async () => {
     const dbMod = require('../models/db');
     const updates = [];
-    dbMod.mockImplementation(() => ({ where: () => ({ update: async (p) => { updates.push(p.service_preferences.binds[0]); return 1; } }) }));
+    const claims = [];
+    dbMod.mockImplementation(() => {
+      const q = { where: () => q, whereRaw: () => q };
+      q.update = async (p) => {
+        if (p.service_preferences.sql.includes('jsonb_set')) { claims.push(p.service_preferences.binds[0]); return 1; }
+        updates.push(p.service_preferences.binds[0]);
+        return 1;
+      };
+      return q;
+    });
     dbMod.raw = jest.fn((sql, binds) => ({ sql, binds }));
     const outcomes = [{ sent: true }, { sent: false, reason: 'visit_not_future' }, { sent: false, reason: 'blocked' }, { sent: false, reason: 'error' }];
     const sendConfirmationToServiceContact = jest.fn(async () => outcomes.shift());
@@ -433,7 +445,31 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     runConfirmationReplays([mk('s1'), mk('s2'), mk('s3'), mk('s4')], null);
     for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
     expect(sendConfirmationToServiceContact).toHaveBeenCalledTimes(4);
-    expect(updates).toEqual([['demote_primary_on_optin', KEY, 's1'], ['demote_primary_on_optin', KEY, 's2']]);
+    // Each attempt claimed its entry first.
+    expect(claims).toHaveLength(4);
+    // Final (s1 sent, s2 terminal): entry cleared. Retryable (s3, s4): only the claim released.
+    expect(updates).toEqual([
+      ['demote_primary_on_optin', KEY, 's1'],
+      ['demote_primary_on_optin', KEY, 's2'],
+      ['demote_primary_on_optin', KEY, 's3', 'replay_claimed_at'],
+      ['demote_primary_on_optin', KEY, 's4', 'replay_claimed_at'],
+    ]);
+  });
+
+  test('a replay whose entry is already claimed by another attempt is skipped (no double send)', async () => {
+    const dbMod = originalDb;
+    dbMod.mockImplementation(() => {
+      const q = { where: () => q, whereRaw: () => q, update: async () => 0 };
+      return q;
+    });
+    dbMod.raw = jest.fn((sql, binds) => ({ sql, binds }));
+    const sendConfirmationToServiceContact = jest.fn(async () => ({ sent: true }));
+    jest.resetModules();
+    jest.doMock('../services/appointment-reminders', () => ({ sendConfirmationToServiceContact }));
+    runConfirmationReplays([{ customerId: 'c1', scheduledServiceId: 's1', phoneKey: KEY, contact: { name: 'Sample Spouse', phone: '+19415550123' } }], null);
+    for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(sendConfirmationToServiceContact).not.toHaveBeenCalled();
+    jest.dontMock('../services/appointment-reminders');
     jest.dontMock('../services/appointment-reminders');
   });
 

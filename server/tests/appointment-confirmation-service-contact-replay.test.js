@@ -20,6 +20,7 @@ jest.mock('../services/customer-contact', () => ({
   isServiceContactRole: jest.fn(() => true),
   firstNameFrom: jest.fn((n) => String(n || '').split(/\s+/)[0]),
   prefsUnavailable: jest.fn(() => false),
+  PREFS_UNAVAILABLE: { __prefsUnavailable: true },
   getPrimaryContact: jest.fn(() => ({})),
 }));
 jest.mock('../services/recipient-optin', () => ({ filterRecipientsByOptin: jest.fn(async (c) => c) }));
@@ -46,9 +47,13 @@ function chain(first) {
   q.first = jest.fn(async () => first);
   return q;
 }
-function wire({ svc = { id: 's1', status: 'confirmed', service_type: 'Pest Control', customer_confirmed: true }, reminder = { appointment_time: future, cancelled: false }, dup = null } = {}) {
+function wire({ svc = { id: 's1', status: 'confirmed', service_type: 'Pest Control', customer_confirmed: true }, reminder = { appointment_time: future, cancelled: false }, dup = null, prefsRow, prefsFail = false } = {}) {
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return chain(svc);
+    if (table === 'notification_prefs') {
+      if (prefsFail) { const q = chain(null); q.first = jest.fn(() => Promise.reject(new Error('db down'))); return q; }
+      return chain(prefsRow);
+    }
     if (table === 'appointment_reminders') return chain(reminder);
     if (table === 'sms_log') return chain(dup);
     return chain(undefined);
@@ -126,5 +131,19 @@ describe('sendConfirmationToServiceContact', () => {
     wire();
     await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
     expect(sendCustomerMessage.mock.calls[0][0].conversationalContext).toBe(false);
+  });
+
+  test('honors the account\'s confirmation choices: email-only channel, SMS off or confirmations off = no text', async () => {
+    for (const [opts, reason] of [
+      [{ prefsRow: { appointment_confirmation_channel: 'email' } }, 'sms_not_chosen'],
+      [{ prefsRow: { sms_enabled: false } }, 'sms_not_chosen'],
+      [{ prefsRow: { appointment_confirmation: false } }, 'confirmation_off'],
+      [{ prefsFail: true }, 'prefs_unavailable'],
+    ]) {
+      wire(opts);
+      const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+      expect(res).toEqual({ sent: false, reason });
+    }
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });
