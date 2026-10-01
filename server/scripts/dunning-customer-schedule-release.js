@@ -25,6 +25,7 @@
 // so export the web service's value (--execute refuses without it):
 //   GATE_DUNNING_LADDER_90=true railway run --service Postgres -- node server/scripts/dunning-customer-schedule-release.js [--customer <id>]
 //   GATE_DUNNING_LADDER_90=true railway run --service Postgres -- node server/scripts/dunning-customer-schedule-release.js [--customer <id>] --execute
+// `--customer=<id>` works too. Any other argument is a usage error before anything runs.
 // Releasing a customer while the live gate is on lets the next run promote
 // them again (2+ active invoices): turn the gate off, or narrow the
 // allowlist, to keep them off.
@@ -49,16 +50,41 @@ function prepareDatabaseEnv() {
   }
 }
 
-/** { customerId, execute } or { error }. */
+const USAGE = 'usage: dunning-customer-schedule-release.js [--customer <id> | --customer=<id>] [--execute]';
+
+/**
+ * { customerId, execute } or { error }. Every argument must be one this script knows: an unrecognized
+ * one (a typo, `--customer=` with no id, a second `--customer`) is a usage error BEFORE anything runs,
+ * never ignored — `--customr <id> --execute` read as "no customer" would release EVERY open schedule.
+ */
 function parseArgs(argv) {
   const args = argv.slice(2);
-  const at = args.indexOf('--customer');
   let customerId = null;
-  if (at !== -1) {
-    customerId = String(args[at + 1] || '').trim().toLowerCase();
-    if (!UUID.test(customerId)) return { error: '--customer needs a customer id (uuid)' };
+  let customerSeen = false;
+  let execute = false;
+  const takeCustomer = (raw) => {
+    if (customerSeen) return '--customer given more than once';
+    customerSeen = true;
+    customerId = String(raw || '').trim().toLowerCase();
+    return UUID.test(customerId) ? null : '--customer needs a customer id (uuid)';
+  };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    let problem = null;
+    if (arg === '--execute') {
+      if (execute) problem = '--execute given more than once';
+      execute = true;
+    } else if (arg === '--customer') {
+      i += 1;
+      problem = takeCustomer(args[i]);
+    } else if (arg.startsWith('--customer=')) {
+      problem = takeCustomer(arg.slice('--customer='.length));
+    } else {
+      problem = `unrecognized argument: ${arg}`;
+    }
+    if (problem) return { error: `${problem}\n${USAGE}` };
   }
-  return { customerId, execute: args.includes('--execute') };
+  return { customerId, execute };
 }
 
 const iso = (d) => (d ? new Date(d).toISOString() : '-');

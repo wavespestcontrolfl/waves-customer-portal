@@ -73,8 +73,32 @@ describe('parseArgs', () => {
     expect(script.parseArgs(['node', 's'])).toEqual({ customerId: null, execute: false });
     expect(script.parseArgs(['node', 's', '--execute'])).toEqual({ customerId: null, execute: true });
     expect(script.parseArgs(['node', 's', '--customer', CUST.toUpperCase(), '--execute'])).toEqual({ customerId: CUST, execute: true });
-    expect(script.parseArgs(['node', 's', '--customer', 'nope'])).toEqual({ error: '--customer needs a customer id (uuid)' });
+    expect(script.parseArgs(['node', 's', '--customer', 'nope']).error).toMatch(/^--customer needs a customer id \(uuid\)\nusage: /);
     expect(script.parseArgs(['node', 's', '--customer'])).toHaveProperty('error');
+  });
+
+  // Codex local review P2: `--customer=<id> --execute` parsed as { customerId: null, execute: true } and
+  // released EVERY open schedule. The = form is supported, and anything unrecognized is a usage error.
+  test('--customer=<id> names one customer, exactly like --customer <id>', () => {
+    expect(script.parseArgs(['node', 's', `--customer=${CUST.toUpperCase()}`, '--execute'])).toEqual({ customerId: CUST, execute: true });
+    expect(script.parseArgs(['node', 's', '--execute', `--customer=${CUST}`])).toEqual({ customerId: CUST, execute: true });
+    expect(script.parseArgs(['node', 's', '--customer=']).error).toMatch(/needs a customer id/);
+    expect(script.parseArgs(['node', 's', '--customer=nope', '--execute']).error).toMatch(/needs a customer id/);
+  });
+
+  test.each([
+    [['--customr', CUST, '--execute']],
+    [['--customer_id=' + CUST, '--execute']],
+    [['--execute', '--all']],
+    [['-x']],
+    [[CUST, '--execute']],
+    [['--customer', CUST, '--customer', CUST]],
+    [[`--customer=${CUST}`, '--customer', CUST, '--execute']],
+    [['--execute', '--execute']],
+  ])('anything unrecognized or repeated is a usage error, never "every schedule": %j', (args) => {
+    const out = script.parseArgs(['node', 's', ...args]);
+    expect(out).toEqual({ error: expect.stringMatching(/\nusage: dunning-customer-schedule-release\.js/) });
+    expect(out).not.toHaveProperty('execute');
   });
 });
 
@@ -173,6 +197,20 @@ describe('main', () => {
     await expect(run(['--execute'])).rejects.toMatchObject({ code: 1 });
     expect(logs.join('\n')).toMatch(/REFUSING --execute/);
     expect(mockSchedule.inReadOnlyTransaction).not.toHaveBeenCalled();
+    exit.mockRestore();
+  });
+
+  test('an unrecognized argument exits 1 with the usage BEFORE touching the database or releasing anything', async () => {
+    process.env.DATABASE_URL = 'postgres://example.invalid/db';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const db = require('../models/db');
+    const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw Object.assign(new Error('exit'), { code }); });
+    await expect(run([`--customer-id=${CUST}`, '--execute'])).rejects.toMatchObject({ code: 1 });
+    expect(logs.join('\n')).toMatch(/unrecognized argument: --customer-id=/);
+    expect(logs.join('\n')).toMatch(/usage: /);
+    expect(db).not.toHaveBeenCalled();
+    expect(mockSchedule.inReadOnlyTransaction).not.toHaveBeenCalled();
+    expect(mockSchedule.release).not.toHaveBeenCalled();
     exit.mockRestore();
   });
 
