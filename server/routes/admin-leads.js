@@ -1163,7 +1163,9 @@ router.put('/:id', async (req, res, next) => {
       if (!current) return null;
       // 'handled' is system-set only, and a status change made from a view loaded
       // before the customer's booking closed the request never reopens it.
-      const refusal = handledStatusRefusal(updates.status, existingLead.status, current.status);
+      // `seen_status`: the status the client SHOWED when staff acted (its page may be
+      // hours old), else the status read when the request arrived.
+      const refusal = handledStatusRefusal(updates.status, req.body.seen_status ?? existingLead.status, current.status);
       if (refusal) return { refusal };
       previousStatus = current.status;
       // Email-specific correction provenance (Codex round-4 P1 on the
@@ -1304,7 +1306,16 @@ router.post('/:id/lost', async (req, res, next) => {
     const { reason, competitor, notes } = req.body;
     const existing = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!existing) return res.status(404).json({ error: 'Lead not found' });
-    await leadAttribution.markLost(req.params.id, { reason, competitor, notes });
+    // A request the customer's booking closed ('handled') after staff loaded it is not
+    // theirs to mark lost from that stale view (codex #5477 r13): judged on the status
+    // the client showed, and re-asserted in the write itself.
+    const seen = req.body.seen_status ?? existing.status;
+    const refusal = handledStatusRefusal('lost', seen, existing.status);
+    if (refusal) return res.status(refusal.code).json({ error: refusal.error });
+    const marked = await leadAttribution.markLost(req.params.id, { reason, competitor, notes, notIfStatusIn: seen === 'handled' ? [] : ['handled'] });
+    if (marked === false) {
+      return res.status(409).json({ error: handledStatusRefusal('lost', seen, 'handled').error });
+    }
     const lead = await db('leads').where('id', req.params.id).first();
     res.json({ lead });
   } catch (err) { next(err); }

@@ -97,7 +97,18 @@ describe("lead status 'handled'", () => {
     const tools = (LEADS_TOOLS || []).filter((t) => t.input_schema?.properties?.new_status?.enum);
     for (const t of tools) expect(t.input_schema.properties.new_status.enum).not.toContain('handled');
     const route = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
-    expect(route).toMatch(/const refusal = handledStatusRefusal\(updates\.status, existingLead\.status, current\.status\);\s*if \(refusal\) return \{ refusal \};/);
+    // judged on the status the CLIENT showed (its page may be hours old), else the one read on arrival
+    expect(route).toMatch(/const refusal = handledStatusRefusal\(updates\.status, req\.body\.seen_status \?\? existingLead\.status, current\.status\);\s*if \(refusal\) return \{ refusal \};/);
+    // mark-lost: the same refusal, re-asserted in markLost's UPDATE (notIfStatusIn)
+    expect(route).toMatch(/const refusal = handledStatusRefusal\('lost', seen, existing\.status\);/);
+    expect(route).toMatch(/notIfStatusIn: seen === 'handled' \? \[\] : \['handled'\]/);
+    const la = fs.readFileSync(path.join(__dirname, '../services/lead-attribution.js'), 'utf8');
+    expect(la).toMatch(/\.whereNotIn\('status', notIfStatusIn\)\.update\(\{\s*status: 'lost',/);
+    const ui = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
+    expect(ui).toMatch(/body: \{ status, seen_status: seenStatus \}/);
+    expect(ui).toMatch(/updateLeadStatus\(lead\.id, stage, lead\.status\)/);
+    expect(ui).toMatch(/updateLeadStatus\(lead\.id, e\.target\.value, lead\.status\)/);
+    expect(ui).toMatch(/openLostModal\(lead\.id, lead\.status\)/);
     expect(route).toMatch(/if \(responseLead\.refusal\) return res\.status\(responseLead\.refusal\.code\)/);
     const { handledStatusRefusal } = require('../services/lead-statuses');
     expect(handledStatusRefusal('handled', 'new', 'new')).toMatchObject({ code: 400 }); // staff never set it

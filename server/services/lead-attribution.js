@@ -296,8 +296,11 @@ async function settleWonFunnelRow(leadId, customerId = null, estimateId = null) 
 // ---------------------------------------------------------------------------
 // 3. markLost
 // ---------------------------------------------------------------------------
-async function markLost(leadId, { reason, competitor, notes }) {
-  const updatedRows = await db('leads').where('id', leadId).whereNull('deleted_at').update({
+// `notIfStatusIn`: statuses the write must not overwrite (re-asserted in the UPDATE,
+// so a close that landed after the caller's check wins). Returns whether it wrote.
+async function markLost(leadId, { reason, competitor, notes, notIfStatusIn = [] }) {
+  const updatedRows = await db('leads').where('id', leadId).whereNull('deleted_at')
+    .whereNotIn('status', notIfStatusIn).update({
     status: 'lost',
     lost_reason: reason || null,
     lost_to_competitor: competitor || null,
@@ -305,8 +308,8 @@ async function markLost(leadId, { reason, competitor, notes }) {
     updated_at: new Date(),
   });
   if (!updatedRows) {
-    logger.info(`[LeadAttribution] markLost skipped — lead ${leadId} missing or deleted`);
-    return;
+    logger.info(`[LeadAttribution] markLost skipped — lead ${leadId} missing, deleted or in ${notIfStatusIn.join('/') || 'no'} excluded status`);
+    return false;
   }
 
   // Funnel-row mirror: 'lost' collapses any intermediate stage but never
@@ -322,6 +325,7 @@ async function markLost(leadId, { reason, competitor, notes }) {
   });
 
   logger.info(`[LeadAttribution] Lead ${leadId} marked lost: ${reason}`);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

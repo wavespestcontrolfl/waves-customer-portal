@@ -1393,19 +1393,21 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     loadLeadActivities(lead.id);
     if (consultationGate === true && !consultationLinks[lead.id]) loadConsultationLink(lead.id);
   };
-  const openLostModal = useCallback((leadId) => {
-    setFormData({ leadId });
+  // `seenStatus`: the status this page SHOWED when staff acted, so the server never
+  // lets a stale view reopen a request the customer's booking closed meanwhile.
+  const openLostModal = useCallback((leadId, seenStatus) => {
+    setFormData({ leadId, seen_status: seenStatus });
     setShowModal("lost");
   }, []);
-  const updateLeadStatus = async (leadId, status) => {
+  const updateLeadStatus = async (leadId, status, seenStatus) => {
     if (status === "lost") {
-      openLostModal(leadId);
+      openLostModal(leadId, seenStatus);
       return;
     }
     try {
       await adminFetch(`/admin/leads/${leadId}`, {
         method: "PUT",
-        body: { status },
+        body: { status, seen_status: seenStatus },
       });
       loadLeads();
     } catch (e) {
@@ -1534,7 +1536,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       event.preventDefault();
       const droppedId = event.dataTransfer.getData("text/plain");
       const lead = leads.find((item) => String(item.id) === droppedId);
-      if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage);
+      if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage, lead.status);
       setDraggingLeadId(null);
     };
     return (
@@ -1865,7 +1867,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                               aria-label={`Stage for ${[lead.first_name, lead.last_name].filter(Boolean).join(" ") || "lead"}`}
                               value={lead.status}
                               onChange={(e) =>
-                                updateLeadStatus(lead.id, e.target.value)
+                                updateLeadStatus(lead.id, e.target.value, lead.status)
                               }
                               className={statusSelectClass(lead.status)}
                             >
@@ -2658,7 +2660,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       </Button>{" "}
                                       <Button
                                         variant={"danger"}
-                                        onClick={() => openLostModal(lead.id)}
+                                        onClick={() => openLostModal(lead.id, lead.status)}
                                       >
                                         Mark Lost
                                       </Button>{" "}
