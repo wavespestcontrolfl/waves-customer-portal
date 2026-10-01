@@ -126,6 +126,14 @@ function windowLabel(row, deriveWindow) {
   return tw ? tw.charAt(0).toUpperCase() + tw.slice(1) : null;
 }
 
+const ET_DAY = { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' };
+// The customer's or caller's own due words, anchored to the day they were said.
+function spokenDue(r) {
+  const said = clip(r.sms_context?.due_text || r.due_text, 80);
+  if (!said) return null;
+  const at = rowSourceAt(r);
+  return at ? `${said} (said ${at.toLocaleDateString('en-US', ET_DAY)})` : null;
+}
 const ET_STAMP = { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
 const formatEtStamp = (value) => {
   const d = toDate(value);
@@ -381,10 +389,13 @@ async function loadCommitments({ conn, customerId, now }) {
       id: r.id == null ? null : String(r.id),
       kind: r.kind || null,
       description: clip(r.description, DESCRIPTION_MAX),
-      // A passed deadline is said as overdue, never restated as a future time.
+      // A passed deadline is said as overdue, never restated as a future time; a
+      // resolved deadline is the ET instant (spoken "tomorrow" from yesterday's call
+      // would read as a day later today); only without one is the spoken text used,
+      // dated to when it was said.
       dueText: overdue
         ? `overdue since ${formatEtStamp(dueAt)}`
-        : clip(r.sms_context?.due_text || r.due_text, 80) || formatEtStamp(dueAt),
+        : dueAt ? formatEtStamp(dueAt) : spokenDue(r),
       source: r.__source,
     };
   });

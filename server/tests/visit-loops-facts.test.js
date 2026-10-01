@@ -360,7 +360,8 @@ describe('weOwe and customerWaiting', () => {
     ]);
     const out = await run(ctxConn({}));
     expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', limit: 50 }));
-    expect(out.weOwe).toEqual([{ id: 'c-1', kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow', source: 'call' }]);
+    // no resolved deadline: the spoken words, dated to the call
+    expect(out.weOwe).toEqual([{ id: 'c-1', kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow (said Wed, Sep 30)', source: 'call' }]);
     expect(out.customerWaiting).toEqual([]);
     expect(out.weOwe).toHaveLength(1);
   });
@@ -372,7 +373,8 @@ describe('weOwe and customerWaiting', () => {
       smsRow({ id: 's-2', kind: 'send_report', description: 'Report requested', due_at: null, sms_started_at: '2026-09-30T10:00:00Z' }),
     ]);
     const out = await run(ctxConn({ 's-1': { basis: 'promise', due_text: 'later today' }, 's-2': { basis: 'request' } }));
-    expect(out.weOwe).toEqual([{ id: 's-1', kind: 'callback', description: 'Call back about ants', dueText: 'later today', source: 'sms' }]);
+    // a resolved deadline wins over the spoken "later today"
+    expect(out.weOwe).toEqual([{ id: 's-1', kind: 'callback', description: 'Call back about ants', dueText: 'Thu, Oct 1, 5:00 PM', source: 'sms' }]);
     expect(out.customerWaiting).toEqual([{ id: 's-2', kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
     // no spoken due text: the due instant, formatted in ET
     const noText = await run(ctxConn({ 's-1': { basis: 'promise' } }));
