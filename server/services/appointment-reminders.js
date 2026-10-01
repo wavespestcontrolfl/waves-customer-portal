@@ -5864,12 +5864,17 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
   try {
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId, customer_id: customerId })
-      .first('id', 'status', 'service_type', 'customer_confirmed');
+      .first('id', 'status', 'service_type', 'customer_confirmed', 'scheduled_date', 'window_start');
     if (!svc || CONFIRMATION_REPLAY_DEAD_STATUSES.has(String(svc.status || '').toLowerCase())) return { sent: false, reason: 'visit_not_live' };
+    // The visit row is the time of record. The reminder row may not exist yet
+    // (the booking's own registration can still be in flight when an already-
+    // confirmed recipient is reconciled); a CANCELLED reminder row means the
+    // slot was pulled.
     const reminder = await db('appointment_reminders')
       .where({ scheduled_service_id: scheduledServiceId })
       .first('appointment_time', 'cancelled');
-    const apptTime = reminder && !reminder.cancelled && reminder.appointment_time ? new Date(reminder.appointment_time) : null;
+    if (reminder && reminder.cancelled) return { sent: false, reason: 'visit_not_live' };
+    const apptTime = composeScheduledApptTime(svc) || (reminder && reminder.appointment_time ? new Date(reminder.appointment_time) : null);
     if (!apptTime || Number.isNaN(apptTime.getTime()) || apptTime.getTime() <= Date.now()) return { sent: false, reason: 'visit_not_future' };
     const recentDup = await db('sms_log')
       .where({ to_phone: contact.phone, message_type: 'confirmation' })

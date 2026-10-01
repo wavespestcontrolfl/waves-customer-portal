@@ -58,6 +58,19 @@ function wire({ svc = { id: 's1', status: 'confirmed', service_type: 'Pest Contr
 beforeEach(() => { jest.clearAllMocks(); });
 
 describe('sendConfirmationToServiceContact', () => {
+  test('the reminder row not registered yet: the visit row\'s own date/time is used, and it still sends', async () => {
+    const d = new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10);
+    wire({ svc: { id: 's1', status: 'pending', service_type: 'Pest Control', scheduled_date: d, window_start: '10:00:00' }, reminder: null });
+    const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+    expect(res).toEqual({ sent: true });
+  });
+
+  test('a cancelled reminder row means the slot was pulled: not sent', async () => {
+    wire({ reminder: { appointment_time: future, cancelled: true } });
+    const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+    expect(res).toEqual({ sent: false, reason: 'visit_not_live' });
+  });
+
   test('sends the confirmation once: service-contact trust, inbound-reply provenance, not customer-initiated', async () => {
     wire();
     const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
@@ -95,7 +108,7 @@ describe('sendConfirmationToServiceContact', () => {
     wire({ reminder: { appointment_time: new Date(Date.now() - 3600000), cancelled: false } });
     expect((await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact })).reason).toBe('visit_not_future');
     wire({ reminder: { appointment_time: future, cancelled: true } });
-    expect((await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact })).reason).toBe('visit_not_future');
+    expect((await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact })).reason).toBe('visit_not_live');
     wire({ svc: null });
     expect((await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact })).reason).toBe('visit_not_live');
     expect(sendCustomerMessage).not.toHaveBeenCalled();

@@ -203,6 +203,17 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
   });
 
+  test('the YES that completes consent also applies the OTHER confirmed phone\'s held entry', async () => {
+    const { dbh, state } = fakeDb({
+      customer: spouseRow({ service_contact2_phone: '+19415550444', service_contact2_name: 'Sample Tenant', service_preferences: marker({ [OTHER]: { scheduled_service_id: 's9', set_at: 'y' } }) }),
+      optinRows: confirmed([{ phone_key: OTHER, customer_id: 'c1', status: 'confirmed' }]),
+    });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(state.customer.service_contacts_consent_source).toBe('recipient_optin_confirmed');
+    expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
+    expect(replays.map((r) => r.scheduledServiceId).sort()).toEqual(['s1', 's9']);
+  });
+
   describe('reconcileDemoteMarker: the opt-in already settled when the booking wrote the marker', () => {
     test('already confirmed (earlier call, or the YES beat the booking): applies the marker now', async () => {
       const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: confirmed() });
@@ -262,9 +273,9 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
   });
 
-  test('MULTIPLE markers: a YES applies and clears only its own entry; another contact\'s entry survives', async () => {
+  test('MULTIPLE markers on an already-consented row: a YES applies and clears only its own entry; another contact\'s entry survives', async () => {
     const { dbh, state } = fakeDb({
-      customer: spouseRow({ service_contact2_phone: '+19415550444', service_preferences: marker({ [OTHER]: { scheduled_service_id: 's9', set_at: 'y' } }) }),
+      customer: spouseRow({ service_contact2_phone: '+19415550444', service_contacts_consent_at: new Date(), service_preferences: marker({ [OTHER]: { scheduled_service_id: 's9', set_at: 'y' } }) }),
       optinRows: confirmed([{ phone_key: OTHER, customer_id: 'c1', status: 'confirmed' }]),
     });
     await applyDemoteMarkersOnConfirm(KEY, { dbh });

@@ -98,9 +98,13 @@ async function stampConsentOnConfirm(h, customerId, phoneKey, customer) {
     const confirmedKeys = new Set((confirmed || []).map((r) => r.phone_key));
     if (!others.every((k) => confirmedKeys.has(k))) return { stamped: false, reason: 'other_slot_phone_unconfirmed' };
   }
-  const wrote = await h('customers')
-    .where({ id: customerId })
-    .whereNull('service_contacts_consent_at')
+  // Bound to the slot phones just checked: a concurrent contact add/replace
+  // changes a column and the stamp writes nothing (row_changed).
+  let stampQuery = h('customers').where({ id: customerId }).whereNull('service_contacts_consent_at');
+  for (const slot of SERVICE_CONTACT_SLOTS) {
+    stampQuery = customer[slot.phone] ? stampQuery.where({ [slot.phone]: customer[slot.phone] }) : stampQuery.whereNull(slot.phone);
+  }
+  const wrote = await stampQuery
     .update({
       service_contacts_consent_at: new Date(),
       service_contacts_consent_source: 'recipient_optin_confirmed',
@@ -130,6 +134,36 @@ async function updateCaptureCard(h, phoneKey, patch) {
 // booking confirmation for this recipient, and clear the entry. Updates the
 // review card. Returns { replays } — confirmation texts to send AFTER the
 // caller's transaction commits (runConfirmationReplays).
+// Apply ONE confirmed phone's marker entry on a consented row. Revalidates
+// before silencing the caller: the phone must STILL sit in a slot (a replaced
+// contact's late YES demotes nobody) and the booked visit must still be live.
+// A stale entry is dropped, never applied. Queues the confirmation replay.
+async function applyMarkerEntry(h, customer, phoneKey, marker, replays) {
+  if (!marker) return;
+  const customerId = customer.id;
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === phoneKey);
+  const visit = slot && marker.scheduled_service_id
+    ? await h('scheduled_services').where({ id: marker.scheduled_service_id, customer_id: customerId }).first('status')
+    : null;
+  const clearEntry = () => h('customers').where({ id: customerId })
+    .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) #- ARRAY['demote_primary_on_optin', ?]::text[]", [phoneKey]) });
+  if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase())) {
+    await clearEntry();
+    return;
+  }
+  await h('notification_prefs')
+    .insert({ customer_id: customerId, appointment_notify_primary: false })
+    .onConflict('customer_id')
+    .merge({ appointment_notify_primary: false });
+  await clearEntry();
+  replays.push({
+    customerId,
+    scheduledServiceId: marker.scheduled_service_id,
+    contact: { name: customer[slot.name] || '', phone: customer[slot.phone], role: customer[slot.roleCol] || null },
+  });
+}
+
 async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
   const replays = [];
   await withSavepoint(dbh, async (h) => {
@@ -139,34 +173,28 @@ async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
       const customer = await h('customers').where({ id: customerId }).first();
       if (!customer) continue;
       const stamp = await stampConsentOnConfirm(h, customerId, phoneKey, customer);
-      if (!stamp.stamped) stampHeld = stamp.reason;
-      const prefs = typeof customer.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer.service_preferences;
-      const marker = prefs && prefs[DEMOTE_MARKER_KEY] && prefs[DEMOTE_MARKER_KEY][phoneKey];
-      if (!marker || !stamp.stamped) continue;
-      // Revalidate before silencing the caller: the phone must STILL sit in a
-      // slot (a replaced contact's late YES demotes nobody) and the booked
-      // visit must still be live. A stale entry is dropped, never applied.
-      const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
-      const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === phoneKey);
-      const visit = slot && marker.scheduled_service_id
-        ? await h('scheduled_services').where({ id: marker.scheduled_service_id, customer_id: customerId }).first('status')
-        : null;
-      const clearEntry = () => h('customers').where({ id: customerId })
-        .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) #- ARRAY['demote_primary_on_optin', ?]::text[]", [phoneKey]) });
-      if (!visit || DEMOTE_STALE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase())) {
-        await clearEntry();
+      if (!stamp.stamped) {
+        stampHeld = stamp.reason;
         continue;
       }
-      await h('notification_prefs')
-        .insert({ customer_id: customerId, appointment_notify_primary: false })
-        .onConflict('customer_id')
-        .merge({ appointment_notify_primary: false });
-      await clearEntry();
-      replays.push({
-        customerId,
-        scheduledServiceId: marker.scheduled_service_id,
-        contact: { name: customer[slot.name] || '', phone: customer[slot.phone], role: customer[slot.roleCol] || null },
-      });
+      const prefs = typeof customer.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer.service_preferences;
+      const entries = (prefs && prefs[DEMOTE_MARKER_KEY]) || {};
+      await applyMarkerEntry(h, customer, phoneKey, entries[phoneKey], replays);
+      // This YES may be the one that completed the account's consent: entries
+      // for OTHER confirmed phones held earlier (their YES came while this
+      // phone was still unconfirmed) are applied now, not stranded.
+      if (stamp.reason === 'stamped') {
+        const otherKeys = Object.keys(entries).filter((k) => k !== phoneKey);
+        if (otherKeys.length) {
+          const confirmedOthers = await h('recipient_optin')
+            .where({ customer_id: customerId, status: 'confirmed' })
+            .whereIn('phone_key', otherKeys)
+            .select('phone_key');
+          for (const { phone_key: otherKey } of confirmedOthers || []) {
+            await applyMarkerEntry(h, customer, otherKey, entries[otherKey], replays);
+          }
+        }
+      }
     }
     await updateCaptureCard(h, phoneKey, {
       optin_result: 'confirmed',
