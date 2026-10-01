@@ -238,15 +238,22 @@ function inchLabel(v) {
 }
 
 // ── 1. Lawn Health Snapshot (hero) ──────────────────────────────────────────────
-export function LawnSnapshotHero({ snapshot = {}, children }) {
-  const { overallScore, statusHeadline, scoreExplanation, rootCause, seasonalNote, todaysFocus = [], watching = [], wavesNext, customerAction, noActionNeeded, nextVisit } = snapshot;
-  const status = snapshot.status || scoreStatus(overallScore);
+// The next-visit sentence the hero and the lead share: a scheduled label as-is,
+// a cadence estimate as "Expected around …", and nothing for a missing or
+// 'Invalid Date' label (an older cached payload).
+function nextVisitSentence(nextVisit) {
   const hasNextVisit = nextVisit && nextVisit.label && nextVisit.label !== 'Invalid Date';
-  const nextVisitText = hasNextVisit
+  return hasNextVisit
     ? (nextVisit.source === 'estimated'
       ? `Expected around ${nextVisit.label}${nextVisit.cadenceWeeks ? ` (about every ${nextVisit.cadenceWeeks} weeks)` : ''}`
       : nextVisit.label)
     : null;
+}
+
+export function LawnSnapshotHero({ snapshot = {}, children }) {
+  const { overallScore, statusHeadline, scoreExplanation, rootCause, seasonalNote, todaysFocus = [], watching = [], wavesNext, customerAction, noActionNeeded, nextVisit } = snapshot;
+  const status = snapshot.status || scoreStatus(overallScore);
+  const nextVisitText = nextVisitSentence(nextVisit);
   return (
     <Card style={{ background: TAN }}>
       <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -316,6 +323,63 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
       ) : null}
       {children}
     </Card>
+  );
+}
+
+// ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
+// The above-the-fold block when the payload carries reportV2.lead (server:
+// lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
+// optional progress line, what we applied, the homeowner's part, and ONE next
+// visit line (date + the lead's reason). It replaces the hero AND the follow-up
+// card, so there is no Today's focus, "What's driving it" box, watching list,
+// "What Waves will do next", seasonal note or "no action needed" line here. The
+// watering banner (rendered above the report) owns the watering task.
+export function LawnLeadCard({ lead = {}, snapshot = {}, children }) {
+  const status = snapshot.status || scoreStatus(snapshot.overallScore);
+  const yourPart = Array.isArray(lead.yourPart) ? lead.yourPart.filter(Boolean) : [];
+  const visitDate = nextVisitSentence(snapshot.nextVisit);
+  const nextVisit = [visitDate, lead.next].filter(Boolean).join(' — ');
+  return (
+    <div data-testid="lawn-lead-region">
+      <Card style={{ background: TAN }}>
+        <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ flex: 'none' }}>
+            <ScoreRing value={snapshot.overallScore} status={status} size={116} />
+          </div>
+          <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+            <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
+              Overall Lawn Status
+            </div>
+            <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
+              {lead.headline || statusMeta(status).label}
+            </h2>
+            {lead.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.why}</p> : null}
+            {lead.progress ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.progress}</p> : null}
+          </div>
+        </div>
+
+        {lead.applied ? (
+          <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
+            <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.applied}</div>
+          </div>
+        ) : null}
+
+        {yourPart.length || nextVisit ? (
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BORDER}`, display: 'grid', gap: 10 }}>
+            {yourPart.length ? (
+              <KeyLine
+                label="Your part this week"
+                value={yourPart.map((task, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{task}</div>)}
+                dot={COLORS.glassNavy}
+              />
+            ) : null}
+            {nextVisit ? <KeyLine label="Next visit" value={nextVisit} dot={COLORS.glassNavy} /> : null}
+          </div>
+        ) : null}
+        {children}
+      </Card>
+    </div>
   );
 }
 
@@ -555,7 +619,16 @@ const INSIGHT_CONFIDENCE = {
   area_estimated: 'Estimated for your area',
 };
 
-export function LawnInsightCards({ insights = [], limit = 3 }) {
+// In lead mode the top-ranked card leaves out the step and next-visit plan the
+// lead already shows (same text, or one sentence containing the other); anything
+// the lead did not carry stays on the card.
+const sameText = (a, b) => {
+  const x = String(a || '').trim();
+  const y = String(b || '').trim();
+  return Boolean(x && y && (x === y || x.includes(y) || y.includes(x)));
+};
+
+export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
   const top = [...insights.filter(Boolean)]
     .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
     .slice(0, limit);
@@ -567,8 +640,14 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
           sized to the headline's longest word + the status pill blew past the
           card on a 320px phone. */}
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12 }}>
-        {top.map((it, i) => {
-          const meta = statusMeta(it.status || 'tracking');
+        {top.map((card, i) => {
+          const meta = statusMeta(card.status || 'tracking');
+          const inLead = lead && i === 0;
+          const it = inLead ? {
+            ...card,
+            customerAction: (lead.yourPart || []).some((task) => sameText(task, card.customerAction)) ? null : card.customerAction,
+            nextVisitPlan: sameText(lead.next, card.nextVisitPlan) ? null : card.nextVisitPlan,
+          } : card;
           return (
             <div key={i} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD, padding: '14px 16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap' }}>

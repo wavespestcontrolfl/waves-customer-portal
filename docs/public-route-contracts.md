@@ -1674,6 +1674,22 @@ separate customer text right after the lawn completion text, rendered from the
 `lawn_watering_instruction` SMS template with the instruction's `lines` joined
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
+`GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
+key) adds `reportV2.lead` `{ headline, why, progress, applied, yourPart, next }` to
+LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
+(null falls back to the status label), `why` the root cause or score
+explanation, `progress` a reserved slot (null until a later change writes
+`snapshot.progress`), `applied` the treatment summary, `yourPart` at most two
+homeowner tasks (may be empty; never the stock "No action is needed" line) and
+`next` the follow-up reason, else the top finding's next-visit plan, else
+`snapshot.wavesNext`. It is derived at the tail of
+`applyLawnReportReconciliation` from the final reconciled strings, so it carries
+the same wording as the rest of the report. When `reportV2.banner` carries
+watering lines the banner owns the watering task: `yourPart` is the top
+finding's own step (dropped when it restates the aftercare task) and no `lead`
+field carries watering wording. The web report renders the lead in place of
+the snapshot hero and the follow-up card when the key is present; the PDF is
+unchanged and ignores it.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

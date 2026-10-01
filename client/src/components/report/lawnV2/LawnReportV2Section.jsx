@@ -15,6 +15,7 @@
 import {
   PrintContext,
   LawnSnapshotHero,
+  LawnLeadCard,
   LawnFollowUpCard,
   LawnInsightCards,
   LawnPhotoStrip,
@@ -26,8 +27,32 @@ import {
   LawnTrends,
 } from './LawnReportV2';
 
+// GATE_LAWN_REPORT_LEAD: a payload carrying `lead` renders the lead layout —
+// lead card (photo strip embedded) → findings → water → progression → the
+// score breakdown → rain → mowing → trends. The follow-up card is not mounted:
+// its reason is lead.next. Without `lead` the legacy layout below is untouched.
+function LawnReportV2LeadSection({ data, print }) {
+  return (
+    <PrintContext.Provider value={print}>
+    <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
+      <LawnLeadCard lead={data.lead} snapshot={data.snapshot || {}}>
+        {(data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} embedded /> : null}
+      </LawnLeadCard>
+      {data.insights?.length ? <LawnInsightCards insights={data.insights} lead={data.lead} /> : null}
+      {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} /> : null}
+      {data.progression?.length >= 2 ? <LawnProgressionSlider frames={data.progression} note={data.progressionNote} /> : null}
+      {data.diagnosis?.length ? <VisualDiagnosisCards categories={data.diagnosis} /> : null}
+      {data.rain7d?.length ? <RainLast7DaysChart days={data.rain7d} confidence={data.rain7dConfidence} source={data.rain7dSource} /> : null}
+      {data.mowing ? <MowingHeightGauge mowing={data.mowing} /> : null}
+      {data.trends ? <LawnTrends trends={data.trends} baselineScore={data.snapshot?.overallScore} hasNextVisit={Boolean(data.snapshot?.nextVisit?.label && data.snapshot.nextVisit.label !== 'Invalid Date')} /> : null}
+    </div>
+    </PrintContext.Provider>
+  );
+}
+
 export default function LawnReportV2Section({ data, print = false }) {
   if (!data) return null;
+  if (data.lead) return <LawnReportV2LeadSection data={data} print={print} />;
   return (
     <PrintContext.Provider value={print}>
     <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>

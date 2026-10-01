@@ -1015,8 +1015,10 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       heading: 'your service is complete!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'neutral',
+      // A lawn report with the lead block (GATE_LAWN_REPORT_LEAD) prints the
+      // snapshot headline right below as its own heading — not here too.
       result: v2Snapshot.peaceOfMind
-        || v2Snapshot.statusHeadline
+        || (data.reportV2?.lead ? null : v2Snapshot.statusHeadline)
         || 'Service completed — we noted items to keep an eye on; details are below.',
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
       // Times live on the tech card, product count on "What Waves did today" —
