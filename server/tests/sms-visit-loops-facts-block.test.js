@@ -22,9 +22,9 @@ const NOW = new Date('2026-06-10T15:00:00Z');
 const baseContext = { summary: 'Test customer', upcomingServices: [{ type: 'Quarterly Pest', date: '2026-06-19', window: '8-10am' }] };
 
 const fullLoops = () => ({
-  techPosition: { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 3, atThisVisit: false, visitType: 'Quarterly Pest', windowDisplay: '8-10am' },
+  techPosition: { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 3, atThisVisit: false, visitId: 'v1', visitType: 'Quarterly Pest', windowDisplay: '8-10am' },
   lateAlert: { type: 'tech_late', severity: 'warning', minutesLate: 25, visitType: 'Quarterly Pest', windowDisplay: '8-10am' },
-  pastWindow: { type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 },
+  pastWindow: { visitId: 'v1', type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 },
   missedVisit: { type: 'Lawn Care', date: '2026-06-08', windowDisplay: '10am-12pm', status: 'confirmed', reason: 'not_completed' },
   weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the wasp nest quote', dueText: 'today by 5 PM', source: 'call' }],
   customerWaiting: [{ id: 'cc-2', kind: 'question', description: 'Asked whether sprinklers need to be off', since: '2026-06-09' }],
@@ -68,8 +68,9 @@ describe('renderVisitLoopsSection', () => {
   });
 
   test('WINDOW PASSED without a fresh tech position (none, or stale) hands off to the SLA', () => {
-    const pastWindow = { type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 };
-    for (const techPosition of [null, { techName: 'Sam', status: 'stale', minutesSinceUpdate: 30 }]) {
+    const pastWindow = { visitId: 'v1', type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 };
+    const otherVisit = { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 1, visitId: 'v2' };
+    for (const techPosition of [null, { techName: 'Sam', status: 'stale', minutesSinceUpdate: 30, visitId: 'v1' }, otherVisit]) {
       expect(renderVisitLoopsSection({ pastWindow, techPosition }))
         .toContain("has passed and the visit is not marked complete, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised");
     }

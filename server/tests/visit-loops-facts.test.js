@@ -104,7 +104,7 @@ describe('techPosition', () => {
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn, deriveWindow });
     expect(out.techPosition).toEqual({
       techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false,
-      visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
+      visitId: 'visit-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
     });
     const count = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'count'));
     expect(hasOp(count.ops, 'whereNotIn', (a) => a[0] === 'status' && ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'].every((s) => a[1].includes(s)))).toBe(true);
@@ -229,7 +229,7 @@ describe('pastWindow', () => {
   test('a pending visit past its customer-facing window (start + 2h, not the internal block) reads passed', async () => {
     // window_start 09:00, internal window_end 10:00, customer window 9-11; it is 12:00.
     const out = await run({ status: 'pending' });
-    expect(out.pastWindow).toEqual({ type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60 });
+    expect(out.pastWindow).toEqual({ visitId: 'visit-1', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60 });
   });
 
   test('inside the customer-facing window (even past the internal window_end) is not passed', async () => {

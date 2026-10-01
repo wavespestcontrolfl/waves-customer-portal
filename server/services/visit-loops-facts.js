@@ -181,6 +181,7 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
     atThisVisit: fresh && ON_SITE_STATUSES.includes(String(status?.status))
       && Boolean(status?.current_job_id) && String(status.current_job_id) === String(visit.id),
     // Which of today's visits this is about (a customer can have two today).
+    visitId: String(visit.id),
     visitType: visit.service_type || null,
     windowDisplay: windowLabel(visit, deriveWindow),
   };
@@ -228,7 +229,7 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
     if (done.has(String(row.id))) continue;
     const endMin = customerWindowEndMinutes(row);
     if (endMin == null || endMin >= nowMin) continue;
-    return { type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };
+    return { visitId: String(row.id), type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };
   }
   return null;
 }

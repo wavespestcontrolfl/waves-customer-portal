@@ -4455,8 +4455,10 @@ function visitLoopPastWindowLine(past, techPosition) {
   const type = visitLoopText(past.type, 60) || 'scheduled';
   const win = visitLoopText(past.windowDisplay, 40);
   const head = `- WINDOW PASSED: today's ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete`;
-  // A fresh Tech position line is the real answer; only without one is it a hand-off.
-  const located = techPosition && typeof techPosition === 'object' && techPosition.status && techPosition.status !== 'stale';
+  // A fresh Tech position line for THIS visit is the real answer; otherwise
+  // (none, stale, or about another of today's visits) it is a hand-off.
+  const located = techPosition && typeof techPosition === 'object' && techPosition.status && techPosition.status !== 'stale'
+    && past.visitId != null && String(techPosition.visitId) === String(past.visitId);
   return located
     ? `${head} — say plainly we're running behind and use Tech position for where the tech is; no arrival time unless a LIVE ETA fact gives one`
     : `${head}, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
