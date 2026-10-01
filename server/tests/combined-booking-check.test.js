@@ -464,6 +464,19 @@ describe('postAlert', () => {
   });
 });
 
+describe('outcomeOf', () => {
+  const { outcomeOf } = check;
+  test('a deferred verdict closes a standing bell, unless that bell carries a price comparison it did not look for', () => {
+    const deferred = { ok: false, deferred: true, problems: [] };
+    expect(outcomeOf(null)).toBe('skipped');
+    expect(outcomeOf({ ok: true, deferred: false, problems: [] }, ['price_mismatch'])).toBe('ok');
+    expect(outcomeOf({ ok: false, deferred: false, problems: [{ code: 'price_missing' }] })).toBe('problems');
+    expect(outcomeOf(deferred, ['missing_time_tech'])).toBe('deferred');
+    expect(outcomeOf(deferred, ['first_invoice_mismatch'])).toBe('held');
+    expect(outcomeOf(deferred)).toBe('deferred');
+  });
+});
+
 describe('markPrepaidCoverage', () => {
   const renewals = require('../services/annual-prepay-renewals');
   afterEach(() => jest.restoreAllMocks());

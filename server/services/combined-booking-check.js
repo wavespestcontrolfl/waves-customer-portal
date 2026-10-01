@@ -75,6 +75,10 @@ const LOOKBACK_HOURS = 72;
 const MAX_NEW_PER_RUN = 25;
 
 const PRICE_TOLERANCE = 0.02;
+// Problems that need an accepted price to compare against: when that price
+// cannot be verified (the verdict is deferred) they are not looked for, so a
+// standing bell carrying one is left open rather than closed as fixed.
+const COMPARISON_CODES = new Set(['price_mismatch', 'first_invoice_mismatch', 'split_invoice_mismatch', 'first_day_price_mismatch']);
 const CANCELLED = new Set(['cancelled', 'canceled']);
 const NOT_LIVE = new Set(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
 
@@ -697,6 +701,21 @@ async function retireAbandoned(conn) {
   return retireStanding(conn, [...new Set(gone.map((row) => row.estimate_id))], RESOLVED_GONE);
 }
 
+// What a sweep does with one verdict:
+//   skipped  — not a combined booking any more (the plan was cancelled): close
+//   problems — post / refresh the bell
+//   ok       — verified: close a standing bell as fixed
+//   deferred — nothing of this check's own to say (the schedule shape is the
+//              accepted-schedule alert's, or a price cannot be verified): close
+//   held     — deferred, and the standing bell carries a price comparison the
+//              deferral did not look for: leave it as it is
+function outcomeOf(verdict, standingCodes = []) {
+  if (!verdict) return 'skipped';
+  if (verdict.problems.length) return 'problems';
+  if (verdict.ok) return 'ok';
+  return standingCodes.some((code) => COMPARISON_CODES.has(code)) ? 'held' : 'deferred';
+}
+
 /**
  * One sweep. Returns counts; never throws for a single bad estimate.
  * `conn` and `raise` are injectable for tests.
@@ -723,10 +742,11 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, max
   // fact), so every accept inside the lookback is judged each run; standing
   // problems go last so the cap below, which counts only newly posted bells,
   // can never let an old problem starve a newer accept.
-  const standing = new Set((await conn('notifications')
+  const standing = new Map((await conn('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("metadata->>'dedupeKey' = ANY(?)", [candidates.map((estimate) => dedupeKeyFor(estimate.id))])
-    .select(conn.raw("metadata->>'estimateId' as estimate_id"))).map((row) => String(row.estimate_id)));
+    .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'problemCodes' as problem_codes")))
+    .map((row) => [String(row.estimate_id), Array.isArray(row.problem_codes) ? row.problem_codes : []]));
   const work = candidates.filter((estimate) => {
     try {
       if ((acceptedPrograms(estimate)?.programs.size || 0) >= 2) return true;
@@ -758,17 +778,16 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, max
         scheduleSkippedFamilies: judged || new Set(),
         scheduleUnjudged: !judged,
       });
-      const verdict = checked?.verdict;
-      if (!verdict?.problems.length) {
-        // Not a combined booking any more (the plan was cancelled), OK, or
-        // nothing of this check's own to say (the schedule shape belongs to the
-        // accepted-schedule alert): a bell rung earlier is closed as done.
-        if (!verdict) result.skipped += 1; else if (verdict.ok) result.ok += 1; else result.deferred += 1;
-        if (!isNew) result.closed += await retireStanding(conn, [id], verdict ? RESOLVED_FIXED : RESOLVED_GONE);
+      const outcome = outcomeOf(checked?.verdict, standing.get(id));
+      if (outcome !== 'problems') {
+        result[outcome === 'held' ? 'deferred' : outcome] += 1;
+        if (!isNew && outcome !== 'held') {
+          result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
+        }
         continue;
       }
       result.checked += 1;
-      const row = await postAlert(estimate, verdict, checked.ctx, { raise });
+      const row = await postAlert(estimate, checked.verdict, checked.ctx, { raise });
       if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`); continue; }
       if (isNew) posted += 1;
       result.problems += 1;
@@ -788,6 +807,7 @@ module.exports = {
   postAlert,
   markPrepaidCoverage,
   ringOnNewProblem,
+  outcomeOf,
   acceptedPrograms,
   firstApplicationAmount,
   shortName,
