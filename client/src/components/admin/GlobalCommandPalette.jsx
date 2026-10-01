@@ -488,7 +488,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     if (!threadsAvailableRef.current) setPendingActions([]);
     else setPendingActions(previous => previous.filter(action => !action.taskId));
     setToolActivity([]);
-    knowledgeGaps.reset();
+    // The gap prompts belong to the response: kept while a thread keeps it,
+    // cleared below with it otherwise.
     if (!threadsAvailableRef.current) {
       // Unlike New chat/submit (deliberate detach — no re-resume), a
       // context-driven invalidation should let the next palette open retry

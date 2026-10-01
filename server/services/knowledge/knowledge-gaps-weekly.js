@@ -58,8 +58,10 @@ function reportWindow(now) {
 }
 
 // Same question asked twice = same key: case, punctuation and spacing ignored.
+// Letters and digits of any script count, so a question in another language
+// is listed, not dropped as empty.
 function questionKey(text) {
-  return String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function clip(text, max) {
@@ -209,6 +211,7 @@ async function runKnowledgeGapsWeekly(opts = {}) {
 }
 
 module.exports = {
+  questionKey,
   runKnowledgeGapsWeekly,
   _private: { composeGapsEmail, reportWindow, questionKey, sourceLabel, loadWeek, sentThisWeek, OPS_KEY },
 };

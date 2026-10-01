@@ -129,10 +129,14 @@ describe("KnowledgeGapPrompt", () => {
     expect(screen.getByRole("button", { name: "Add to knowledge gaps" })).toBeInTheDocument();
   });
 
-  it("disables the button when the text is under 3 characters", () => {
+  it("disables the button for under 3 characters or no letter or number", () => {
     render(<Harness misses={["chinch bugs"]} save={vi.fn()} />);
     fireEvent.change(box(), { target: { value: " a " } });
     expect(screen.getByRole("button", { name: "Add to knowledge gaps" })).toBeDisabled();
+    fireEvent.change(box(), { target: { value: "???" } });
+    expect(screen.getByRole("button", { name: "Add to knowledge gaps" })).toBeDisabled();
+    fireEvent.change(box(), { target: { value: "муравьи" } });
+    expect(screen.getByRole("button", { name: "Add to knowledge gaps" })).toBeEnabled();
   });
 
   it("the mobile box is 16px so Safari does not zoom on focus", () => {

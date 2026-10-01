@@ -65,11 +65,14 @@ export function useKnowledgeGaps() {
 function GapRow({ gap, update, save, dark }) {
   const { requestKey, draft, submitted, status, error } = gap;
   const text = submitted ?? normalize(draft);
+  // Same rule as the route: the weekly email lists a gap by its letters and
+  // digits (any script), so one with none could never be listed.
+  const savable = text.length >= 3 && /[\p{L}\p{N}]/u.test(text);
   const muted = dark ? "#64748B" : "#71717A";
   const border = dark ? "#CBD5E1" : "#D4D4D8";
 
   async function onSave() {
-    if (status === "saving" || text.length < 3) return;
+    if (status === "saving" || !savable) return;
     update(requestKey, { submitted: text, status: "saving", error: "" });
     try {
       await save(text, requestKey);
@@ -112,13 +115,13 @@ function GapRow({ gap, update, save, dark }) {
       <button
         type="button"
         onClick={onSave}
-        disabled={status === "saving" || text.length < 3}
+        disabled={status === "saving" || !savable}
         style={{
           padding: "6px 12px",
           border: `1px solid ${border}`,
           borderRadius: 6,
           font: "inherit",
-          cursor: status === "saving" || text.length < 3 ? "default" : "pointer",
+          cursor: status === "saving" || !savable ? "default" : "pointer",
           background: "transparent",
           color: "inherit",
         }}

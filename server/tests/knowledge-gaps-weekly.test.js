@@ -36,6 +36,15 @@ describe('composeGapsEmail', () => {
     expect(text).toMatch(/Asked by: Intelligence Bar 1\./);
   });
 
+  test('questions in other scripts are listed, punctuation-only ones are not', () => {
+    expect(questionKey('¿Cómo controlo las hormigas?')).toBe('cómo controlo las hormigas');
+    expect(questionKey('Как избавиться от муравьёв')).toBe('как избавиться от муравьёв');
+    expect(questionKey('???')).toBe('');
+    const { text, gaps } = composeGapsEmail({ rows: [row('Как избавиться от муравьёв', 'intelligence_bar')] }, NOW);
+    expect(gaps).toBe(1);
+    expect(text).toContain('"Как избавиться от муравьёв"');
+  });
+
   test('caps the list at 10 and says how many more', () => {
     const rows = Array.from({ length: 13 }, (_, i) => row(`question ${i}`));
     const { text } = composeGapsEmail({ rows }, NOW);

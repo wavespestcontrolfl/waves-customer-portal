@@ -294,6 +294,7 @@ describe('POST /knowledge-gap', () => {
     ['missing', { request_key: KEY }],
     ['no request key', { question: 'chinch bugs on zoysia' }],
     ['a request key that is not a UUID', { question: 'chinch bugs on zoysia', request_key: 'retry-1' }],
+    ['punctuation only (the weekly email would never list it)', { question: '???', request_key: KEY }],
   ])('%s is refused', async (_label, payload) => {
     await withServer(async (baseUrl) => {
       const { status } = await postGap(baseUrl, payload);

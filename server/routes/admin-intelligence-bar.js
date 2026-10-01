@@ -3201,6 +3201,11 @@ router.post('/knowledge-gap', async (req, res) => {
   if (question.length < 3 || question.length > KNOWLEDGE_GAP_MAX) {
     return res.status(400).json({ error: `question must be 3 to ${KNOWLEDGE_GAP_MAX} characters` });
   }
+  // The weekly email lists a question by its letters and digits; one with
+  // none (e.g. "???") would be saved but never listed.
+  if (!require('../services/knowledge/knowledge-gaps-weekly').questionKey(question)) {
+    return res.status(400).json({ error: 'question needs at least one letter or number' });
+  }
   try {
     await db('knowledge_queries').insert({
       query: question,
