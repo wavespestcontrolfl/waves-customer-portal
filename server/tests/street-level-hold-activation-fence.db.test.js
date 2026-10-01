@@ -159,6 +159,18 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect(await state(visitId, callId)).toMatchObject({ confirmed: true });
   });
 
+  test('a hold-card lookup failure fails CLOSED: no leg runs, nothing is stamped', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    const flaky = new Proxy(knex, { apply: (target, thisArg, args) => {
+      if (args[0] === 'triage_items') throw new Error('db blip');
+      return target(...args);
+    } });
+    expect(await runOfficeConfirmActivation(flaky, svc, 'admin-dispatch')).toBe(false);
+    expect(reminders.registerAppointment).not.toHaveBeenCalled();
+    expect(cardRequest.requestCardForAppointment).not.toHaveBeenCalled();
+    expect(await state(visitId, callId)).toEqual({ confirmed: false, card: 'open' });
+  });
+
   test('a rollback by one attempt cannot un-stamp another activation: a re-stamped visit, or one recovery already finished, stays activated', async () => {
     // (a) another activation re-stamped the visit (a different confirmed_at) while this one's leg failed
     const a = await seedApprovedHold();

@@ -1221,9 +1221,18 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
   // overlapping office confirm must still take the fenced path (it loses the stamp and runs no legs) instead of
   // running the legs hook-first with no address check.
   if (bindAddress) {
-    const callLogId = svc.source_call_log_id
-      || (await dbh('scheduled_services').where({ id: svc.id }).first('source_call_log_id').catch(() => null))?.source_call_log_id;
-    if (callLogId && await findStreetLevelHoldCard(dbh, { callLogId, visitId: svc.id }).catch(() => null)) {
+    // Fail CLOSED: a lookup error must not fall through to the unbound hook-first legs. The visit stays
+    // unstamped, the answer is false (the retry rail owns it), and no leg runs.
+    let callLogId = svc.source_call_log_id;
+    let holdCard = null;
+    try {
+      if (!callLogId) callLogId = (await dbh('scheduled_services').where({ id: svc.id }).first('source_call_log_id'))?.source_call_log_id;
+      holdCard = callLogId ? await findStreetLevelHoldCard(dbh, { callLogId, visitId: svc.id }) : null;
+    } catch (e) {
+      logger.error(`[${routeTag}] hold-card lookup failed for ${svc.id} — office activation deferred (nothing run): ${e.message}`);
+      return false;
+    }
+    if (holdCard) {
       return activateHoldFencedByAddress(dbh, svc.source_call_log_id ? svc : { ...svc, source_call_log_id: callLogId }, routeTag, {});
     }
   }
