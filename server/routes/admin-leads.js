@@ -1290,12 +1290,20 @@ router.post('/:id/convert', async (req, res, next) => {
     const customer = await db('customers').where('id', customerId).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    await leadAttribution.markConverted(req.params.id, {
+    // Same stale-view rule as the PUT and mark-lost (codex #5477 r14): a request the
+    // customer's booking closed after staff loaded it is not won from that view.
+    // Judged on the status the client showed, and re-asserted in the win's own UPDATE.
+    const seen = req.body.seen_status;
+    const refusal = handledStatusRefusal('won', seen, lead.status);
+    if (refusal) return res.status(refusal.code).json({ error: refusal.error });
+    const won = await leadAttribution.markConverted(req.params.id, {
       customerId,
       monthlyValue: monthly_value,
       initialServiceValue: initial_service_value,
       waveguardTier: waveguard_tier,
+      ...(seen === 'handled' ? {} : { onlyIfStatusIn: LEAD_STATUSES.filter((s) => s !== 'handled') }),
     });
+    if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
     const updatedLead = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updatedLead });
   } catch (err) { next(err); }

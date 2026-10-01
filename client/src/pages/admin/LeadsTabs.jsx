@@ -2652,6 +2652,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         onClick={() => {
                                           setFormData({
                                             leadId: lead.id,
+                                            seen_status: lead.status,
                                           });
                                           setShowModal("convert");
                                         }}
