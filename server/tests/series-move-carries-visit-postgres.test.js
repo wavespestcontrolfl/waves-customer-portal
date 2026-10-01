@@ -425,6 +425,20 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
   });
 
+  test('an occurrence pointing at ANOTHER customer\'s visit carries nothing: the move refuses', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const otherCustomer = randomUUID();
+    await db('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Owner', email: `${otherCustomer}@example.invalid`, phone: '+19415550001', address_line1: '2 Elsewhere', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer' });
+    // The visit and its pest partner belong to another customer; the lawn row points at it.
+    await db('service_visits').where({ id: f.visits[0].id }).update({ customer_id: otherCustomer });
+    await db('scheduled_services').where({ id: f.pest[0].id }).update({ customer_id: otherCustomer });
+    const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
+    await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED' });
+    const after = await rowsOf([...before.keys()]);
+    for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
+  });
+
   test('each carried partner gets its own reschedule_log row tied to the operation', async () => {
     process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
     const f = await build();

@@ -825,11 +825,17 @@ function planCarriedTargets(vg, sib, entry, updateData, dateStr) {
 // row in the visit (one visit, one stop — two occurrences of one series
 // cannot share it) with at least one partner, and every partner movable (the
 // unit mover's own rule) and still at this stop. Throws the refusal.
-function assertPartnersCanRide({ sweptInVisit, partners, visit, allowLive, vg }) {
+function assertPartnersCanRide({ sweptInVisit, partners, visit, customerId, allowLive, vg }) {
   if (sweptInVisit.length !== 1 || !partners.length) {
     throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
   }
   const occ = sweptInVisit[0];
+  // The swept occurrence itself must be on the visit's own tuple too (its
+  // series is read for the anchor's customer): never carry partners of a
+  // visit that belongs to another customer.
+  if (!visit || !vg.rowStillAtVisitStop({ ...occ, customer_id: occ.customer_id ?? customerId }, visit, partners)) {
+    throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+  }
   // A partner that is its own plan's ROOT row: the seeder derives that plan's
   // future dates from the root's scheduled_date, so a carried one-off date
   // would shift the whole partner plan at the next top-up. Refused.
@@ -3059,7 +3065,7 @@ class SmartRebooker {
                 const sweptInVisit = siblings.filter((x) => sweptSet.has(String(x.id)) && String(x.visit_id) === vid);
                 const partners = carryPartnersLocked.get(vid) || [];
                 const visitRow = await trx('service_visits').where({ id: vid }).first();
-                assertPartnersCanRide({ sweptInVisit, partners, visit: visitRow, allowLive: options.allowLive === true, vg });
+                assertPartnersCanRide({ sweptInVisit, partners, visit: visitRow, customerId: service.customer_id, allowLive: options.allowLive === true, vg });
                 carry.byVisit.set(vid, { visit: visitRow, partners, occurrenceId: String(sweptInVisit[0].id) });
                 carry.partnerIds.push(...partners.map((x) => String(x.id)));
               }
