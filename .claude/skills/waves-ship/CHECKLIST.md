@@ -32,7 +32,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] PR reviews + inline comments polled with `--paginate`; count stable for 15 min after the wrapper (inline findings have lagged it by up to ~12 min — #3669 r4)
 - [ ] Severity read on the GitHub P0–P3 badge scale (the pre-push schema's P0–P2 is a different scale; its P2 = GitHub P2+P3)
 - [ ] Zero unresolved P0/P1 on the current head (`original_commit_id` checked for staleness): each one FIXED, or rebutted inline with file:line evidence AND that rebuttal accepted — by Adam in-session, or by a later Codex round on this same head that did not re-dispute it. A rebuttal Codex has not yet evaluated is unresolved (post `@codex review` and wait); one Codex re-disputed is unresolved and listed under `Open for Adam` in the PR body — it blocks every merge path until Adam decides
-- [ ] The final HEAD's Codex round has ZERO findings, P2 included (`codex-status` CLEAN / CLEAN_EQUIV); a fixed, rebutted or declined finding needs a later clean round. A `Deferred P2s` list is not a resolution. P3s are advisory. A per-PR owner stopping rule (memory `open-stopping-rules`) can relax this for that PR only.
+- [ ] The final HEAD's Codex round has ZERO findings, P2 included (`codex-status` CLEAN / CLEAN_EQUIV); a fixed, rebutted or declined finding needs a later clean round. A `Deferred P2s` list is not a resolution. P3s are advisory. A per-PR owner stopping rule (memory `open-stopping-rules`) or an in-session owner acceptance recorded in the PR body can relax this for that PR only.
 - [ ] Round history checked: if round 5 or later produced a NEW P0/P1, this PR is a split proposal for Adam, not a merge
 
 ## Merge authorization
