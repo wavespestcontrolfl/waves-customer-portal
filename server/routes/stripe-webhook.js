@@ -2798,6 +2798,8 @@ async function armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRo
     priorAttempts = Number((await db('payments')
       .where({ customer_id: processingRow.customer_id, status: 'failed' })
       .whereNot({ id: processingRow.id })
+      // A collections-hold placeholder never reached Stripe: not an attempt.
+      .modify((q) => require('../services/collections/collection-hold').excludeNeverAttemptedHoldDeferrals(q))
       .where(function () {
         this.whereRaw("metadata->>'billed_month' = ?", [obligationMonth])
           .orWhere(function () {
