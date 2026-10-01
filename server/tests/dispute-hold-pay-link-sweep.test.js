@@ -132,6 +132,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       // --- machine-initiated dunning: gated at the boundary by HOLD_GATED_DUNNING_ENTRY_POINTS ---
       'routes/admin-projects.js', // EXEMPT: an operator's own click (operatorInitiated), not automated follow-up
       'services/annual-prepay-renewals.js', // EXEMPT: the termite renewal NOTICE (dates, fee, cancel terms), no pay link
+      'services/customer-dunning/send.js', // GATED: the customer-level schedule (invoice_followup_customer); send-now passes holdExempt 'operator'
       'services/invoice-followups.js', // GATED: Day 3-90 ladder (invoice_followup_sequence); send-now passes holdExempt 'operator'
       'services/invoice.js', // EXEMPT: the invoice sender itself (invoice_send_via_sms): its own default-on hold check
       'services/late-payment-checker.js', // GATED: late_payment_checker / late_payment_checker_microdeposit
@@ -167,12 +168,12 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
   test('every entry point the dunning senders use is gated or classified as a non-pay-link notice', () => {
     const gated = [...Hold.HOLD_GATED_DUNNING_ENTRY_POINTS].sort();
     expect(gated).toEqual([
-      'balance_reminder_late_payment_check', 'balance_reminder_workflow', 'invoice_followup_sequence',
+      'balance_reminder_late_payment_check', 'balance_reminder_workflow', 'invoice_followup_customer', 'invoice_followup_sequence',
       'late_payment_checker', 'late_payment_checker_microdeposit', 'previsit_balance_reminder',
     ]);
     // thank-you / receipt texts carry no pay link (a payment was just received)
     const NON_PAY_LINK_ENTRY_POINTS = ['invoice_followup_thank_you', 'balance_reminder_payment_received'];
-    for (const file of ['services/invoice-followups.js', 'services/late-payment-checker.js',
+    for (const file of ['services/customer-dunning/send.js', 'services/invoice-followups.js', 'services/late-payment-checker.js',
       'services/previsit-balance-reminder.js', 'services/workflows/balance-reminder.js']) {
       const literals = [...read(file).matchAll(/entryPoint:\s*['"]([a-z_]+)['"]/g)].map((m) => m[1]);
       expect(literals.length).toBeGreaterThan(0);
@@ -200,6 +201,9 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
 
   test('every consumer of the shared reminder-delivery helper is a classified dunning sender', () => {
     expect(filesMatching(/require\(['"](\.\/|\.\.\/)billing-reminder-delivery['"]\)/)).toEqual([
+      'services/customer-dunning/runner.js', // sendReminderChannels: a suppressed leg is released, the schedule holds (collection_hold)
+      'services/customer-dunning/schedule.js', // verdict helper only (isTerminalEmailRefusal, for the told / held disposition)
+      'services/customer-dunning/send.js', // verdict helper only (isTerminalEmailRefusal)
       'services/invoice-followups.js', // verdict helpers only
       'services/late-payment-checker.js', // verdict helpers only
       'services/previsit-balance-reminder.js', // sendReminderChannels: a suppressed leg is released, episode stays open
@@ -249,6 +253,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/billing-channel-email-authority.js', // the authority itself (the definition, not a sender)
       'services/billing-channel-email.js', // the routed billing.notice leg: gated a step earlier at the customer-message boundary
       'services/billing-email-provider-replay.js', // stored-copy replay: its own hold check
+      'services/customer-dunning/send.js', // GATED by template (the combined / single follow-up templates); the boundary re-reads the hold
       'services/invoice-email.js', // the invoice email itself: its own provider-boundary hold check
       'services/invoice-followups.js', // GATED by template
       'services/microdeposit-verification-email.js', // GATED by template
@@ -321,7 +326,7 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
   test('the sender due query holds back a confirmed-held Bill-To row with a fresh stamp, and the loop stamps it only after the fence ran', () => {
     const inv = read('services/invoice.js');
     expect(inv).toMatch(/hold_bill_to_checked_at", "<", new Date\(Date\.now\(\) - require\("\.\/collections\/collection-hold"\)\.HOLD_BILL_TO_RECHECK_MS\)/);
-    expect(inv).toMatch(/const billToConfirmed = renewalFenceRan;[\s\S]{0,400}hold_bill_to_checked_at: new Date\(\)/);
+    expect(inv).toMatch(/const billToConfirmed = renewalFenceRan \|\| packetFenceConfirmed;[\s\S]{0,400}hold_bill_to_checked_at: new Date\(\)/);
     expect(inv).toMatch(/\.orderBy\(db\.raw\(\s*`CASE WHEN invoices\.payer_id IS NULL[\s\S]{0,600}hold_bill_to_checked_at/);
   });
 

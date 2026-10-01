@@ -693,7 +693,7 @@ describe('POST /admin/communications/customer-link', () => {
         const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
         expect(res.status).toBe(200);
         expect(await res.json()).toMatchObject({ channel: 'email', sent: true, requestId: 'rr-texted', retriedInline: true });
-        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-texted');
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-texted', { skipClickGuard: true });
         expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
       });
       // Codex #5367 r8 P1: the retry sends under the review-send lock.

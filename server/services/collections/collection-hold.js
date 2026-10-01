@@ -323,6 +323,7 @@ const HOLD_GATED_EMAIL_TEMPLATES = new Set([
 // test fails until it is classified).
 const HOLD_GATED_DUNNING_ENTRY_POINTS = new Set([
   'invoice_followup_sequence',
+  'invoice_followup_customer', // the customer-level combined schedule (customer-dunning/send.js)
   'late_payment_checker',
   'late_payment_checker_microdeposit',
   'balance_reminder_workflow',
@@ -379,6 +380,9 @@ function holdDeferOutcome(held = { reason: 'hold' }) {
     reason: held.reason === 'lookup_failed'
       ? 'The collections dispute-hold lookup failed; delivery deferred'
       : 'Customer has an active collections dispute hold; delivery deferred until it is released',
+    // The hold itself was never confirmed: a caller that cannot hand its claim back must not tell staff to wait for a
+    // release (Codex #5459 r6 P2).
+    ...(held.reason === 'lookup_failed' ? { lookupFailed: true } : {}),
     retryable: true,
     deferred: true,
     deliveryOutcome: 'not_sent',
@@ -399,8 +403,11 @@ function holdDeferOutcome(held = { reason: 'hold' }) {
 // retryable error (QUEUE_INVOICE_NOT_SETTLED): every caller owes the invoice a
 // retry, a durable alert or a deferral, never a finalized hand-off.
 const QUEUE_NOT_SETTLED_CODE = 'QUEUE_INVOICE_NOT_SETTLED';
+// The scheduled-invoice sender's attempt cap (processScheduledSends / claimDueScheduledInvoiceForSend
+// select only rows with scheduled_send_attempts < 5).
+const SCHEDULED_SEND_ATTEMPT_CAP = 5;
 const HANDLED_INVOICE_STATUSES = new Set(['scheduled', 'sent', 'viewed', 'overdue', 'paid', 'prepaid', 'void', 'voided', 'refunded', 'canceled', 'cancelled', 'processing']);
-async function queueHeldInvoiceForSender(invoiceId, database = db) {
+async function queueHeldInvoiceForSender(invoiceId, database = db, { rearmExhausted = false } = {}) {
   if (!invoiceId) return { queued: false };
   const n = await database('invoices')
     .where({ id: invoiceId, status: 'draft' })
@@ -412,6 +419,42 @@ async function queueHeldInvoiceForSender(invoiceId, database = db) {
       scheduled_send_error: null, updated_at: database.fn.now(),
     });
   if (Number(n) > 0) return { queued: true };
+  // ONE-TIME (Codex #5459 r4 P2): the caller passes rearmExhausted only on the FIRST ownership hand-over (the
+  // completion that is newly recording invoiceSenderOwnsPayLinkFor), never on an idempotent re-run, so a
+  // repeated closeout / replay cannot keep resetting the sender's attempt cap.
+  // Codex #5424 r16 P2: a row that is ALREADY 'scheduled' is the sender's own only while it stays
+  // runnable. processScheduledSends skips a row at its attempt cap (scheduled_send_attempts >= 5), so a
+  // handoff that called it "settled" would record the sender as the pay link's owner and the release would
+  // never deliver it. Re-arm such an exhausted, still-undelivered self-pay row: a hold deferral spends no
+  // attempt, so the cap was reached by earlier definite failures and the hold gives it a fresh budget. A
+  // live claim is never touched: a claimed row is 'sending' (the compare-and-set needs status 'scheduled'),
+  // and the sender's own claim needs attempts < 5, so no claimer can hold an exhausted row.
+  // Only a RETRYABLE exhausted row (Codex #5459 r1 P2): one that still has its scheduled send time. A row
+  // parked for manual review has scheduled_send_at NULL and carries its evidence in scheduled_send_error
+  // (a stale-claim review hold, a payer withdrawal, the visit summary's planned-text state, a renewal
+  // withheld stamp); re-arming it would clear that evidence and could send a second pay link while the
+  // earlier outcome is unresolved. A parked row is never re-armed, by its null time OR by its marker.
+  let rearmed = 0;
+  if (rearmExhausted) {
+  const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('../invoice-helpers');
+  const likeEscape = (text) => text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+  const PARK_PREFIXES = [STALE_SEND_PARK_ERROR, 'payer_billed:', SUMMARY_TEXT_PLANNED_ERROR, 'renewal_send_withheld'];
+  let rearmQuery = database('invoices')
+    .where({ id: invoiceId, status: 'scheduled' })
+    .whereNotNull('scheduled_send_at')
+    .where('scheduled_send_attempts', '>=', SCHEDULED_SEND_ATTEMPT_CAP)
+    .whereNull('payer_id').whereNull('payer_statement_id')
+    .whereNull('paid_at').whereNull('sent_at').whereNull('sms_sent_at').whereNull('email_sent_at');
+  for (const prefix of PARK_PREFIXES) {
+    rearmQuery = rearmQuery.whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE ?", [`${likeEscape(prefix)}%`]);
+  }
+  rearmed = await rearmQuery
+    .update({
+      scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
+      scheduled_send_error: null, updated_at: database.fn.now(),
+    });
+  }
+  if (Number(rearmed) > 0) return { queued: true, rearmed: true };
   const row = await database('invoices').where({ id: invoiceId })
     .first('status', 'payer_id', 'payer_statement_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at', 'scheduled_send_error');
   const status = String(row?.status || '').toLowerCase();

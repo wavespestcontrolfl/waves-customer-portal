@@ -16,6 +16,7 @@ const {
   assertTemplateSignatureMode,
   buildCustomerDocumentContext,
   jsonb,
+  lockActiveVersionForIssue,
   renderDocumentTemplate,
   serializeTemplate,
   serializeVersion,
@@ -465,27 +466,30 @@ router.post('/:key/contracts', async (req, res, next) => {
       // serialize on the same key, or its insert can race a rollback's
       // replacement re-check and leave two live signing flows.
       const { PROGRAM_TEMPLATE_KEYS, normalizeAddress } = require('../services/termite-program-agreement');
-      if (PROGRAM_TEMPLATE_KEYS.includes(loaded.template.template_key)) {
+      const isProgramAgreement = PROGRAM_TEMPLATE_KEYS.includes(loaded.template.template_key);
+      if (isProgramAgreement) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customer.id}`]);
-        // Customer row before the template and contract rows — the order
-        // every program-agreement writer holds; the cancellation event below
-        // takes the customer FK key lock (Codex #4922 r4).
-        await trx('customers').where({ id: customer.id }).forUpdate().first('id');
-        // Revalidate AFTER the lock: this request may have waited behind
-        // the v2 migration rollback (or a publish) — the render above was
-        // captured before the wait, and inserting it unchecked would put a
-        // just-deactivated version's wording back in front of the
-        // customer. Pointer or status moved → abort; the admin reloads and
-        // reissues from the now-active version.
-        const live = await trx('document_templates')
-          .where({ id: loaded.template.id })
-          .forUpdate()
-          .first('active_version_id', 'status');
-        if (!live || live.status !== 'active' || live.active_version_id !== loaded.activeVersion.id) {
-          const staleErr = new Error('Document template changed while issuing — reload and try again.');
-          staleErr.status = 409;
-          throw staleErr;
-        }
+      }
+      // Customer row before the template and contract rows, for EVERY key —
+      // the order every program-agreement writer holds and the order the
+      // bulk send holds (assertNoRecentBulkContract locks the customer, then
+      // lockActiveVersionForIssue the template). The contract and event
+      // inserts below take the customer FK key lock (Codex #4922 r4), so a
+      // manual issue that locked the template FIRST would deadlock a bulk
+      // send of the same template that holds the customer and waits for the
+      // template (pre-push Codex P1 on d2316043f2).
+      await trx('customers').where({ id: customer.id }).forUpdate().first('id');
+      // Template row lock + revalidation for EVERY template key, not only
+      // the termite branch (Codex #5463 P1): `loaded` was read before this
+      // transaction, so this request may have waited behind a publish, the
+      // version editor, the v2 migration rollback, or a content migration
+      // that activated a new version — the render above was captured before
+      // the wait, and inserting it unchecked would issue a just-deactivated
+      // version's wording (e.g. a residential agreement without the
+      // rate-review disclosure, after the rollout). Pointer or status moved
+      // → 409; the admin reloads and reissues from the now-active version.
+      await lockActiveVersionForIssue(trx, loaded);
+      if (isProgramAgreement) {
         // One live program request per customer/property — the same
         // invariant the accept-time service, the sweeps, and the rollback
         // enforce. A manual issue is a replacement: supersede the prior

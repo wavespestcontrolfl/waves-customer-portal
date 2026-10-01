@@ -572,7 +572,13 @@ async function markCardLinkSendOutcome(visitId, stamp) {
  *   action 'skipped'      — reason says why (gate_off, exemption, dedup...).
  * Never throws — every trigger path treats this as fire-and-observe.
  */
-async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms', recipientPhone = null }) {
+// customerInitiated — the card ask answers something the customer just did
+// themselves (today: booking on their own INBOUND call). Owner ruling
+// 2026-09-30: a reply to the customer's own contact is never held to 8 AM.
+// Same trust model as the send-window validator's marker: only a caller that
+// verified the upstream action was the customer's may set it — the call
+// pipeline passes it for inbound calls only, never for outbound dials.
+async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms', recipientPhone = null, customerInitiated = false }) {
   // Owner ruling 2026-09-25 (callback_number_needed / disclaimed caller
   // ID): set below, inside the delivery==='none' branch, when the visit's
   // SMS leg is held for a disclaimed ANI AND an email invitation might
@@ -1180,10 +1186,12 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         customerId: visit.customer_id,
         identityTrustLevel: 'phone_matches_customer',
         // trigger 'admin' = the schedule page's explicit "request card"
-        // click; every other trigger (previsit sweep, call pipeline,
-        // outbound confirm, booking) is automation and stays fenced by
-        // the send window.
+        // click. customerInitiated = the caller's own inbound-call booking
+        // (owner ruling 2026-09-30). Every other trigger (previsit sweep,
+        // outbound confirm, booking) is automation and stays fenced by the
+        // send window.
         ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
+        ...(customerInitiated === true ? { customerInitiated: true } : {}),
         metadata: {
           scheduled_service_id: visit.id,
           trigger,

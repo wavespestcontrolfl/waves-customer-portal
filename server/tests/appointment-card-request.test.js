@@ -658,6 +658,20 @@ describe('the send', () => {
     }));
   });
 
+  test('customerInitiated rides to the send for an inbound-call booking; absent otherwise (owner ruling 2026-09-30)', async () => {
+    // The call pipeline marks the card ask as the caller's own action, so
+    // the send-window validator lets it out at night. The marker is an
+    // opt-in per call site: an unmarked automation trigger must NOT carry
+    // it, or the window would be defeated for every scheduled send.
+    await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', customerInitiated: true });
+    expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerInitiated: true }));
+    expect(mockSendCustomerMessage).not.toHaveBeenCalledWith(expect.objectContaining({ operatorInitiated: true }));
+    mockSendCustomerMessage.mockClear();
+    await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline' });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('customerInitiated');
+  });
+
   test('a resolved call recipient overrides customer.phone (consented-recipient routing)', async () => {
     const res = await requestCardForAppointment({
       scheduledServiceId: 'svc-1',

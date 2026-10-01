@@ -13,8 +13,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const {
-  CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY, CARD_HOLD_CONSENT_VERSION, PREPAY_CONSENT_MARKER,
-  getConsentText, renderedConsentVersionIsCurrent,
+  CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY, PREPAY_CONSENT_MARKER,
+  getConsentText, consentVersionForVariant, renderedConsentVersionIsCurrent,
 } = require('./payment-method-consent-text');
 const { isExpiredCardMethod } = require('./autopay-eligibility');
 
@@ -39,6 +39,10 @@ async function recordConsent({
   // 'card_hold' snapshots the one-time hold disclosure the CardHoldModal
   // rendered (fee + window in `holdTerms`) under CARD_HOLD_CONSENT_VERSION —
   // never the card authorization that modal does not show (codex #5434 r3).
+  // 'after_visit_prepay' / 'after_visit_card' (GATE_PAY_AFTER_FIRST_VISIT)
+  // snapshot the charge-after-the-first-visit authorization; they carry the
+  // rate sentence too and are recorded under the v12 label. The label for
+  // every variant comes from consentVersionForVariant.
   consentVariant = null,
   holdTerms = null,
   // Authorization that came from a SIGNED AGREEMENT rather than a consent
@@ -64,21 +68,21 @@ async function recordConsent({
     throw new Error('recordConsent: an agreement-backed consent needs its snapshot, version, and contract id');
   }
   const consentText = consentTextSnapshot || getConsentText(methodType, { variant: consentVariant, holdTerms });
-  const versionForVariant = consentVariant === 'card_hold' ? CARD_HOLD_CONSENT_VERSION : CONSENT_VERSION;
+  const versionLabel = consentTextVersion || consentVersionForVariant(consentVariant, methodType);
 
   const [row] = await database('payment_method_consents').insert({
     customer_id: customerId,
     payment_method_id: paymentMethodId,
     stripe_payment_method_id: stripePaymentMethodId,
     source,
-    consent_text_version: consentTextVersion || versionForVariant,
+    consent_text_version: versionLabel,
     consent_text_snapshot: consentText,
     ip,
     user_agent: userAgent,
     ...(evidenceContractId ? { evidence_contract_id: evidenceContractId } : {}),
   }).returning('*');
 
-  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${consentTextVersion || versionForVariant}, methodType=${methodType})`);
+  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${versionLabel}, methodType=${methodType})`);
   return row;
 }
 

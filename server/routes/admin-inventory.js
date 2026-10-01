@@ -711,6 +711,7 @@ function mapProduct(product, vendorPricing = []) {
     heatRestrictions: product.heat_restrictions || null,
     irrigationNotes: product.irrigation_notes || null,
     postApplicationWatering: product.post_application_watering || null,
+    mowHoldDays: product.mow_hold_days ?? null,
     localRuleSensitivity: product.local_rule_sensitivity === true,
   };
 }
@@ -1001,6 +1002,7 @@ router.get('/lawn-outline-facts', async (req, res, next) => {
             'label_verified_at',
             'label_version',
             'post_application_watering',
+            'mow_hold_days',
             'approved_for_public_page',
             'approved_for_estimate_packet',
             'approved_for_service_report',
@@ -1083,6 +1085,9 @@ router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
     );
     if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
     if (!wateringPatch.skip) update.post_application_watering = wateringPatch.value;
+    const mowHoldPatch = mowHoldDaysPatch(req.body);
+    if (mowHoldPatch.error) return res.status(400).json({ error: mowHoldPatch.error });
+    if (!mowHoldPatch.skip) update.mow_hold_days = mowHoldPatch.value;
 
     // Read, decide, update and audit on ONE locked row (the PUT's pattern), so
     // overlapping edits produce a correct old -> A -> B audit trail and the
@@ -1112,6 +1117,7 @@ router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
         .update(rowUpdate)
         .returning('*');
       await auditWateringRuleChange(req, product, wateringPatch, trx);
+      await auditMowHoldDaysChange(req, product, mowHoldPatch, trx);
       return { status: 200, body: { product: mapProduct(updated), readiness: lawnFactReadiness(updated) } };
     });
     res.status(outcome.status).json(outcome.body);
@@ -3394,6 +3400,55 @@ function postApplicationWateringPatch(body, actor) {
   return { value: JSON.stringify(checked.rule) };
 }
 
+// products_catalog.mow_hold_days — the days the product LABEL says to hold off
+// mowing after an application. Validated on every admin save: an integer 1..14
+// (a whole-number string is accepted), or null / '' to clear. Anything else is a
+// 400 before any write. Returns { skip } when the body does not mention the
+// field, { error } for a 400, else { value } (an integer, or null).
+function mowHoldDaysPatch(body) {
+  const raw = body?.mowHoldDays;
+  if (raw === undefined) return { skip: true };
+  if (raw === null || raw === '') return { value: null };
+  const n = typeof raw === 'string' && /^\d{1,3}$/.test(raw.trim()) ? Number(raw.trim()) : raw;
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 14) {
+    return { error: 'Invalid mowHoldDays: must be a whole number of days from 1 to 14, or null to clear' };
+  }
+  return { value: n };
+}
+
+// Audit an admin edit of the product's label mow hold (a customer-facing claim
+// that completion snapshots freeze), same posture as auditWateringRuleChange:
+// no-op when the field was not in the request or did not change; critical
+// inside a transaction so the audit and the save commit or roll back together.
+async function auditMowHoldDaysChange(req, product, mowHoldPatch, trx = null) {
+  if (!mowHoldPatch || mowHoldPatch.skip) return;
+  const before = product?.mow_hold_days == null ? null : Number(product.mow_hold_days);
+  const after = mowHoldPatch.value ?? null;
+  if (before === after) return;
+  const { recordAuditEvent } = require('../services/audit-log');
+  const event = (extra) => ({
+    actor_type: 'technician',
+    actor_id: req.technicianId || null,
+    action: 'products_catalog.mow_hold_days.updated',
+    resource_type: 'products_catalog',
+    resource_id: String(product.id),
+    metadata: {
+      product: product.name || null,
+      before,
+      after,
+      actor_name: req.technician?.name || null,
+    },
+    trx,
+    ...extra,
+  });
+  if (trx) return recordAuditEvent(event({ critical: true }));
+  try {
+    await recordAuditEvent(event({}));
+  } catch (err) {
+    logger?.warn?.(`[admin-inventory] mow-hold audit failed: ${err.message}`);
+  }
+}
+
 // POST / — create a new product
 router.post('/', async (req, res, next) => {
   try {
@@ -3545,6 +3600,9 @@ router.put('/:id', async (req, res, next) => {
     );
     if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
     if (!wateringPatch.skip) upd.post_application_watering = wateringPatch.value;
+    const mowHoldPatch = mowHoldDaysPatch(req.body);
+    if (mowHoldPatch.error) return res.status(400).json({ error: mowHoldPatch.error });
+    if (!mowHoldPatch.skip) upd.mow_hold_days = mowHoldPatch.value;
     // The inline editor sends containerSize alone, and scoreVendorRows treats
     // a positive unit_size_oz as authoritative (Codex #3974 r3 P1): a
     // container edit without an explicit unitSizeOz re-derives it from the
@@ -3614,6 +3672,7 @@ router.put('/:id', async (req, res, next) => {
         || (upd.unit_size_oz !== undefined && numberOrNull(upd.unit_size_oz) !== numberOrNull(locked.unit_size_oz));
       await trx('products_catalog').where({ id: req.params.id }).update(upd);
       await auditWateringRuleChange(req, locked, wateringPatch, trx);
+      await auditMowHoldDaysChange(req, locked, mowHoldPatch, trx);
       if (stockChanged) {
         const before = stockBefore || 0;
         const after = nextStock || 0;

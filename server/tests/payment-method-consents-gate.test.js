@@ -267,6 +267,10 @@ describe('hasConsentSnapshotForVariant — version / anyVersion lookups', () => 
     expect(text.PREPAY_ACH_CONSENT_TEXT).toContain(text.PREPAY_CONSENT_MARKER);
     expect(text.CARD_CONSENT_TEXT).not.toContain(text.PREPAY_CONSENT_MARKER);
     expect(text.ACH_CONSENT_TEXT).not.toContain(text.PREPAY_CONSENT_MARKER);
+    // After-visit prepay consents name the same invoice but charge nothing
+    // today — they must not stand in for the immediate-charge authorization.
+    expect(text.AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT).not.toContain(text.PREPAY_CONSENT_MARKER);
+    expect(text.AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT).not.toContain(text.PREPAY_CONSENT_MARKER);
   });
 
   test('anyVersion: no text or version filter at all (unstamped jobs)', async () => {
