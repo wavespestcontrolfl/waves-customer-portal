@@ -803,6 +803,7 @@ async function checkGemini() {
 // yes/no question over a one-word state against the pinned model. 401/403 =
 // the key is bad (expired); 429/529 = the key works but the service is busy
 // (healthy for credential purposes); anything else is an error.
+const TYPESAFE_PROBE_TIMEOUT_MS = 15000;
 async function checkTypeSafe() {
   const platform = 'typesafe';
   const envVarName = 'TYPESAFE_API_KEY';
@@ -826,6 +827,10 @@ async function checkTypeSafe() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({ model: MODELS.TYPESAFE_JEV, state: 'ping', questions: { ok: { type: 'noul', instructions: 'Is the state the word ping?' } } }),
+      // Same ceiling as the adapter (callTypeSafe's 15 s): checkAll runs
+      // providers sequentially, so a stalled probe here would hold up every
+      // check after it and the credential alert.
+      signal: AbortSignal.timeout(TYPESAFE_PROBE_TIMEOUT_MS),
     });
 
     if (res.ok || res.status === 429 || res.status === 529) {

@@ -1,10 +1,12 @@
 const { rowToCase, parseArgs, exportCases, COLUMNS } = require('../scripts/export-decision-review-fixtures');
+const { PACKAGES, packageHash } = require('../services/typed-decisions/packages');
+const CALL_JUDGE_HASH = packageHash(PACKAGES['call_judge.v2']);
 
 const ROW = {
   id: 'ignored-id',
   capability: 'call_judge',
   package_id: 'call_judge.v2',
-  package_hash: 'h',
+  package_hash: CALL_JUDGE_HASH,
   served_model: 'jev-1.13.0',
   subject_type: 'call_log',
   subject_id: '11111111-1111-4111-8111-111111111111',
@@ -28,7 +30,7 @@ describe('rowToCase', () => {
       subject_type: 'call_log',
       subject_id: '11111111-1111-4111-8111-111111111111',
       package_id: 'call_judge.v2',
-      package_hash: 'h',
+      package_hash: CALL_JUDGE_HASH,
       question_id: 'is_lead',
       question_type: 'noul',
       jev_answer: { p: 0.9, yes: true, confident: true },
@@ -68,6 +70,17 @@ describe('rowToCase', () => {
     // unknown package or question → nothing to validate against → excluded
     expect(rowToCase({ ...ROW, package_id: 'nope.v9' })).toBeNull();
     expect(rowToCase({ ...ROW, question_id: 'not_a_question' })).toBeNull();
+  });
+});
+
+describe('provenance and status/verdict pairing', () => {
+  test('a row whose hash is not the registered package\'s current hash is excluded', () => {
+    expect(rowToCase({ ...ROW, package_hash: 'a'.repeat(64) })).toBeNull();
+  });
+  test('confirmed_correct needs jev_right and confirmed_error needs jev_wrong', () => {
+    expect(rowToCase({ ...ROW, label_status: 'confirmed_correct', label: { verdict: 'jev_wrong', correct_value: false } })).toBeNull();
+    expect(rowToCase({ ...ROW, label_status: 'confirmed_error', label: { verdict: 'jev_right' } })).toBeNull();
+    expect(rowToCase({ ...ROW, label_status: 'confirmed_correct', label: { verdict: 'jev_right' } })).toMatchObject({ expected: true });
   });
 });
 
@@ -111,9 +124,9 @@ describe('exportCases (stubbed db)', () => {
     };
     const db = jest.fn((table) => { calls.table = table; return query; });
     const result = await exportCases({ db, capability: 'call_judge', now: () => new Date('2026-10-01T00:00:00Z') });
-    expect(calls).toMatchObject({ table: 'decision_reviews', where: { capability: 'call_judge' }, whereIn: ['label_status', ['confirmed_error', 'confirmed_correct']], whereRaw: expect.stringMatching(/package_hash ~ '\^\[0-9a-f\]\{64\}\$'.*label->>'verdict' IN \('jev_right','jev_wrong','unclear'\).*jsonb_exists\(label, 'correct_value'\).*btrim\(labeled_by\) <> ''/), select: COLUMNS });
+    expect(calls).toMatchObject({ table: 'decision_reviews', where: { capability: 'call_judge' }, whereIn: ['label_status', ['confirmed_error', 'confirmed_correct']], whereRaw: expect.stringMatching(/package_hash ~ '\^\[0-9a-f\]\{64\}\$'.*label->>'verdict' IN \('jev_right','jev_wrong','unclear'\).*jsonb_exists\(label, 'correct_value'\).*btrim\(labeled_by\) <> ''.*confirmed_correct' AND label->>'verdict' = 'jev_right'/), select: COLUMNS });
     expect(calls.whereRaw).not.toMatch(/\?/);
-    expect(rowToCase(ROW).package_hash).toBe('h');
+    expect(rowToCase(ROW).package_hash).toBe(CALL_JUDGE_HASH);
     expect(result).toEqual({ capability: 'call_judge', exported_at: '2026-10-01T00:00:00.000Z', cases: [rowToCase(ROW)] });
   });
 });

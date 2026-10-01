@@ -29,6 +29,7 @@ describe('token-health: typesafe', () => {
     expect(url).toBe(TYPESAFE_SYSTEMONE_API);
     expect(init.headers.Authorization).toBe('Bearer k');
     expect(JSON.parse(init.body).model).toBe(MODELS.TYPESAFE_JEV);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
   test('an unpinned MODEL_TYPESAFE_JEV is an error before any request (Codex #5476)', async () => {
     jest.resetModules();

@@ -27,7 +27,11 @@ const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'package_hash', 'qu
 // required for jev_wrong }) with a non-blank reviewer and a timestamp.
 const LABEL_OK = "(label IS NOT NULL AND jsonb_typeof(label) = 'object' AND label->>'verdict' IS NOT NULL AND label->>'verdict' IN ('jev_right','jev_wrong','unclear') AND (label->>'verdict' <> 'jev_wrong' OR jsonb_exists(label, 'correct_value')))";
 const PROVENANCE_OK = "(labeled_by IS NOT NULL AND btrim(labeled_by) <> '' AND labeled_at IS NOT NULL)";
-const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NOT IN ('confirmed_error','confirmed_correct') OR (${LABEL_OK} AND ${PROVENANCE_OK}))`;
+// A confirmed status must match its verdict (confirmed_correct ↔ jev_right,
+// confirmed_error ↔ jev_wrong; unclear is never confirmed) — the same pairing
+// migration 20261001160000 enforces.
+const PAIRING_OK = "((label_status = 'confirmed_correct' AND label->>'verdict' = 'jev_right') OR (label_status = 'confirmed_error' AND label->>'verdict' = 'jev_wrong'))";
+const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NOT IN ('confirmed_error','confirmed_correct') OR (${LABEL_OK} AND ${PROVENANCE_OK} AND ${PAIRING_OK}))`;
 
 // One decision_reviews row -> one fixture case. Picks only the allowed fields,
 // so a column added to the table later can never leak into a fixture.
@@ -37,11 +41,15 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 // a score is a finite number. Anything else (a name, an address, a sentence, an
 // option that is not in the package) is dropped, and a confirmed case that
 // cannot produce an in-domain expected answer is not exported at all.
-const { packageFor } = require('../services/typed-decisions/packages');
+const { packageFor, packageHash } = require('../services/typed-decisions/packages');
 
+// The row must name a registered package AND carry that package's CURRENT
+// content hash: a syntactically valid digest for different question wording
+// is false provenance and the row is not evidence.
 function questionFor(row) {
   const pkg = packageFor(row.package_id);
-  return pkg && pkg.questions ? pkg.questions[row.question_id] || null : null;
+  if (!pkg || !pkg.questions || packageHash(pkg) !== row.package_hash) return null;
+  return pkg.questions[row.question_id] || null;
 }
 // The question's answer domain: true when `v` is a valid answer for it.
 function inDomain(question, v) {
@@ -118,6 +126,9 @@ function rowToCase(row) {
   if (!question) return null; // unknown package or question: nothing to validate against
   const expected = expectedFor(question, row);
   if (CONFIRMED.has(row.label_status) && expected === null) return null; // not scorable
+  const verdict = row.label && typeof row.label === 'object' ? row.label.verdict : null;
+  if (row.label_status === 'confirmed_correct' && verdict !== 'jev_right') return null; // status/verdict mismatch
+  if (row.label_status === 'confirmed_error' && verdict !== 'jev_wrong') return null;
   const label = structuredLabel(row.label);
   if (label && row.label && row.label.verdict === 'jev_wrong' && inDomain(question, row.label.correct_value)) label.correct_value = row.label.correct_value;
   return {
