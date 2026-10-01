@@ -833,7 +833,13 @@ const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersio
 // customer has since cancelled comes out of the estimate's services, one
 // added since (on another estimate) goes in as a prior qualifying service —
 // and the list carries today's tier, not the one the old quote was sold at.
-function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFamilies = null } = {}) {
+// `savedPriorQualifying`: the SERVER-stamped prior-qualifying services on
+// estimate_data (admin-estimate-persistence writes the top-level key only
+// when it repriced at the server) — restored for the ORIGINAL-mix replay
+// so an add-on estimate legitimately sold at Silver (the customer already
+// had another program) replays at Silver, not Bronze. Never the client-
+// posted copy inside the inputs, which the sanitizer strips.
+function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFamilies = null, savedPriorQualifying = null } = {}) {
   // The shared client-identity sanitizer first (estimate-client-identity-
   // fields.js: every server-owned replay stamp — treeShrubPricingKnobs,
   // palmAnnualRounding, catalogPricing, the identity flags …), the same
@@ -847,6 +853,10 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFami
         for (const key of keys) delete clean.services[service][key];
       }
     }
+  }
+  if (!Array.isArray(activeFamilies) && Array.isArray(savedPriorQualifying) && savedPriorQualifying.length) {
+    clean.priorQualifyingServices = savedPriorQualifying.map(String);
+    clean.recurringCustomer = true;
   }
   if (Array.isArray(activeFamilies) && clean.services && typeof clean.services === 'object') {
     const active = new Set(activeFamilies);
@@ -970,8 +980,10 @@ async function replayEstimate(estimate, { familyKey, cadence, activeFamilies }, 
   if (!inputs) return null;
   if (deps.engineSynced === false) return { unavailable: 'engine_sync_failed' };
   const engine = deps.pricingEngine || require('./pricing-engine');
+  const data = parseJson(estimate.estimate_data);
+  const savedPriorQualifying = data && Array.isArray(data.priorQualifyingServices) ? data.priorQualifyingServices : null;
   try {
-    return { inputs, result: engine.generateEstimate(listReplayInputs(inputs, { familyKey, cadence, activeFamilies })) };
+    return { inputs, result: engine.generateEstimate(listReplayInputs(inputs, { familyKey, cadence, activeFamilies, savedPriorQualifying })) };
   } catch (err) {
     logger.warn(`[rate-review] engine replay failed for estimate ${estimate.id}: ${err.message}`);
     return { unavailable: 'engine_replay_failed' };

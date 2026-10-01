@@ -548,6 +548,20 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(Object.keys(P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly' }).services).sort()).toEqual(['lawn', 'mosquito', 'pest']);
     expect(sold.services.lawn).toBeDefined();
   });
+  test('the ORIGINAL-mix replay restores the server-stamped prior qualifying services; the client-posted copy never survives', () => {
+    const inputs = { lotSqFt: 8000, priorQualifyingServices: ['pest_control', 'mosquito'], recurringCustomer: true, services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } };
+    // original mix with the server-stamped evidence → priors restored (sold as a Silver add-on)
+    const original = P.listReplayInputs(inputs, { familyKey: null, cadence: null, activeFamilies: null, savedPriorQualifying: ['pest_control'] });
+    expect(original.priorQualifyingServices).toEqual(['pest_control']);
+    expect(original.recurringCustomer).toBe(true);
+    // no server stamp → the client-posted list is gone
+    const bare = P.listReplayInputs(inputs, { familyKey: null, cadence: null, activeFamilies: null, savedPriorQualifying: null });
+    expect(bare.priorQualifyingServices).toBeUndefined();
+    expect(bare.recurringCustomer).toBeUndefined();
+    // the current-bundle replay derives priors from today's plan lines, not the stamp
+    const current = P.listReplayInputs(inputs, { familyKey: 'lawn_care', cadence: 'every_6_weeks', activeFamilies: ['lawn_care', 'pest_control', 'rodent'], savedPriorQualifying: ['pest_control'] });
+    expect(current.priorQualifyingServices).toEqual(['pest_control', 'rodent_bait']);
+  });
   test('every server-owned replay stamp comes off through the shared client-identity sanitizer', () => {
     const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
     for (const stamp of ['treeShrubPricingKnobs', 'palmAnnualRounding', 'catalogPricing', 'termitePricingKnobs', 'rodentWaveguardPostureReplay']) expect(CLIENT_IDENTITY_FIELDS).toContain(stamp);
@@ -1142,6 +1156,36 @@ describe('buildBatch over the synthetic December book', () => {
     const pickedRow = db4.writes.snapshotInserts.find((r) => r.customer_id === picked.id);
     expect(JSON.parse(pickedRow.flags)).toContain('hand_picked_tier');
     expect(pickedRow.status).toBe('exception');
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+  });
+
+  test('an existing-member add-on estimate sold at Silver is not a hand-picked tier', async () => {
+    const member = fixture.customer(19, { member_since: '2025-02-01', waveguard_tier: 'Silver', last_name: 'Member Add-on' });
+    const addon = { id: fixture.ESTIMATE(10), customer_id: member.id, accepted_at: '2025-11-26T16:00:00Z', waveguard_tier: 'Silver',
+      // server-stamped evidence at the top level: the customer already had pest when lawn was sold
+      estimate_data: { inputs: { lotSqFt: 8000, services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } }, priorQualifyingServices: ['pest_control'] } };
+    const lines = [...book.planLines,
+      fixture.planLine(member.id, 'pest_control', 'quarterly', 117, { account_lines: 2 }),
+      fixture.planLine(member.id, 'lawn_care', 'every_6_weeks', 61, { source_estimate_ids: [addon.id], account_lines: 2 })];
+    const scenario = {
+      planLines: lines, customers: [...book.customerRows, member],
+      firstVisits: [...book.firstVisits, { customer_id: member.id, line: 'pest_control', first_visit: '2025-03-01', completed_visits: 6 }, { customer_id: member.id, line: 'lawn_care', first_visit: '2025-12-03', completed_visits: 5 }],
+      completedVisits: book.completedVisits, estimates: [...book.estimates, addon], terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const db5 = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => db5(table));
+    db.raw.mockImplementation((...args) => db5.raw(...args));
+    db.transaction.mockImplementation((fn) => db5.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    const engine = fixture.fakePricingEngine({ tier: 'derive' });
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: engine } });
+    const row = db5.writes.snapshotInserts.find((r) => r.customer_id === member.id && r.family_key === 'lawn_care');
+    expect(row.list_rate_source).toBe('engine');
+    expect(JSON.parse(row.flags)).not.toContain('hand_picked_tier');
+    // the original-mix replay carried the stamped prior (lawn + pest → silver); the client-posted copy is never what decides it
+    expect(engine.generateEstimate.mock.calls.some(([inputs]) => Array.isArray(inputs.priorQualifyingServices) && inputs.priorQualifyingServices.length === 1 && inputs.priorQualifyingServices[0] === 'pest_control')).toBe(true);
     db.mockImplementation((table) => scripted(table));
     db.raw.mockImplementation((...args) => scripted.raw(...args));
     db.transaction.mockImplementation((fn) => scripted.transaction(fn));
