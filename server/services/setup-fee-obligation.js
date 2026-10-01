@@ -153,7 +153,7 @@ const DUES_COVERED_LANES = new Set(['monthly_membership', 'annual_prepay']);
 // can still consume it AND the customer's lane runs completion mints. The
 // immutable setup_fee_claims record of a non-dead invoice on such a series
 // (the claim consumed by the first performed completion; a stamp never
-// outlives the mint, the record does) counts at the frozen fee. Query
+// outlives the mint, the record does) counts at whatever amount it billed. Query
 // failures propagate: the caller fails CLOSED exactly as it does for the
 // invoice reads below.
 //
@@ -162,7 +162,7 @@ const DUES_COVERED_LANES = new Set(['monthly_membership', 'annual_prepay']);
 // series with no live consumer). When the obligation is then owed the office
 // bills the fee manually, and the completion neutralizes these so they cannot
 // auto-bill on top of that manual bill later.
-async function deferredSetupFeeCovers(conn, estimate, expectedFeeCents, { completingVisitId = null, completingParentId = null } = {}) {
+async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null, completingParentId = null } = {}) {
   const none = { covers: false, unconsumableStamps: [] };
   const roots = await conn('scheduled_services')
     .where({ source_estimate_id: estimate.id, customer_id: estimate.customer_id })
@@ -196,12 +196,15 @@ async function deferredSetupFeeCovers(conn, estimate, expectedFeeCents, { comple
     }
   }
   if (covers) return { covers: true, unconsumableStamps: [] };
-  if (!(expectedFeeCents > 0)) return { covers: false, unconsumableStamps };
   const claims = await conn('setup_fee_claims')
     .whereIn('scheduled_service_id', rootRows.map((r) => r.id))
     .select('invoice_id', 'amount');
   for (const claim of Array.isArray(claims) ? claims : []) {
-    if (!claim || Math.round(Number(claim.amount) * 100) < expectedFeeCents) continue;
+    // ANY positive claim amount counts, symmetric with the queued stamp above:
+    // the claim IS the fee the completion mint billed, so a stamp at another
+    // amount (e.g. $49 on a $99 estimate) must read as billed after collection
+    // exactly as it read as deferred before it — never as a full re-bill.
+    if (!claim || !(Math.round(Number(claim.amount) * 100) > 0)) continue;
     const invoice = await conn('invoices').where({ id: claim.invoice_id }).first('status');
     const status = String(invoice?.status || '').toLowerCase();
     // A REFUNDED claim-backed invoice still resolves the obligation: the fee
@@ -435,7 +438,7 @@ async function findUnmintedSetupFeeObligation({
   // "missing". Deliberately NOT behind the sub-gate: it only ever matches a
   // stamp this estimate's own series carries, and a stamp written while the
   // gate was on must stay recognised after a flip back off.
-  const deferral = await deferredSetupFeeCovers(conn, estimate, expectedFeeCents, {
+  const deferral = await deferredSetupFeeCovers(conn, estimate, {
     completingVisitId: excludeScheduledServiceId,
     completingParentId: visitPlanRow?.recurring_parent_id || null,
   });

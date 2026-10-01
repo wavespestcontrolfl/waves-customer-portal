@@ -562,6 +562,18 @@ describe('fee deferred to the first performed visit (series claim)', () => {
     expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
   });
 
+  // Symmetry with the queued stamp: a $49 stamp on a $99 estimate reads as
+  // deferred while queued, so after collection its immutable claim ($49) must
+  // read as billed — not as "the whole $99 was never invoiced".
+  test('a consumed claim at a LOWER amount than the frozen fee still reads as billed (the claim is the fee the mint billed)', async () => {
+    mockTables = baseTables({
+      scheduled_services: [ROOT({ pending_setup_fee: null })],
+      setup_fee_claims: [{ invoice_id: 'inv-9', amount: '49.00' }],
+      invoices: { id: 'inv-9', status: 'paid', line_items: APP_ONLY_LINE },
+    });
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
   test('a REFUNDED claim-backed invoice still resolves the obligation (deliberate refund — never instruct a re-bill, matching the refunded-fee doctrine above)', async () => {
     mockTables = baseTables({
       scheduled_services: [ROOT({ pending_setup_fee: null })],

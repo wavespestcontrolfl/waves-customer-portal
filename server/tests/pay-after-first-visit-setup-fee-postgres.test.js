@@ -391,6 +391,30 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // A stamp at another amount is still THE fee: completion bills it, and the
+  // next completion must read the immutable claim as billed (not re-demand the
+  // full frozen $99 through a manual-billing alert).
+  test('a lower-valued stamp ($49 on a $99 estimate) bills at $49 through collection, and the NEXT completion neither alerts nor bills a second fee', async () => {
+    const f = await seed({ stamp: 49 });
+    try {
+      const first = await complete(f, f.parentId);
+      expect(first).toMatchObject({ status: 200 });
+      let invoices = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoices).toHaveLength(1);
+      expect(setupLines(invoices[0])).toHaveLength(1);
+      expect(Number(setupLines(invoices[0])[0].unit_price ?? setupLines(invoices[0])[0].amount)).toBe(49);
+      expect(await parkAlerts(f)).toHaveLength(0);
+
+      await makeDue(f.childIds[0]);
+      const next = await complete(f, f.childIds[0]);
+      expect(next).toMatchObject({ status: 200 });
+      invoices = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoices).toHaveLength(2);
+      expect(invoices.flatMap(setupLines)).toHaveLength(1);
+      expect(await parkAlerts(f)).toHaveLength(0);
+    } finally { await cleanup(f); }
+  });
+
   // Reviewer P2-B/P2-D: a stamp on a customer whose lane never runs the
   // completion mint (monthly membership: dues cover the visit) can never be
   // consumed. The detector must not call it a deferral (the fee would be
