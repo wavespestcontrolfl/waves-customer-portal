@@ -693,6 +693,9 @@ describe('mow hold', () => {
     const { isValidMowHold } = require('../services/service-report/lawn-watering-instruction');
     const good = mow([entry(HOLD(24), 2)]);
     expect(isValidMowHold(good)).toBe(true);
+    // A record frozen before untilAt existed still replays as written.
+    const { untilAt: _u, ...legacy } = good;
+    expect(isValidMowHold({ ...legacy, untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' })).toBe(true);
     for (const bad of [null, undefined, 'x', [], {}, { ...good, days: 0 }, { ...good, days: 15 }, { ...good, days: '2' }, { ...good, untilDate: 'Friday' }, { ...good, untilAt: 'later' }, { ...good, untilLabel: '' }, { ...good, line: '' }]) {
       expect(isValidMowHold(bad)).toBe(false);
     }

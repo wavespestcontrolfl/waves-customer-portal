@@ -563,6 +563,13 @@ describe('label mow hold on the report payload (GATE_LAWN_WATERING_RULE)', () =>
       expect(replay.reportV2.banner).toMatchObject({ state: null, lines: [], mowHold: { days: 7 } });
     });
 
+    test('a hold frozen with the first mow shape (no untilAt) replays its mow line as written', async () => {
+      const { buildWateringBanner } = require('../services/service-report/report-data');
+      const legacyMow = { days: 2, untilDate: '2026-10-02', untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' };
+      const hold = { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: null, expiresAt: null, ruleSource: 'label', mowHold: legacyMow };
+      expect(buildWateringBanner(hold, null).mowHold).toEqual(legacyMow);
+    });
+
     test('a frozen banner with a malformed mow hold prints no mow line', async () => {
       const { buildWateringBanner } = require('../services/service-report/report-data');
       const hold = { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: null, expiresAt: null, ruleSource: 'label' };

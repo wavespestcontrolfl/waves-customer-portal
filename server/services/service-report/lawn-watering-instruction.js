@@ -175,7 +175,9 @@ function isValidMowHold(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
     && normalizeMowHoldDays(value.days) != null
     && typeof value.untilDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.untilDate)
-    && typeof value.untilAt === 'string' && Number.isFinite(Date.parse(value.untilAt))
+    // untilAt arrived after the first shape: a record frozen without it replays
+    // as written (record, not clock); when present it must parse.
+    && (value.untilAt === undefined || (typeof value.untilAt === 'string' && Number.isFinite(Date.parse(value.untilAt))))
     && typeof value.untilLabel === 'string' && value.untilLabel.length > 0
     && typeof value.line === 'string' && value.line.length > 0;
 }
