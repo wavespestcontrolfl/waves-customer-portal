@@ -75,6 +75,7 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
+    if ((!queue || !queue.length) && table === 'customer_dunning_schedules') return chain({ result: [] });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
@@ -110,6 +111,9 @@ describe('invoice-followups micro-deposit diversion', () => {
     // fireStep claims inside a transaction that locks the invoice row —
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
+    // fireStep takes the customer's dunning key (SHARED) and reads ownership
+    // (customer_dunning_schedules) under it; no schedule rows here.
+    db.raw = jest.fn(async () => ({ rows: [] }));
     // Sequence UPDATEs stamp updated_at via knex's .fn.now() (the
     // touched-since signal), so the stub connection needs that surface too.
     db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
