@@ -352,7 +352,13 @@ postgres('combined-booking check through the real conversion', () => {
       const later = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
       const [hold] = await trx('plan_holds').insert({ customer_id: est.customerId, family_key: 'lawn_care',
         starts_on: new Date(Date.now() - 86400000).toISOString().slice(0, 10), resume_on: later, status: 'active' }).returning('id');
-      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0, overflow: 1 });
+      // A pest problem first: its bell rings; fixing it while lawn is on hold
+      // closes the bell AND keeps the booking tracked as held.
+      const pestChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /pest/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ technician_id: null });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ technician_id: (await rowsOf(trx, est.estimateId))[0].technician_id });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0, closed: 1, overflow: 1 });
       expect((await check.overflowEntries(trx)).held).toEqual(new Set([est.estimateId]));
       expect(await check.owedEstimateIds(trx)).toEqual([]); // no known problem: not an Action Inbox item
 
@@ -362,7 +368,8 @@ postgres('combined-booking check through the real conversion', () => {
       const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
       await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: null });
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1, overflow: 0 });
-      expect((await alertsOf(trx, est.estimateId))[0].metadata.itemKeys).toEqual(['missing_time_tech:lawn_care']);
+      const open = (await alertsOf(trx, est.estimateId)).filter((row) => !row.done_at);
+      expect(open.map((row) => row.metadata.itemKeys)).toEqual([['missing_time_tech:lawn_care']]);
     } finally {
       mockPg = pool;
       await trx.rollback();

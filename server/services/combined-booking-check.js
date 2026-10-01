@@ -590,10 +590,11 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
       if (outcome !== 'problems') {
         result[outcome] += 1;
         if (known) result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
-        // A service on hold could not be judged: with no open bell to keep it
-        // a candidate, the overflow record does (as `held`, no known problem),
-        // so it is judged when the hold ends even past the lookback.
-        if (onHold && !known) owe(estimate, 'a service is on hold; it is checked again when the hold ends', { held: true });
+        // A service on hold could not be judged, and this branch leaves no open
+        // bell (any standing one was just closed): the overflow record keeps
+        // the booking a candidate (as `held`, no known problem), so it is
+        // judged when the hold ends even past the lookback.
+        if (onHold) owe(estimate, 'a service is on hold; it is checked again when the hold ends', { held: true });
         continue;
       }
       result.checked += 1;
