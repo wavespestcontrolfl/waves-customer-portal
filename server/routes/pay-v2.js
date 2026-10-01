@@ -9,7 +9,7 @@ const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 // financial/personal data — never cacheable, never indexable.
 router.use(noStore);
 const InvoiceService = require('../services/invoice');
-const { customerReportNotes } = require('../services/service-report/customer-report-notes');
+const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const InvoiceAttachments = require('../services/invoice-attachments');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
@@ -439,7 +439,8 @@ router.get('/:token', async (req, res, next) => {
       && (await invoiceCaptureNeeded(data));
 
     // The visit note, screened like every other customer render
-    // (customer-report-notes.js): the reviewed report text only. The invoice
+    // (context-aggregator.js customerSafeVisitNotes): the reviewed report
+    // text only. The invoice
     // keeps the note as it stood when billed (the raw note, on older
     // invoices), so it is screened here with the visit record's own flags; a
     // combined-visit invoice keeps none and shows none.
@@ -447,7 +448,7 @@ router.get('/:token', async (req, res, next) => {
       ? await db('service_records')
         .where({ id: data.service_record_id, customer_id: data.customer_id })
         .first('structured_notes', 'service_data', 'completion_source')
-        .then((record) => (record ? customerReportNotes({ ...record, technician_notes: data.tech_notes }) : null))
+        .then((record) => (record ? customerSafeVisitNotes({ ...record, technician_notes: data.tech_notes }, { projectLine: true }) : null))
         .catch(() => null)
       : null;
 

@@ -8,7 +8,7 @@ const { authenticate } = require('../middleware/auth');
 // page so every customer-facing render of technician_notes follows one
 // rule: the reviewed report text only, never the tech's raw note, with the
 // legacy inspection-fee scrub on top (owner ruling 2026-10-01; codex #2817).
-const { customerReportNotes } = require('../services/service-report/customer-report-notes');
+const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const { etDateString } = require('../utils/datetime-et');
 const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 
@@ -123,8 +123,8 @@ router.get('/', async (req, res, next) => {
         checkInTime: svc.effective_check_in_time || null,
         checkOutTime: svc.effective_check_out_time || null,
         // The reviewed report text only, never the tech's raw note
-        // (customer-report-notes.js).
-        notes: suppressCustomerArtifacts ? null : customerReportNotes(svc),
+        // (context-aggregator.js customerSafeVisitNotes).
+        notes: suppressCustomerArtifacts ? null : customerSafeVisitNotes(svc, { projectLine: true }),
         soilTemp: svc.soil_temp ? parseFloat(svc.soil_temp) : null,
         thatchMeasurement: svc.thatch_measurement ? parseFloat(svc.thatch_measurement) : null,
         soilPh: svc.soil_ph ? parseFloat(svc.soil_ph) : null,
@@ -237,7 +237,7 @@ router.get('/:id', async (req, res, next) => {
       technician: service.technician_name,
       checkInTime: service.effective_check_in_time || null,
       checkOutTime: service.effective_check_out_time || null,
-      notes: suppressCustomerArtifacts ? null : customerReportNotes(service),
+      notes: suppressCustomerArtifacts ? null : customerSafeVisitNotes(service, { projectLine: true }),
       measurements: {
         soilTemp: service.soil_temp ? parseFloat(service.soil_temp) : null,
         thatchMeasurement: service.thatch_measurement ? parseFloat(service.thatch_measurement) : null,

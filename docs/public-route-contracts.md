@@ -555,7 +555,7 @@ access; no sibling invoice, report, receipt, or other bearer token rides a line
 item. Legacy and unrelated invoice rows may omit the ownership fields.
 
 Visit note: `/api/pay/:token` returns `service.techNotes` only as the reviewed
-report text (`customerReportNotes`, server/services/service-report/customer-report-notes.js;
+report text (`customerSafeVisitNotes` with `projectLine`, server/services/context-aggregator.js;
 owner ruling 2026-10-01: customers see only the report text, never the tech's
 raw note). The invoice keeps the note as it stood when billed, which on older
 invoices is the raw note, so the route screens it on the way out against the

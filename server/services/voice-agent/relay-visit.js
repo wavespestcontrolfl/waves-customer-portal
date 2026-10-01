@@ -32,8 +32,8 @@
  *   - the typedReportDelivery suppression predicate (routes/services.js
  *     suppressesCustomerArtifacts) — anything but auto_send keeps findings,
  *     products and notes off customer surfaces, and the phone is one;
- *   - the note text is PARSER-APPROVED COPY ONLY: reviewedReportNotes
- *     (services/service-report/customer-report-notes.js), the same reviewed
+ *   - the note text is PARSER-APPROVED COPY ONLY: customerSafeVisitNotes
+ *     (services/context-aggregator.js), the same reviewed
  *     parse that feeds the written report's summary slot, with
  *     customerSafeServiceNotes and the access-code redactor applied on top.
  *     Raw technician_notes never egress on a report path (AGENTS.md; owner
@@ -369,16 +369,16 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   // ⭐ PARSER-APPROVED COPY ONLY — this is a REPORT path. AGENTS.md: "Raw
   // `technician_notes` never egress on any report path (parser-approved copy
   // only)" (owner ruling 2026-07-16, report-data.js `legacy` block).
-  // reviewedReportNotes is technicianReportCustomerCopy's reviewed parse
-  // alone, the written report's summary source: a note that is not the
-  // reviewed draft, or whose body a banned-copy screen nulled, produces no
-  // spoken note. It honors a completion-time body rejection and a governing
-  // typed story that refused the body as the web report does, fails CLOSED
-  // on unreadable service_data (codex r61 #3420, r65), and runs the WDO fee
-  // scrub and the access-code redactor over the approved copy —
-  // parser-approved is not code-free.
-  const { reviewedReportNotes } = require('../service-report/customer-report-notes');
-  const redactedBody = reviewedReportNotes(record);
+  // customerSafeVisitNotes (context-aggregator.js) is the one rule for every
+  // customer render of the note: technicianReportCustomerCopy's reviewed
+  // parse alone, the written report's summary source, standing only where
+  // the web report lets it (technicianReportDrivesSummary: a completion-time
+  // body rejection, a governing typed story that refused the body, the
+  // rodent trapping screens; codex r61 #3420, r65), failing CLOSED on
+  // unreadable service_data, with the WDO fee scrub and the access-code
+  // redactor over the approved copy — parser-approved is not code-free.
+  const { customerSafeVisitNotes } = require('../context-aggregator');
+  const redactedBody = customerSafeVisitNotes(record);
   const noteText = redactedBody ? promptSafeUntrusted(redactedBody, 240) : null;
 
   const lines = [`Visit on ${speakDate(record.service_date) || 'an unrecorded date'}`

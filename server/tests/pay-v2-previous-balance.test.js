@@ -211,7 +211,7 @@ describe('GET /pay/:token previous-balance itemization', () => {
 });
 
 // The visit note on this unauthenticated page follows the one rule for
-// customer renders (customer-report-notes.js, owner ruling 2026-10-01): the
+// customer renders (context-aggregator.js customerSafeVisitNotes, owner ruling 2026-10-01): the
 // reviewed report text only. The invoice keeps the note as it stood when
 // billed — the raw note, on older invoices — so it is screened on the way
 // out, with the visit record's own flags.

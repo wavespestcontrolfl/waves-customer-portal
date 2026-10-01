@@ -22,7 +22,7 @@ describe('customer services artifact suppression', () => {
 });
 
 // The visit note in the service history follows the one rule for customer
-// renders (customer-report-notes.js, owner ruling 2026-10-01): the reviewed
+// renders (context-aggregator.js customerSafeVisitNotes, owner ruling 2026-10-01): the reviewed
 // report text only, never the tech's raw note.
 describe('customer services visit note', () => {
   const db = require('../models/db');
