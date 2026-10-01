@@ -265,6 +265,26 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(req.text.startsWith('FACT CHECK DATA')).toBe(true);
   });
 
+  test('terminal pass 5: a bare thanks needs no quote, but a thanks with a claim still does', async () => {
+    const thanks = { ...GOOD, body: "It's Adam, I know you had to get to work. Thanks again. A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
+    mockDispatch.mockResolvedValue(reply(thanks));
+    judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: false, greeting_only: true, supported: true, quote: null }, { ask_only: true, supported: false, quote: null }]);
+    expect(await Drafter.draftTechVoice(INPUT)).toBe(thanks.body);
+    const { isGreetingOnlySentence } = Drafter.__private;
+    expect(isGreetingOnlySentence('Thanks again.', new Set())).toBe(true);
+    expect(isGreetingOnlySentence("It's Adam.", new Set(['adam']))).toBe(true);
+    expect(isGreetingOnlySentence('Thanks for the new deck.', new Set())).toBe(false);
+  });
+
+  test('terminal pass 5: every record line carries its date, and today is stated', async () => {
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    mockTables.sms_log = [{ direction: 'inbound', message_body: 'I saw ants today', created_at: new Date('2026-09-10T15:00:00Z') }];
+    await Drafter.draftTechVoice(INPUT);
+    const text = mockDispatch.mock.calls[0][1].text;
+    expect(text).toContain('[customer, 2026-09-10] I saw ants today');
+    expect(text).toMatch(/Today: \d{4}-\d{2}-\d{2}/);
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);
