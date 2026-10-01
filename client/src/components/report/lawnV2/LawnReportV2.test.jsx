@@ -431,7 +431,7 @@ describe('LawnWateringBanner', () => {
     expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('No watering change');
   });
 
-  const MOW = { days: 2, untilDate: '2026-10-03', untilLabel: 'Sat', line: 'Mowing: hold off until Sat, 2 days after today\'s treatment.' };
+  const MOW = { days: 2, untilAt: '2026-10-03T19:00:00.000Z', untilDate: '2026-10-03', untilLabel: 'Sat 3 PM', line: 'Mowing: hold off until Sat 3 PM, 2 days after today\'s treatment.' };
 
   it('a label mow hold is its own last line, after the watering lines', () => {
     renderBanner({ ...BANNERS.hold, mowHold: MOW });
