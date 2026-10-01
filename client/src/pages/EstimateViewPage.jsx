@@ -7320,7 +7320,15 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // what the accept would bill (a rail, gate or lane difference). The
             // acceptance rolled back; refetch so the page shows the terms the
             // server will apply, keep the reservation and selections, and ask
-            // for one more tap.
+            // for one more tap. The card authorization the customer ticked was
+            // for the OLD terms (the refreshed page may render a different
+            // consent text): drop the captured intent so the capture remounts
+            // unticked and the new terms are agreed to fresh.
+            recurringCardSetupIntentIdRef.current = null;
+            setInlineCardIntent(null);
+            prepayChargeAckRef.current = null;
+            setPrepayChargeQuote(null);
+            setPrepayConsentChecked(false);
             await loadEstimate({ preserveSelection: true });
             throw new Error(body.error || 'Your billing terms were updated — please review them and confirm again.');
           }

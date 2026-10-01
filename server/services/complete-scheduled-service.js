@@ -8883,7 +8883,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // declined / inspection-only visit, a backfill or a recap-only record
         // performed no application, so the stamp stays for the visit that does.
         if (obligation.owed && Array.isArray(obligation.unconsumableStamps) && obligation.unconsumableStamps.length
-          && visitPerformed && !isIncompleteVisit && !isBackfillCompletion && !recapReviewOnly) {
+          && visitPerformed && require('../services/setup-fee-obligation').isPlanApplicationRow(svc) && !isIncompleteVisit && !isBackfillCompletion && !recapReviewOnly) {
           const { parkSetupFeeStampForOffice } = require('../services/setup-fee-obligation');
           const parked = [];
           for (const stamp of obligation.unconsumableStamps) {
@@ -11131,7 +11131,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // completion. FAIL CLOSED: if the park cannot be persisted the stamp is
     // still armed, so the completion attempt is released for resume (503)
     // rather than finalized with the fee queued behind a swallowed error.
-    if (!packetEffects && visitPerformed && !isIncompleteVisit && !isBackfillCompletion
+    if (!packetEffects && visitPerformed && require('../services/setup-fee-obligation').isPlanApplicationRow(svc) && !isIncompleteVisit && !isBackfillCompletion
       && !recapReviewOnly && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       try {
         const feeParentId = svc.recurring_parent_id || svc.id;

@@ -275,6 +275,70 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // Terminal Codex pass 1 (P1): annual prepay waives the WaveGuard setup fee.
+  // The switch to prepay retires the deferred stamp (marker on the prepay); a
+  // void/refund of that prepay restores it exactly once.
+  test('switch to annual prepay waives the deferred setup fee; the prepay\'s reversal restores it once', async () => {
+    const f = await seed();
+    const Obligation = require('../services/setup-fee-obligation');
+    try {
+      const prepay = await require('../services/invoice').create({
+        customerId: f.customerId, title: 'Annual Prepay',
+        lineItems: [{ description: 'Prepay', quantity: 1, unit_price: 400 }],
+      });
+      const waived = await mockPg.transaction((trx) => Obligation.waiveDeferredSetupFeeForPrepay(trx, { estimateId: f.estimateId, prepayInvoiceId: prepay.id }));
+      expect(waived).toEqual([{ parentId: f.parentId, amount: SETUP_FEE }]);
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+      expect((await mockPg('invoices').where({ id: prepay.id }).first('notes')).notes).toContain(`[paf-setup-waived:${f.parentId}:`);
+
+      const restored = await Obligation.restoreWaivedDeferredSetupFeeForPrepay(mockPg, prepay.id);
+      expect(restored).toEqual([{ scheduledServiceId: f.parentId, amount: SETUP_FEE }]);
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+
+      // A later completion billed it; a second sync must never re-arm it.
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: null });
+      expect(await Obligation.restoreWaivedDeferredSetupFeeForPrepay(mockPg, prepay.id)).toEqual([]);
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
+  test('the prepay waiver ignores an estimate that did not defer its setup fee', async () => {
+    const f = await seed({ withDeferredMarker: false });
+    const Obligation = require('../services/setup-fee-obligation');
+    try {
+      const prepay = await require('../services/invoice').create({
+        customerId: f.customerId, title: 'Annual Prepay',
+        lineItems: [{ description: 'Prepay', quantity: 1, unit_price: 400 }],
+      });
+      expect(await mockPg.transaction((trx) => Obligation.waiveDeferredSetupFeeForPrepay(trx, { estimateId: f.estimateId, prepayInvoiceId: prepay.id }))).toEqual([]);
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+    } finally { await cleanup(f); }
+  });
+
+  // Terminal Codex pass 1 (P2): a NON-recurring booster/add-on under the plan
+  // parent is not a plan application, so its completion never takes (or parks)
+  // the plan's queued first-visit fee.
+  test('a zero-priced non-recurring booster completing after a declined first visit leaves the plan fee queued (nothing parked)', async () => {
+    const f = await seed();
+    try {
+      expect(await complete(f, f.parentId, { visitOutcome: 'customer_declined' })).toMatchObject({ status: 200 });
+      const child = await mockPg('scheduled_services').where({ id: f.childIds[0] }).first();
+      const { randomUUID: uuid } = require('crypto');
+      const { etDateString } = require('../utils/datetime-et');
+      const boosterId = uuid();
+      f.childIds.push(boosterId);
+      await mockPg('scheduled_services').insert({
+        id: boosterId, customer_id: child.customer_id, technician_id: child.technician_id, service_id: child.service_id,
+        service_type: child.service_type, scheduled_date: etDateString(), window_start: '11:00', window_end: '12:00',
+        status: 'confirmed', estimated_price: 0, estimated_duration_minutes: 30, source_estimate_id: child.source_estimate_id,
+        recurring_parent_id: f.parentId, is_recurring: false,
+      });
+      expect(await complete(f, boosterId)).toMatchObject({ status: 200 });
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+      expect(await officeFeeAlerts(f)).toHaveLength(0);
+    } finally { await cleanup(f); }
+  });
+
   test('a no-show first visit charges nothing and keeps the stamp for the next performed visit', async () => {
     const f = await seed();
     try {

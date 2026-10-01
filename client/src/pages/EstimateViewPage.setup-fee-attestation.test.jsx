@@ -18,6 +18,10 @@ describe('EstimateViewPage setup-fee promise attestation', () => {
     expect(src).toMatch(/setupFeeAfterFirstVisitShown: setupFeeAfterVisitShownRef\.current \? true : undefined,/);
   });
 
+  it('a SETUP_FEE_TERMS_REFRESH drops the captured card authorization so the refreshed terms are agreed to fresh', () => {
+    expect(src).toMatch(/body\.code === 'SETUP_FEE_TERMS_REFRESH'\) \{[\s\S]{0,1200}recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);[\s\S]{0,200}await loadEstimate\(\{ preserveSelection: true \}\);/);
+  });
+
   it('the 409 answer wins for THIS selection only, so a lane /data could not predict does not loop', () => {
     expect(src).toMatch(/if \(typeof body\.setupFeePromise === 'boolean'\) \{\s*setSetupFeePromiseOverride\(\{ key: setupFeeSelectionKeyRef\.current, value: body\.setupFeePromise \}\);/);
     expect(src).toMatch(/const setupFeeServerAnswer = setupFeePromiseOverride\?\.key === setupFeeSelectionKey \? setupFeePromiseOverride\.value : null;/);
