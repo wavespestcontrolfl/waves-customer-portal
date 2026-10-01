@@ -428,12 +428,21 @@ function outcomeOf(verdict, standingProblems = []) {
   return { outcome: verdict.ok ? 'ok' : 'deferred', problems, onHold };
 }
 
-// The estimates the standing overflow bell still owes their own bell.
-async function owedEstimateIds(conn) {
+// The overflow record's entries: every estimate it keeps a candidate
+// (`all`), and the subset waiting only for a service's hold to end (`held`),
+// which has no known problem yet.
+async function overflowEntries(conn) {
   const row = await conn('notifications').where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKeyFor(OVERFLOW_ID)]).first('metadata');
-  const keys = row?.metadata?.itemKeys;
-  return Array.isArray(keys) ? keys.map(String) : [];
+  const list = (value) => (Array.isArray(value) ? value.map(String) : []);
+  return { all: list(row?.metadata?.itemKeys), held: new Set(list(row?.metadata?.heldIds)) };
+}
+
+// The bookings owed their own alert: each has a known problem (the dashboard
+// Action Inbox count, dashboard-alerts.js combined_bookings_owed).
+async function owedEstimateIds(conn) {
+  const { all, held } = await overflowEntries(conn);
+  return all.filter((id) => !held.has(id));
 }
 
 // The estimates with an open bell of this check: they stay candidates past
@@ -482,9 +491,13 @@ async function postOverflow(conn, owed, { raise } = {}) {
   if (!owed.length) return retireStanding(conn, [OVERFLOW_ID], RESOLVED_FIXED);
   const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
   const ids = owed.map((entry) => entry.id);
+  const heldIds = owed.filter((entry) => entry.held).map((entry) => entry.id);
+  const toFix = ids.length - heldIds.length;
   const row = await raiseAdminAlert(CATEGORY, {
     area: AREA,
-    action: `fix ${ids.length} more combined booking${ids.length === 1 ? '' : 's'}`,
+    action: toFix
+      ? `fix ${toFix} more combined booking${toFix === 1 ? '' : 's'}`
+      : `recheck ${ids.length} combined booking${ids.length === 1 ? '' : 's'} after a hold`,
     why: 'Past the daily alert budget, so these bookings are listed here until each gets its own alert.',
     severity: 'needs-you',
     link: '/admin/customers',
@@ -498,7 +511,7 @@ async function postOverflow(conn, owed, { raise } = {}) {
     refreshOnDedupe: true,
     ringGate: async () => false,
     ringOnRefresh: () => false,
-    metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids },
+    metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids, heldIds },
   });
   // This row is the only record of what is owed: a lost write fails the
   // sweep loudly (the watchdog logs COMBINED-BOOKING-CHECK-FAILED).
@@ -519,7 +532,7 @@ const rang = (row) => !!row && !row.suppressed && (!row.deduped || row.rung === 
 async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, ringBudget = DEFAULT_RING_BUDGET } = {}) {
   const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, overflow: 0 };
   result.closed += await retireAbandoned(conn);
-  const owedBefore = new Set(await owedEstimateIds(conn));
+  const owedBefore = new Set((await overflowEntries(conn)).all);
   // An internal test / demo customer never gets an admin artifact (the
   // notification service suppresses its bells); it is left out before any
   // budgeting, so it can never land on the overflow record either.
@@ -542,7 +555,9 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
   // A booking that could not be judged, or whose bell could not be written,
   // goes on the overflow bell: it stays a candidate until it is.
   const owed = [];
-  const owe = (estimate, why) => owed.push({ id: String(estimate.id), line: `estimate ${estimate.id} (customer ${estimate.customer_id}): ${why}` });
+  const owe = (estimate, why, { held = false } = {}) => owed.push({
+    id: String(estimate.id), held, line: `estimate ${estimate.id} (customer ${estimate.customer_id}): ${why}`,
+  });
   const work = candidates.filter((estimate) => {
     try {
       if ((acceptedFamilies(estimate)?.size || 0) >= 2) return true;
@@ -575,9 +590,10 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
       if (outcome !== 'problems') {
         result[outcome] += 1;
         if (known) result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
-        // A service on hold could not be judged: an owed booking stays owed
-        // until it is.
-        if (onHold && owedBefore.has(id)) owe(estimate, 'a service is on hold; it is checked again when the hold ends');
+        // A service on hold could not be judged: with no open bell to keep it
+        // a candidate, the overflow record does (as `held`, no known problem),
+        // so it is judged when the hold ends even past the lookback.
+        if (onHold && !known) owe(estimate, 'a service is on hold; it is checked again when the hold ends', { held: true });
         continue;
       }
       result.checked += 1;
@@ -623,6 +639,7 @@ module.exports = {
   outcomeOf,
   heldProblems,
   owedEstimateIds,
+  overflowEntries,
   acceptedFamilies,
   shortName,
   OPS_KEY,

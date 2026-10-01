@@ -340,6 +340,35 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a service on hold at the first check stays a candidate (held, not an Action Inbox item) and is judged after the hold, past the lookback', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    const check = require('../services/combined-booking-check');
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const today = new Date().toISOString().slice(0, 10);
+      const later = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+      const [hold] = await trx('plan_holds').insert({ customer_id: est.customerId, family_key: 'lawn_care',
+        starts_on: new Date(Date.now() - 86400000).toISOString().slice(0, 10), resume_on: later, status: 'active' }).returning('id');
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0, overflow: 1 });
+      expect((await check.overflowEntries(trx)).held).toEqual(new Set([est.estimateId]));
+      expect(await check.owedEstimateIds(trx)).toEqual([]); // no known problem: not an Action Inbox item
+
+      // The hold ends after the lookback, and a lawn visit has no technician.
+      await trx('estimates').where({ id: est.estimateId }).update({ accepted_at: new Date(Date.now() - 100 * 3600 * 1000) });
+      await trx('plan_holds').where({ id: hold.id || hold }).update({ status: 'resumed', resumed_at: new Date(), resume_on: today });
+      const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: null });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1, overflow: 0 });
+      expect((await alertsOf(trx, est.estimateId))[0].metadata.itemKeys).toEqual(['missing_time_tech:lawn_care']);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('an OK result writes no row (an fyi fact)', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
