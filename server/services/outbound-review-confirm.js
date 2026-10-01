@@ -1173,7 +1173,8 @@ async function resumePendingHoldActivations(dbh = db, { limit = 25 } = {}) {
       const ok = await runOutboundReviewConfirmHook(dbh, row, 'hold-activation-resume',
         row.pending_mode === 'lazy' ? { suppressCardAskWithoutClearance: true } : {});
       if (ok) {
-        await setHoldActivationPending(dbh, row.source_call_log_id, row.id, false);
+        // Only the mode this resume ran in: an 'office' upgrade written meanwhile stays owed for the next pass.
+        await setHoldActivationPending(dbh, row.source_call_log_id, row.id, false, row.pending_mode);
         await reconcileStreetLevelHoldAfterStamp(dbh, row);
         resumed += 1;
       }

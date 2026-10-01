@@ -154,6 +154,21 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).not.toBeNull();
   });
 
+  test('a LAZY resume finishing never clears an office upgrade written while it ran', async () => {
+    const { callId, svc } = await seedApprovedHold();
+    await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'lazy' });
+    const actual = jest.requireActual('../services/appointment-reminders').registerAppointment;
+    reminders.registerAppointment.mockImplementationOnce(async (...args) => {
+      await knex('triage_items').where({ call_log_id: callId }).update({ payload: knex.raw("payload || '{\"activation_pending\": \"office\"}'::jsonb") });
+      return actual(...args);
+    });
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
+    expect(await marker(callId)).toBe('office');
+    reminders.registerAppointment.mockImplementationOnce((...args) => actual(...args));
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
+    expect(await marker(callId)).toBeUndefined();
+  });
+
   test('a LAZY-mode marker resumes without the office clearance: no clearance stamp, the card ask runs delivery-less', async () => {
     const { visitId, callId, svc } = await seedApprovedHold();
     await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'lazy' });
