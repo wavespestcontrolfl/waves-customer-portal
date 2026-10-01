@@ -335,10 +335,6 @@ function normalizeSecondaryContact(value) {
     email: usableEmail,
     role: SECONDARY_CONTACT_ROLES.has(role) ? role : 'unknown',
     wants_notifications: normalizeStrictBoolean(value.wants_notifications),
-    // Grounded on-site rule inputs (owner 2026-09-30): strict booleans, so an
-    // absent/garbled value is false and the contact never earns the exception.
-    wants_appointment_texts: normalizeStrictBoolean(value.wants_appointment_texts),
-    on_site: normalizeStrictBoolean(value.on_site),
     is_billing_party: normalizeStrictBoolean(value.is_billing_party),
     notes: cleanNullableText(value.notes),
   };

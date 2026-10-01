@@ -119,8 +119,9 @@ function normalizeSecondaryContact(contact) {
     phone_raw_spoken: cleanText(contact.phone_raw_spoken),
     email: validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null,
     notes: cleanText(contact.notes),
-    // Schema 1.21.0 on-site consent inputs: strict booleans, absent/garbled =
-    // false, so a contact never earns the on-site rule by omission.
+    // Schema 1.21.0: the extractor's read on whether this person should get the
+    // appointment texts / will be on site. They only trigger the recipient
+    // opt-in ASK; strict booleans, absent/garbled = false.
     wants_appointment_texts: contact.wants_appointment_texts === true,
     on_site: contact.on_site === true,
   };
@@ -133,44 +134,12 @@ function normalizeSecondaryContact(contact) {
 // re-validation, garbled-email rejection); empty shells drop; cap 3.
 // Non-array garbage fails safe to null (persisted schema allows null).
 function normalizeSecondaryContacts(list) {
-  return normalizeSecondaryContactsWithMap(list).contacts;
-}
-
-// Same, plus the ORIGINAL index of every kept entry: evidence[] pins its
-// quotes to `/secondary_contacts/<i>/...` by the model's indices, so when a
-// non-object shell is dropped (or the cap of 3 cuts the tail) the pointers
-// must be rewritten or the on-site quotes attach to the wrong person
-// (pre-push codex P1). normalizeExtractionV2 uses the map to remap evidence.
-function normalizeSecondaryContactsWithMap(list) {
-  if (!Array.isArray(list)) return { contacts: null, indexMap: new Map() };
+  if (!Array.isArray(list)) return null;
   const out = [];
-  const indexMap = new Map();
-  for (let i = 0; i < list.length; i += 1) {
-    const normalized = normalizeSecondaryContact(list[i]);
-    if (normalized) {
-      indexMap.set(i, out.length);
-      out.push(normalized);
-    }
+  for (const entry of list) {
+    const normalized = normalizeSecondaryContact(entry);
+    if (normalized) out.push(normalized);
     if (out.length >= 3) break;
-  }
-  return { contacts: out, indexMap };
-}
-
-// Rewrite `/secondary_contacts/<old>/...` evidence pointers to the kept
-// entry's new position; pointers to dropped entries are removed (their quotes
-// can no longer authorize anything). Every other evidence entry passes through.
-const SECONDARY_ARRAY_PATH_RE = /^(\/?secondary_contacts)(?:\/|\[|\.)(\d+)(\]?)(.*)$/;
-function remapSecondaryContactEvidence(evidence, indexMap) {
-  if (!Array.isArray(evidence)) return evidence;
-  const out = [];
-  for (const entry of evidence) {
-    const path = entry && typeof entry.field_path === 'string' ? entry.field_path : null;
-    const m = path ? SECONDARY_ARRAY_PATH_RE.exec(path) : null;
-    if (!m) { out.push(entry); continue; }
-    const oldIdx = Number(m[2]);
-    if (!indexMap.has(oldIdx)) continue;
-    const newIdx = indexMap.get(oldIdx);
-    out.push(newIdx === oldIdx ? entry : { ...entry, field_path: `${m[1]}/${newIdx}${m[4]}` });
   }
   return out;
 }
@@ -326,15 +295,7 @@ function normalizeExtractionV2(extraction) {
       ? { secondary_contact: normalizeSecondaryContact(extraction.secondary_contact) }
       : {}),
     ...(extraction.secondary_contacts !== undefined
-      ? (() => {
-        const { contacts, indexMap } = normalizeSecondaryContactsWithMap(extraction.secondary_contacts);
-        return {
-          secondary_contacts: contacts,
-          ...(Array.isArray(extraction.evidence)
-            ? { evidence: remapSecondaryContactEvidence(extraction.evidence, indexMap) }
-            : {}),
-        };
-      })()
+      ? { secondary_contacts: normalizeSecondaryContacts(extraction.secondary_contacts) }
       : {}),
     ...(extraction.service_request !== undefined
       ? { service_request: normalizeServiceRequestPricing(extraction.service_request) }
@@ -347,8 +308,6 @@ module.exports = {
   normalizeCaller,
   normalizeSecondaryContact,
   normalizeSecondaryContacts,
-  normalizeSecondaryContactsWithMap,
-  remapSecondaryContactEvidence,
   normalizeAddress,
   normalizePhone,
   normalizeZip,

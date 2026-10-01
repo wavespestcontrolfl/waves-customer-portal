@@ -46,18 +46,12 @@ const FIELD_GROUPS = {
     'definite_commitment',
     'relative_date_used',
     'moved_appointment_relative_date_used',
-    // On-site consent inputs (schema 1.21.0): together they gate the SMS
-    // consent stamp for a spouse/buyer/tenant/family member, so drift must show.
+    // On-site flags (schema 1.21.0): they decide whether a spouse/buyer/tenant/
+    // family member is sent the recipient opt-in ask, so drift must show.
     'secondary_wants_appointment_texts',
     'secondary_on_site',
-    // Evidence presence for those flags (a caller-quote is what lets them authorize consent).
-    'secondary_wants_appointment_texts_evidence',
-    'secondary_on_site_evidence',
-    // VERIFIED against the transcript (what would actually authorize consent);
-    // null when no transcript was given, which collapses to false.
-    'secondary_wants_appointment_texts_grounded',
-    'secondary_on_site_grounded',
-    // Same inputs for EVERY entry of secondary_contacts[] (order-stable signature).
+    // Same inputs for EVERY entry of secondary_contacts[] (order-stable signature,
+    // keyed on each contact's phone identity).
     'secondary_contacts_consent_signature',
     'is_spam',
     'is_voicemail',
@@ -476,9 +470,7 @@ function normalizeField(field, value) {
   // don't report a spurious high-severity delta on every pre-1.8.0 row
   // (codex P2). A genuine true↔false disagreement still surfaces.
   if (field === 'agent_committed_booking' || field === 'caller_accepted_slot'
-    || field === 'secondary_wants_appointment_texts' || field === 'secondary_on_site'
-    || field === 'secondary_wants_appointment_texts_evidence' || field === 'secondary_on_site_evidence'
-    || field === 'secondary_wants_appointment_texts_grounded' || field === 'secondary_on_site_grounded') return normalizeBool(value) === true;
+    || field === 'secondary_wants_appointment_texts' || field === 'secondary_on_site') return normalizeBool(value) === true;
   // Absent and '' both mean "no other parties" — collapse so pre-1.21 rows don't read as drift.
   if (field === 'secondary_contacts_consent_signature') return normalizeString(value) || '';
   if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
@@ -1299,7 +1291,7 @@ async function replayCall(call, context) {
   const legacyFlat = parseJson(call.ai_extraction, {}) || {};
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
-  const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2, { transcript: call.transcription }) : null;
+  const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
   const storedAvUnwaived = parseJson(call.ai_address_validation, null);
   // A whole-structure unit waiver (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT) was decided
   // for the PRIOR extraction's service and property. It rebuilds for the prior
@@ -1412,10 +1404,7 @@ async function replayCall(call, context) {
   const durationMs = Date.now() - startedAt;
 
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
-  // The candidate is verified against the transcript it was extracted from (the
-  // stored one unless --retranscribe replaced it): the on-site consent flags only
-  // count when their quotes are really in that transcript.
-  const currentFlat = currentExtraction ? helpers.flatView(currentExtraction, { transcript: transcriptForExtraction }) : null;
+  const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
   const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
   const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && priorV2Valid && currentExtraction
     && waiverInputs(priorV2) !== waiverInputs(currentExtraction))

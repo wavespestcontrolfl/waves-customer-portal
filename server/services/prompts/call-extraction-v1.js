@@ -88,15 +88,15 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // instructions: a new cohort.
 // v20: secondary_contact(s).wants_appointment_texts and .on_site (schema
 // 1.21.0; owner ruling 2026-09-30 "on-site person is the contact point",
-// codex P1 on #5467). wants_notifications is channel-neutral (it is also set
-// for "email him the report"), so it cannot authorize texting a person. The
-// model now separately records whether the caller agreed THIS person gets the
-// appointment TEXTS (reminders, route-tracking link, arrival text) and
-// whether the call says they will be AT the property for the visit; both need
-// an evidence quote when true. The call pipeline stamps the service-contact
-// consent artifact only when both are true for an on-site role AND each
-// quote is a verbatim caller-turn quote (the V1 extractor cannot ground it). New fields
-// and instructions: a new cohort.
+// redesigned 2026-10-01). wants_notifications is channel-neutral (it is also
+// set for "email him the report"), so it cannot say a person should be texted.
+// The model now separately records whether the caller agreed THIS person gets
+// the appointment TEXTS (reminders, route-tracking link, arrival text) and
+// whether the call says they will be AT the property for the visit; each needs
+// an evidence quote when true (model guidance only). The pipeline uses them for
+// ONE thing: deciding whether to send that person the recipient opt-in ask.
+// Consent is the recipient's own YES to that text, never these flags. New
+// fields and instructions: a new cohort.
 const PROMPT_VERSION = 'v20';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
@@ -368,7 +368,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values (day, hour, period) verbatim. When scheduling.moved_appointment_words is set, the /scheduling/moved_appointment_date quote must contain it verbatim.
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
-- secondary_contact.wants_appointment_texts (when true — quote the caller agreeing this person gets the appointment texts/reminders/tracking link) and secondary_contact.on_site (when true — quote the words saying this person will be at the property for the visit); the field_path is the JSON pointer /secondary_contact/wants_appointment_texts and /secondary_contact/on_site, and for each secondary_contacts[] entry /secondary_contacts/<index>/wants_appointment_texts and /secondary_contacts/<index>/on_site. Each quote must be the CALLER's own words (speaker "caller"), copied verbatim from ONE caller turn — not the agent's offer: when the agent proposed it and the caller agreed, quote the caller's agreement ("Yeah."). A true flag with no such quote is ignored downstream, so always give one
+- secondary_contact.wants_appointment_texts (when true — quote the caller agreeing this person gets the appointment texts/reminders/tracking link) and secondary_contact.on_site (when true — quote the words saying this person will be at the property for the visit); the field_path is the JSON pointer /secondary_contact/wants_appointment_texts and /secondary_contact/on_site, and for each secondary_contacts[] entry /secondary_contacts/<index>/wants_appointment_texts and /secondary_contacts/<index>/on_site. Each quote must be the CALLER's own words (speaker "caller"), copied verbatim from ONE caller turn — not the agent's offer: when the agent proposed it and the caller agreed, quote the caller's agreement ("Yeah."). Always give one when a flag is true
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
 - service_request.price / service_request.prices[] (when amount_usd or amount_max_usd is set — each entry's own evidence_quote field above already carries this; no separate top-level evidence entry is required)
 Each evidence entry: field_path (JSON pointer), quote (verbatim transcript), speaker (caller/agent), transcript_offset_ms (approximate, or null).

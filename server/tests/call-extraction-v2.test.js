@@ -1343,7 +1343,7 @@ describe('extraction compat adapter', () => {
     expect(flatView(v2).definite_commitment).toBeNull();
   });
 
-  test('flatView secondary_contacts_consent_signature is order-stable over every entry (schema 1.21.0)', () => {
+  test('flatView secondary_contacts_consent_signature is keyed on phone identity and covers every entry and the singleton (schema 1.21.0)', () => {
     const v2 = validPersisted();
     expect(flatView(v2).secondary_contacts_consent_signature).toBe('');
     const entry = (role, texts, onSite, name, phone = null, email = null) => ({
@@ -1357,73 +1357,22 @@ describe('extraction compat adapter', () => {
       entry('lender', false, false, 'Third Person'),
     ];
     expect(flatView(v2).secondary_contacts_consent_signature)
-      .toBe('5550100123:spouse_partner:1:1:0:0|other@example.com:tenant:1:0:0:0|third person:lender:0:0:0:0');
-    // Absent flags (older rows) read as 0.
-    delete v2.secondary_contacts[1].on_site;
-    delete v2.secondary_contacts[1].wants_appointment_texts;
-    expect(flatView(v2).secondary_contacts_consent_signature)
-      .toBe('5550100123:spouse_partner:1:1:0:0|other@example.com:tenant:0:0:0:0|third person:lender:0:0:0:0');
+      .toBe('5550100123:spouse_partner:1:1:1|other@example.com:tenant:1:1:0|third person:lender:1:0:0');
     // Swapping the flags between two people changes the signature (flags are bound to identity, not position).
     const swapped = validPersisted();
     swapped.secondary_contacts = [entry('spouse_partner', false, false, 'Sample', '+15550100123'), entry('tenant', true, true, 'Other', null, 'other@example.com')];
     const original = validPersisted();
     original.secondary_contacts = [entry('spouse_partner', true, true, 'Sample', '+15550100123'), entry('tenant', false, false, 'Other', null, 'other@example.com')];
     expect(flatView(swapped).secondary_contacts_consent_signature).not.toBe(flatView(original).secondary_contacts_consent_signature);
-    // Flat singleton mirrors.
-    v2.secondary_contact = v2.secondary_contacts[0];
-    expect(flatView(v2)).toMatchObject({ secondary_wants_appointment_texts: true, secondary_on_site: true });
-  });
-
-  test('flatView: singleton-only payloads are fingerprinted too, and evidence presence is part of the signature and the flat mirrors', () => {
-    const contact = (phone) => ({
-      name_full: 'Sample', first_name: 'Sample', last_name: null, phone_e164: phone, email: null,
-      role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true,
-    });
-    const make = (phone, evidence) => { const v2 = validPersisted(); v2.secondary_contact = contact(phone); v2.evidence = evidence || []; return v2; };
-    const before = flatView(make('+15550100123')).secondary_contacts_consent_signature;
-    expect(before).toBe('5550100123:spouse_partner:1:1:0:0');
-    // A phone change on the singleton changes the signature.
-    expect(flatView(make('+15550100124')).secondary_contacts_consent_signature).not.toBe(before);
-    // Evidence presence: caller entries pin both flags.
-    const evidence = [
-      { field_path: '/secondary_contact/wants_appointment_texts', quote: 'Yeah.', speaker: 'caller' },
-      { field_path: '/secondary_contact/on_site', quote: 'he will be there', speaker: 'caller' },
-    ];
-    const pinned = flatView(make('+15550100123', evidence));
-    expect(pinned.secondary_contacts_consent_signature).toBe('5550100123:spouse_partner:1:1:1:1');
-    expect(pinned).toMatchObject({ secondary_wants_appointment_texts_evidence: true, secondary_on_site_evidence: true });
-    // Agent-spoken evidence is not evidence.
-    const agentOnly = flatView(make('+15550100123', evidence.map((e) => ({ ...e, speaker: 'agent' }))));
-    expect(agentOnly).toMatchObject({ secondary_wants_appointment_texts_evidence: false, secondary_on_site_evidence: false });
-    expect(flatView(make('+15550100123')).secondary_on_site_evidence).toBe(false);
-  });
-
-  test('flatView with a transcript verifies the on-site flags against it (replay compares grounding, not quote presence)', () => {
-    const transcript = ['Agent: We could put his cell phone on the account so he will get the reminders.', 'Caller: Yeah.', 'Agent: Will he be there Tuesday?', 'Caller: Yes he will be at the house all day.'].join('\n');
-    const make = (textsQuote, onSiteQuote) => {
-      const v2 = validPersisted();
-      v2.secondary_contact = {
-        name_full: 'Sample', first_name: 'Sample', last_name: null, phone_e164: '+15550100123', email: null,
-        role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true,
-      };
-      v2.evidence = [
-        { field_path: '/secondary_contact/wants_appointment_texts', quote: textsQuote, speaker: 'caller' },
-        { field_path: '/secondary_contact/on_site', quote: onSiteQuote, speaker: 'caller' },
-      ];
-      return v2;
-    };
-    const good = flatView(make('Yeah.', 'Yes he will be at the house all day'), { transcript });
-    expect(good).toMatchObject({ secondary_wants_appointment_texts_grounded: true, secondary_on_site_grounded: true });
-    expect(good.secondary_contacts_consent_signature).toBe('5550100123:spouse_partner:1:1:1:1:1:1');
-    // A candidate whose quotes are text ABSENT from the transcript still has evidence presence, but is not grounded.
-    const fabricated = flatView(make('Yeah.', 'she lives in the back unit and is always home'), { transcript });
-    expect(fabricated).toMatchObject({ secondary_on_site_evidence: true, secondary_on_site_grounded: false, secondary_wants_appointment_texts_grounded: true });
-    expect(fabricated.secondary_contacts_consent_signature).not.toBe(good.secondary_contacts_consent_signature);
-    // No transcript: fields are null and the signature keeps its transcript-free shape.
-    const noTranscript = flatView(make('Yeah.', 'Yes he will be at the house all day'));
-    expect(noTranscript.secondary_on_site_grounded).toBeNull();
-    expect(noTranscript.secondary_wants_appointment_texts_grounded).toBeNull();
-    expect(noTranscript.secondary_contacts_consent_signature).toBe('5550100123:spouse_partner:1:1:1:1');
+    // Singleton-only payloads are fingerprinted too; a phone change changes the signature.
+    const single = (phone) => { const x = validPersisted(); x.secondary_contact = entry('spouse_partner', true, true, 'Sample', phone); return x; };
+    expect(flatView(single('+15550100123')).secondary_contacts_consent_signature).toBe('5550100123:spouse_partner:1:1:1');
+    expect(flatView(single('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(single('+15550100123')).secondary_contacts_consent_signature);
+    // Flat singleton mirrors; the retired evidence/grounded mirrors and the transcript option are gone.
+    const flat = flatView(single('+15550100123'));
+    expect(flat).toMatchObject({ secondary_wants_appointment_texts: true, secondary_on_site: true });
+    expect(flat).not.toHaveProperty('secondary_on_site_evidence');
+    expect(flat).not.toHaveProperty('secondary_on_site_grounded');
   });
 
   test('flatView preserves _v2 reference', () => {

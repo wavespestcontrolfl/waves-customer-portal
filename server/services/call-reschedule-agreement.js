@@ -852,7 +852,4 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 
-// parseTurns / turnsHolding are shared with the on-site contact consent check
-// (call-recording-processor verifyOnSiteGrounding): a quote must sit word for
-// word inside a CALLER turn of a speaker-labeled transcript.
-module.exports = { groundRescheduleAgreement, parseTurns, turnsHolding };
+module.exports = { groundRescheduleAgreement };

@@ -648,6 +648,11 @@ const ALLOWLIST = [
     snippet: "const inboundSms = await database('sms_log')",
     reason: 'RECENT_HUMAN_CONTACT existence check (direction inbound): an inbound row is the customer\'s own message and is never a send reservation (those are always outbound placeholders), so the exclusion cannot apply regardless.',
   },
+  {
+    file: 'services/appointment-reminders.js',
+    snippet: "const recentDup = await db('sms_log')",
+    reason: 'sendConfirmationToServiceContact 24h dedupe existence check: deliberately counts an in-flight reservation — a confirmation already being sent to this phone for this visit must block a second one; it presents nothing as a delivered message.',
+  },
 ];
 
 function stripComments(src) {

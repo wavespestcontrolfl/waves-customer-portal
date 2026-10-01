@@ -48,9 +48,12 @@ async function isOptinRailLive() {
 // the customer row (customers.service_preferences jsonb) by the call pipeline
 // at booking time (owner 2026-09-30: the account holder who booked for an
 // on-site person stops getting appointment texts, but only once that person
-// has actually said YES). Keyed by the recipient's phone so another contact's
-// confirmation never fires it. Every helper is best-effort and savepointed: a
-// marker problem must never block or fail an opt-in transition.
+// has actually said YES). The marker is an OBJECT KEYED BY RECIPIENT PHONE —
+// service_preferences.demote_primary_on_optin = { "<last10>": { scheduled_
+// service_id, set_at } } — so several on-site contacts on one account each
+// keep their own entry and another contact's YES / NO never touches it. Every
+// helper is best-effort and savepointed: a marker problem must never block or
+// fail an opt-in transition.
 const DEMOTE_MARKER_KEY = 'demote_primary_on_optin';
 async function withSavepoint(dbh, fn) {
   try {
@@ -61,38 +64,138 @@ async function withSavepoint(dbh, fn) {
     return null;
   }
 }
-// Remove the marker when it names this phone (the ask failed or was declined).
+// Remove THIS phone's marker entry (the ask failed or was declined); other
+// phones' entries stay.
 async function clearDemoteMarker(customerId, phoneKey, { dbh = db } = {}) {
   if (!customerId || !phoneKey) return;
   await withSavepoint(dbh, (h) => h('customers')
     .where({ id: customerId })
-    .whereRaw("service_preferences #>> '{demote_primary_on_optin,phone_key}' = ?", [phoneKey])
-    .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) - 'demote_primary_on_optin'") }));
+    .whereRaw("jsonb_exists(COALESCE(service_preferences -> 'demote_primary_on_optin', '{}'::jsonb), ?)", [phoneKey])
+    .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) #- ARRAY['demote_primary_on_optin', ?]::text[]", [phoneKey]) }));
 }
-// A YES confirmed this phone: for each customer whose marker names it, turn the
-// caller's appointment texts OFF and clear the marker.
+// Stamp the account's service-contact consent artifact from a recipient's own
+// YES (owner redesign 2026-10-01: the call pipeline infers no consent; the
+// on-site person's YES to the opt-in text IS the consent). The artifact is
+// ACCOUNT-WIDE ("every slot phone is consented"), so it is stamped only when
+// the confirmed phone sits in one of the customer's slots AND every OTHER slot
+// phone is already covered: the row is already stamped, or it has its own
+// confirmed recipient_optin row. Otherwise it stays off and the review card
+// says why. Returns { stamped, reason }.
+async function stampConsentOnConfirm(h, customerId, phoneKey, customer) {
+  if (customer.service_contacts_consent_at) return { stamped: true, reason: 'already_stamped' };
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  const slotKeys = SERVICE_CONTACT_SLOTS.map((slot) => recipientPhoneKey(customer[slot.phone])).filter(Boolean);
+  if (!slotKeys.includes(phoneKey)) return { stamped: false, reason: 'phone_not_in_a_slot' };
+  const others = [...new Set(slotKeys.filter((k) => k !== phoneKey))];
+  if (others.length) {
+    const confirmed = await h('recipient_optin')
+      .where({ customer_id: customerId, status: 'confirmed' })
+      .whereIn('phone_key', others)
+      .select('phone_key');
+    const confirmedKeys = new Set((confirmed || []).map((r) => r.phone_key));
+    if (!others.every((k) => confirmedKeys.has(k))) return { stamped: false, reason: 'other_slot_phone_unconfirmed' };
+  }
+  const wrote = await h('customers')
+    .where({ id: customerId })
+    .whereNull('service_contacts_consent_at')
+    .update({
+      service_contacts_consent_at: new Date(),
+      service_contacts_consent_source: 'recipient_optin_confirmed',
+      service_contacts_consent_text_version: OPTIN_TEMPLATE_VERSION,
+    });
+  return wrote ? { stamped: true, reason: 'stamped' } : { stamped: false, reason: 'row_changed' };
+}
+
+// Breadcrumb on the open secondary_contact_captured review card for this
+// recipient (matched by the contact phone in its payload): optin_result
+// confirmed|declined, plus consent_stamp when the stamp was held.
+async function updateCaptureCard(h, phoneKey, patch) {
+  await h('triage_items')
+    .where({ reason_code: 'secondary_contact_captured' })
+    .whereIn('status', ['open', 'in_progress'])
+    .whereRaw("right(regexp_replace(coalesce(payload #>> '{secondary_contact,phone}', ''), '\\D', '', 'g'), 10) = ?", [phoneKey])
+    .update({
+      payload: h.raw("(coalesce(payload, '{}'::jsonb)) || ?::jsonb", [JSON.stringify(patch)]),
+      updated_at: new Date(),
+    });
+}
+
+// A YES confirmed this phone. For each customer with a confirmed row for it:
+// stamp the consent artifact (when the whole row is covered); and — only if the
+// row now has consent, so somebody can actually be texted — act on THIS phone's
+// demote marker entry: turn the caller's appointment texts OFF, queue the
+// booking confirmation for this recipient, and clear the entry. Updates the
+// review card. Returns { replays } — confirmation texts to send AFTER the
+// caller's transaction commits (runConfirmationReplays).
 async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
+  const replays = [];
   await withSavepoint(dbh, async (h) => {
     const rows = await h('recipient_optin').where({ phone_key: phoneKey, status: 'confirmed' }).whereNotNull('customer_id').select('customer_id');
+    let stampHeld = null;
     for (const { customer_id: customerId } of rows || []) {
-      const customer = await h('customers').where({ id: customerId }).first('service_preferences');
-      const prefs = typeof customer?.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer?.service_preferences;
-      const marker = prefs && prefs[DEMOTE_MARKER_KEY];
-      if (!marker || marker.phone_key !== phoneKey) continue;
+      const customer = await h('customers').where({ id: customerId }).first();
+      if (!customer) continue;
+      const stamp = await stampConsentOnConfirm(h, customerId, phoneKey, customer);
+      if (!stamp.stamped) stampHeld = stamp.reason;
+      const prefs = typeof customer.service_preferences === 'string' ? JSON.parse(customer.service_preferences) : customer.service_preferences;
+      const marker = prefs && prefs[DEMOTE_MARKER_KEY] && prefs[DEMOTE_MARKER_KEY][phoneKey];
+      if (!marker || !stamp.stamped) continue;
       await h('notification_prefs')
         .insert({ customer_id: customerId, appointment_notify_primary: false })
         .onConflict('customer_id')
         .merge({ appointment_notify_primary: false });
       await h('customers').where({ id: customerId })
-        .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) - 'demote_primary_on_optin'") });
+        .update({ service_preferences: h.raw("COALESCE(service_preferences, '{}'::jsonb) #- ARRAY['demote_primary_on_optin', ?]::text[]", [phoneKey]) });
+      if (marker.scheduled_service_id) {
+        const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+        const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === phoneKey);
+        if (slot) {
+          replays.push({
+            customerId,
+            scheduledServiceId: marker.scheduled_service_id,
+            contact: { name: customer[slot.name] || '', phone: customer[slot.phone], role: customer[slot.roleCol] || null },
+          });
+        }
+      }
     }
+    await updateCaptureCard(h, phoneKey, {
+      optin_result: 'confirmed',
+      ...(stampHeld ? { consent_stamp: `held:${stampHeld}` } : {}),
+    });
   });
+  return { replays };
 }
+
+// Send the booking confirmation to a recipient who just said YES, for the visit
+// the call booked (still live and in the future; deduped on sms_log inside the
+// helper). Runs AFTER the caller's transaction commits so the consent stamp is
+// visible to the send's own checks. Best-effort: never throws.
+function runConfirmationReplays(replays, dbh) {
+  if (!replays || !replays.length) return;
+  const run = async () => {
+    for (const replay of replays) {
+      try {
+        const AppointmentReminders = require('./appointment-reminders');
+        const result = await AppointmentReminders.sendConfirmationToServiceContact(replay);
+        logger.info(`[recipient-optin] booking confirmation replay to ***${recipientPhoneKey(replay.contact.phone).slice(-4)}: ${result.sent ? 'sent' : `not sent (${result.reason})`}`);
+      } catch (err) {
+        logger.warn(`[recipient-optin] confirmation replay failed (${err.code || err.name || 'error'})`);
+      }
+    }
+  };
+  if (dbh && dbh.isTransaction && dbh.executionPromise && typeof dbh.executionPromise.then === 'function') {
+    dbh.executionPromise.then(run, () => {});
+  } else {
+    setImmediate(run);
+  }
+}
+
 // A STOP declined this phone everywhere: drop every marker that names it.
 async function clearDemoteMarkersForPhone(phoneKey, { dbh = db } = {}) {
   await withSavepoint(dbh, async (h) => {
     const rows = await h('recipient_optin').where({ phone_key: phoneKey }).whereNotNull('customer_id').select('customer_id');
     for (const { customer_id: customerId } of rows || []) await clearDemoteMarker(customerId, phoneKey, { dbh: h });
+    await updateCaptureCard(h, phoneKey, { optin_result: 'declined' });
   });
 }
 // The ask for this (customer, phone) never reached the recipient: release the
@@ -219,7 +322,7 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
       }
     }
     if (updated) {
-      if (status === 'confirmed') await applyDemoteMarkersOnConfirm(key, { dbh });
+      if (status === 'confirmed') runConfirmationReplays((await applyDemoteMarkersOnConfirm(key, { dbh })).replays, dbh);
       else if (status === 'declined') await clearDemoteMarkersForPhone(key, { dbh });
       logger.info(`[recipient-optin] ${status} recorded for ***${key.slice(-4)}`);
     }
@@ -576,6 +679,7 @@ module.exports = {
   isOptinRailLive,
   clearDemoteMarker,
   applyDemoteMarkersOnConfirm,
+  runConfirmationReplays,
   clearDemoteMarkersForPhone,
   OPTIN_TEMPLATE_VERSION,
   isDoubleOptinEnabled,

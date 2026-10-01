@@ -38,13 +38,7 @@ function pricesSignature(prices) {
   return prices.map(priceEntrySignature).join(';');
 }
 
-// `transcript` (optional, the call's speaker-labeled transcript): when given,
-// the on-site consent flags are also VERIFIED against it (the processor's own
-// check, utils/on-site-grounding.js) and exposed as *_grounded fields and in
-// the per-contact signature, so replay compares what would actually authorize
-// consent, not just whether a quote was produced. Absent -> those fields are
-// null and the signature is unchanged.
-function flatView(extraction, { transcript = null } = {}) {
+function flatView(extraction) {
   if (!extraction) return {};
   if (!isV2Extraction(extraction)) return extraction;
 
@@ -59,11 +53,6 @@ function flatView(extraction, { transcript = null } = {}) {
   const history = extraction.customer_history || {};
   const consent = extraction.consent || {};
   const secondary = canonicalV2Secondary(extraction);
-  const hasTranscript = typeof transcript === 'string' && transcript.length > 0;
-  const groundedFor = (contact) => {
-    if (!hasTranscript || !contact) return null;
-    return require('./on-site-grounding').verifyOnSiteGrounding(contact, transcript);
-  };
 
   return {
     first_name: caller.first_name || null,
@@ -137,34 +126,21 @@ function flatView(extraction, { transcript = null } = {}) {
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
     secondary_contact: secondary,
-    secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence, extraction.secondary_contact || null),
-    // Flat mirrors of the first other party's on-site consent inputs (schema
-    // 1.21.0) so replay variance watches them (FIELD_GROUPS high — they gate
-    // an SMS consent stamp). False when absent, like agent_committed_booking.
+    secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
+    // Flat mirrors of the first other party's on-site flags (schema 1.21.0) so
+    // replay variance watches them (FIELD_GROUPS high — they decide whether the
+    // recipient gets the opt-in ask). False when absent, like
+    // agent_committed_booking.
     secondary_wants_appointment_texts: secondary?.wants_appointment_texts === true,
     secondary_on_site: secondary?.on_site === true,
-    // Evidence PRESENCE for those two flags (a caller-speaker evidence[] entry
-    // exists for the path): the flags only authorize SMS consent when pinned,
-    // so a model that stops (or starts) pinning them must show in replay.
-    secondary_wants_appointment_texts_evidence: !!secondary?.wants_appointment_texts_quote,
-    secondary_on_site_evidence: !!secondary?.on_site_quote,
-    secondary_wants_appointment_texts_grounded: groundedFor(secondary)?.wants_appointment_texts ?? (hasTranscript ? false : null),
-    secondary_on_site_grounded: groundedFor(secondary)?.on_site ?? (hasTranscript ? false : null),
     // Order-stable per-contact signature over the whole secondary_contacts[]
-    // (identity:role:text-intent:on-site:text-evidence:on-site-evidence, '|'-joined, '' when none) so a flag flipping
-    // on entries 2+ shows in replay variance too (FIELD_GROUPS high).
-    // Canonical: the array when present, else the singleton as one entry (a
-    // singleton-only payload must not read as "no contacts"). Each entry also
-    // carries its two evidence-presence bits.
+    // (phone-identity:role:wants-notifications:text-intent:on-site, '|'-joined, '' when none) so a
+    // flag flipping on entries 2+ shows in replay variance too (FIELD_GROUPS
+    // high). Canonical: the array when present, else the singleton as one entry.
     secondary_contacts_consent_signature: (() => {
-      const list = mapSecondaryContactsToLegacy(extraction.secondary_contacts, extraction.evidence, extraction.secondary_contact || null);
+      const list = mapSecondaryContactsToLegacy(extraction.secondary_contacts);
       return (list.length ? list : [secondary].filter(Boolean))
-        .map((c) => {
-          const base = `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}:${c.wants_appointment_texts_quote ? 1 : 0}:${c.on_site_quote ? 1 : 0}`;
-          if (!hasTranscript) return base;
-          const g = groundedFor(c);
-          return `${base}:${g.wants_appointment_texts ? 1 : 0}:${g.on_site ? 1 : 0}`;
-        })
+        .map((c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_notifications ? 1 : 0}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`)
         .join('|');
     })(),
 
@@ -227,19 +203,19 @@ function mapAdditionalPropertiesToLegacy(entries) {
 // contact persistence expects (same keys as the V1 extraction's
 // secondary_contact). An entry with no name, phone, or email is dropped —
 // there is nothing to persist or review without one.
+
 // The singleton secondary_contact and secondary_contacts[0] are usually the
-// same person written twice, so their evidence pointers are shared — but ONLY
-// when the two V2 shapes positively agree on identity (shared phone, email,
-// or full name). Otherwise one person's "he'll be there" would ground the
-// other's on-site consent (pre-push codex P1).
+// same person written twice. They count as one only when the two V2 shapes
+// positively agree on identity (shared phone, email, or full name) and neither
+// states a conflicting phone/email: otherwise one person's flags must never
+// attach to the other (pre-push codex P1).
 function sameV2Person(a, b) {
   if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
   const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const nameOf = (c) => norm(c.name_full) || norm([c.first_name, c.last_name].filter(Boolean).join(' '));
-  // CONFLICTS veto first (pre-push codex P1): two shapes that both state a
-  // phone or an email and DISAGREE are different people even when the names
-  // coincide ("Sample Spouse" with two different numbers never shares).
+  // CONFLICTS veto first: two shapes that both state a phone or an email and
+  // DISAGREE are different people even when the names coincide.
   if (a.phone_e164 && b.phone_e164 && last10(a.phone_e164) !== last10(b.phone_e164)) return false;
   if (a.email && b.email && norm(a.email) !== norm(b.email)) return false;
   if (a.phone_e164 && b.phone_e164 && last10(a.phone_e164) === last10(b.phone_e164)) return true;
@@ -248,33 +224,28 @@ function sameV2Person(a, b) {
   return !!an && an === bn && an.includes(' ');
 }
 
-// The singleton secondary_contact and secondary_contacts[0] mirror each other,
-// and a model may put the on-site flags/evidence on only ONE of the two shapes.
-// When the two V2 shapes positively agree on identity (sameV2Person), the
-// canonical contact takes the flags (OR) and the first non-null quote from
-// whichever shape has them, BEFORE any V1/V2 merge or replay fingerprint
-// (pre-push codex P1). A different person in entry 0 never lends its flags.
+// The singleton and secondary_contacts[0] mirror each other, and a model may put
+// the on-site flags on only ONE of the two shapes. When they are the same
+// person (sameV2Person) the canonical contact ORs the flags, BEFORE any V1/V2
+// merge or replay fingerprint. A different person in entry 0 never lends its
+// flags.
 function canonicalV2Secondary(extraction) {
-  const single = mapSecondaryContactToLegacy(extraction?.secondary_contact, {
-    evidence: extraction?.evidence, counterpart: extraction?.secondary_contacts?.[0] || null,
-  });
+  const single = mapSecondaryContactToLegacy(extraction?.secondary_contact);
   const first = extraction?.secondary_contacts?.[0];
   if (!single || !first || !sameV2Person(extraction.secondary_contact, first)) return single;
-  const mirror = mapSecondaryContactToLegacy(first, { evidence: extraction.evidence, index: 0, counterpart: extraction.secondary_contact });
+  const mirror = mapSecondaryContactToLegacy(first);
   if (!mirror) return single;
   return {
     ...single,
     wants_appointment_texts: single.wants_appointment_texts || mirror.wants_appointment_texts,
     on_site: single.on_site || mirror.on_site,
-    wants_appointment_texts_quote: single.wants_appointment_texts_quote || mirror.wants_appointment_texts_quote,
-    on_site_quote: single.on_site_quote || mirror.on_site_quote,
   };
 }
 
 // Stable identity of a secondary contact for replay signatures: phone last-10,
-// else lowercased email, else normalized full name, else ''. Binds each
-// consent entry to WHO it is about, so two runs that swap flags between two
-// people (or reorder them) read as variance.
+// else lowercased email, else normalized full name, else ''. Binds each entry
+// to WHO it is about, so two runs that swap flags between two people (or
+// reorder them) read as variance.
 function secondaryIdentityKey(c) {
   const phone = String(c?.phone || '').replace(/\D/g, '').slice(-10);
   if (phone) return phone;
@@ -283,42 +254,8 @@ function secondaryIdentityKey(c) {
   return [c?.first_name, c?.last_name].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean).join(' ').replace(/\s+/g, ' ');
 }
 
-function secondaryEvidencePrefixes(index, shareWithCounterpart = false) {
-  if (index === null || index === undefined) {
-    return shareWithCounterpart ? ['/secondary_contact', '/secondary_contacts/0'] : ['/secondary_contact'];
-  }
-  if (index === 0) return shareWithCounterpart ? ['/secondary_contacts/0', '/secondary_contact'] : ['/secondary_contacts/0'];
-  return [`/secondary_contacts/${index}`];
-}
-
-// Pinned quote for one on-site consent field from the V2 evidence[] list. The
-// prompt writes JSON pointers (/secondary_contact/on_site,
-// /secondary_contacts/<index>/on_site); dotted and bracketed spellings are
-// tolerated. Returns the first non-empty trimmed quote, else null. A quote
-// is the proof onSiteNotifyConsent's caller verifies against the transcript.
-function secondaryEvidenceQuote(evidence, prefixes, leaf) {
-  if (!Array.isArray(evidence)) return null;
-  for (const e of evidence) {
-    const quote = typeof e?.quote === 'string' ? e.quote.trim() : '';
-    // Only the CALLER's own words can ground the caller's agreement / the
-    // statement that someone will be on site (owner 2026-09-30 audit).
-    if (!quote || e.speaker !== 'caller') continue;
-    let p = String(e.field_path || '').trim().replace(/\[(\d+)\]/g, '/$1').replace(/\./g, '/');
-    if (!p.startsWith('/')) p = `/${p}`;
-    if (prefixes.some((pre) => p === `${pre}/${leaf}`)) return quote;
-  }
-  return null;
-}
-
-// `evidence` (the extraction's evidence[]) and `index` (position in
-// secondary_contacts[], or null for the singleton secondary_contact, which
-// mirrors entry 0) locate this contact's pinned on-site quotes.
-// `counterpart` is the OTHER shape's candidate for the same slot (the array's
-// entry 0 when mapping the singleton; the singleton when mapping entry 0):
-// evidence pointers are shared across the two paths only if sameV2Person.
-function mapSecondaryContactToLegacy(contact, { evidence = null, index = null, counterpart = null } = {}) {
+function mapSecondaryContactToLegacy(contact) {
   if (!contact || typeof contact !== 'object') return null;
-  const shareEvidence = (index === null || index === undefined || index === 0) && sameV2Person(contact, counterpart);
   // A V2 contact can arrive with only name_full populated ("Joseph Haught"
   // unsplit) — derive first/last from it so the name survives the flat
   // mapping instead of producing an unnamed (or dropped) contact.
@@ -336,16 +273,12 @@ function mapSecondaryContactToLegacy(contact, { evidence = null, index = null, c
     email: contact.email || null,
     role: contact.role || 'unknown',
     wants_notifications: contact.wants_notifications === true,
-    // On-site consent inputs (schema 1.21.0): strict booleans, false when the
-    // extraction lacks them (older V2 rows), so such a contact never qualifies
-    // for the on-site consent rule (onSiteNotifyConsent).
+    // On-site flags (schema 1.21.0): strict booleans, false when the extraction
+    // lacks them (older V2 rows). They only trigger the recipient opt-in ASK
+    // (call-recording-processor onSiteOptinAskTrigger); consent is the
+    // recipient's own YES.
     wants_appointment_texts: contact.wants_appointment_texts === true,
     on_site: contact.on_site === true,
-    // Pinned evidence quotes for those two flags (null when none): without a
-    // quote that appears in the transcript the processor ignores the flag
-    // (verifyOnSiteGrounding) — a schema-valid response may omit evidence.
-    wants_appointment_texts_quote: secondaryEvidenceQuote(evidence, secondaryEvidencePrefixes(index, shareEvidence), 'wants_appointment_texts'),
-    on_site_quote: secondaryEvidenceQuote(evidence, secondaryEvidencePrefixes(index, shareEvidence), 'on_site'),
     is_billing_party: contact.is_billing_party === true,
     notes: contact.notes || null,
   };
@@ -355,11 +288,9 @@ function mapSecondaryContactToLegacy(contact, { evidence = null, index = null, c
 
 // 1.4.0 array — every entry through the same single-contact mapper; empty
 // shells drop; hard cap 3 (the slot budget).
-function mapSecondaryContactsToLegacy(list, evidence = null, singleton = null) {
+function mapSecondaryContactsToLegacy(list) {
   if (!Array.isArray(list)) return [];
-  // The ORIGINAL index locates the evidence pointer, so map before dropping
-  // empty shells. Entry 0 may share the singleton's pointers (same person only).
-  return list.map((c, i) => mapSecondaryContactToLegacy(c, { evidence, index: i, counterpart: i === 0 ? singleton : null })).filter(Boolean).slice(0, 3);
+  return list.map(mapSecondaryContactToLegacy).filter(Boolean).slice(0, 3);
 }
 
 function mapServiceCategoryToLegacy(category) {
@@ -833,7 +764,6 @@ function callerIdDisclaimedNoteText(caller, { now = new Date(), ani = null } = {
 module.exports = {
   sameV2Person,
   canonicalV2Secondary,
-  secondaryEvidencePrefixes,
   isV2Extraction,
   flatView,
   mapSecondaryContactsToLegacy,

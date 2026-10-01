@@ -5845,6 +5845,86 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 // deferred-replay recheck (app property scope, PR 3).
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
 
+// Terminal / in-flight visit states that must never get a replayed confirmation.
+const CONFIRMATION_REPLAY_DEAD_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show', 'en_route', 'on_site', 'in_progress']);
+
+// Send ONE service contact the same appointment confirmation text the primary
+// got, for a visit that is still live and in the future. Used when an on-site
+// recipient answers YES to the opt-in ask AFTER the booking confirmation went
+// out (owner redesign 2026-10-01: the caller and the on-site person both get
+// it). It is a reply to the recipient's own YES, so it rides
+// conversationalContext (never deferred by the send window, like the other
+// inbound-reply senders) with the service-contact trust floor, and renders the
+// SAME `appointment_confirmation` template ladder as deliverConfirmation. The
+// slot, window, reminders and the primary's own confirmation are untouched.
+// Deduped on sms_log: the same phone, message_type 'confirmation' and visit
+// within 24 hours is never re-sent. Returns { sent, reason }.
+async function sendConfirmationToServiceContact({ customerId, scheduledServiceId, contact } = {}) {
+  if (!customerId || !scheduledServiceId || !contact || !contact.phone) return { sent: false, reason: 'missing_input' };
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: scheduledServiceId, customer_id: customerId })
+      .first('id', 'status', 'service_type', 'customer_confirmed');
+    if (!svc || CONFIRMATION_REPLAY_DEAD_STATUSES.has(String(svc.status || '').toLowerCase())) return { sent: false, reason: 'visit_not_live' };
+    const reminder = await db('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('appointment_time', 'cancelled');
+    const apptTime = reminder && !reminder.cancelled && reminder.appointment_time ? new Date(reminder.appointment_time) : null;
+    if (!apptTime || Number.isNaN(apptTime.getTime()) || apptTime.getTime() <= Date.now()) return { sent: false, reason: 'visit_not_future' };
+    const recentDup = await db('sms_log')
+      .where({ to_phone: contact.phone, message_type: 'confirmation' })
+      .whereRaw('metadata::text like ?', [`%${scheduledServiceId}%`])
+      .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+      .first('id')
+      .catch(() => null);
+    if (recentDup) return { sent: false, reason: 'already_sent' };
+    const firstName = firstNameFrom(contact.name) || 'there';
+    const serviceLabel = svc.service_type || 'service';
+    const day = formatDay(apptTime);
+    const date = formatDate(apptTime);
+    const time = formatTime(apptTime);
+    const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+    const alreadyConfirmed = String(svc.status || '').toLowerCase() === 'confirmed' || !!svc.customer_confirmed;
+    const body = await renderAppointmentPageTemplate(
+      'appointment_confirmation',
+      async () => {
+        const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
+          customerId,
+          label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
+        });
+        const window = await confirmationArrivalWindow({ scheduledServiceId });
+        return { first_name: firstName, service_type: serviceLabel, date, time, day, window, appointment_line: appointmentLink.line };
+      },
+      { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
+      { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
+    );
+    if (!body) return { sent: false, reason: 'template_unavailable' };
+    const result = await sendCustomerMessage({
+      to: contact.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'appointment_confirmation',
+      customerId,
+      appointmentId: scheduledServiceId,
+      renderedSlotMs: apptTime.getTime(),
+      identityTrustLevel: 'service_contact_authorized',
+      conversationalContext: true,
+      metadata: {
+        original_message_type: 'confirmation',
+        appointment_contact_role: contact.role || null,
+        scheduled_service_id: scheduledServiceId,
+        entry_point: 'recipient_optin_confirmed_replay',
+      },
+    });
+    return result && result.sent ? { sent: true } : { sent: false, reason: (result && (result.code || result.reason)) || 'blocked' };
+  } catch (err) {
+    logger.warn(`[appt-remind] confirmation replay to service contact failed (${err.code || err.name || 'error'})`);
+    return { sent: false, reason: 'error' };
+  }
+}
+AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
+
 // Shared with twilio.js's en-route/arrival senders (owner ruling
 // 2026-09-25) — see the function's own comment.
 AppointmentReminders.callbackNumberHoldActiveForVisit = callbackNumberHoldActiveForVisit;
