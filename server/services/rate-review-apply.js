@@ -156,6 +156,8 @@ const HOLD_COPY = Object.freeze({
   notice_event_collision: 'A notice with the same amounts and date already exists for this customer.',
   notice_too_recent: 'The notice went out fewer than 30 days before the new rate, so the rate waits.',
   billing_lane_changed: 'The account moved to a different billing lane since the notice, so the rate was not applied.',
+  renewal_in_progress: 'A renewal of this prepaid plan is being recorded right now, so the amount is retried tonight.',
+  successor_already_created: 'The next prepaid term was already created, so the noticed amount was not written to the old one.',
   row_not_approved: 'The ranking row is no longer approved, so no notice was created.',
   apply_error: 'The nightly apply hit an error on this account and will retry tonight.',
 });
@@ -318,6 +320,19 @@ async function resolvePrepayTerm(dbh, { customerId, familyKey, accountLines, tod
   return { term: null, reason: unlabeled.length > 1 ? 'prepay_term_ambiguous' : 'prepay_term_not_found' };
 }
 
+// A live or pending term of the same coverage family that starts after
+// this term ends, or one minted as its renewal successor.
+async function successorTermExists(dbh, term) {
+  const rows = await dbh('annual_prepay_terms')
+    .where({ customer_id: term.customer_id })
+    .whereNot('id', term.id)
+    .whereNotIn('status', ['cancelled', 'canceled', 'refunded'])
+    .select('id', 'term_start', 'coverage_service_type', 'renewed_from_term_id');
+  const family = familyOfCoverage(term.coverage_service_type);
+  return rows.some((r) => String(r.renewed_from_term_id || '') === String(term.id)
+    || (ymd(r.term_start) > ymd(term.term_end) && familyOfCoverage(r.coverage_service_type) === family));
+}
+
 function termRenewalNoticed(term) {
   return !!(term.notice_30_sent_at || term.notice_15_sent_at || term.notice_7_sent_at
     || (term.renewal_noticed_fee != null && term.renewal_noticed_fee !== ''));
@@ -335,6 +350,19 @@ async function resolveLiveLane(dbh, { customer, familyKey, today }) {
   if (customer.billing_mode === LANE_MONTHLY) return LANE_MONTHLY;
   if (customer.billing_mode === LANE_PER_APPLICATION) return LANE_PER_APPLICATION;
   return customer.billing_mode || null;
+}
+
+// The per-customer annual-prepay advisory lock every renewal writer takes
+// (routes/admin-customers.js lockAndAssertNoAnnualPrepayOverlap; the
+// prepay-on-book paths; the termite successor mint). The prepaid lane takes
+// it too, so a renewal and the apply never interleave — with the TRY
+// variant, before the customers row: the renewal holds this lock and then
+// writes the customers row, so waiting here with the row held would be a
+// cycle, and a try never waits (busy → retried tonight).
+async function tryAnnualPrepayLock(trx, customerId) {
+  const { ANNUAL_PREPAY_LOCK_NS } = require('../routes/admin-customers')._private;
+  const result = await trx.raw('SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked', [ANNUAL_PREPAY_LOCK_NS, String(customerId)]);
+  if (result?.rows?.[0]?.locked !== true) throw hold('renewal_in_progress', { customerId });
 }
 
 async function activePlanHold(dbh, customerId) {
@@ -821,6 +849,10 @@ async function applyPrepay(trx, ctx) {
   // "Notified amount is the charged amount": once the renewal reminder is
   // out (or a termite fee was frozen), the term's amount is spoken for.
   if (termRenewalNoticed(term)) throw hold('renewal_notice_already_sent', { termId: term.id });
+  // A successor already on the books (a renewal recorded, at whatever
+  // amount, or a termite successor minted) makes the predecessor's noticed
+  // amount moot — never written after the fact.
+  if (await successorTermExists(trx, term)) throw hold('successor_already_created', { termId: term.id });
   const nextAmount = dollars(Number(notice.noticed_new_cents));
   if (term.next_term_prepay_amount != null && term.next_term_prepay_amount !== '' && roundMoney(term.next_term_prepay_amount) !== nextAmount) {
     throw hold('rate_moved_since_notice', { nextTermPrepayAmount: Number(term.next_term_prepay_amount) });
@@ -879,6 +911,7 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       // the notice row. The per-application lane adds the series maintenance
       // lock before touching any visit.
       await lockCustomerComms(trx, noticeRow.customer_id);
+      if (noticeRow.billing_lane === LANE_PREPAY) await tryAnnualPrepayLock(trx, noticeRow.customer_id);
       const customer = await trx('customers').where({ id: noticeRow.customer_id }).forUpdate().first();
       if (!customer || customer.deleted_at) throw hold('rate_moved_since_notice', 'customer gone');
       const notice = await trx('price_change_notices').where({ id: noticeRow.id }).forUpdate().first();
@@ -985,17 +1018,23 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
     const rows = await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id').select('id', 'notice_id');
     const noticeIds = rows.map((r) => r.notice_id);
     if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0 };
-    const linked = await trx('price_change_notices').whereIn('id', noticeIds).forUpdate().select('id', 'status', 'sent_at', 'email_sent', 'sms_sent');
-    const undeliveredIds = linked.filter((n) => !wasDelivered(n) && !n.sent_at && !n.email_sent && !n.sms_sent).map((n) => n.id);
+    // Retirable = exactly what the DELETE below accepts: a draft, or a
+    // previewed draft ('viewed') with no sent_at and no delivered leg. A
+    // 'sending' claim or an 'unreachable' attempt is in flight and is kept
+    // linked. Rows are locked, deleted under the same predicate, and ONLY
+    // the rows confirmed deleted are unlinked (a count mismatch rolls back).
+    const retirable = (q) => q.whereIn('status', ['draft', 'viewed']).whereNull('sent_at').where('email_sent', false).where('sms_sent', false);
+    const candidates = await retirable(trx('price_change_notices').whereIn('id', noticeIds)).forUpdate().select('id');
+    const candidateIds = candidates.map((n) => n.id);
     let retired = 0;
-    if (undeliveredIds.length) {
-      await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereIn('notice_id', undeliveredIds).update({ notice_id: null, updated_at: new Date() });
-      retired = await trx('price_change_notices').whereIn('id', undeliveredIds)
-        .whereIn('status', ['draft', 'viewed']).whereNull('sent_at').where('email_sent', false).where('sms_sent', false)
-        .delete();
+    if (candidateIds.length) {
+      retired = await retirable(trx('price_change_notices').whereIn('id', candidateIds)).delete();
+      if (retired !== candidateIds.length) throw new Error(`rate review ${batchKey}: ${retired} of ${candidateIds.length} retirable notice rows deleted — rolled back`);
+      await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereIn('notice_id', candidateIds).update({ notice_id: null, updated_at: new Date() });
     }
-    logger.info(`[rate-review-apply] ${batchKey}: ${retired} undelivered notice rows retired, ${linked.length - undeliveredIds.length} delivered kept`);
-    return { ok: true, batchKey, retired, keptDelivered: linked.length - undeliveredIds.length };
+    const kept = noticeIds.length - candidateIds.length;
+    logger.info(`[rate-review-apply] ${batchKey}: ${retired} undelivered notice rows retired, ${kept} delivered or in-flight kept`);
+    return { ok: true, batchKey, retired, keptDelivered: kept };
   });
 }
 
@@ -1018,15 +1057,19 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   if (!customerId || !(Number(amount) > 0)) return null;
   const start = ymd(termStart) || today;
   const family = familyOfCoverage(coverageServiceType);
+  // The predecessor's row is locked WHATEVER its noticed amount is right
+  // now (no NULL filter in SQL): the first noticed amount is written by the
+  // apply from NULL, and a renewal that filtered on NOT NULL would lock
+  // nothing and read the old NULL. The amount is judged after the lock.
   const query = dbh('annual_prepay_terms')
     .where({ customer_id: customerId })
-    .whereNotNull('next_term_prepay_amount')
     .where('term_end', '>=', addDaysYmd(start, -60))
     .where('term_end', '<=', addDaysYmd(start, 60))
     .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'renewed', 'switch_plan']);
   if (lock) query.forUpdate();
   const terms = await query.select('id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
   const candidates = terms
+    .filter((t) => t.next_term_prepay_amount != null && t.next_term_prepay_amount !== '')
     .filter((t) => !['cancel', 'renew', 'switch_plan'].includes(String(t.renewal_decision || '')))
     .filter((t) => (family ? familyOfCoverage(t.coverage_service_type) === family : !familyOfCoverage(t.coverage_service_type)))
     .sort((a, b) => Math.abs(daysBetweenYmd(ymd(a.term_end), start)) - Math.abs(daysBetweenYmd(ymd(b.term_end), start)));
@@ -1079,6 +1122,6 @@ module.exports = {
   noticedRenewalAmountConflict,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
-    loadLineOpenVisits, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
+    loadLineOpenVisits, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

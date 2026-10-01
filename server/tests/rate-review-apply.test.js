@@ -40,6 +40,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     .where('t.term_start', '<=', today)
     .where('t.term_end', '>=', today),
 }));
+jest.mock('../routes/admin-customers', () => ({ _private: { ANNUAL_PREPAY_LOCK_NS: 0x4150 } }));
 jest.mock('../routes/admin-schedule', () => {
   const { parseTemplateOverrides } = require('../services/recurring-template-overrides');
   const sum = (rows) => (rows || []).reduce((s, a) => s + (Number(a.estimated_price) > 0 ? Number(a.estimated_price) : 0), 0);
@@ -782,6 +783,37 @@ describe('applyDueRateChanges — annual_prepay', () => {
     out = await runApply(prepayBook({ next_term_prepay_amount: '500.00' }));
     expect(out.holds.map((h) => h.reason)).toEqual(['rate_moved_since_notice']);
   });
+  test('the prepaid lane takes the renewal writers\' own per-customer annual-prepay lock (try, before the customers row): busy → retried tonight', async () => {
+    mockDb.reset(prepayBook());
+    let out = await apply.applyDueRateChanges({ asOf: ASOF, now: ASOF });
+    expect(out.applied).toBe(1);
+    const lockCall = mockDb.raw.mock.calls.find(([sql]) => /pg_try_advisory_xact_lock/.test(sql));
+    expect(lockCall).toBeTruthy();
+    expect(lockCall[1]).toEqual([0x4150, CUSTOMER(1)]);
+    const names = mockDb.log.filter((e) => ['commsLock', 'forUpdate'].includes(e[0])).map((e) => (e[0] === 'forUpdate' ? `forUpdate:${e[1]}` : e[0]));
+    expect(names.slice(0, 2)).toEqual(['commsLock', 'forUpdate:customers']);
+    expect(mockDb.raw.mock.calls.findIndex(([sql]) => /pg_try_advisory_xact_lock/.test(sql))).toBeGreaterThanOrEqual(0);
+    // the renewal route holds it → nothing written, hold recorded
+    mockDb.reset(prepayBook());
+    mockDb.rawHandlers.push([/pg_try_advisory_xact_lock/, () => ({ rows: [{ locked: false }] })]);
+    out = await apply.applyDueRateChanges({ asOf: ASOF, now: ASOF });
+    expect(out.holds.map((h) => h.reason)).toEqual(['renewal_in_progress']);
+    expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+  });
+  test('a successor term already on the books → the noticed amount is never written to the predecessor after the fact', async () => {
+    const book = prepayBook();
+    book.annual_prepay_terms.push({ id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '468.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null });
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['successor_already_created']);
+    expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+    // a renewed_from link counts too, whatever its dates; another family's later term does not
+    const book2 = prepayBook();
+    book2.annual_prepay_terms.push({ id: TERM(3), customer_id: CUSTOMER(1), status: 'active', prepay_amount: '300.00', coverage_service_type: 'Lawn Care Program', term_start: '2027-06-01', term_end: '2028-05-31', renewal_decision: null, next_term_prepay_amount: null });
+    expect((await runApply(book2)).applied).toBe(1);
+    const book3 = prepayBook();
+    book3.annual_prepay_terms.push({ id: TERM(4), customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) });
+    expect((await runApply(book3)).holds.map((h) => h.reason)).toEqual(['successor_already_created']);
+  });
   test('the termite program is never reached', async () => {
     const out = await runApply(prepayBook({ annual_plan_version: 'v3' }));
     expect(out.holds.map((h) => h.reason)).toEqual(['termite_program']);
@@ -859,14 +891,17 @@ describe('retireDraftNotices and the rebuild guard', () => {
     // a second line already delivered (and viewed)
     mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(2, { status: 'sent', family_key: 'lawn_care', notice_id: 'n-sent-2' }));
     mockDb.store.price_change_notices.push(fixture.noticeRow(2, { id: 'n-sent-2', family_key: 'lawn_care', status: 'viewed' }));
+    // a 'sending' claim with no delivery markers yet (a send in flight) is kept linked, never deleted
+    mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(4, { customer_id: CUSTOMER(1), status: 'approved', family_key: 'tree_shrub', notice_id: 'n-sending-4' }));
+    mockDb.store.price_change_notices.push(fixture.noticeRow(4, { id: 'n-sending-4', customer_id: CUSTOMER(1), family_key: 'tree_shrub', status: 'sending', sent_at: null, email_sent: false, sms_sent: false, current_amount_cents: 6500, new_amount_cents: 7000, noticed_current_cents: 6500, noticed_new_cents: 7000 }));
     const out = await apply.retireDraftNotices(BATCH_KEY);
-    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 2, keptDelivered: 1 });
-    expect(notices().map((n) => n.id)).toEqual(['n-sent-2']);
-    expect(snapshots().map((r) => [r.family_key, r.notice_id])).toEqual([['pest_control', null], ['mosquito', null], ['lawn_care', 'n-sent-2']]);
+    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 2, keptDelivered: 2 });
+    expect(notices().map((n) => n.id).sort()).toEqual(['n-sending-4', 'n-sent-2']);
+    expect(snapshots().map((r) => [r.family_key, r.notice_id])).toEqual([['pest_control', null], ['mosquito', null], ['lawn_care', 'n-sent-2'], ['tree_shrub', 'n-sending-4']]);
     expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'price_change_notices')).toBe(true);
-    // and the batch can be scheduled again (the mosquito line has no visits in this book → held, not re-linked)
+    // and the batch can be scheduled again (the mosquito line has no visits in this book → held, not re-linked; the in-flight one stays linked)
     const again = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
-    expect(again).toMatchObject({ created: 1, alreadyScheduled: 0 });
+    expect(again).toMatchObject({ created: 1, alreadyScheduled: 1 });
     expect(again.held.map((h) => [h.familyKey, h.reason])).toEqual([['mosquito', 'no_future_visit']]);
     expect(snapshots().find((r) => r.family_key === 'pest_control').notice_id).not.toBeNull();
   });
@@ -926,10 +961,20 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     mockDb.reset({ annual_prepay_terms: [term()] });
     expect(await apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(2), amount: 468, coverageServiceType: 'Quarterly Pest Control', termStart: '2027-05-15', today: '2027-05-14' })).toBeNull();
   });
-  test('inside a write transaction the candidate terms are read FOR UPDATE, so the nightly apply\'s write serializes against the renewal', async () => {
+  test('inside a write transaction the candidate terms are read FOR UPDATE — whatever their noticed amount is right now — so the nightly apply\'s first write serializes against the renewal', async () => {
     mockDb.reset({ annual_prepay_terms: [term()] });
     expect(await renew(468, { lock: true })).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
     expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'annual_prepay_terms')).toBe(true);
+    // a predecessor with NO noticed amount yet is still locked (the apply may be writing its first one)
+    mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })] });
+    expect(await renew(468, { lock: true })).toBeNull();
+    const locked = mockDb.log.find((e) => e[0] === 'forUpdate' && e[1] === 'annual_prepay_terms');
+    expect(locked).toBeTruthy();
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/rate-review-apply.js'), 'utf8');
+    const fn = src.slice(src.indexOf('async function noticedRenewalAmountConflict('), src.indexOf('// Held rate-review notices'));
+    expect(fn).not.toMatch(/whereNotNull\('next_term_prepay_amount'\)/);
     mockDb.reset({ annual_prepay_terms: [term()] });
     await renew(468);
     expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'annual_prepay_terms')).toBe(false);
