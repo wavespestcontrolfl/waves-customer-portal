@@ -125,11 +125,20 @@ function rowPrice(row) {
   const est = Number(row.estimated_price);
   return est > 0 ? est : 0;
 }
-// Prepaid coverage is proven by loadContext (prepaidCoverage): a positive
-// out-of-band stamp, or an annual-prepay stamp annualPrepayCoversVisit
-// validated against a live paid term. A term id alone proves nothing.
-function isPrepaid(row) {
-  return row.prepaid_covered === true;
+// A visit needs no price of its own when it is prepaid (markPrepaidCoverage):
+//  - an annual-prepay stamp annualPrepayCoversVisit validated against a live
+//    paid term (prepaid_covered; a term id alone proves nothing);
+//  - an out-of-band payment (prepaid_out_of_band) only when the visit carries
+//    no price of its own AND the payment meets the ACCEPTED price; a visit
+//    that is priced keeps its price check (completion bills the rest of a
+//    partial payment, and the visit price is what this check verifies).
+//    With no accepted price to compare, the verdict is deferred anyway.
+function isPrepaid(row, programs) {
+  if (row.prepaid_covered === true) return true;
+  const paid = Number(row.prepaid_out_of_band);
+  if (!(paid > 0) || rowPrice(row) > 0) return false;
+  const expected = expectedFor(row, programs);
+  return expected == null || paid + 0.005 >= expected;
 }
 
 /**
@@ -306,7 +315,7 @@ function checkLaterPrices(dated, programs, firstDay) {
   const off = new Map();
   const offDetail = [];
   for (const row of dated.filter((r) => r.recurring_parent_id || r.day > firstDay)) {
-    if (isPrepaid(row) || duesOnly(row, programs)) continue;
+    if (isPrepaid(row, programs) || duesOnly(row, programs)) continue;
     // A parent stamped into a combined first-application invoice is covered
     // by it (the converter leaves such companions unpriced on purpose).
     if (row.first_application_invoice_id && !row.recurring_parent_id) continue;
@@ -472,7 +481,7 @@ function evaluateCombinedBooking(ctx) {
   // so the invoice is judged against all live top-level rows carrying a stamp
   // (`stamped`, above).
   const unstamped = dated.filter((row) => row.day === firstDay && !row.recurring_parent_id
-    && !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row) && !duesOnly(row, priced));
+    && !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row, priced) && !duesOnly(row, priced));
   const problems = [
     ...checkTimeAndTech(dated, programs),
     ...checkLaterPrices(dated, priced, firstDay),
@@ -524,13 +533,8 @@ async function markPrepaidCoverage(conn, rows) {
   const { hasOutOfBandPrepaidStamp } = require('./schedule-integrity-watchdog');
   for (const row of rows) {
     row.prepaid_covered = false;
-    // An out-of-band stamp covers the visit only when it pays the whole visit
-    // price: completion bills the rest of a partial prepayment, so a partly
-    // prepaid visit keeps its price check.
-    if (hasOutOfBandPrepaidStamp(row)) {
-      row.prepaid_covered = Number(row.prepaid_amount) + 0.005 >= rowPrice(row);
-      continue;
-    }
+    // An out-of-band payment is judged against the accepted price (isPrepaid).
+    if (hasOutOfBandPrepaidStamp(row)) { row.prepaid_out_of_band = Number(row.prepaid_amount); continue; }
     if (!row.annual_prepay_term_id && !(Number(row.prepaid_amount) > 0)) continue;
     try {
       row.prepaid_covered = await annualPrepayCoversVisit(row, conn) === true;

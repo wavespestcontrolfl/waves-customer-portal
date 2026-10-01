@@ -377,6 +377,16 @@ describe('evaluateCombinedBooking', () => {
     expect(codes(zero)).toEqual(['price_missing']);
   });
 
+  test('an out-of-band payment covers only an unpriced visit, and only at the accepted price', () => {
+    const lawn = (child) => lawnRows({ childOverrides: child });
+    // Priced wrongly at $10 with $10 paid: still a mismatch.
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: 10, prepaid_out_of_band: 10 })]))).toEqual(['price_mismatch']);
+    // Unpriced, paid in full at the accepted $100: covered.
+    expect(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: null, prepaid_out_of_band: 100 })]).ok).toBe(true);
+    // Unpriced, only $10 paid: completion would bill nothing, so it is unpriced.
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn({ estimated_price: null, prepaid_out_of_band: 10 })]))).toEqual(['price_missing']);
+  });
+
   test('prepaid visits are not judged on price', () => {
     const lawn = lawnRows({ price: 0, childOverrides: { prepaid_covered: true, estimated_price: null } });
     expect(run([PEST, LAWN], [...pestRows(), ...lawn]).ok).toBe(true);
@@ -500,16 +510,7 @@ describe('markPrepaidCoverage', () => {
   const renewals = require('../services/annual-prepay-renewals');
   afterEach(() => jest.restoreAllMocks());
 
-  test('a partial out-of-band prepayment does not cover the visit (its price is still checked)', async () => {
-    const rows = [
-      { id: 'partial', prepaid_amount: 10, prepaid_method: 'cash', estimated_price: 120 },
-      { id: 'full', prepaid_amount: 120, prepaid_method: 'check', estimated_price: 120 },
-    ];
-    await markPrepaidCoverage({}, rows);
-    expect(rows.map((row) => row.prepaid_covered)).toEqual([false, true]);
-  });
-
-  test('an out-of-band stamp counts; an annual stamp counts only when the coverage validator says so; a bare term id never does', async () => {
+  test('an out-of-band stamp is recorded for the price-aware check; an annual stamp counts only when the coverage validator says so; a bare term id never does', async () => {
     const validator = jest.spyOn(renewals, 'annualPrepayCoversVisit').mockImplementation(async (row) => row.id === 'valid');
     const rows = [
       { id: 'cash', prepaid_amount: 100, prepaid_method: 'cash' },
@@ -520,8 +521,9 @@ describe('markPrepaidCoverage', () => {
     ];
     await markPrepaidCoverage({}, rows);
     expect(Object.fromEntries(rows.map((row) => [row.id, row.prepaid_covered]))).toEqual({
-      cash: true, valid: true, stale: false, termonly: false, none: false,
+      cash: false, valid: true, stale: false, termonly: false, none: false,
     });
+    expect(rows[0].prepaid_out_of_band).toBe(100);
     expect(validator).toHaveBeenCalledTimes(3);
   });
 
