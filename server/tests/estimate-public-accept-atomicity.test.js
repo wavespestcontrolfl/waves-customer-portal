@@ -2581,6 +2581,116 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     });
   });
 
+  // GitHub Codex #5481 r3 (structural): ONE collection promise decided in the
+  // accept transaction from the verified tender + the real invoice outcome.
+  describe('r3: the collection promise the accept records equals what the capture UI attested', () => {
+    let verifySpy;
+    let bankSpy;
+    let driftSpy;
+    let underLockSpy;
+    let enrollSpy;
+    const AFTER_VISIT = {
+      recurringCardSetupIntentId: 'seti_captured_1',
+      recurringCardConsentVariant: 'after_visit_card',
+      recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
+      recurringCardConsentTender: 'card',
+    };
+    function verification(methodType) {
+      verifySpy.mockResolvedValue({
+        ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_captured_1', methodType,
+      });
+    }
+    function conversion(firstScheduledServiceId) {
+      EstimateConverter.convertEstimate.mockResolvedValueOnce({
+        customerId: 'cust-1',
+        tier: 'Bronze',
+        monthlyRate: 60,
+        firstScheduledServiceId,
+        recurringConversionSkipped: false,
+        welcomeSms: null,
+        membershipEmail: null,
+        deferredFollowUpReminderRows: [],
+      });
+    }
+    beforeEach(() => {
+      seed();
+      livePolicy({
+        enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true,
+      });
+      verifySpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntent');
+      verification('card');
+      bankSpy = jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+      driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(false);
+      underLockSpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+      enrollSpy = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    });
+    afterEach(() => {
+      [verifySpy, bankSpy, driftSpy, underLockSpy, enrollSpy].forEach((spy) => spy.mockRestore());
+    });
+
+    test('attached first-application invoice + card tender + after-visit attestation: accepted, variant stamped, enrollment records it', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBe('after_visit_card');
+      expect(enrollSpy).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_card' }));
+      expect(retireSpy).not.toHaveBeenCalled();
+    });
+
+    test('an UNATTACHED standard invoice (setup-only shape / no first visit: pay link at accept) is not the after-visit promise — 409, nothing recorded, dropped intent retired', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+      // The promise the server would record rides the 409 so the reloaded tab
+      // renders the base text for this selection instead of looping.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'card' });
+    });
+
+    test('the same unattached shape accepts when the tab rendered (and attests) the base text — recorded variant is base', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card' });
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
+      expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
+    });
+
+    test('ACH tender captured but the tab attests the after-visit CARD text (rendered ACH) — 409, nothing recorded', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('ACH tender, tab attests the tender-specific base text: accepted, no after-visit variant stamped or recorded', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account' });
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
+      expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
+    });
+
+    test('a tab that attests a tender different from the verified one is refused even with no variant', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    });
+
+    test('an old tab with no tender attestation keeps working for a CARD capture (tender defaults to card)', async () => {
+      conversion('ss-first');
+      const { recurringCardConsentTender, ...legacy } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, legacy);
+      expect(res.status).toBe(200);
+    });
+  });
+
   test('P1: the accept transaction lands on a different customer than the resolver judged — 409 ACCEPT_BILLING_CHANGED before conversion', async () => {
     seed();
     livePolicy({

@@ -51,7 +51,7 @@ import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
@@ -3145,7 +3145,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
       // Consent was ticked for the tender the server told us is saved; the
       // accept gate re-verifies the intent against Stripe regardless.
       setSubmitting(true);
-      onSuccess(intent.setupIntentId);
+      onSuccess(intent.setupIntentId, bank ? 'us_bank_account' : 'card');
       return;
     }
     if (!stripeRef.current || !elementsRef.current) return;
@@ -3170,7 +3170,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
           setSubmitting(false);
           return;
         }
-        onSuccess(existing.setupIntent.id);
+        onSuccess(existing.setupIntent.id, bank ? 'us_bank_account' : 'card');
         return;
       }
       const result = await stripeRef.current.confirmSetup({
@@ -3186,7 +3186,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
       }
       const si = result.setupIntent;
       if (si && si.status === 'succeeded') {
-        onSuccess(si.id);
+        onSuccess(si.id, bank ? 'us_bank_account' : 'card');
         return;
       }
       // Instant-verified banks land 'succeeded' like cards; there is no
@@ -3223,7 +3223,10 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
             ? 'Payment method already saved'
             : prepay
               ? (bankOffered ? 'Save your card or bank account — annual prepay' : 'Save your card — annual prepay')
-              : 'Set up Auto Pay'}
+              // Held cohorts (Auto Pay paused / explicitly off) keep the method
+              // on file but are never auto-charged: "Set up Auto Pay" would
+              // contradict the body copy below (GitHub Codex #5481 r3 P2).
+              : ((paused || autopayOff) ? 'Save a payment method' : 'Set up Auto Pay')}
         </div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           {replay
@@ -5768,6 +5771,30 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // resolve-time check needs the live modal state, not its closure snapshot.
   const recurringCardIntentOpenRef = useRef(false);
   const recurringCardSetupIntentIdRef = useRef(null);
+  // GitHub Codex #5481 r3: the collection promise the capture UI RENDERED for
+  // the captured intent — { tender, variant, version } — recorded at the moment
+  // of capture, never recomputed at accept (a plan switch after the capture must
+  // not change what the customer is said to have seen). afterVisitRenderedRef
+  // is the render-time promise the capture surfaces are currently showing.
+  const recurringCardRenderedConsentRef = useRef(null);
+  const afterVisitRenderedRef = useRef({ afterVisit: false, version: AFTER_VISIT_CONSENT_VERSION });
+  // The accept's in-transaction promise can be narrower than /data's best
+  // case for reasons the page cannot see (an existing customer whose series
+  // already exists gets an UNATTACHED first invoice, paid by link at accept).
+  // A CONSENT_VARIANT_STALE 409 returns that promise; remember it for THIS
+  // selection so the next capture renders the base text instead of looping.
+  const [afterVisitDeniedKey, setAfterVisitDeniedKey] = useState(null);
+  const afterVisitSelectionKeyRef = useRef('');
+  const noteRenderedRecurringConsent = useCallback((tender) => {
+    const t = tender === 'us_bank_account' ? 'us_bank_account' : 'card';
+    const cur = afterVisitRenderedRef.current;
+    const afterVisit = cur.afterVisit === true && t === 'card';
+    recurringCardRenderedConsentRef.current = {
+      tender: t,
+      variant: afterVisit ? 'after_visit_card' : null,
+      version: afterVisit ? cur.version : null,
+    };
+  }, []);
   // Server said RECURRING_CARD_REQUIRED but our /data snapshot predates the
   // requirement (flag flipped mid-session, or an exemption changed between
   // /data and /accept) — force the capture branch on the next confirm so the
@@ -5946,6 +5973,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         // intent's purpose metadata, so the wrong-lane echo is ignored.
         cardHoldSetupIntentIdRef.current = siFromRedirect;
         recurringCardSetupIntentIdRef.current = siFromRedirect;
+        // The tender the customer rendered is unknown after a redirect; the
+        // attestation falls back to the current render (card) and the server
+        // verifies it against the intent's real tender.
+        recurringCardRenderedConsentRef.current = null;
       }
       if (piFromRedirect || siFromRedirect) {
         ['payment_intent', 'payment_intent_client_secret', 'setup_intent', 'setup_intent_client_secret', 'redirect_status']
@@ -7192,16 +7223,27 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // Never for annual prepay: the line is not shown for that lane (paid
           // up front), so nothing is attested and nothing is recorded.
           termsVersion: (paymentPreference !== 'prepay_annual' && data?.acceptanceTerms?.version) || undefined,
-          // Attests which card-authorization copy THIS TAB RENDERED
-          // (GATE_PAF_EXISTING_CUSTOMERS) — render-bound, sent only when the
-          // after_visit_card (v12) text is what the capture UI shows (never for
-          // prepay, never for the paused / Auto-Pay-off cohorts, which keep the
-          // base text). The server 409s CONSENT_VARIANT_STALE when what it would
-          // record differs from what was shown.
-          recurringCardConsentVariant: (paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true)
-            ? 'after_visit_card' : undefined,
-          recurringCardConsentVersion: (paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true)
-            ? AFTER_VISIT_CONSENT_VERSION : undefined,
+          // Attests which card-authorization copy THIS TAB RENDERED for the
+          // captured intent (GATE_PAF_EXISTING_CUSTOMERS) — {variant, version,
+          // tender}, taken from what the capture UI showed when the card was
+          // saved: the after_visit_card (v12) text only for a CARD tender when
+          // the promise held (never prepay, never the paused / Auto-Pay-off
+          // cohorts, never a setup-only invoice), the tender-specific base text
+          // otherwise. The server recomputes the promise in the accept
+          // transaction and 409s CONSENT_VARIANT_STALE on any difference.
+          ...(() => {
+            if (paymentPreference === 'prepay_annual' || data?.recurringCardPolicy?.afterVisitConsent !== true) return {};
+            const rendered = recurringCardSetupIntentIdRef.current ? recurringCardRenderedConsentRef.current : null;
+            const cur = afterVisitRenderedRef.current;
+            const tender = rendered ? rendered.tender : 'card';
+            const afterVisit = rendered ? rendered.variant === 'after_visit_card' : cur.afterVisit === true;
+            const version = rendered ? rendered.version : cur.version;
+            return {
+              recurringCardConsentVariant: afterVisit ? 'after_visit_card' : undefined,
+              recurringCardConsentVersion: afterVisit ? version : undefined,
+              recurringCardConsentTender: recurringCardSetupIntentIdRef.current ? tender : undefined,
+            };
+          })(),
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
@@ -7298,6 +7340,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         }
         if (r.status === 409) {
           if (body.code === 'CONSENT_VARIANT_STALE' || body.code === 'ACCEPT_BILLING_CHANGED') {
+            if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise?.tender === 'card') {
+              setAfterVisitDeniedKey(body.collectionPromise.variant ? null : afterVisitSelectionKeyRef.current);
+            }
             // The card-authorization text (or the account's billing cohort) moved
             // since this tab loaded — refetch so the capture UI renders exactly
             // what the server will record, drop the captured intent (its
@@ -7510,6 +7555,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         return;
       }
       recurringCardSetupIntentIdRef.current = cardResult.setupIntentId;
+      noteRenderedRecurringConsent(cardResult.methodType);
       track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
       // Auto-extend trigger 2/3: the inline seamless capture just spent real
       // time confirming the SetupIntent. Awaited, and a definitive answer
@@ -7645,7 +7691,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       }
     }
     await performAccept();
-  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, extendHoldAndSettle]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, extendHoldAndSettle, noteRenderedRecurringConsent]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -7717,8 +7763,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Unlike the card-hold success (which goes straight to accept — the hold
   // supersedes the deposit), the Auto Pay card rides ALONGSIDE the deposit:
   // re-enter handleConfirm so the deposit preflight runs next.
-  const handleRecurringCardSuccess = useCallback(async (setupIntentId) => {
+  const handleRecurringCardSuccess = useCallback(async (setupIntentId, renderedTender) => {
     recurringCardSetupIntentIdRef.current = setupIntentId;
+    noteRenderedRecurringConsent(renderedTender);
     recurringCardIntentOpenRef.current = false;
     setRecurringCardIntent(null);
     track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
@@ -7750,7 +7797,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     if (ctaPhaseRef.current !== 'review'
       || (reservationRef.current?.scheduledServiceId || null) !== holdBeforeExtend) return;
     await handleConfirm();
-  }, [data, handleConfirm, extendHoldAndSettle]);
+  }, [data, handleConfirm, extendHoldAndSettle, noteRenderedRecurringConsent]);
 
   const handleRecurringCardCancel = useCallback(() => {
     recurringCardIntentOpenRef.current = false;
@@ -8320,6 +8367,26 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const rodentSetupInvoiceRows = Number(pricing?.rodentBaitSetupFee?.amount) > 0
     ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
     : [];
+  // The after-visit card promise the capture surfaces render (GitHub Codex #5481
+  // r3): the server's best-case promise (/data afterVisitConsent + version) AND
+  // an invoice shape that is actually deferred to the first visit — a setup-only
+  // invoice goes out as a pay link at accept, so the "billed after your first
+  // visit" text must not render for it. The accept re-checks all of it.
+  const afterVisitInvoiceShape = standardInvoiceShape({
+    setupFee: setupFeeEffective,
+    extraInvoiceRows: rodentSetupInvoiceRows,
+    selectedFrequency: combinedFrequency,
+  });
+  const afterVisitSelectionKey = `${paymentPreference || ''}|${selectedFrequency || ''}|${JSON.stringify(serviceCadences || null)}`;
+  afterVisitSelectionKeyRef.current = afterVisitSelectionKey;
+  const afterVisitRendered = paymentPreference !== 'prepay_annual'
+    && data?.recurringCardPolicy?.afterVisitConsent === true
+    && !afterVisitInvoiceShape.setupOnly
+    && afterVisitDeniedKey !== afterVisitSelectionKey;
+  afterVisitRenderedRef.current = {
+    afterVisit: afterVisitRendered,
+    version: data?.recurringCardPolicy?.afterVisitConsentVersion || AFTER_VISIT_CONSENT_VERSION,
+  };
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -9241,7 +9308,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 onStateChange={handleInlineCardState}
                 onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}
-                afterVisit={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true}
+                afterVisit={afterVisitRendered}
                 paused={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitPaused === true}
                 autopayOff={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitAutopayOff === true}
               />
@@ -9339,7 +9406,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               onCancel={handleRecurringCardCancel}
               onReplace={handleReplacePaymentMethod}
               prepay={paymentPreference === 'prepay_annual'}
-              afterVisit={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitConsent === true}
+              afterVisit={afterVisitRendered}
               paused={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitPaused === true}
               autopayOff={paymentPreference !== 'prepay_annual' && data?.recurringCardPolicy?.afterVisitAutopayOff === true}
             />

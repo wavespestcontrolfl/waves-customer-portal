@@ -184,7 +184,8 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     );
     await flush();
     await act(async () => { second.getByRole('checkbox').click(); });
-    expect(await ref2.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1' });
+    // The tender the consent was rendered for rides the result (the page attests it).
+    expect(await ref2.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1', methodType: 'us_bank_account' });
   });
 
   // "Use a different payment method" (customer report 2026-09-08): a
@@ -208,7 +209,7 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
       expect(getByText(/Your card is already saved for this plan/)).toBeInTheDocument();
       expect(onStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ ready: true, agreed: false, methodType: 'card' }));
       await act(async () => { getByRole('checkbox').click(); });
-      expect(await ref.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1' });
+      expect(await ref.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1', methodType: 'card' });
     });
 
     it('offers "Use a different payment method" and passes the saved intent id to onReplace', async () => {

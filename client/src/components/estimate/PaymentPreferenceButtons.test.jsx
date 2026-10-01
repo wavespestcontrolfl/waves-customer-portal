@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from './PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, standardInvoiceShape } from './PaymentPreferenceButtons';
 import {
   CARD_CONSENT_TEXT as CLIENT_CARD_CONSENT_TEXT,
   CONSENT_VERSION as CLIENT_CONSENT_VERSION,
@@ -415,5 +415,25 @@ describe('PaymentPreferenceButtons', () => {
         expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
       });
     });
+  });
+});
+
+// GitHub Codex #5481 r3: the shared invoice-shape predicate behind the
+// after-visit card promise — a SETUP-ONLY invoice goes out unattached with a
+// pay link at accept, so it is never the "billed after your first visit" promise.
+describe('standardInvoiceShape (after-visit promise gate)', () => {
+  const PER_VISIT = { key: 'quarterly', perVisit: 60 };
+  it('setup + first application, or first application alone: deferrable (not setup-only)', () => {
+    expect(standardInvoiceShape({ setupFee: { amount: 99 }, selectedFrequency: PER_VISIT }).setupOnly).toBe(false);
+    expect(standardInvoiceShape({ selectedFrequency: PER_VISIT }).setupOnly).toBe(false);
+  });
+  it('a setup fee (or rodent setup row) with no first-application amount is setup-only', () => {
+    expect(standardInvoiceShape({ setupFee: { amount: 99 }, selectedFrequency: { key: 'monthly', billingFrequencyKey: 'monthly' } }))
+      .toEqual({ hasSetupInvoice: true, hasFirstVisitInvoice: false, setupOnly: true });
+    expect(standardInvoiceShape({ extraInvoiceRows: [{ label: 'Bait Station Setup', amount: 99 }], selectedFrequency: {} }).setupOnly).toBe(true);
+  });
+  it('no invoice rows at all is not setup-only (nothing is collected at accept)', () => {
+    expect(standardInvoiceShape({ selectedFrequency: {} }).setupOnly).toBe(false);
+    expect(standardInvoiceShape().setupOnly).toBe(false);
   });
 });

@@ -98,13 +98,12 @@ async function chargeTimingLine(customerId, { tender = 'your card', verb = 'char
   try {
     const row = await db('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate', 'waveguard_tier', 'autopay_paused_until');
     mode = row?.billing_mode || null;
-    // PR-B (GATE_PAF_EXISTING_CUSTOMERS, owner R5): a paused customer's card is
-    // kept on file but NOT auto-charged — the per-service "charged
-    // automatically" sentence below would contradict the page and accept copy.
-    // Gate-keyed so gate off is today's wording byte for byte.
-    if (require('../config/feature-gates').pafExistingCustomersLive()) {
-      autopayPaused = require('./autopay-eligibility').isPaused(row || {});
-    }
+    // A paused customer's card is kept on file but NOT auto-charged — the
+    // per-service "charged automatically" sentence below would contradict the
+    // pause. Read from the LIVE pause only, never the rollout gate (GitHub
+    // Codex #5481 r3 P2): webhook recovery can send this email after the gate
+    // is turned off, and the pause is a customer fact the gate does not undo.
+    autopayPaused = require('./autopay-eligibility').isPaused(row || {});
     monthlyRate = Number(row?.monthly_rate) || 0;
     // GUARD 3c parity (Codex r9): the cron now runs NULL rows through the
     // lane resolver, so a tier-less/sentinel-tier row with a lingering rate

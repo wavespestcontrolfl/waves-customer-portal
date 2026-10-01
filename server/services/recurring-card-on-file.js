@@ -1956,6 +1956,73 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
 // recovered/enrolled for it by the setup_intent.succeeded webhook.
 const ACCEPTED_NO_CAPTURE_MARKER = 'no_capture_at_accept';
 
+// ---------------------------------------------------------------------------
+// ONE collection promise (GitHub Codex #5481 r3 — view-vs-accept consent drift,
+// structural fix). What a capture's consent text PROMISES about when money
+// moves is a function of: the live policy cohort (after-visit / paused /
+// opted out), the tender family the customer actually used (card vs bank),
+// and whether the standard first-application invoice is really deferred to
+// the first visit or goes out at accept. /data, the capture UI's attestation,
+// the accept's in-transaction re-check, the recorded consent snapshot and the
+// webhook recovery all read THIS, never their own copies of the predicates.
+//
+// The after-visit authorization (v12) has card copy only: a bank method has no
+// bank-specific variant (the base ACH text already covers a debit after the
+// invoice is due), so a bank capture's promise is the base ACH consent.
+function normalizeCollectionTender(tender) {
+  return tender === 'us_bank_account' || tender === 'ach' ? 'us_bank_account' : 'card';
+}
+
+// Where the accept leaves the standard setup / first-application invoice. The
+// card lane suppresses delivery ONLY for an invoice attached to the first
+// visit (completion reuse finds only attached invoices); an unattached one —
+// the SETUP-ONLY shape, or no first scheduled service — keeps the normal
+// payable path with a pay link at accept. A lane accept that mints no invoice
+// collects nothing at accept either. Shared by the accept's suppression
+// branch and the promise below so they cannot drift.
+function standardInvoiceDelivery({ laneActive = false, minted = false, attached = false } = {}) {
+  const suppressed = !!laneActive && !!minted && !!attached;
+  return { suppressed, collectsAtAccept: !!minted && !suppressed };
+}
+
+function resolveCollectionPromise({
+  policy,
+  tender = 'card',
+  annualPrepay = false,
+  collectsAtAccept = false,
+} = {}) {
+  const t = normalizeCollectionTender(tender);
+  const afterVisit = !annualPrepay
+    && !collectsAtAccept
+    && t === 'card'
+    && !!policy
+    && policy.required === true
+    && policy.afterVisitCard === true
+    && !afterVisitHeld(policy);
+  const variant = afterVisit ? 'after_visit_card' : null;
+  return {
+    variant,
+    version: require('./payment-method-consent-text').consentVersionForVariant(variant, t),
+    tender: t,
+  };
+}
+
+// Does what the capture UI attested it RENDERED equal the promise the accept
+// would record? variant must match exactly (null == not attested). When the
+// promise is the after-visit text, the version and tender must match too; any
+// other promise still rejects a tender the client claims that differs from the
+// verified one.
+function collectionPromiseMatches(expected, attested = {}) {
+  const variant = attested.variant || null;
+  if (variant !== (expected.variant || null)) return false;
+  if (attested.tender && normalizeCollectionTender(attested.tender) !== expected.tender) return false;
+  if (expected.variant) {
+    if (attested.version !== expected.version) return false;
+    if (normalizeCollectionTender(attested.tender) !== expected.tender) return false;
+  }
+  return true;
+}
+
 // True when a no-capture accept must stamp the marker above: the policy is the
 // PR-B existing-customer cohort (afterVisitCard is set only while
 // GATE_PAF_EXISTING_CUSTOMERS is live, never for prepay, and is cleared by the
@@ -1970,6 +2037,10 @@ function acceptDiscardsBindableCapture(policy) {
 module.exports = {
   ACCEPTED_NO_CAPTURE_MARKER,
   acceptDiscardsBindableCapture,
+  normalizeCollectionTender,
+  standardInvoiceDelivery,
+  resolveCollectionPromise,
+  collectionPromiseMatches,
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   payAfterFirstVisitCardRail,

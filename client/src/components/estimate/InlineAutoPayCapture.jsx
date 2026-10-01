@@ -212,6 +212,8 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
      * including the succeeded-replay short-circuit.
      */
     async confirmSetup() {
+      // The tender the consent on screen was rendered for (the parent attests it).
+      const tenderNow = () => (methodTypeRef.current === 'us_bank_account' ? 'us_bank_account' : 'card');
       if (replacing) {
         return { ok: false, error: 'Switching your payment method — one moment.' };
       }
@@ -224,7 +226,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       if (replay) {
         // Consent was ticked for the tender the server told us is saved;
         // the accept gate re-verifies the intent against Stripe regardless.
-        return { ok: true, setupIntentId: intent.setupIntentId };
+        return { ok: true, setupIntentId: intent.setupIntentId, methodType: tenderNow() };
       }
       if (!stripeRef.current || !elementsRef.current) {
         return { ok: false, error: 'The secure card form is still loading — try again in a moment.' };
@@ -247,7 +249,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
             setStaleReplay(true);
             return fail('Your payment method was already saved. Choose "Use a different payment method" below, or refresh this page to continue.');
           }
-          return { ok: true, setupIntentId: existing.setupIntent.id };
+          return { ok: true, setupIntentId: existing.setupIntent.id, methodType: tenderNow() };
         }
         const result = await stripeRef.current.confirmSetup({
           elements: elementsRef.current,
@@ -259,7 +261,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         }
         const si = result.setupIntent;
         if (si && si.status === 'succeeded') {
-          return { ok: true, setupIntentId: si.id };
+          return { ok: true, setupIntentId: si.id, methodType: tenderNow() };
         }
         // Instant-verified banks land 'succeeded' like cards; a bank that
         // could not instant-verify never gets here (Stripe surfaces the

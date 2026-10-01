@@ -70,18 +70,23 @@ describe('accept notification copy (existing customer on the card rail)', () => 
 describe('accept route wiring (source pins)', () => {
   const src = read('routes/estimate-public.js');
 
-  test('the card enrollment records after_visit_card (v12) for a moved existing customer who captures a card (NOT a paused one: never auto-charged), with prepay_card still winning for in-lane prepay', () => {
+  test('the card enrollment records the ONE shared collection promise decided in the accept transaction (prepay_card still wins for in-lane prepay)', () => {
     expect(src).toMatch(
-      /const recurringCardAfterVisitVariant = recurringCardPolicy\.required === true\s*&& recurringCardPolicy\.afterVisitCard === true\s*&& !RecurringCards\.afterVisitHeld\(recurringCardPolicy\)\s*\? 'after_visit_card' : null;/,
+      /const recurringCardPromiseCeiling = RecurringCards\.resolveCollectionPromise\(\{\s*policy: recurringCardPolicy,\s*tender: 'card',\s*annualPrepay: annualPrepaySelected,\s*\}\);/,
     );
     expect(src).toMatch(
-      /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'[\s\S]{0,400}: recurringCardAfterVisitVariant,/,
+      /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'[\s\S]{0,400}: \(acceptedCollectionPromise\?\.variant \|\| null\),/,
     );
+    // No second copy of the variant predicate in the route.
+    expect(src).not.toMatch(/recurringCardAfterVisitVariant/);
   });
 
-  test('the variant is stamped on the estimate with the accepted SetupIntent so webhook recovery records the same text', () => {
-    expect(src).toMatch(/recurringCardVerification\?\.ok && recurringCardVerification\.setupIntentId && recurringCardAfterVisitVariant/);
-    expect(src).toMatch(/'\{acceptedRecurringCardConsentVariant\}', to_jsonb\(\?::text\)\)",\s*\[recurringCardAfterVisitVariant\]/);
+  test('the promise is recomputed IN the accept transaction from the verified tender and the real invoice outcome, 409s on any attestation difference, and is what gets stamped', () => {
+    expect(src).toMatch(/const delivery = RecurringCards\.standardInvoiceDelivery\(\{\s*laneActive: recurringCardLaneActive,\s*minted: standardInvoiceMinted,\s*attached: standardInvoiceAttached,\s*\}\);/);
+    expect(src).toMatch(/tender: recurringCardVerification\.methodType,\s*collectsAtAccept: delivery\.collectsAtAccept,/);
+    expect(src).toMatch(/!RecurringCards\.collectionPromiseMatches\(expectedPromise, \{\s*variant: attestedConsentVariant,\s*version: attestedConsentVersion,\s*tender: attestedConsentTender,\s*\}\)\) \{\s*await retireOrDenyDroppedCapture\(estimate, recurringCardVerification\.setupIntentId\);[\s\S]{0,300}err\.code = 'CONSENT_VARIANT_STALE';/);
+    expect(src).toMatch(/acceptedCollectionPromise = expectedPromise;/);
+    expect(src).toMatch(/'\{acceptedRecurringCardConsentVariant\}', to_jsonb\(\?::text\)\)",\s*\[expectedPromise\.variant\]/);
   });
 
   test('the accept notification flag requires the sub-gate, the marker and the lane', () => {
@@ -92,15 +97,14 @@ describe('accept route wiring (source pins)', () => {
 
   test('no pay link at accept rides the SAME shared lane predicate the new-customer rail uses (no second inline predicate)', () => {
     expect(src).toMatch(/const recurringCardLaneActive = RecurringCards\.payAfterFirstVisitInvoiceRail\(recurringCardPolicy\);/);
-    expect(src).toMatch(/if \(recurringCardLaneActive && standardInvoiceAttached\) \{[\s\S]{0,900}invoiceModeResult = false;\s*invoicePayUrlResult = null;/);
+    // Suppression and the promise share ONE delivery function.
+    expect(src).toMatch(/if \(RecurringCards\.standardInvoiceDelivery\(\{\s*laneActive: recurringCardLaneActive, minted: true, attached: standardInvoiceAttached,\s*\}\)\.suppressed\) \{[\s\S]{0,900}invoiceModeResult = false;\s*invoicePayUrlResult = null;/);
   });
 
-  test('render attestation: the accept 409s CONSENT_VARIANT_STALE when the recorded variant differs from the one the page rendered (never records unseen text)', () => {
+  test('render attestation: a variant the best-case promise cannot be 409s CONSENT_VARIANT_STALE up front (never records unseen text)', () => {
     // Checked only when a card is captured (a consent row is recorded) and not for prepay.
     expect(src).toMatch(/\} else if \(!annualPrepaySelected\) \{[\s\S]{0,2600}code: 'CONSENT_VARIANT_STALE'/);
-    // Version is verified against the server's own constant, variant against the live-recomputed one.
-    expect(src).toMatch(/attestedConsentVersion === require\('\.\.\/services\/payment-method-consent-text'\)\.AFTER_VISIT_CONSENT_VERSION/);
-    expect(src).toMatch(/consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'\s*\? !attestedAfterVisit\s*: attestedConsentVariant !== '';/);
+    expect(src).toMatch(/consentMismatch = attestedConsentVariant !== ''\s*&& \(attestedConsentVariant !== recurringCardPromiseCeiling\.variant\s*\|\| attestedConsentVersion !== recurringCardPromiseCeiling\.version\);/);
     expect(src).toMatch(/return res\.status\(409\)\.json\(\{[^}]*code: 'CONSENT_VARIANT_STALE'/);
   });
 

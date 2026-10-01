@@ -91,6 +91,20 @@ function firstVisitAmount(frequency = {}) {
   return null;
 }
 
+// The standard setup / first-application invoice shape for the selected plan,
+// from the SAME rows the invoice box above the CTA renders. The after-visit
+// card promise ("billed after your first visit") holds only when a first-
+// application invoice exists to attach to the visit: a SETUP-ONLY invoice is
+// minted unattached and its pay link goes out at accept (GitHub Codex #5481
+// r3), so the capture UI must not render — or attest — that promise for it.
+export function standardInvoiceShape({ setupFee = null, extraInvoiceRows = [], selectedFrequency = null } = {}) {
+  const setupAmount = Number(setupFee?.amount);
+  const hasSetupInvoice = (Number.isFinite(setupAmount) && setupAmount > 0)
+    || (Array.isArray(extraInvoiceRows) ? extraInvoiceRows : []).some((row) => Number(row?.amount) > 0);
+  const hasFirstVisitInvoice = Number(firstVisitAmount(selectedFrequency || {}) || 0) > 0;
+  return { hasSetupInvoice, hasFirstVisitInvoice, setupOnly: hasSetupInvoice && !hasFirstVisitInvoice };
+}
+
 export default function PaymentPreferenceButtons({
   onSelect,
   disabled,

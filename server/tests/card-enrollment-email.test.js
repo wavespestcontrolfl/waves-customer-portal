@@ -273,10 +273,13 @@ describe('charge timing line by billing mode (Codex r3)', () => {
       expect(line).not.toMatch(/is charged that service/);
     });
 
-    test('sub-gate off (or only the master gate): today\'s per-service line, byte for byte', async () => {
-      expect(await timingLineFor(PAUSED)).toBe(PER_SERVICE);
+    // r3 P2: the timing line follows the LIVE pause, never the rollout gate —
+    // webhook recovery can send this email after the gate was turned off.
+    test('the paused line does NOT depend on the rollout gates (live pause only)', async () => {
+      const PAUSED_LINE = 'Your Auto Pay is paused, so nothing is charged automatically right now. Your card stays on file, and we send you a link to pay after each completed service.';
+      expect(await timingLineFor(PAUSED)).toBe(PAUSED_LINE);
       process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
-      expect(await timingLineFor(PAUSED)).toBe(PER_SERVICE);
+      expect(await timingLineFor(PAUSED)).toBe(PAUSED_LINE);
     });
 
     test('sub-gate on but NOT paused (or the pause already lapsed): unchanged per-service line', async () => {

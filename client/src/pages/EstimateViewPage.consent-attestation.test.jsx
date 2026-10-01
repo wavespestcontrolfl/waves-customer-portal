@@ -19,18 +19,34 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(AFTER_VISIT_CONSENT_VERSION).toBe(serverConsent.AFTER_VISIT_CONSENT_VERSION);
   });
 
-  it('sends the variant + version only when the after_visit_card text is what the capture UI renders, never for prepay', () => {
-    expect(src).toMatch(
-      /recurringCardConsentVariant: \(paymentPreference !== 'prepay_annual' && data\?\.recurringCardPolicy\?\.afterVisitConsent === true\)\s*\? 'after_visit_card' : undefined,/,
-    );
-    expect(src).toMatch(
-      /recurringCardConsentVersion: \(paymentPreference !== 'prepay_annual' && data\?\.recurringCardPolicy\?\.afterVisitConsent === true\)\s*\? AFTER_VISIT_CONSENT_VERSION : undefined,/,
-    );
+  it('attests {variant, version, tender} from what the capture UI RENDERED at capture time (r3: never recomputed at accept, never a constant), never for prepay', () => {
+    // Recorded when the card is saved, from the same flag the capture surfaces render from + the tender in use.
+    expect(src).toMatch(/noteRenderedRecurringConsent = useCallback\(\(tender\) => \{[\s\S]{0,500}variant: afterVisit \? 'after_visit_card' : null,[\s\S]{0,80}version: afterVisit \? cur\.version : null,/);
+    expect(src).toMatch(/noteRenderedRecurringConsent\(renderedTender\);/);
+    expect(src).toMatch(/noteRenderedRecurringConsent\(cardResult\.methodType\);/);
+    expect(src).toMatch(/if \(paymentPreference === 'prepay_annual' \|\| data\?\.recurringCardPolicy\?\.afterVisitConsent !== true\) return \{\};/);
+    expect(src).toMatch(/recurringCardConsentVariant: afterVisit \? 'after_visit_card' : undefined,/);
+    expect(src).toMatch(/recurringCardConsentVersion: afterVisit \? version : undefined,/);
+    expect(src).toMatch(/recurringCardConsentTender: recurringCardSetupIntentIdRef\.current \? tender : undefined,/);
+    // The version the server emits wins over the mirrored constant.
+    expect(src).toMatch(/version: data\?\.recurringCardPolicy\?\.afterVisitConsentVersion \|\| AFTER_VISIT_CONSENT_VERSION,/);
   });
 
-  it('the attestation is keyed off the SAME flag the capture UI uses to render the after-visit text', () => {
-    const renders = src.match(/afterVisit=\{paymentPreference !== 'prepay_annual' && data\?\.recurringCardPolicy\?\.afterVisitConsent === true\}/g) || [];
+  it('the capture surfaces render from the SAME promise flag the attestation reads (server best case AND a setup-only invoice is not the after-visit promise)', () => {
+    expect(src).toMatch(/const afterVisitRendered = paymentPreference !== 'prepay_annual'\s*&& data\?\.recurringCardPolicy\?\.afterVisitConsent === true\s*&& !afterVisitInvoiceShape\.setupOnly\s*&& afterVisitDeniedKey !== afterVisitSelectionKey;/);
+    // A CONSENT_VARIANT_STALE 409 carries the promise the server would record;
+    // a card promise without the after-visit variant is remembered for THIS
+    // selection so the reloaded capture renders the base text (no 409 loop).
+    expect(src).toMatch(/body\.code === 'CONSENT_VARIANT_STALE' && body\.collectionPromise\?\.tender === 'card'\) \{\s*setAfterVisitDeniedKey\(body\.collectionPromise\.variant \? null : afterVisitSelectionKeyRef\.current\);/);
+    expect(src).toMatch(/afterVisitRenderedRef\.current = \{\s*afterVisit: afterVisitRendered,/);
+    const renders = src.match(/afterVisit=\{afterVisitRendered\}/g) || [];
     expect(renders.length).toBe(2);
+    // Both capture surfaces report the tender the consent was rendered for.
+    expect(src.match(/onSuccess\([^)]*, bank \? 'us_bank_account' : 'card'\);/g).length).toBe(3);
+  });
+
+  it('r3 P2: the held cohorts (Auto Pay paused / explicitly off) get a save-only modal title, not "Set up Auto Pay"', () => {
+    expect(src).toMatch(/\(paused \|\| autopayOff\) \? 'Save a payment method' : 'Set up Auto Pay'/);
   });
 
   it('a CONSENT_VARIANT_STALE / ACCEPT_BILLING_CHANGED 409 drops the captured intent and refetches /data so the UI re-renders what the server will record', () => {

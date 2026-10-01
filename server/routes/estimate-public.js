@@ -9223,6 +9223,20 @@ async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
   });
 }
 
+// A reloadable accept refusal makes the client DROP the SetupIntent it
+// captured, orphaning it (succeeded in Stripe, bound to nothing). Retire it so
+// no later recovery can read it as a legacy capture; when Stripe cannot confirm
+// the retirement the accept fails closed (503) and the tab keeps its intent.
+async function retireOrDenyDroppedCapture(estimate, setupIntentId) {
+  const retired = await RecurringCards.retireOrphanedCaptureIntent({ estimate, setupIntentId });
+  if (!retired.ok) {
+    const err = new Error('We could not update your payment terms just now. Please try again in a moment.');
+    err.status = 503;
+    err.code = 'RECURRING_CARD_RETIRE_FAILED';
+    throw err;
+  }
+}
+
 // PUT /api/estimates/:token/accept — customer accepts
 // Body (backward compatible — both optional):
 //   { slotId?: string, paymentMethodPreference?: 'card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual' }
@@ -9925,16 +9939,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }),
     });
     const recurringCardLaneActive = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicy);
-    // PR-B (GATE_PAF_EXISTING_CUSTOMERS): the consent variant the capture UI
-    // rendered for a moved existing customer who must capture a card. Paused
-    // Auto Pay (owner R5) and an explicit Auto Pay opt-out are never
-    // auto-charged, so they keep the base consent.
-    // Stamped on the estimate with the accepted SetupIntent so the webhook
-    // recovery records the SAME variant the customer saw.
-    const recurringCardAfterVisitVariant = recurringCardPolicy.required === true
-      && recurringCardPolicy.afterVisitCard === true
-      && !RecurringCards.afterVisitHeld(recurringCardPolicy)
-      ? 'after_visit_card' : null;
+    // PR-B (GATE_PAF_EXISTING_CUSTOMERS) / GitHub Codex #5481 r3: the consent a
+    // capture records is ONE shared "collection promise"
+    // (RecurringCards.resolveCollectionPromise): policy cohort + the tender the
+    // customer actually used + whether the standard invoice is really deferred
+    // to the first visit. The tender and the invoice outcome are only known
+    // after verification / inside the accept transaction, so this is the
+    // BEST-CASE promise (card tender, invoice deferred): an attestation of any
+    // other variant is refused up front, and the exact check + the recorded
+    // variant are decided in the transaction from the same function.
+    const recurringCardPromiseCeiling = RecurringCards.resolveCollectionPromise({
+      policy: recurringCardPolicy,
+      tender: 'card',
+      annualPrepay: annualPrepaySelected,
+    });
+    let acceptedCollectionPromise = null;
     // Render attestation (GitHub Codex #5481 r1 P1): the capture UI sends the
     // consent variant + version IT RENDERED (/data recurringCardPolicy
     // .afterVisitConsent, never for prepay). The recorded variant is
@@ -9962,6 +9981,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       ? req.body.recurringCardConsentVariant.trim().slice(0, 40) : '';
     const attestedConsentVersion = typeof req.body?.recurringCardConsentVersion === 'string'
       ? req.body.recurringCardConsentVersion.trim().slice(0, 40) : '';
+    // Tender family the capture UI actually RENDERED its consent for.
+    const attestedConsentTender = typeof req.body?.recurringCardConsentTender === 'string'
+      ? req.body.recurringCardConsentTender.trim().slice(0, 40) : '';
     const requestCarriesCapture = recurringCardSetupIntentId !== '' || attestedConsentVariant !== '';
     let consentMismatch = false;
     if (recurringCardPolicy.required !== true) {
@@ -9972,11 +9994,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // those keep ignoring it instead of bouncing the customer.
       consentMismatch = requestCarriesCapture && !treatAsOneTime && !billByInvoice;
     } else if (!annualPrepaySelected) {
-      const attestedAfterVisit = attestedConsentVariant === 'after_visit_card'
-        && attestedConsentVersion === require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION;
-      consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'
-        ? !attestedAfterVisit
-        : attestedConsentVariant !== '';
+      // A variant the best-case promise cannot be is stale outright; the
+      // after-visit promise's exact tender / version / invoice-outcome check
+      // runs in the accept transaction (an ABSENT attestation is legitimate
+      // there for a bank tender or a setup-only invoice).
+      consentMismatch = attestedConsentVariant !== ''
+        && (attestedConsentVariant !== recurringCardPromiseCeiling.variant
+          || attestedConsentVersion !== recurringCardPromiseCeiling.version);
     }
     if (consentMismatch) {
       // r3 pre-push P0: the client drops the intent it captured on this 409,
@@ -11183,18 +11207,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         });
       }
 
-      // PR-B: persist the consent variant with the accepted intent so the
-      // setup_intent.succeeded recovery (stripe-webhook.js) records the same
-      // authorization the capture UI rendered (after_visit_card v12).
-      if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId && recurringCardAfterVisitVariant) {
-        await trx('estimates').where({ id: estimate.id }).update({
-          estimate_data: trx.raw(
-            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardConsentVariant}', to_jsonb(?::text))",
-            [recurringCardAfterVisitVariant],
-          ),
-        });
-      }
-
       // Click-to-estimate mints only (GitHub #3391 P1): acceptance is the
       // customer self-booking the very thing the CTA request row asked
       // staff to follow up on — leaving it open pages staff after 24h
@@ -11529,16 +11541,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // be exempt and write no marker, can never have it recovered as a
         // legacy capture (r3 pre-push P0). Fail closed if Stripe cannot confirm.
         if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
-          const retired = await RecurringCards.retireOrphanedCaptureIntent({
-            estimate,
-            setupIntentId: recurringCardVerification.setupIntentId,
-          });
-          if (!retired.ok) {
-            const retireErr = new Error('We could not update your payment terms just now. Please try again in a moment.');
-            retireErr.status = 503;
-            retireErr.code = 'RECURRING_CARD_RETIRE_FAILED';
-            throw retireErr;
-          }
+          await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
         }
         const err = new Error('Your account just changed. Please reload the page and confirm again.');
         err.status = 409;
@@ -12787,7 +12790,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // The customer-facing amount is the invoice's actual after-tax,
             // after-credit total — the same figure the /pay page collects.
             invoiceAmountResult = Number(inv.total) || 0;
-            if (recurringCardLaneActive && standardInvoiceAttached) {
+            if (RecurringCards.standardInvoiceDelivery({
+              laneActive: recurringCardLaneActive, minted: true, attached: standardInvoiceAttached,
+            }).suppressed) {
               // Card-on-file lane (spec §3.1, Codex #2680): the invoice is
               // still minted — it anchors the setup fee + first application
               // amount and the deposit credit — but NOTHING is due at
@@ -12808,6 +12813,56 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               invoicePayUrlResult = inv.token ? `/pay/${inv.token}` : null;
             }
           }
+        }
+      }
+
+      // GitHub Codex #5481 r3 (structural): the collection promise this accept
+      // RECORDS is decided HERE, in the transaction, from the same predicates
+      // that just attached / suppressed (or didn't) the standard invoice and the
+      // verified tender — and the capture UI's attestation must equal it. A
+      // setup-only invoice (unattached, pay link at accept) or a bank tender
+      // is not the "billed after your first visit" promise the after-visit text
+      // makes, so a tab that rendered it is refused (reloadable 409) and the
+      // intent it dropped is retired; nothing is recorded on a mismatch.
+      if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId && !annualPrepaySelected) {
+        const delivery = RecurringCards.standardInvoiceDelivery({
+          laneActive: recurringCardLaneActive,
+          minted: standardInvoiceMinted,
+          attached: standardInvoiceAttached,
+        });
+        const expectedPromise = RecurringCards.resolveCollectionPromise({
+          policy: recurringCardPolicy,
+          tender: recurringCardVerification.methodType,
+          collectsAtAccept: delivery.collectsAtAccept,
+        });
+        if (!RecurringCards.collectionPromiseMatches(expectedPromise, {
+          variant: attestedConsentVariant,
+          version: attestedConsentVersion,
+          tender: attestedConsentTender,
+        })) {
+          await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
+          const err = new Error('Your payment terms were just updated. Please reload the page and review the card authorization before confirming.');
+          err.status = 409;
+          err.code = 'CONSENT_VARIANT_STALE';
+          // The promise the server WOULD record, so the reloaded tab renders it
+          // instead of re-attesting the same best case: an existing customer
+          // whose series already exists gets an UNATTACHED first invoice (pay
+          // link at accept) that /data cannot predict, and without this the
+          // customer would 409 on every confirm.
+          err.collectionPromise = { variant: expectedPromise.variant, tender: expectedPromise.tender };
+          throw err;
+        }
+        acceptedCollectionPromise = expectedPromise;
+        // Persist the variant with the accepted intent so the
+        // setup_intent.succeeded recovery (stripe-webhook.js) records the SAME
+        // authorization — read from the persisted promise, never recomputed.
+        if (expectedPromise.variant) {
+          await trx('estimates').where({ id: estimate.id }).update({
+            estimate_data: trx.raw(
+              "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardConsentVariant}', to_jsonb(?::text))",
+              [expectedPromise.variant],
+            ),
+          });
         }
       }
 
@@ -13078,7 +13133,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Paused Auto Pay (owner R5) keeps the card but is never charged
             // automatically, so the "charged after your first visit"
             // authorization is NOT what that customer was shown or agreed to.
-            : recurringCardAfterVisitVariant,
+            : (acceptedCollectionPromise?.variant || null),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
@@ -14888,7 +14943,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // raced hold (OFF_CUSTOMER_SURFACE) must read exactly like an unknown
       // token (codex #4667 r38 P0).
       if (err.status === 404) return res.status(404).json({ error: 'Estimate not found' });
-      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+      return res.status(err.status).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.collectionPromise ? { collectionPromise: err.collectionPromise } : {}),
+      });
     }
     next(err);
   }
@@ -28318,9 +28377,19 @@ async function composeEstimateDataPayload(estimate, {
         ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.autopayDisabled === true
           && RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData)
           ? { afterVisitAutopayOff: true } : {}),
-        ...(recurringCardPolicyForData.afterVisitCard === true && recurringCardPolicyForData.required === true
-          && !RecurringCards.afterVisitHeld(recurringCardPolicyForData)
-          ? { afterVisitConsent: true } : {}),
+        // The collection promise's best case for a CARD tender (GitHub Codex
+        // #5481 r3): the SAME function the accept re-runs in its transaction
+        // with the verified tender and the real invoice outcome. The version
+        // is emitted so the client attests exactly what the server would
+        // record; a bank tender or a setup-only invoice (resolved per plan
+        // selection on the client) narrows it, and the accept 409s on any
+        // difference.
+        ...(() => {
+          const promise = RecurringCards.resolveCollectionPromise({ policy: recurringCardPolicyForData, tender: 'card' });
+          return promise.variant
+            ? { afterVisitConsent: true, afterVisitConsentVersion: promise.version }
+            : {};
+        })(),
       },
       estimate: {
         id: estimate.id,
