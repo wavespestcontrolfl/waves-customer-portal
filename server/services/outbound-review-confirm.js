@@ -803,14 +803,15 @@ async function hasRecordedOfficeConfirm(dbh, serviceId) {
  * so the visit is no longer a hold and its recap sends normally. The card-on-file request
  * is skipped (the tech collects in person). No-op for every other visit; best-effort, never
  * throws — a failed release leaves the hold (and its customer-message hold) in place.
- * @returns {Promise<boolean>} true when THIS call released the hold
+ * @returns {Promise<boolean|null>} null when the visit is not a hold (nothing to do), true when THIS
+ *   call released it, false when it is a hold that could not be released
  */
 async function releaseStreetLevelHoldForCompletion(svc, actor = {}, routeTag = 'completion') {
   try {
     const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
-    if (!svc?.id || svc.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || svc.customer_confirmed === true) return false;
+    if (!svc?.id || svc.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || svc.customer_confirmed === true) return null;
     const dbh = require('../models/db');
-    if (!(await isStreetLevelHoldVisit(svc.id, dbh))) return false;
+    if (!(await isStreetLevelHoldVisit(svc.id, dbh))) return null;
     // Read the CURRENT row: completion may already have moved the visit to 'completed'.
     let row = await dbh('scheduled_services').where({ id: svc.id }).first(
       'id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'source_call_log_id', 'is_callback', 'estimated_price', 'status',

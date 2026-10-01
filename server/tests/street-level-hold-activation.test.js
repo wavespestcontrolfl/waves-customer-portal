@@ -257,9 +257,9 @@ describe('owner ruling 2026-10-01: completing the visit confirms the address (sh
     jest.clearAllMocks();
     const none = makeHandle({ visit: baseVisit(), held: false, calls });
     db.mockImplementation(none);
-    expect(await releaseStreetLevelHoldForCompletion(baseVisit(), actor)).toBe(false);
-    expect(await releaseStreetLevelHoldForCompletion(baseVisit({ customer_confirmed: true }), actor)).toBe(false);
-    expect(await releaseStreetLevelHoldForCompletion(baseVisit({ source_action: 'ai_call_pipeline' }), actor)).toBe(false);
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit(), actor)).toBeNull();
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit({ customer_confirmed: true }), actor)).toBeNull();
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit({ source_action: 'ai_call_pipeline' }), actor)).toBeNull();
     expect(transitionJobStatus).not.toHaveBeenCalled();
   });
 
@@ -306,5 +306,22 @@ describe('a completed hold (completion recorded the approval) may retry its fail
     const h = makeHandle({ visit: baseVisit({ status: 'confirmed' }), held: true, history: false, calls: moved });
     expect(await activateLegacyOutboundReviewRowIfNeeded(h, 'v1', 'rebooker-reschedule')).toBe(false);
     expect(moved.updates).toHaveLength(0);
+  });
+});
+
+describe('a failed release keeps the saved completion resumable', () => {
+  const { releaseStreetLevelHoldForCompletion } = require('../services/outbound-review-confirm');
+  test('both release sites turn a failed release into a retryable 503 (attempt released for resume) instead of finalizing', () => {
+    const s = fs.readFileSync(require.resolve('../services/complete-scheduled-service.js'), 'utf8');
+    expect(s.split('if (holdRelease === false) {').length - 1).toBe(2);
+    expect(s.split("code: 'street_level_hold_release_failed',").length - 1).toBe(2);
+    expect(s.split("releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'))").length - 1).toBe(2);
+  });
+  test('the release reports false (not null) when it is a hold whose activation failed or threw', async () => {
+    const calls = { hold: 0, updates: [] };
+    const handle = makeHandle({ visit: baseVisit(), held: true, calls });
+    db.mockImplementation(() => { throw new Error('db down'); });
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit(), { technicianId: 't' })).toBe(false);
+    void handle;
   });
 });

@@ -5074,7 +5074,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // its address — released only now that the completion is durably committed (a rejected
       // completion never approves the address) and before any customer delivery below, so the
       // recap is no longer a held message. A no-op for every other visit; best-effort.
-      await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor);
+      const holdRelease = await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor);
+      // A hold that could NOT be released leaves the recap a held message: keep the saved completion
+      // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
+      if (holdRelease === false) {
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'));
+        return ({ status: 503, body: {
+          error: 'The visit is saved, but its address hold could not be released yet — the closeout is NOT finalized. Retry the closeout.',
+          code: 'street_level_hold_release_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+        } });
+      }
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
@@ -7421,7 +7431,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // its address — released only now that the completion is durably committed (a rejected
         // completion never approves the address) and before any customer delivery below, so the
         // recap is no longer a held message. A no-op for every other visit; best-effort.
-        await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor);
+        const holdRelease = await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor);
+        // A hold that could NOT be released leaves the recap a held message: keep the saved completion
+        // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
+        if (holdRelease === false) {
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'));
+          return ({ status: 503, body: {
+            error: 'The visit is saved, but its address hold could not be released yet — the closeout is NOT finalized. Retry the closeout.',
+            code: 'street_level_hold_release_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          } });
+        }
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
