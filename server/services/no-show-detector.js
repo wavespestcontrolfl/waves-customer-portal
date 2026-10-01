@@ -1161,6 +1161,11 @@ async function promisedVisitIds(conn, { now }) {
   ].filter(Boolean).map(String))];
 }
 
+// Subquery builder for `s`: the visit is a live, uncleared street-level address hold (street-level-hold.js).
+function unclearedHold() {
+  require('./street-level-hold').heldVisitSubquery(this, 's');
+}
+
 async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
   if (!enabled()) return [];
   // Candidates by SCHEDULE DATE (the indexed scan) OR by PROMISED WINDOW: a
@@ -1175,6 +1180,8 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
     .where((qb) => qb
       .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
       .modify((inner) => { if (promisedIds.length) inner.orWhereIn('s.id', promisedIds); }))
+    // An uncleared street-level address hold was never dispatched: no no-show for it.
+    .whereNotExists(unclearedHold)
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
   // A recalled row that is NOT live still names a stop: the grouped reminder
   // is linked to whichever member won the send claim, and that member may
@@ -1190,6 +1197,7 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
     ? await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
       .whereIn('s.visit_id', strandedStops).whereIn('s.status', LIVE_STATUSES)
       .whereNotIn('s.id', rows.map((r) => r.id))
+      .whereNotExists(unclearedHold)
       .select('s.*', 'c.first_name', 'c.last_name', 'c.phone')
     : [];
   const liveRows = [...rows, ...stranded]
@@ -1309,9 +1317,11 @@ async function alreadyHasOpenAlert(trx, { jobId, type, key }) {
 // technician_id, so a stale tracking notice stayed visible to a now
 // office-only user who cannot act on it (codex P2, pre-push audit on
 // 04ecfd821).
-function noticeStillCurrent({ live, visit, notice, recipientTech }) {
+// `held`: the visit is a live street-level address hold — never dispatched, so no technician notice about it is
+// current (the one place the reconcile decides this; the dismissal below is the existing automatic one).
+function noticeStillCurrent({ live, visit, notice, recipientTech, held = false }) {
   const sameRecipient = !!(live && visit?.technician_id === notice?.technician_id);
-  return sameRecipient && isAssignable(recipientTech)
+  return !held && sameRecipient && isAssignable(recipientTech)
     && live.stage === notice?.payload?.stage
     && live.promised_window.start_at === notice?.payload?.promised_window?.start_at;
 }
@@ -1572,6 +1582,9 @@ async function sweep(conn, { now = new Date() } = {}) {
       const at = new Date();
       const { visit, live } = await lockedStop(trx, card.id, { now: at });
       if (!enabled() || !visit) return null;
+      // lockedStop holds the visit's row lock FOR UPDATE (the promoter's own lock): a street-level hold
+      // promoted after the candidate scan is seen here, atomically, and gets no card or notice.
+      if (await require('./street-level-hold').isStreetLevelHoldVisit(card.id, trx)) return null;
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
         employment_status: 'active', field_dispatchable: true }).first('id', 'name') : null;
@@ -1665,7 +1678,10 @@ async function sweep(conn, { now = new Date() } = {}) {
     // any other mismatch already dismisses the notice.
     const recipientTech = sameRecipient ? await trx('technicians').where({ id: visit.technician_id })
       .first('id', 'employment_status', 'field_dispatchable') : null;
-    if (!noticeStillCurrent({ live, visit, notice, recipientTech })) {
+    // A visit promoted to a street-level hold after its notice was raised: lockedStop holds the stop's row lock,
+    // so this read is atomic with it. Only asked when the notice would otherwise stay current.
+    const held = !!(visitId && sameRecipient && await require('./street-level-hold').isStreetLevelHoldVisit(visitId, trx));
+    if (!noticeStillCurrent({ live, visit, notice, recipientTech, held })) {
       // Stamped as an AUTOMATIC dismissal (never a tech's own Got-it tap —
       // routes/tech-notifications.js's /dismiss and /confirm-start never
       // touch payload), so recordTrackingNotice can revive this same row
