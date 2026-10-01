@@ -687,6 +687,20 @@ describe('the review window: anniversaries 35–65 days out from the build date'
     const explicit = await rateReview.buildBatch({ batchKey: '2026-11', anniversaryFrom: '2026-01-01', anniversaryTo: '2026-12-31', now: NOW });
     expect(explicit.window).toEqual({ from: '2026-01-01', to: '2026-12-31' });
   });
+  test('a recompute of an EXISTING batch keeps the window it was built with — a later rebuild never slides it and drops rows', async () => {
+    const scenario = { planLines: [], customers: [], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, batchRow: { batch_key: '2026-11', window_from: '2026-12-06', window_to: '2027-01-05' } };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    // rebuilt nine days later: the rolling window would now start Dec 15
+    const rebuilt = await rateReview.buildBatch({ batchKey: '2026-11', now: new Date('2026-11-10T11:20:00Z') });
+    expect(rebuilt.window).toEqual({ from: '2026-12-06', to: '2027-01-05' });
+    // an explicit window still wins, and a batch with no stored row takes the rolling default
+    expect((await rateReview.buildBatch({ batchKey: '2026-11', anniversaryFrom: '2026-12-10', anniversaryTo: '2026-12-20', now: new Date('2026-11-10T11:20:00Z') })).window).toEqual({ from: '2026-12-10', to: '2026-12-20' });
+    scenario.batchRow = null;
+    expect((await rateReview.buildBatch({ batchKey: '2026-11', now: new Date('2026-11-10T11:20:00Z') })).window).toEqual({ from: '2026-12-15', to: '2027-01-14' });
+  });
   test('impossible batch months and calendar dates are 400s in the service', async () => {
     await expect(rateReview.buildBatch({ batchKey: '2026-13' })).rejects.toMatchObject({ status: 400 });
     await expect(rateReview.buildBatch({ batchKey: '2026-00' })).rejects.toMatchObject({ status: 400 });

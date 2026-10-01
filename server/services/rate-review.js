@@ -1727,17 +1727,24 @@ function rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEd
 async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null, now = new Date(), deps = {} } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
-  // No explicit window → the standing review window relative to the build
-  // date (35–65 days out), the same one the monthly job uses.
-  const defaults = reviewWindowFor(now);
-  const from = anniversaryFrom || defaults.from;
-  const to = anniversaryTo || defaults.to;
-  assertYmd(from, 'anniversaryFrom');
-  assertYmd(to, 'anniversaryTo');
-  if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
+  if (anniversaryFrom) assertYmd(anniversaryFrom, 'anniversaryFrom');
+  if (anniversaryTo) assertYmd(anniversaryTo, 'anniversaryTo');
+  if (anniversaryFrom && anniversaryTo && anniversaryFrom > anniversaryTo) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
 
   const dbh = trx || db;
   if (await batchHasSentRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', batchKey };
+
+  // No explicit window → an EXISTING batch keeps the window it was built
+  // with (a recompute must never drop rows by sliding the window to today);
+  // a new batch takes the standing review window relative to the build
+  // date (35–65 days out), the same one the monthly job uses.
+  const existing = anniversaryFrom && anniversaryTo ? null : await dbh(BATCHES).where({ batch_key: batchKey }).first('window_from', 'window_to');
+  const defaults = existing && dateColumn(existing.window_from) && dateColumn(existing.window_to)
+    ? { from: dateColumn(existing.window_from), to: dateColumn(existing.window_to) }
+    : reviewWindowFor(now);
+  const from = anniversaryFrom || defaults.from;
+  const to = anniversaryTo || defaults.to;
+  if (from > to) { const err = new Error('anniversaryFrom must not be after anniversaryTo'); err.status = 400; throw err; }
 
   const today = etDateString(now);
   const config = await loadConfig(dbh);
