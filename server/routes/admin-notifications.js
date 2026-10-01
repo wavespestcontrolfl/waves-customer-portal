@@ -488,12 +488,25 @@ router.put('/:id/read', async (req, res, next) => {
 // count and mark-all-read. Same role scope as /:id/read (a technician can
 // only touch a tech-visible row). `resolution` is optional, one plain line.
 // Live overlay rows have no persisted id, so they cannot be marked done.
+// `version` (required): the content version the bell list served for the row.
+// A quiet refresh can rewrite a standing row's text in place, so Done only
+// lands on the text the admin actually saw; a changed row answers 409 and the
+// bell reloads it.
+const NOTIFICATION_VERSION_RE = /^[0-9a-f]{32}$/i;
 router.put('/:id/done', async (req, res, next) => {
   try {
     const id = String(req.params.id);
     if (id.startsWith('live:')) return res.status(400).json({ error: 'Live alerts clear when their count does' });
+    const version = req.body?.version;
+    if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
+      return res.status(400).json({ error: 'version is required' });
+    }
     const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution : null;
-    const updated = await NotificationService.markAdminDone([id], { by: String(req.technicianId), resolution, role: req.techRole });
+    const updated = await NotificationService.markAdminDone([id], { by: String(req.technicianId), resolution, role: req.techRole, expectedVersion: version.toLowerCase() });
+    if (!updated) {
+      const state = await NotificationService.getAdminNotificationState(id, { role: req.techRole });
+      if (state && !state.done && state.version !== version.toLowerCase()) return res.status(409).json({ error: 'changed' });
+    }
     res.json({ success: true, updated: updated > 0 });
   } catch (err) { next(err); }
 });

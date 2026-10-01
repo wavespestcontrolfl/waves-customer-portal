@@ -45,6 +45,7 @@ jest.mock('../models/db', () => {
         return b;
       },
       orderBy() { return b; },
+      select() { return b; },
       orderByRaw() { return b; },
       limit() { return b; },
       offset(n) { return (mockRows[table] || []).filter((r) => conds.every((c) => c(r))).slice(n || 0); },
@@ -69,6 +70,7 @@ jest.mock('../models/db', () => {
     return b;
   };
   const fn = jest.fn((table) => builder(table));
+  fn.raw = jest.fn((sql) => sql);
   fn.transaction = async (cb) => { const trx = jest.fn((table) => builder(table)); trx.raw = jest.fn(async () => {}); return cb(trx); };
   return fn;
 });

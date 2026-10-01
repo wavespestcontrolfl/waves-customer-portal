@@ -492,12 +492,19 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
   // Done leaves the bell: the row is removed once the server accepts it, and
   // the badge is re-synced from the authoritative count (see markRead).
+  // `version` is the content version the list served for this row: a quiet
+  // refresh can rewrite a standing alert's text in place, and the server
+  // answers 409 when the row is no longer the text this admin saw. Then the
+  // row stays and the list reloads, so the new text is what they see next.
   const markDone = async (e, n) => {
     e.stopPropagation();
     e.preventDefault();
     try {
-      await requestJson(`${basePath}/${n.id}/done`, { method: 'PUT' });
-    } catch { return; }
+      await requestJson(`${basePath}/${n.id}/done`, { method: 'PUT', body: JSON.stringify({ version: n.version }) });
+    } catch (err) {
+      if (err?.status === 409) loadNotifications();
+      return;
+    }
     setNotifications(prev => prev.filter(x => x.id !== n.id));
     if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
     fetchCount();

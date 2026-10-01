@@ -636,6 +636,7 @@ describe('live dashboard-alert overlay under the bell policy', () => {
     computeDashboardAlerts.mockResolvedValue({ alerts: [{ id: 'churn-risk', count: 143, title: '143 customers at churn risk' }] });
     const persisted = [{ id: 'p1', category: 'new_lead', title: 'New lead', metadata: null }];
     mockTables({ notifications: chainMock(persisted) });
+    db.raw = jest.fn((sql) => sql);
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/notifications/`);

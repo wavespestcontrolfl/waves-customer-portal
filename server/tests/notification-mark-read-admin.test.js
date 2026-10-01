@@ -6,7 +6,7 @@
  */
 
 jest.mock('../models/db', () => {
-  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNull: jest.fn(() => q), update: jest.fn(async () => 1) };
+  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNull: jest.fn(() => q), whereRaw: jest.fn(() => q), update: jest.fn(async () => 1) };
   const db = jest.fn(() => q);
   db.raw = jest.fn((sql) => sql);
   db.__q = q;
@@ -46,6 +46,7 @@ describe('markAdminDone', () => {
     db.__q.update.mockResolvedValue(2);
     db.__q.whereIn.mockClear();
     db.__q.whereNull.mockClear();
+    db.__q.whereRaw.mockClear();
     db.raw.mockClear();
   });
 
@@ -68,6 +69,23 @@ describe('markAdminDone', () => {
     const resolution = bound['COALESCE(resolution, ?)'][0];
     expect(resolution).toMatch(/^Fixed in PR word word.*…$/);
     expect(resolution.length).toBeLessThanOrEqual(200);
+  });
+
+  test('expectedVersion fences the update on the md5 content version of the one row', async () => {
+    const version = 'b'.repeat(32);
+    await NotificationService.markAdminDone(['a'], { by: '7', expectedVersion: version });
+    expect(db.__q.whereRaw).toHaveBeenCalledWith(`${NotificationService._private.NOTIFICATION_VERSION_SQL} = ?`, [version]);
+    expect(NotificationService._private.NOTIFICATION_VERSION_SQL).toMatch(/^md5\(concat_ws\('\|', title, body, link, detail, metadata::text\)\)$/);
+  });
+
+  test('no expectedVersion adds no version fence (Claude and system callers)', async () => {
+    await NotificationService.markAdminDone(['a'], { by: 'claude' });
+    expect(db.__q.whereRaw).not.toHaveBeenCalled();
+  });
+
+  test('expectedVersion with more than one id writes nothing', async () => {
+    expect(await NotificationService.markAdminDone(['a', 'b'], { by: '7', expectedVersion: 'b'.repeat(32) })).toBe(0);
+    expect(db.__q.update).not.toHaveBeenCalled();
   });
 
   test('writes nothing without ids or an actor', async () => {

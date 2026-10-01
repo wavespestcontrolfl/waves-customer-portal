@@ -795,7 +795,7 @@ describe('NotificationBell admin "Show full text" (brevity guard detail)', () =>
 describe('NotificationBell admin "Done" (docs/admin-notifications.md section 4.3)', () => {
   const rows = () => ([
     { id: 'd1', category: 'schedule', title: 'Schedule: price the series', body: 'Nothing priced.', link: '/admin/dispatch',
-      created_at: new Date().toISOString(), read_at: null },
+      created_at: new Date().toISOString(), read_at: null, version: '0123456789abcdef0123456789abcdef' },
     { id: 'live:overdue_invoices', category: 'alert', title: 'Overdue invoices', body: 'Three are overdue.', link: '/admin/invoices',
       created_at: new Date().toISOString(), read_at: null },
   ]);
@@ -826,7 +826,9 @@ describe('NotificationBell admin "Done" (docs/admin-notifications.md section 4.3
       fireEvent.click(done);
       await waitFor(() => expect(screen.queryByText('Schedule: price the series')).toBeNull());
       expect(screen.getByText('Overdue invoices')).toBeInTheDocument();
-      expect(global.fetch.mock.calls.some(([url, o]) => String(url).endsWith('/admin/notifications/d1/done') && o?.method === 'PUT')).toBe(true);
+      const doneCall = global.fetch.mock.calls.find(([url, o]) => String(url).endsWith('/admin/notifications/d1/done') && o?.method === 'PUT');
+      // Done names the content version the bell showed, so a refreshed row is not marked unseen.
+      expect(JSON.parse(doneCall[1].body)).toEqual({ version: '0123456789abcdef0123456789abcdef' });
       // Done is not read: the row's own read call never fires.
       expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/d1/read'))).toBe(false);
       expect(hrefSpy).not.toHaveBeenCalled();
@@ -866,6 +868,22 @@ describe('NotificationBell admin "Done" (docs/admin-notifications.md section 4.3
     fireEvent.click(await screen.findByRole('button', { name: 'Done' }));
     await waitFor(() => expect(global.fetch.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(true));
     expect(screen.getByText('Schedule: price the series')).toBeInTheDocument();
+  });
+
+  it('keeps the row and re-fetches the list when the row changed since it was shown (409)', async () => {
+    let listCalls = 0;
+    global.fetch = vi.fn(async (url, options = {}) => {
+      if (options.method === 'PUT') return { ok: false, status: 409, json: async () => ({ error: 'changed' }) };
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
+      listCalls += 1;
+      return jsonResponse({ notifications: listCalls === 1 ? rows() : [{ ...rows()[0], title: 'Schedule: price two series', version: 'f'.repeat(32) }] });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Done' }));
+    expect(await screen.findByText('Schedule: price two series')).toBeInTheDocument();
+    expect(screen.queryByText('Schedule: price the series')).toBeNull();
+    expect(listCalls).toBe(2);
   });
 
   it('offers no Done on a customer bell', async () => {

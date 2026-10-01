@@ -11,17 +11,20 @@ jest.mock('../services/admin-unread', () => ({
 jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: jest.fn(), requireAdmin: jest.fn() }));
 
 let mockRows = [];
-jest.mock('../models/db', () => () => {
+jest.mock('../models/db', () => {
+const makeQuery = () => {
   let rows = [...mockRows];
   const sorts = [];
   let limit = Infinity;
   let offset = 0;
+  let selectsVersion = false;
   const q = {
     where(filters) { rows = rows.filter(r => Object.entries(filters).every(([k, v]) => r[k] === v)); return q; },
     // The bell list leaves done rows out (done_at).
     whereNull(key) { rows = rows.filter(r => r[key] == null); return q; },
     whereNotNull(key) { rows = rows.filter(r => r[key] != null); return q; },
-    select() { return q; },
+    select(...cols) { if (cols.some((c) => c && c.__raw)) selectsVersion = true; return q; },
+    first(...cols) { return Promise.resolve(rows[0] ? { done_at: rows[0].done_at ?? null, version: rows[0].version ?? null } : undefined); },
     // The one raw predicate the bell list adds: Activity-only rows
     // (metadata.feed = 'activity') never reach the bell.
     whereRaw(sql, bindings) {
@@ -66,10 +69,14 @@ jest.mock('../models/db', () => () => {
         }
         return 0;
       });
-      return Promise.resolve(rows.slice(offset, offset + limit)).then(resolve, reject);
+      const out = rows.slice(offset, offset + limit);
+      return Promise.resolve(selectsVersion ? out.map(r => ({ ...r, version: `v-${r.id}` })) : out).then(resolve, reject);
     },
   };
   return q;
+};
+makeQuery.raw = (sql) => ({ __raw: true, sql });
+return makeQuery;
 });
 
 const router = require('../routes/admin-notifications');
@@ -195,18 +202,48 @@ describe('PUT /:id/done and /:id/reopen', () => {
     return res;
   };
 
+  const VERSION = 'a'.repeat(32);
   afterEach(() => jest.restoreAllMocks());
 
   test('done: marks the persisted row by the caller, under their role, with an optional resolution', async () => {
     const done = jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(1);
-    const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { resolution: 'Called back' }, techRole: 'technician', technicianId: 42 });
-    expect(done).toHaveBeenCalledWith(['n1'], { by: '42', resolution: 'Called back', role: 'technician' });
+    const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { resolution: 'Called back', version: VERSION }, techRole: 'technician', technicianId: 42 });
+    expect(done).toHaveBeenCalledWith(['n1'], { by: '42', resolution: 'Called back', role: 'technician', expectedVersion: VERSION });
     expect(res.json).toHaveBeenCalledWith({ success: true, updated: true });
+  });
+
+  test('done: a missing or malformed version is refused before any write', async () => {
+    const done = jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(1);
+    for (const body of [{}, { version: 'not-a-hash' }, { version: 123 }]) {
+      const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body, techRole: 'admin', technicianId: 1 });
+      expect(res.status).toHaveBeenCalledWith(400);
+    }
+    expect(done).not.toHaveBeenCalled();
+  });
+
+  test('done: nothing marked and the row changed since the bell served it answers 409 changed', async () => {
+    jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(0);
+    const state = jest.spyOn(NotificationService, 'getAdminNotificationState').mockResolvedValue({ done: false, version: 'f'.repeat(32) });
+    const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { version: VERSION }, techRole: 'admin', technicianId: 1 });
+    expect(state).toHaveBeenCalledWith('n1', { role: 'admin' });
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ error: 'changed' });
+  });
+
+  test('done: nothing marked on an already-done or missing row keeps the plain updated:false answer', async () => {
+    jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(0);
+    const state = jest.spyOn(NotificationService, 'getAdminNotificationState');
+    for (const row of [{ done: true, version: 'f'.repeat(32) }, null, { done: false, version: VERSION }]) {
+      state.mockResolvedValueOnce(row);
+      const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { version: VERSION }, techRole: 'admin', technicianId: 1 });
+      expect(res.status).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith({ success: true, updated: false });
+    }
   });
 
   test('done: a live overlay row has no persisted id and is refused', async () => {
     const done = jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(1);
-    const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'live:overdue_invoices' }, techRole: 'admin', technicianId: 1 });
+    const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'live:overdue_invoices' }, body: { version: VERSION }, techRole: 'admin', technicianId: 1 });
     expect(res.status).toHaveBeenCalledWith(400);
     expect(done).not.toHaveBeenCalled();
   });

@@ -58,6 +58,15 @@ function excludeActivityOnlyFromBell(query) {
   return query.whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'");
 }
 
+// Content version of an admin row: an md5 over everything the bell shows
+// (title, body, link, detail, metadata). notifyAdmin's refreshOnDedupe can
+// rewrite a standing row in place while keeping its id and read state, so an
+// id alone cannot say WHICH text an admin saw. The bell list returns this as
+// `version`; a Done click sends it back and markAdminDone only marks the row
+// done while the content is still that version. The ONE definition: every
+// reader and the fence must agree on it. No `updated_at` column exists.
+const NOTIFICATION_VERSION_SQL = "md5(concat_ws('|', title, body, link, detail, metadata::text))";
+
 // The done state (docs/admin-notifications.md section 4.3, owner ruling
 // 2026-09-30): read is not done. A done admin row leaves the bell whether a
 // person marked it or the condition it was about cleared. done_by names who
@@ -787,8 +796,20 @@ const NotificationService = {
     ));
     if (before) query.whereRaw("(date_trunc('milliseconds', created_at), id) < (?::timestamptz, ?::uuid)", [before.at, before.id]);
     return query
+      .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
       .orderByRaw("date_trunc('milliseconds', created_at) DESC, id DESC")
       .limit(limit).offset(offset);
+  },
+
+  // The current content version of one admin row (see NOTIFICATION_VERSION_SQL),
+  // or null when the row is gone. Done route: tells "changed under you" apart
+  // from "already done / not found" after a fenced markAdminDone matched nothing.
+  async getAdminNotificationState(id, { role } = {}) {
+    const row = await scopeAdminFeedToRole(
+      db('notifications').where({ id, recipient_type: 'admin' }),
+      role,
+    ).first('done_at', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`));
+    return row ? { done: row.done_at != null, version: row.version } : null;
   },
 
   // Recently done admin rows (the "Recently done" list, so an accidental Done
@@ -866,13 +887,20 @@ const NotificationService = {
   // as mark-read. read_at is stamped too so every reader keyed on it agrees.
   // `by`: an admin user id, 'claude', or a system component. Returns the
   // number of rows marked.
-  async markAdminDone(ids, { by, resolution = null, role } = {}, connection = db) {
+  // expectedVersion (single id only): the content version the caller saw
+  // (NOTIFICATION_VERSION_SQL). The row is marked only while it still has that
+  // version, so a refresh that rewrote the row since cannot be marked done
+  // unseen. Callers without it (Claude, system) mark whatever is standing.
+  async markAdminDone(ids, { by, resolution = null, role, expectedVersion = null } = {}, connection = db) {
     const list = [...new Set([].concat(ids ?? []).filter(Boolean).map(String))];
     if (!list.length || !by) return 0;
-    const updated = await scopeAdminFeedToRole(
+    if (expectedVersion != null && list.length !== 1) return 0;
+    let query = scopeAdminFeedToRole(
       connection('notifications').whereIn('id', list).where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
-    ).update(doneColumns({ by, resolution, keepExisting: true, conn: connection }));
+    );
+    if (expectedVersion != null) query = query.whereRaw(`${NOTIFICATION_VERSION_SQL} = ?`, [String(expectedVersion)]);
+    const updated = await query.update(doneColumns({ by, resolution, keepExisting: true, conn: connection }));
     if (updated) logger.info(`[notifications] marked ${updated} admin notification(s) done`);
     return updated;
   },
@@ -985,6 +1013,7 @@ module.exports._private = {
   applyAdminBrevityGuard,
   normalizeAdminNotificationText,
   excludeActivityOnlyFromBell,
+  NOTIFICATION_VERSION_SQL,
   doneColumns,
   DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,
