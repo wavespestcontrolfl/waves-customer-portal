@@ -42,8 +42,12 @@
  * family joins it. A fixed problem, a cancelled plan, or a customer / estimate
  * that left for good closes the bell as DONE. An OK result is an `fyi` fact and
  * writes no row. Rings share the watchdog run's budget (at most 10 a day):
- * past it a booking waits on ONE standing "fix N more combined bookings" bell,
- * whose list the next run re-reads, so nothing ages out unreported.
+ * past it a booking waits on ONE quiet overflow record, whose list the next
+ * run re-reads (so nothing ages out unreported) and whose count is a standing
+ * item in the dashboard Action Inbox (combined_bookings_owed). An estimate
+ * with an open bell stays a candidate past the lookback, and a finding about
+ * a service that went on hold stays on its bell until that service is judged
+ * again.
  */
 
 const db = require('../models/db');
@@ -180,7 +184,7 @@ function checkTimeAndTech(dated, families, { firstDay, byId }) {
  *          scheduleSkippedFamilies: Set, scheduleUnjudged: bool }
  * Returns null when the accept is not a multi-service recurring accept, or
  * every row of the plan was cancelled (no alert at all); else
- * { ok, deferred, frozen, problems: [{ code, families, text }], labels }.
+ * { ok, deferred, frozen, heldFamilies, problems: [{ code, families, text }], labels }.
  */
 function evaluateCombinedBooking(ctx) {
   const {
@@ -189,28 +193,36 @@ function evaluateCombinedBooking(ctx) {
   } = ctx;
   const accepted = acceptedFamilies(estimate);
   if (!accepted || accepted.size < 2) return null;
+  // On hold / stopped (the classifier skipped them): not judged now, and a
+  // standing finding about them is kept until they are (the runner's heldProblems).
+  const heldFamilies = [...accepted].filter((family) => scheduleSkippedFamilies.has(family));
   const families = new Set([...accepted].filter((family) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
   // Every family on hold / stopped / kept on an older series: nothing to judge.
-  if (!families.size) return { ok: false, deferred: true, frozen: true, problems: [], labels: [] };
+  if (!families.size) return { ok: false, deferred: true, frozen: true, heldFamilies, problems: [], labels: [] };
 
-  const planRows = allRows.filter((row) => !row.is_callback && !row.followup_included
+  const isPlanRow = (row, scope) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
-    && rowFamilies(row).some((family) => families.has(family)));
+    && rowFamilies(row).some((family) => scope.has(family));
+  // The booking's first day comes from ALL its plan visits, before families on
+  // hold or cancelled rows are filtered out (the seasonal exemption is judged
+  // against the day the booking really started).
+  const firstDay = allRows.filter((row) => isPlanRow(row, accepted)).map((row) => dateOnly(row.scheduled_date)).sort()[0];
+  const planRows = allRows.filter((row) => isPlanRow(row, families));
   const rows = planRows.filter((row) => !NOT_LIVE.has(row.status));
   // Rows were created and every one was cancelled: the customer or office
   // cancelled the plan. Nothing left to verify, so nothing to say.
   if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
   const labels = [...families].map(familyLabel);
   // No live rows: the schedule shape is the accepted-schedule alert's.
-  if (!rows.length) return { ok: false, deferred: true, frozen: false, problems: [], labels };
+  if (!rows.length) return { ok: false, deferred: true, frozen: false, heldFamilies, problems: [], labels };
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
     a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
   const byId = new Map(allRows.map((row) => [String(row.id), row]));
-  const problems = checkTimeAndTech(dated, families, { firstDay: dated[0].day, byId });
+  const problems = checkTimeAndTech(dated, families, { firstDay, byId });
   // A schedule gap, or an estimate the classifier did not judge, is never OK.
   const deferred = scheduleGaps.length > 0 || scheduleUnjudged;
-  return { ok: !problems.length && !deferred, deferred, frozen: false, problems, labels };
+  return { ok: !problems.length && !deferred, deferred, frozen: false, heldFamilies, problems, labels };
 }
 
 function shortName(customer) {
@@ -227,7 +239,7 @@ function shortName(customer) {
  */
 function composeAlert(verdict, { customerName, customerId, estimateId }) {
   const { cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
-  const texts = verdict.problems.map((problem) => problem.text);
+  const texts = verdict.problems.map((problem) => `${problem.text}${problem.held ? ' (on hold)' : ''}`);
   const why = `${texts.slice(0, 2).join('; ')}${texts.length > 2 ? ` (+${texts.length - 2} more)` : ''}`;
   return {
     area: AREA,
@@ -239,7 +251,7 @@ function composeAlert(verdict, { customerName, customerId, estimateId }) {
     doneWhen: DONE_WHEN,
     who: 'person',
     detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a time and technician on every visit.`,
-      ...verdict.problems.map((problem) => `- ${problem.text}`)].join('\n'),
+      ...verdict.problems.map((problem) => `- ${problem.text}${problem.held ? ' (service on hold; checked again when the hold ends)' : ''}`)].join('\n'),
   };
 }
 
@@ -345,6 +357,9 @@ async function postAlert(estimate, verdict, ctx, { raise } = {}) {
       estimateId: estimate.id,
       customerId: estimate.customer_id,
       problemCodes: verdict.problems.map((problem) => problem.code),
+      // The findings themselves, so a later run can keep one about a service
+      // that went on hold (heldProblems).
+      problems: verdict.problems.map(({ code, families, text }) => ({ code, families, text })),
       // count + itemKeys are the ring-stamps notifyAdmin compares on a
       // refresh, so a changed problem set is treated as a real change.
       count: keys.length,
@@ -373,17 +388,26 @@ async function retireAbandoned(conn) {
   return retireStanding(conn, [...new Set(gone.map((row) => row.estimate_id))], RESOLVED_GONE);
 }
 
-// What a sweep does with one verdict:
+// A standing bell's findings about a service now on hold: not re-judged
+// this run, so they stay on the bell (marked) instead of closing as fixed.
+function heldProblems(verdict, standingProblems = []) {
+  const held = new Set(verdict.heldFamilies || []);
+  return standingProblems.filter((problem) => (problem?.families || []).some((family) => held.has(family)))
+    .map((problem) => ({ code: problem.code, families: problem.families, text: problem.text, held: true }));
+}
+
+// What a sweep does with one verdict, given the standing bell's findings:
 //   skipped  — not a combined booking any more (the plan was cancelled): close
 //   frozen   — every accepted family is on hold / stopped: leave a bell as is
-//   problems — post / refresh the bell
+//   problems — post / refresh the bell (current findings plus held ones)
 //   ok       — verified: close a standing bell as fixed
 //   deferred — nothing of this check's own to say: close
-function outcomeOf(verdict) {
-  if (!verdict) return 'skipped';
-  if (verdict.frozen) return 'frozen';
-  if (verdict.problems.length) return 'problems';
-  return verdict.ok ? 'ok' : 'deferred';
+function outcomeOf(verdict, standingProblems = []) {
+  if (!verdict) return { outcome: 'skipped', problems: [] };
+  if (verdict.frozen) return { outcome: 'frozen', problems: [] };
+  const problems = [...verdict.problems, ...heldProblems(verdict, standingProblems)];
+  if (problems.length) return { outcome: 'problems', problems };
+  return { outcome: verdict.ok ? 'ok' : 'deferred', problems };
 }
 
 // The estimates the standing overflow bell still owes their own bell.
@@ -394,9 +418,19 @@ async function owedEstimateIds(conn) {
   return Array.isArray(keys) ? keys.map(String) : [];
 }
 
+// The estimates with an open bell of this check: they stay candidates past
+// the lookback, so a bell is only ever closed by a run that judged it.
+async function standingEstimateIds(conn) {
+  const rows = await conn('notifications').where({ recipient_type: 'admin', category: CATEGORY })
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [`${OPS_KEY}:`])
+    .whereRaw("metadata->>'estimateId' IS NOT NULL")
+    .select(conn.raw("metadata->>'estimateId' as estimate_id"));
+  return rows.map((row) => String(row.estimate_id));
+}
+
 // Accepted multi-service estimates to judge: those accepted inside the
-// lookback, plus any the overflow bell still owes a bell (so a booking held
-// back by the budget never ages out unreported).
+// lookback, plus any with an open bell or that the overflow row still owes a
+// bell (so nothing open or owed ages out unjudged).
 function candidateQuery(conn, { now, owed }) {
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const settled = new Date(now.getTime() - SETTLE_MINUTES * 60 * 1000);
@@ -421,11 +455,12 @@ function candidateQuery(conn, { now, owed }) {
     .orderBy('e.accepted_at', 'asc');
 }
 
-// The standing count bell for bookings past the ring budget: one needs-you
-// row listing each (its itemKeys are what the next run re-reads), closed as
-// done once nothing is owed. It rings only while the run's budget has room;
-// otherwise it is written or refreshed quietly.
-async function postOverflow(conn, owed, { raise, canRing } = {}) {
+// The record of bookings past the ring budget: one row listing each (its
+// itemKeys are what the next run re-reads), closed as done once nothing is
+// owed. It is a standing condition (docs/admin-notifications.md section 1), so
+// it never rings: it is always written quietly, and the count shows in the
+// dashboard Action Inbox (dashboard-alerts.js, combined_bookings_owed).
+async function postOverflow(conn, owed, { raise } = {}) {
   if (!owed.length) return retireStanding(conn, [OVERFLOW_ID], RESOLVED_FIXED);
   const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
   const ids = owed.map((entry) => entry.id);
@@ -443,8 +478,8 @@ async function postOverflow(conn, owed, { raise, canRing } = {}) {
     detail: owed.map((entry) => `- ${entry.line}`).join('\n'),
     dedupeKey: dedupeKeyFor(OVERFLOW_ID),
     refreshOnDedupe: true,
-    ringGate: async () => canRing,
-    ringOnRefresh: canRing ? ringOnNewProblem(ids) : () => false,
+    ringGate: async () => false,
+    ringOnRefresh: () => false,
     metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids },
   });
   // This row is the only record of what is owed: a lost write fails the
@@ -467,7 +502,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
   const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, overflow: 0 };
   result.closed += await retireAbandoned(conn);
   const owedBefore = new Set(await owedEstimateIds(conn));
-  const candidates = await candidateQuery(conn, { now, owed: [...owedBefore] });
+  const candidates = await candidateQuery(conn, { now, owed: [...owedBefore, ...await standingEstimateIds(conn)] });
   result.candidates = candidates.length;
 
   // An OK verdict writes nothing (an `fyi` fact), so every candidate is judged
@@ -475,8 +510,12 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
   const standing = new Map((await conn('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("metadata->>'dedupeKey' = ANY(?)", [candidates.map((estimate) => dedupeKeyFor(estimate.id))])
-    .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'itemKeys' as item_keys")))
-    .map((row) => [String(row.estimate_id), new Set(Array.isArray(row.item_keys) ? row.item_keys : [])]));
+    .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'itemKeys' as item_keys"),
+      conn.raw("metadata->'problems' as problems")))
+    .map((row) => [String(row.estimate_id), {
+      keys: new Set(Array.isArray(row.item_keys) ? row.item_keys : []),
+      problems: Array.isArray(row.problems) ? row.problems : [],
+    }]));
   // A booking that could not be judged, or whose bell could not be written,
   // goes on the overflow bell: it stays a candidate until it is.
   const owed = [];
@@ -511,10 +550,10 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         scheduleSkippedFamilies: judged, // checkEstimate defaults it when unjudged
         scheduleUnjudged: !judged,
       });
-      const outcome = outcomeOf(checked?.verdict);
+      const { outcome, problems } = outcomeOf(checked?.verdict, known?.problems);
       if (outcome === 'frozen') {
-        // Every family on hold: nothing could be judged, so an owed booking
-        // stays owed until a hold ends.
+        // Every family on hold: nothing could be judged. A standing bell keeps
+        // the estimate a candidate; an owed booking stays owed.
         result.deferred += 1;
         if (owedBefore.has(id)) owe(estimate, 'every service is on hold; it is checked again when a hold ends');
         continue;
@@ -525,14 +564,15 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         continue;
       }
       result.checked += 1;
-      const { verdict, ctx } = checked;
+      const verdict = { ...checked.verdict, problems };
+      const { ctx } = checked;
       // Anything that would ring (a new bell, or a standing one gaining a
       // family it did not carry) spends the budget; past it the booking waits
-      // on the overflow bell and rings on a later run, never refreshed into a
-      // read bell in silence.
-      const wouldRing = !known || verdict.problems.flatMap(problemKeys).some((key) => !known.has(key));
+      // on the overflow record and rings on a later run, never refreshed into
+      // a read bell in silence.
+      const wouldRing = !known || problems.flatMap(problemKeys).some((key) => !known.keys.has(key));
       if (wouldRing && rings >= ringBudget) {
-        owe(estimate, `${ctx.customerName}: ${verdict.problems.map((problem) => problem.text).join('; ')}`);
+        owe(estimate, `${ctx.customerName}: ${problems.map((problem) => problem.text).join('; ')}`);
         continue;
       }
       const row = await postAlert(estimate, verdict, ctx, { raise });
@@ -551,7 +591,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     }
   }
   result.overflow = owed.length;
-  result.closed += await postOverflow(conn, owed, { raise, canRing: rings < ringBudget });
+  result.closed += await postOverflow(conn, owed, { raise });
   return result;
 }
 
@@ -564,6 +604,8 @@ module.exports = {
   ringOnNewProblem,
   problemKeys,
   outcomeOf,
+  heldProblems,
+  owedEstimateIds,
   acceptedFamilies,
   shortName,
   OPS_KEY,

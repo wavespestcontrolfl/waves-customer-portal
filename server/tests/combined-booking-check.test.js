@@ -112,6 +112,14 @@ describe('evaluateCombinedBooking', () => {
     expect(codes(pestOnly)).toEqual(['missing_time_tech']);
   });
 
+  test('the seasonal exemption reads the booking\'s real first day, even when that day\'s service is on hold', () => {
+    const later = '2027-02-01';
+    const mosq = series({ key: 'mosquito_seasonal', type: 'Mosquito Control', visits: 3, spacing: 42, parentOverrides: { scheduled_date: later, ...untimed }, childOverrides: untimed })
+      .map((row) => (row.recurring_parent_id ? { ...row, scheduled_date: later } : row));
+    const verdict = run([PEST, LAWN, MOSQ], [...pestRows(), ...lawnRows(), ...mosq], { scheduleSkippedFamilies: new Set(['pest_control', 'lawn_care']) });
+    expect(verdict.ok).toBe(true);
+  });
+
   test('every family on hold: frozen, nothing judged', () => {
     const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['pest_control', 'lawn_care']) });
     expect(verdict).toMatchObject({ frozen: true, problems: [] });
@@ -185,11 +193,21 @@ describe('postAlert', () => {
 });
 
 describe('outcomeOf', () => {
+  const lawnOpen = { code: 'missing_time_tech', families: ['lawn_care'], text: '5 lawn visits missing time/tech' };
   test('maps every verdict to what the sweep does', () => {
-    expect(outcomeOf(null)).toBe('skipped');
-    expect(outcomeOf({ frozen: true, problems: [] })).toBe('frozen');
-    expect(outcomeOf({ problems: [{ code: 'missing_time_tech' }] })).toBe('problems');
-    expect(outcomeOf({ ok: true, problems: [] })).toBe('ok');
-    expect(outcomeOf({ ok: false, deferred: true, problems: [] })).toBe('deferred');
+    expect(outcomeOf(null).outcome).toBe('skipped');
+    expect(outcomeOf({ frozen: true, problems: [] }).outcome).toBe('frozen');
+    expect(outcomeOf({ problems: [{ code: 'missing_time_tech', families: ['pest_control'] }] }).outcome).toBe('problems');
+    expect(outcomeOf({ ok: true, problems: [] }).outcome).toBe('ok');
+    expect(outcomeOf({ ok: false, deferred: true, problems: [] }).outcome).toBe('deferred');
+  });
+
+  test('a finding about a service that went on hold stays on the bell, marked, instead of closing as fixed', () => {
+    const clean = { ok: true, deferred: false, heldFamilies: ['lawn_care'], problems: [] };
+    expect(outcomeOf(clean, [lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...lawnOpen, held: true }] });
+    // Not on hold: a clean verdict closes it.
+    expect(outcomeOf({ ...clean, heldFamilies: [] }, [lawnOpen]).outcome).toBe('ok');
+    const why = composeAdminAlert(composeAlert({ labels: ['Pest'], problems: [{ ...lawnOpen, held: true }] }, ALERT_IDS)).why;
+    expect(why).toBe('5 lawn visits missing time/tech (on hold).');
   });
 });

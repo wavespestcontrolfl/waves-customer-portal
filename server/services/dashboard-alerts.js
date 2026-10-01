@@ -844,6 +844,25 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
     }
   } catch (err) { logger.error(`[dashboard-alerts] customer_duplicates_review: ${err.message}`); }
 
+  // Combined bookings past the shared alert budget (combined-booking-check.js):
+  // a standing count, never a ring (docs/admin-notifications.md section 1).
+  // The check's quiet overflow record lists the bookings still owed their own
+  // alert; each one is missing a time or technician on at least one visit.
+  try {
+    const owed = await require('./combined-booking-check').owedEstimateIds(db);
+    if (owed.length > 0) {
+      alerts.push({
+        id: 'combined_bookings_owed',
+        kind: 'action',
+        severity: 'warn',
+        count: owed.length,
+        label: `${owed.length} combined booking${owed.length === 1 ? '' : 's'} missing a time or technician`,
+        href: '/admin/customers',
+        members: queueMembers(owed),
+      });
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] combined_bookings_owed: ${err.message}`); }
+
   // Everything not explicitly tagged above is a passive watch-state alarm; the
   // client separates do-this-now actions from alerts on this field.
   for (const a of alerts) {

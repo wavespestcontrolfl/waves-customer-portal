@@ -279,6 +279,20 @@ describe('Action Inbox generators', () => {
     expect(quiet.find((a) => a.id === 'builder_warranty_expiring')).toBeUndefined();
   });
 
+  test('combined_bookings_owed: a standing count of bookings past the alert budget; absent when none are owed', async () => {
+    const combined = require('../services/combined-booking-check');
+    const owed = jest.spyOn(combined, 'owedEstimateIds').mockResolvedValue(['est-b', 'est-a']);
+    let { alerts } = await computeDashboardAlertsUncached();
+    expect(alerts.find((a) => a.id === 'combined_bookings_owed')).toMatchObject({
+      kind: 'action', severity: 'warn', count: 2, members: ['est-a', 'est-b'], href: '/admin/customers',
+      label: '2 combined bookings missing a time or technician',
+    });
+    owed.mockResolvedValue([]);
+    ({ alerts } = await computeDashboardAlertsUncached());
+    expect(alerts.find((a) => a.id === 'combined_bookings_owed')).toBeUndefined();
+    owed.mockRestore();
+  });
+
   test('at_risk_mrr: reuses the shared at-risk account list; absent when nothing is at risk', async () => {
     listAtRiskMrrAccounts.mockResolvedValue([
       atRiskAccount('cust-b', 400),

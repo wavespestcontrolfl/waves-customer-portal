@@ -301,6 +301,23 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('an open bell keeps its estimate checked past the 72h lookback, so a later fix still closes it', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      await trx('estimates').where({ id: est.estimateId }).update({ accepted_at: new Date(Date.now() - 100 * 3600 * 1000) });
+      await repair(trx, est);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ ok: 1, closed: 1 });
+      expect((await alertsOf(trx, est.estimateId))[0].done_at).not.toBeNull();
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('an OK result writes no row (an fyi fact)', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
