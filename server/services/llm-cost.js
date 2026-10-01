@@ -489,7 +489,9 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
     refreshOnDedupe: true,
     metadata: { lane: 'llm_cost', day: dayLabel, spikes: spikes.map((s) => ({ laneId: s.laneId, usd: Number(s.usd.toFixed(4)), avgUsd: Number(s.avgUsd.toFixed(4)) })) },
   });
-  if (!alert) {
+  // silenced category (or any other suppression): no new item, so nothing is superseded
+  if (alert?.suppressed) return { ran: true, raised: false, reason: 'suppressed', spikes: spikes.length, prices };
+  if (!alert || alert.id == null) {
     logger.warn('[llm-cost] spend spike item was not persisted');
     return { ran: true, raised: false, reason: 'alert_not_persisted', spikes: spikes.length, prices };
   }

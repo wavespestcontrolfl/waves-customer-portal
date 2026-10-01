@@ -477,6 +477,12 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(res).toMatchObject({ raised: true, dedupeKey: 'llm-cost-spike:2026-10-01' });
     expect(mockCloseKeys).toHaveBeenCalledWith(app, ['llm-cost-spike:2026-09-30'], 'superseded', expect.any(Object));
 
+    // the category silenced: the raise is suppressed, so nothing is superseded
+    mockCloseKeys.mockClear();
+    mockRaise.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'preference_disabled' });
+    await expect(llmCost.runLlmCostCheck({ now: NEXT, conn: app, fetchImpl })).resolves.toMatchObject({ raised: false, reason: 'suppressed' });
+    expect(mockCloseKeys).not.toHaveBeenCalled();
+
     // the items cannot be read: nothing closes
     mockCloseKeys.mockClear();
     mockOpenMeta.mockRejectedValue(new Error('db down'));
