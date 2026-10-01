@@ -97,7 +97,7 @@ const STREET_WORDS = {
 // directionals, "florida" -> "fl", collapse spaces.
 function normalizeStreet(str) {
   return String(str || '').toLowerCase()
-    .replace(/\b(?:suite|ste|unit|apt|apartment|bldg|building)\b\.?\s*#?\s*[a-z0-9-]+/g, ' ') // "Suite #110" is ONE designator
+    .replace(/\b(?:suite|ste|unit|apt|apartment|bldg|building)\b\.?\s*(?:#\s*)?[a-z0-9-]+/g, ' ') // "Suite #110" is ONE designator; one whitespace run, so no backtracking blowup
     .replace(/#\s*[a-z0-9-]+/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .split(' ').filter(Boolean).map((w) => STREET_WORDS[w] || w).join(' ');
@@ -387,8 +387,11 @@ function observedNap(nap, who, address) {
 // so in its <title> or <h1>. Body text never counts: "404 reviews" or a 404-area-code phone on
 // a healthy listing is not a not-found page.
 const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\bcan.?t find (?:that|this|the) page\b/i;
+// Scripts, styles, templates and comments are never rendered, so an unused error template
+// inside one is not the page's heading.
+const NON_RENDERED_RE = /<!--[\s\S]*?-->|<(script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
 function notFoundHeading(html) {
-  return [...String(html).matchAll(/<(title|h1)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi)]
+  return [...String(html).replace(NON_RENDERED_RE, ' ').matchAll(/<(title|h1)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi)]
     .some((m) => NOT_FOUND_HEADING_RE.test(decodeHTML(visibleText(m[2]))));
 }
 

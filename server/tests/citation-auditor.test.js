@@ -440,6 +440,20 @@ describe('classifyListing', () => {
       expect(titled('404 - Page Not Found').detail.reason).toBe('soft_404');
       expect(titled('Error 404 | Directory').detail.reason).toBe('soft_404');
     });
+
+    test('an unused error template in a script, template or comment is not a soft-404', () => {
+      for (const inert of [
+        '<script type="text/template"><h1>Page not found</h1></script>',
+        '<template><h1>Page not found</h1></template>',
+        '<!-- <h1>Page not found</h1> -->',
+      ]) expect(text(inert).status).toBe('verified');
+    });
+
+    test('a unit designator followed by a long whitespace run normalizes in linear time', () => {
+      const started = Date.now();
+      expect(normalizeStreet(`13649 Luxe Ave Suite${' '.repeat(200000)}`)).toBe('13649 luxe avenue suite');
+      expect(Date.now() - started).toBeLessThan(500);
+    });
   });
 
   describe('Codex round 2', () => {
