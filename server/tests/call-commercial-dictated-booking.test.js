@@ -268,9 +268,11 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
     expect(grounded(ex, t)).toEqual({ ok: false, reason: 'price_offer_unjudged' });
   });
 
-  test('the offer quote must state exactly the recorded amount, and no other figure in its turn', () => {
+  test('the offer quote must state the recorded amount (digits or words); other numbers in the turn are not scanned (owner ruling 2026-10-01)', () => {
     expect(grounded(extraction(), TRANSCRIPT.replace('$150', '$120')).ok).toBe(false);
-    expect(grounded(extraction(), TRANSCRIPT.replace('$150, does', '$150 or $120, does')).ok).toBe(false);
+    // no code scan for "other figures": a mention of another number does not block, and the
+    // extraction's price_is_final judgement is what governs corrections and added charges
+    expect(grounded(extraction(), TRANSCRIPT.replace('$150, does', '$150 or $120, does')).ok).toBe(true);
     const noFigure = extraction({ priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', 'The quarterly service for the office'), PRICE_EVIDENCE[1]] });
     expect(grounded(noFigure).reason).toBe('price_not_stated_by_staff');
   });
@@ -283,11 +285,15 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
     expect(grounded(extraction({ priceEvidence: [quote('/service_request/price_offered_by_staff', 'caller', PRICE_QUOTE), PRICE_EVIDENCE[1]] })).reason).toBe('price_not_stated_by_staff');
   });
 
-  test('a staff correction between the offer and the "yes" does not attach the "yes" to the old price', () => {
+  test('a staff correction or an added charge is governed by the extraction\'s price_is_final judgement, not a code scan (owner ruling 2026-10-01)', () => {
     const t = [OPENING, `Agent: ${PRICE_TALK}`, 'Agent: Actually, correction, the service is $250.', `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
-    expect(grounded(extraction(), t)).toEqual({ ok: false, reason: 'price_not_accepted_by_caller' });
-    // ...and the extraction judges a corrected price not final.
+    // the extraction judges a corrected price NOT final: the call is held
     expect(grounded(extraction({ service: { price_is_final: false } }), t).reason).toBe('price_not_final');
+    expect(route(extraction({ service: { price_is_final: false } }), { transcript: t }).allowed).toBe(false);
+    // an added small charge ("plus ten dollars"): same path, nothing is scanned
+    const added = [OPENING, `Agent: ${PRICE_TALK}`, 'Agent: Plus ten dollars for the garage.', `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
+    expect(grounded(extraction({ service: { price_is_final: false } }), added).reason).toBe('price_not_final');
+    expect(grounded(extraction({ service: { price_is_final: null } }), added).reason).toBe('price_not_final');
   });
 
   test('a recurring billing unit on the accepted price goes to the office (codex #5377 r5 P1)', () => {
@@ -993,61 +999,6 @@ describe('prices said as words ground like digit prices (codex #5377 r12 P2)', (
     expect(verdict('one fifty', 150)).toEqual({ ok: false, reason: 'price_not_stated_by_staff' });
     expect(verdict('one fifty', 50).ok).toBe(false);
   });
-
-  test('no OTHER figure in the offer turn, in words either', () => {
-    expect(verdict('a hundred forty nine dollars, or two hundred if you add the garage', 149).ok).toBe(false);
-  });
-
-  test('a SPOKEN correction between the offer and the "yes" is still caught', () => {
-    const between = ['Agent: Actually, correction, it is two hundred fifty dollars.'];
-    expect(verdict('a hundred forty nine dollars', 149, { between })).toEqual({ ok: false, reason: 'price_not_accepted_by_caller' });
-    // a staff turn with no figure between them is fine
-    expect(verdict('a hundred forty nine dollars', 149, { between: ['Agent: Great.'] }).ok).toBe(true);
-    // a plain "one of our technicians" in between is prose, not a figure
-    expect(verdict('a hundred forty nine dollars', 149, { between: ['Agent: One of our technicians will come out.'] }).ok).toBe(true);
-  });
-});
-
-// Non-price numbers in the offer turn / between offer and acceptance (codex #5377 r13 P2).
-describe('only price-like figures count for the "no other figure" rules (codex #5377 r13 P2)', () => {
-  const run = (offerTalk, { between = [], amount = 150, quoteText = null } = {}) => {
-    const ex = extraction({
-      service: { quoted_price_usd: amount },
-      priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', quoteText || offerTalk.replace(/[,?.].*$/, '')), PRICE_EVIDENCE[1]],
-    });
-    const t = [OPENING, `Agent: ${offerTalk}`, ...between, `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
-    return grounded(ex, t);
-  };
-
-  test('times, dates, quantities, addresses and phone numbers in the offer turn do not block a grounded price', () => {
-    for (const talk of [
-      'The service is $150 and we can start Thursday at 2:30 PM.',
-      'The service is $150, we come out at 2 pm.',
-      'The service is $150 for the 3 buildings.',
-      'The service is $150 per visit, 4 visits a year.',
-      'The service is $150 and the first visit is October 8.',
-      'The service is $150, starting the 24th.',
-      'The service is $150 for 123 Main Street.',
-      'The service is $150, call us at 941-555-0123 with questions.',
-      'The service is $150 and it takes about thirty minutes.',
-      'The service is $150, we can be there at two thirty in the afternoon.',
-      'The service is a hundred fifty dollars, two visits a year.',
-    ]) expect([talk, run(talk, { quoteText: talk.includes('hundred') ? 'The service is a hundred fifty dollars' : 'The service is $150' }).ok]).toEqual([talk, true]);
-  });
-
-  test('another PRICE in the offer turn still blocks, digits or words', () => {
-    expect(run('The service is $150, or $200 if you add the garage.').ok).toBe(false);
-    expect(run('The service is $150, or two hundred dollars with the garage.').ok).toBe(false);
-    expect(run('The service is $150 or 200.').ok).toBe(false); // a bare 200 is a possible price: fail closed
-    expect(run('The service is one fifty.', { quoteText: 'The service is one fifty' }).ok).toBe(false); // ambiguous
-  });
-
-  test('a price correction between the offer and the yes is still caught; time/quantity chatter is not', () => {
-    expect(run('The service is $150.', { between: ['Agent: Correction, it is $250.'] })).toEqual({ ok: false, reason: 'price_not_accepted_by_caller' });
-    expect(run('The service is $150.', { between: ['Agent: Actually two hundred fifty dollars.'] }).ok).toBe(false);
-    expect(run('The service is $150.', { between: ['Agent: Actually 250.'] }).ok).toBe(false);
-    expect(run('The service is $150.', { between: ['Agent: We can come Thursday at 2 pm, 3 technicians, October 8.'] }).ok).toBe(true);
-  });
 });
 
 describe('the embedded schemas let the staff price quote be words (codex #5377 r13 P2)', () => {
@@ -1062,69 +1013,26 @@ describe('the embedded schemas let the staff price quote be words (codex #5377 r
   });
 });
 
-// "around / about" before a number (codex #5377 r14 P2): approximate prices are prices.
-describe('approximators: "around 350 total" is a price, "around 2 PM" is a time (codex #5377 r14 P2)', () => {
-  const run = (offerTalk, { between = [], amount = 350, quoteText } = {}) => {
-    const ex = extraction({
-      service: { quoted_price_usd: amount },
-      priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', quoteText || offerTalk.replace(/[,?.]$/, '')), PRICE_EVIDENCE[1]],
-    });
-    const t = [OPENING, `Agent: ${offerTalk}`, ...between, `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
-    return grounded(ex, t);
-  };
-
-  test('an approximate bare-dollar or dollar-marked quote grounds', () => {
-    expect(run('That runs around 350 total.').ok).toBe(true);
-    expect(run('That runs about $350.').ok).toBe(true);
-    expect(run('That runs approximately 350 dollars.').ok).toBe(true);
-    expect(run('That runs roughly three hundred fifty dollars.').ok).toBe(true);
-    expect(run('That runs around 150 total.', { amount: 150 }).ok).toBe(true);
-    // the wrong approximate amount still does not
-    expect(run('That runs around 350 total.', { amount: 150 }).ok).toBe(false);
-  });
-
-  test('around/about a TIME is ignored: it never blocks a grounded price', () => {
-    expect(run('That runs $350 and we can come around 2 PM.').ok).toBe(true);
-    expect(run('That runs $350 and we can come around 2:30.').ok).toBe(true);
-    expect(run('That runs $350 and we can come around two.').ok).toBe(true);
-    expect(run('That runs $350 and we can come about 2 in the afternoon.').ok).toBe(true);
-    expect(run('That runs $350, we are there around 10.').ok).toBe(true); // a bare hour 1-12, no money word
-  });
-
-  test('a correction using "around" between the offer and the yes is still caught', () => {
-    expect(run('That runs $350.', { between: ['Agent: Actually around 400.'] }).ok).toBe(false);
-    expect(run('That runs $350.', { between: ['Agent: Actually about $400.'] }).ok).toBe(false);
-    expect(run('That runs $350.', { between: ['Agent: Actually around four hundred dollars.'] }).ok).toBe(false);
-    expect(run('That runs $350.', { between: ['Agent: We will be there around 2 PM.'] }).ok).toBe(true);
-  });
-
-  test('another approximate price in the offer turn still blocks', () => {
-    expect(run('That runs $350, or around 400 with the garage.').ok).toBe(false);
-  });
-});
-
-// ONE clock-shape rule for every time preposition (codex #5377 r15 P1).
-describe('after at/by/before/until/around/about a number is a time only when clock-shaped (codex #5377 r15 P1)', () => {
-  const run = (offerTalk, { between = [] } = {}) => grounded(extraction({
-    priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', 'The service is $150'), PRICE_EVIDENCE[1]],
-  }), [OPENING, `Agent: ${offerTalk || 'The service is $150.'}`, ...between, `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n'));
-
-  test('a staff correction after a time preposition is caught, digits or words', () => {
-    for (const said of ['Actually, we\'re at 250.', 'Actually, by 300.', 'Actually, before 400.', 'Actually, until 300.', 'Actually, after 250.',
-      'Actually, we are at two hundred fifty.', 'Actually, by three hundred.', 'Actually, around 400.', 'Actually, about $400.']) {
-      expect([said, run('', { between: [`Agent: ${said}`] }).ok]).toEqual([said, false]);
+// The prompt/schema tell the model that ANY later correction or added charge makes the
+// price non-final (owner ruling 2026-10-01: the AI judges the price language).
+describe('price_is_final carries correction and added-charge language (owner ruling 2026-10-01)', () => {
+  test('prompt and both schemas say a correction or an added charge, any amount, makes it false', () => {
+    const prompt = fs.readFileSync(path.join(__dirname, '../services/prompts/call-extraction-v1.js'), 'utf8');
+    const line = prompt.split('\n').find((l) => l.startsWith('- price_is_final:'));
+    expect(line).toMatch(/ADDED CHARGE/);
+    expect(line).toMatch(/any amount and any phrasing/);
+    expect(line).toMatch(/When in doubt, false/);
+    for (const f of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
+      const raw = fs.readFileSync(path.join(__dirname, '../schemas', f), 'utf8');
+      const d = JSON.parse(raw).properties?.service_request?.properties?.price_is_final?.description
+        || raw.match(/"price_is_final": \{[\s\S]*?"description": "((?:[^"\\]|\\.)*)"/)[1];
+      expect(d).toMatch(/ADDED CHARGE/);
+      expect(d).toMatch(/When in doubt, false/);
     }
   });
 
-  test('a clock-shaped number after them is a time and is ignored', () => {
-    for (const said of ['We can come at 2.', 'We can come at 2:30.', 'We can come by 3 PM.', 'We can come at two.', 'We can come before 10.',
-      'We can come around 2 PM.', 'We can come about 2:30.', 'We can come until 5.', 'We can come at 12 noon.']) {
-      expect([said, run('', { between: [`Agent: ${said}`] }).ok]).toEqual([said, true]);
-    }
-  });
-
-  test('the same holds inside the offer turn itself', () => {
-    expect(run('The service is $150 and we are at 250 for the garage.').ok).toBe(false);
-    expect(run('The service is $150 and we come at 2.').ok).toBe(true);
+  test('the deleted number scan is gone from the module', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-commercial-dictated-booking.js'), 'utf8');
+    for (const gone of ['TIME_BEFORE', 'nonPriceContext', 'figuresIn(', 'QUANTITY_AFTER', 'STREET_WORDS', 'spokenFigureRuns']) expect(src).not.toContain(gone);
   });
 });

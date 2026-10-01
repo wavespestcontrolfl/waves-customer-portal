@@ -1074,17 +1074,12 @@ function evaluateSpokenRun(words) {
   return total + group;
 }
 
-// Runs of spoken number words with their neighbours, so a caller can judge whether a
-// figure is a price or a time/date/quantity: [{ value, prev: [word], next: [word] }]
-// (up to three words either side, lower-cased, punctuation stripped). Same value
-// rules as spokenFiguresIn (which is this, values only).
-function spokenFigureRuns(text) {
+function spokenFiguresIn(text) {
   const tokens = String(text || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
   const out = [];
   for (let i = 0; i < tokens.length;) {
     const aBeforeMultiplier = tokens[i] === 'a' && (tokens[i + 1] === 'hundred' || tokens[i + 1] === 'thousand');
     if (!aBeforeMultiplier && !isSpokenNumberWord(tokens[i])) { i += 1; continue; }
-    const startAt = i;
     const words = [];
     if (aBeforeMultiplier) { words.push('one'); i += 1; }
     while (i < tokens.length) {
@@ -1095,15 +1090,9 @@ function spokenFigureRuns(text) {
       break;
     }
     const value = evaluateSpokenRun(words);
-    if (Number.isNaN(value) || value >= 20) {
-      out.push({ value, prev: tokens.slice(Math.max(0, startAt - 3), startAt), next: tokens.slice(i, i + 3) });
-    }
+    if (Number.isNaN(value) || value >= 20) out.push(value);
   }
   return out;
 }
 
-function spokenFiguresIn(text) {
-  return spokenFigureRuns(text).map((r) => r.value);
-}
-
-module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenFigureRuns } };
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn } };

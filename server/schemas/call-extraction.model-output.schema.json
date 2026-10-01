@@ -926,7 +926,7 @@
             "boolean",
             "null"
           ],
-          "description": "1.21.0, additive/optional (never `required`): true ONLY when the accepted amount was the LAST price staff stated for this service on the call: no later correction, revision or different number before the call ended (\"actually, correction, it's $250\"). false when staff or the caller changed the price after the acceptance or between the offer and the acceptance. null when no price was discussed."
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when the accepted amount was the LAST price staff stated for this service on the call: with nothing added to it: no later correction, revision, different number or ADDED CHARGE, in any amount and any phrasing, before the call ended (\"actually, correction, it's $250\", \"plus ten dollars for the garage\", \"that is before the trip fee\"). false when staff or the caller changed the price or a charge was added between the offer and the acceptance OR after it, even a small one. When in doubt, false. null when no price was discussed."
         },
         "quote_requested": {
           "type": [

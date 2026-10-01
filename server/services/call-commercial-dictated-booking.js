@@ -54,81 +54,26 @@ const { resolveCallAgreedPrice } = require('../utils/call-agreed-price');
 // catalog price or none): reuse it, never copy the bounds.
 const { sanitizeQuotedCallPrice } = require('./call-booking-catalog');
 
-const { parseTurns, turnsHolding, spokenFigureRuns } = groundingTools;
+const { parseTurns, turnsHolding, spokenFiguresIn } = groundingTools;
 
-// PRICE-LIKE figures said in a text: "$1,500", "150", "150.00", or in words ("a hundred
-// forty nine dollars"). A number is NOT a price when its own context says it is a
-// time ("at 2:30", "2 PM", "two o'clock", "in the afternoon"), a date ("October 8",
-// "the 24th"), a quantity ("2 visits", "three bedrooms") or part of an address or a
-// phone number — those must not trip the "no other figure" rules. A dollar-marked
-// figure ("$", "dollars", "bucks", "USD") is always a price; any other number with no
-// such context counts (fail closed: a bare "250" in a staff turn is a possible
-// correction). An ambiguous spoken run ("one fifty") is NaN, never equal to the
-// amount, so the offer is not grounded and the office books it (codex #5377 r12 + r13).
-const MONTHS = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
-const MONTH_RE = new RegExp(`^${MONTHS}$`, 'i');
-const DOLLAR_WORDS = new Set(['dollar', 'dollars', 'buck', 'bucks', 'usd']);
-const TIME_AFTER = new Set(['am', 'pm', 'oclock', 'clock', 'morning', 'afternoon', 'evening', 'noon', 'tonight']);
-// Words that put a number in TIME context ("at 2", "by 3", "around 2", "before 10"),
-// and ALSO qualify prices ("we're at 250", "that runs around 350", "by 300"): ONE rule
-// for all of them. After one of these a number is a time only when it is clock-shaped:
-// an integer hour 1-12, or one a time word / colon time follows (handled by TIME_AFTER
-// and the colon check). Anything else ("at 250", "by 300", "around 350") counts as a
-// possible price (codex #5377 r14 + r15).
-const TIME_BEFORE = new Set(['at', 'by', 'until', 'till', 'before', 'after', 'around', 'about', 'approximately', 'roughly']);
-const QUANTITY_AFTER = new Set(['visit', 'visits', 'time', 'times', 'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
-  'minute', 'minutes', 'hour', 'hours', 'treatment', 'treatments', 'unit', 'units', 'bedroom', 'bedrooms', 'bathroom', 'bathrooms',
-  'building', 'buildings', 'property', 'properties', 'location', 'locations', 'room', 'rooms', 'story', 'stories', 'floor', 'floors',
-  'foot', 'feet', 'ft', 'square', 'sq', 'acre', 'acres', 'people', 'person', 'technician', 'technicians', 'truck', 'trucks',
-  'percent', 'employee', 'employees', 'tenant', 'tenants', 'door', 'doors', 'window', 'windows', 'service', 'services', 'application', 'applications']);
-const STREET_WORDS = new Set(['st', 'street', 'ave', 'avenue', 'rd', 'road', 'dr', 'drive', 'blvd', 'boulevard', 'ln', 'lane', 'way', 'ct', 'court', 'pkwy', 'parkway', 'hwy', 'highway', 'circle', 'cir', 'trail', 'trl', 'place', 'pl', 'terrace']);
-
-function nonPriceContext(prev, next, value) {
-  const n0 = next[0];
-  if (TIME_AFTER.has(n0)) return true;
-  if (n0 === 'in' && ['the', 'a'].includes(next[1]) && TIME_AFTER.has(next[2])) return true;
-  if (TIME_BEFORE.has(prev[prev.length - 1]) && Number.isInteger(value) && value >= 1 && value <= 12) return true;
-  if (['st', 'nd', 'rd', 'th'].includes(n0)) return true;
-  if (MONTH_RE.test(prev[prev.length - 1] || '') || MONTH_RE.test(n0 || '')) return true;
-  if (prev[prev.length - 1] === 'of' && MONTH_RE.test(next[0] || '')) return true;
-  if (QUANTITY_AFTER.has(n0) && !(next[1] && DOLLAR_WORDS.has(next[1]))) return true;
-  if (STREET_WORDS.has(n0) || STREET_WORDS.has(next[1])) return true;
-  return false;
+// Does a text state this amount, as digits ("$1,500", "150.00") or as spoken words
+// ("a hundred forty nine dollars")? The ONLY number reading left in this file: it
+// grounds the booked amount in the staff's own offer quote. It does NOT scan for
+// other figures: whether a later correction or an added charge happened is the
+// extraction's judgement (price_is_final), per the owner ruling of 2026-10-01.
+function statesAmount(text, amount) {
+  const digits = [...String(text || '').matchAll(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g)]
+    .map((m) => Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`));
+  return digits.includes(amount) || spokenFiguresIn(text).includes(amount);
 }
 
-function figuresIn(text) {
-  const src = String(text || '');
-  const figures = [];
-  for (const m of src.matchAll(/(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/g)) {
-    const before = src.slice(Math.max(0, m.index - 14), m.index);
-    const after = src.slice(m.index + m[0].length, m.index + m[0].length + 40);
-    const words = (str) => str.toLowerCase().replace(/[^a-z\s']/g, ' ').replace(/'/g, '').split(/\s+/).filter(Boolean);
-    const next = words(after).slice(0, 3);
-    const prev = words(before).slice(-3);
-    const marked = /\$\s*$/.test(before) || DOLLAR_WORDS.has(next[0]) || /^\s*(?:dollars?|bucks?|usd)\b/i.test(after);
-    if (!marked) {
-      // clock "2:30", a number glued to a suffix ("24th", "2pm") or a phone-number group
-      if (/:\s*$/.test(before) || /^\s*:\d/.test(after) || /^(?:st|nd|rd|th|am|pm|a\.m|p\.m)\b/i.test(after)) continue;
-      if (/\d-$/.test(before) || /^-\d/.test(after)) continue;
-      if (nonPriceContext(prev, next, Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`))) continue;
-    }
-    figures.push(Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`));
-  }
-  for (const run of spokenFigureRuns(src)) {
-    const marked = DOLLAR_WORDS.has(run.next[0]);
-    if (!marked && nonPriceContext(run.prev, run.next, run.value)) continue;
-    figures.push(run.value);
-  }
-  return figures;
-}
-
-// The agreed price is real. The extraction JUDGES the language (schema 1.21.0:
-// staff offered this amount as Waves' own quote, the caller accepted it, it was
-// the final price) and pins a quote for the offer and the acceptance; this code
-// only verifies: every judgement is true (a missing one fails closed), each
-// quote is word for word in a turn of its required speaker, the offer's turn
-// states exactly the recorded amount as a figure (and no other figure), and the
-// acceptance comes in a LATER turn than the offer.
+// The agreed price is real. The extraction JUDGES the price language (schema 1.21.0:
+// staff offered this amount as Waves' own quote, the caller accepted it, and it was
+// FINAL: no later correction or added charge) and pins a quote for the offer and the
+// acceptance; this code only verifies: every judgement is true (a missing one fails
+// closed), each quote is word for word in a turn of its required speaker, the OFFER
+// quote states the booked amount (quoted_price_usd), and the acceptance comes in a
+// LATER turn than the offer.
 function priceGrounded(v2, transcript, amount) {
   const svc = v2.service_request || {};
   if (svc.price_offered_by_staff !== true) return 'price_offer_unjudged';
@@ -140,17 +85,10 @@ function priceGrounded(v2, transcript, amount) {
     .filter((e) => e?.field_path === path && e.speaker === speaker && typeof e.quote === 'string')
     .flatMap((e) => turnsHolding(turns, e.quote, speaker).map((turn) => ({ turn, quote: e.quote })));
   const offers = pinned('/service_request/price_offered_by_staff', 'agent')
-    .filter(({ turn, quote }) => figuresIn(quote).length > 0 && [quote, turn.raw].every((text) => figuresIn(text).every((n) => n === amount)));
+    .filter(({ quote }) => statesAmount(quote, amount));
   if (!offers.length) return 'price_not_stated_by_staff';
-  // The acceptance answers an offer: it is in a later turn, and no staff turn
-  // between the two says another figure (a correction before the "yes").
-  const answers = (offer, turn) => {
-    const from = turns.indexOf(offer.turn);
-    const to = turns.indexOf(turn);
-    return to > from && turns.slice(from + 1, to).every((t) => !t.agent || figuresIn(t.raw).every((n) => n === amount));
-  };
   const accepted = pinned('/service_request/price_accepted_by_caller', 'caller')
-    .some(({ turn }) => offers.some((offer) => answers(offer, turn)));
+    .some(({ turn }) => offers.some((offer) => turns.indexOf(turn) > turns.indexOf(offer.turn)));
   return accepted ? null : 'price_not_accepted_by_caller';
 }
 
