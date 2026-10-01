@@ -163,6 +163,11 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['lawn_care']) })).toBeNull();
   });
 
+  test('a primary_line_price with no estimated_price is not a price: completion bills nothing from it', () => {
+    const lawn = lawnRows({ childOverrides: { estimated_price: null, primary_line_price: 100 } });
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual(['price_missing']);
+  });
+
   test('a left-out family still on the shared first invoice keeps its share of the invoice total', () => {
     const three = invoice([setupFee, firstApp(150, 'Quarterly Pest Control'), firstApp(100, 'Lawn Care'), firstApp(60, 'Tree & Shrub')]);
     const verdict = run([PEST, LAWN, TREE], [...pestRows(), ...lawnRows(), ...treeRows()],

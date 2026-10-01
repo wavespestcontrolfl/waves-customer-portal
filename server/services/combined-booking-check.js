@@ -110,11 +110,12 @@ function truncateAtWord(text, max) {
   return require('./ops-digest').truncateAtWord(text, max);
 }
 
+// The visit's own price exactly as completion bills it (billing-lane.js
+// completionInvoiceAmount's first rule): estimated_price, nothing else. A
+// primary_line_price with no estimated_price is never billed on its own.
 function rowPrice(row) {
   const est = Number(row.estimated_price);
-  if (est > 0) return est;
-  const primary = Number(row.primary_line_price);
-  return primary > 0 ? primary : 0;
+  return est > 0 ? est : 0;
 }
 // Prepaid coverage is proven by loadContext (prepaidCoverage): a positive
 // out-of-band stamp, or an annual-prepay stamp annualPrepayCoversVisit
@@ -550,20 +551,26 @@ function ringOnNewProblem(codes) {
 
 // Retires a bell the way resolveOpsDigest retires a cleared finding: read plus
 // a resolved stamp; the row stays in the Activity feed as history.
-function resolvedPatch(conn) {
+function resolvedPatch(conn, { dropDedupeKey = false } = {}) {
+  const base = dropDedupeKey ? "(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey')" : "COALESCE(metadata, '{}'::jsonb)";
   return {
     read_at: conn.raw('COALESCE(read_at, NOW())'),
-    metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+    metadata: conn.raw(`${base} || ?::jsonb`, [JSON.stringify({
       resolved: true, resolvedAt: new Date().toISOString(), resolvedBy: OPS_KEY,
     })]),
   };
 }
+// An OK row keeps its dedupeKey: it is the "already checked" marker.
 const retireRow = (conn, id) => conn('notifications').where({ id }).update(resolvedPatch(conn));
+// A problem retired WITHOUT an OK (plan cancelled, or nothing of this check's
+// own left to say) drops its dedupeKey like resolveOpsDigest does, so the
+// same problem coming back posts a fresh bell that rings instead of
+// refreshing this read, resolved row in silence.
 const retireStanding = (conn, estimateId) => conn('notifications')
   .where({ recipient_type: 'admin', category: CATEGORY })
   .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKeyFor(estimateId)])
   .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-  .update(resolvedPatch(conn));
+  .update(resolvedPatch(conn, { dropDedupeKey: true }));
 
 async function postAlert(conn, estimate, verdict, ctx, { notifier } = {}) {
   const notificationService = notifier || require('./notification-service');

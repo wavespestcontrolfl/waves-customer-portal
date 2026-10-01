@@ -171,6 +171,16 @@ postgres('combined-booking check through the real conversion', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0].read_at).not.toBeNull();
       expect(rows[0].metadata.resolved).toBe(true);
+      expect(rows[0].metadata.dedupeKey).toBeUndefined();
+
+      // The same problem coming back rings a fresh bell, never the retired row.
+      await trx('scheduled_services').whereIn('id', (await rowsOf(trx, estimateId)).map((row) => row.id)).update({ status: 'pending' });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1, failed: 0 });
+      const again = await alertsOf(trx, estimateId);
+      expect(again).toHaveLength(2);
+      const fresh = again.find((row) => row.id !== rung.id);
+      expect(fresh.read_at).toBeNull();
+      expect(fresh.metadata.resolved).toBeUndefined();
 
       const churned = await acceptedEstimate(trx, lines);
       await trx('scheduled_services').whereIn('id', (await rowsOf(trx, churned.estimateId)).map((row) => row.id)).update({ status: 'cancelled' });
