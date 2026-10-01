@@ -149,6 +149,43 @@ function documentCarriesRateReviewTerms(estimate, acceptance = null) {
   return typeof text === 'string' && text.includes(RATE_REVIEW_SENTENCE);
 }
 
+// Structured commercial terms (slice 1A-i) rendered as "Label: value" lines —
+// the pdfkit document prints them; both renderers treat their presence as
+// authored terms. Canonical payment tokens → labels (same map as
+// proposal-sections.js). Lives here, beside the predicates that key on it,
+// so the renderers and the served-disclosure evidence read ONE definition.
+function commercialTermLines(commercialTerms) {
+  if (!commercialTerms || typeof commercialTerms !== 'object') return [];
+  const paymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+  return [
+    ['Payment', paymentLabel[commercialTerms.paymentTerms] || null],
+    ['Initial term', commercialTerms.initialTermMonths != null
+      ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')
+      : null],
+    ['Renewal', commercialTerms.renewal],
+    ['Price adjustment', commercialTerms.priceAdjustment],
+    ['Cancellation', commercialTerms.cancellation],
+    ['Property access', commercialTerms.accessRequirements],
+  ].filter(([, value]) => value != null).map(([label, value]) => `${label}: ${value}`);
+}
+
+// The renderers print the canned plan sentences (the callback guarantee, the
+// annual rate review line) only where no operator-authored terms sit beside
+// them — never next to a free-text `terms` block, a structured commercial
+// terms block, or a programs-mode proposal (estimate-pdf.js termsBlock
+// cannedTermsAllowed; EstimateProposalDocument.jsx authoredTermsPresent /
+// programList). The rate-review predicate below applies the same exclusions,
+// so the /data projection, the pdfkit fallback and the served-disclosure
+// evidence agree: a document whose renderer suppresses the line never
+// records that it showed it (pre-push Codex on #5434).
+function proposalPrintsCannedTerms(proposal) {
+  if (!proposal || typeof proposal !== 'object') return false;
+  if (proposal.terms) return false;
+  if (commercialTermLines(proposal.commercialTerms).length > 0) return false;
+  if (Array.isArray(proposal.programs) && proposal.programs.length > 0) return false;
+  return true;
+}
+
 // Whether the annual rate review disclosure prints beside the pdfkit
 // document's terms (owner ruling 2026-09-30): the SAME plan-terms scope the
 // money-back guarantee keys on — every row residential pest, lawn, mosquito
@@ -160,6 +197,7 @@ function documentCarriesRateReviewTerms(estimate, acceptance = null) {
 // decision (EstimateProposalDocument.jsx rateReviewEligible).
 function proposalRateReviewTermsEligible(proposal, estimateId = null, { estimate = null, acceptance = null } = {}) {
   if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
+  if (!proposalPrintsCannedTerms(proposal)) return false;
   if (!proposalHasRecurringVisit(proposal)) return false;
   return estimate ? documentCarriesRateReviewTerms(estimate, acceptance) : true;
 }
@@ -429,6 +467,8 @@ module.exports = {
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
   proposalRateReviewTermsEligible,
+  proposalPrintsCannedTerms,
+  commercialTermLines,
   documentCarriesRateReviewTerms,
   documentPrintsRateReviewTerms,
   rateReviewTermsServedIsCurrent,

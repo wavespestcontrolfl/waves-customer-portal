@@ -1730,6 +1730,23 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     seed({ id: 'est-pdf-2', token: 'tok-pdf-2-x0123456789', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData });
     expect((await fetch(`${base}/api/estimates/tok-pdf-2-x0123456789/pdf`)).status).toBe(200);
     expect(servedOps()).toHaveLength(0);
+    // A stored (disabled) proposal with operator terms: both renderers
+    // suppress the canned line beside authored terms, so no evidence either
+    // (pre-push Codex on #5434).
+    seed({
+      id: 'est-pdf-3',
+      token: 'tok-pdf-3-x0123456789',
+      estimate_data: JSON.stringify({
+        ...JSON.parse(documentData),
+        proposal: {
+          enabled: false,
+          terms: 'Operator terms govern this proposal.',
+          buildings: [{ name: 'Home', lineItems: [{ description: 'Quarterly Pest Control', unitPrice: 60, frequency: 'quarterly', taxable: false }] }],
+        },
+      }),
+    });
+    expect((await fetch(`${base}/api/estimates/tok-pdf-3-x0123456789/pdf`)).status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
   });
 
   test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {

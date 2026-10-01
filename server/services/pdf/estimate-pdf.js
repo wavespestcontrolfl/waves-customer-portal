@@ -23,7 +23,9 @@ const {
 const { formatDisplayDate } = require('../../utils/date-only');
 const { normalizeProposal, computeProposalTotals, annualizedAmount } = require('../estimate-proposal');
 const { formatUnitPrice, formatQuantity } = require('../../../shared/proposal-bid.cjs');
-const { proposalCallbackTermsEligible, proposalMakesNoGuaranteeClaim, proposalRateReviewTermsEligible, resolveProposalBillingContext } = require('../estimate-proposal-billing');
+const {
+  commercialTermLines, proposalCallbackTermsEligible, proposalMakesNoGuaranteeClaim, proposalRateReviewTermsEligible, resolveProposalBillingContext,
+} = require('../estimate-proposal-billing');
 const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims.cjs');
 
 // Brand palette — identical to invoice-pdf.js.
@@ -395,21 +397,8 @@ function correctiveWorkBlock(ctx, correctiveWork, y) {
 // terms block prints. Labels mirror client/src/lib/proposal-sections.js —
 // including its validDays omission (the enforced expires_at is the only
 // validity date any renderer may print; codex 1A-i r1).
-function commercialTermLines(commercialTerms) {
-  if (!commercialTerms || typeof commercialTerms !== 'object') return [];
-  // Canonical payment tokens → labels (same map as proposal-sections.js).
-  const paymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
-  return [
-    ['Payment', paymentLabel[commercialTerms.paymentTerms] || null],
-    ['Initial term', commercialTerms.initialTermMonths != null
-      ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')
-      : null],
-    ['Renewal', commercialTerms.renewal],
-    ['Price adjustment', commercialTerms.priceAdjustment],
-    ['Cancellation', commercialTerms.cancellation],
-    ['Property access', commercialTerms.accessRequirements],
-  ].filter(([, value]) => value != null).map(([label, value]) => `${label}: ${value}`);
-}
+// commercialTermLines now lives in estimate-proposal-billing.js (one
+// definition for the renderer and the served-disclosure evidence).
 
 function quotesPerApplication(proposal) {
   return (proposal.buildings || []).some((building) => (building.lineItems || [])

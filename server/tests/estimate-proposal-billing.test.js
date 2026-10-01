@@ -36,6 +36,8 @@ const {
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
   proposalRateReviewTermsEligible,
+  proposalPrintsCannedTerms,
+  commercialTermLines,
   documentCarriesRateReviewTerms,
   rateReviewTermsServedIsCurrent,
   recordRateReviewTermsServed,
@@ -202,6 +204,28 @@ describe('proposalRateReviewTermsEligible (annual rate review disclosure, owner 
   it('never prints where the proposal makes no guarantee claim (termite / unclassifiable work)', () => {
     mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
     expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] }, 'e1')).toBe(false);
+  });
+
+  // Pre-push Codex on #5434: the renderers suppress the canned line beside
+  // authored, structured or program terms, so the shared predicate must too —
+  // otherwise a download would record served evidence for a line never shown.
+  it('never prints beside authored free-text terms, structured commercial terms or programs (renderer exclusions)', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    const pest = () => ({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] });
+    expect(proposalRateReviewTermsEligible(pest(), 'e1')).toBe(true);
+    expect(proposalRateReviewTermsEligible({ ...pest(), terms: 'Operator terms govern this proposal.' }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ ...pest(), commercialTerms: { paymentTerms: 'net30' } }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ ...pest(), commercialTerms: { initialTermMonths: 0 } }, 'e1')).toBe(false);
+    // A programs-mode proposal whose program rows classify as plan work.
+    expect(proposalRateReviewTermsEligible({ ...pest(), programs: [{ name: 'Lawn Program', frequencyPerYear: 8, pricePerApplication: 60 }] }, 'e1')).toBe(false);
+    // An EMPTY structured block or blank terms are not authored terms.
+    expect(proposalRateReviewTermsEligible({ ...pest(), commercialTerms: {}, terms: '' }, 'e1')).toBe(true);
+    expect(proposalPrintsCannedTerms(pest())).toBe(true);
+    expect(proposalPrintsCannedTerms({ ...pest(), terms: 'x' })).toBe(false);
+    expect(proposalPrintsCannedTerms(null)).toBe(false);
+    expect(commercialTermLines({ paymentTerms: 'net15', renewal: 'Auto-renews yearly' })).toEqual(['Payment: Net-15', 'Renewal: Auto-renews yearly']);
+    expect(commercialTermLines(null)).toEqual([]);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
   });
 
   // codex #5434 r2 P1: frozen documents keep their original terms.
