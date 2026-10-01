@@ -191,7 +191,7 @@ describe('lateAlert', () => {
   });
 
   test('an open alert carries type, severity and minutes from the payload (string or object)', async () => {
-    const which = { visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
+    const which = { visitId: 'visit-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
     expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: JSON.stringify({ delay_minutes: 35 }) })).lateAlert)
       .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: 35, missingTracking: false, ...which });
     expect((await run({ type: 'unassigned_overdue', severity: 'critical', job_id: 'visit-1', payload: { delay_minutes: '12' } })).lateAlert)
@@ -201,7 +201,7 @@ describe('lateAlert', () => {
   test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
     const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, delay_minutes: 50 };
     expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload })).lateAlert)
-      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true, visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
+      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true, visitId: 'visit-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
   });
 
   test('with two visits today the alert names the visit it was raised on', async () => {

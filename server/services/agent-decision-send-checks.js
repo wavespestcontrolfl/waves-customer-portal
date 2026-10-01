@@ -306,11 +306,12 @@ async function reserviceBlock({ decision, outgoingBody }) {
 // rendered call_commitments row as "id:rev" (rev = visit-loops-facts
 // commitmentRevision of what it restated); every one must still be open, live and
 // unedited at send time.
-// VISIT STATUS (visit_loop_status): a draft that showed tech position, a flagged
+// VISIT STATUS (visit_loop_status): a draft that showed a fresh tech position, a
 // delay, a passed window or a missed visit is held to the LIVE ETA freshness window
-// (15 min from facts_generated_at; missing = expired) — one rule for every
-// time-sensitive line — and a fresh position's stop count is recounted on every
-// send within it (a paraphrase can carry the count without any keyword).
+// (15 min from facts_generated_at; missing = expired), and within it the facts are
+// rebuilt for the customer: any change to that signature (a reschedule, a
+// completion, a resolved alert, a moved route) refuses — one check for every
+// time-sensitive line, whatever wording the reply used.
 // Fails closed on a read error. Returns null or a reason code.
 function visitStatusExpired(snapshot, nowMs) {
   const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness');
@@ -341,14 +342,16 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
     .map((ref) => { const [id, rev = null] = ref.split(':'); return { id, rev }; });
   const status = objectOrNull(snapshot.visit_loop_status);
   if (status && visitStatusExpired(snapshot, now.getTime())) return 'visit_status_expired';
-  const position = objectOrNull(status?.position);
-  if (!refs.length && !position) return null;
+  const signature = typeof status?.signature === 'string' ? status.signature : null;
+  if (!refs.length && !signature) return null;
   try {
     const conn = dbh || require('../models/db');
     if (refs.length && await commitmentsChanged(conn, refs, customerId)) return 'commitment_closed';
-    if (position) {
-      const count = await require('./visit-loops-facts').currentStopsAhead({ conn, visitId: position.visitId, techId: position.techId });
-      if (count == null || Number(count) !== Number(position.stopsAhead)) return 'stop_count_stale';
+    if (signature) {
+      if (!customerId) return 'visit_status_changed';
+      const facts = require('./visit-loops-facts');
+      const fresh = await facts.loadVisitLoops({ customerId, conn });
+      if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
     }
     return null;
   } catch (err) {

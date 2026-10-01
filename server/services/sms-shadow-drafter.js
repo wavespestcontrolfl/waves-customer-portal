@@ -4513,22 +4513,15 @@ function validateOpenLoopAnswer({ reply, context }) {
   if (!visitLoopsNeedAnswer(context) || String(reply || '').trim()) return { ok: true, violations: [] };
   return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
 }
-// Marks a draft whose section showed time-sensitive VISIT STATUS (tech position, a
-// flagged delay, a passed window, a missed visit): the send boundary holds it to the
-// LIVE ETA freshness window, and recounts a fresh position's stops when the reply
-// mentions stops. { position: { visitId, techId, stopsAhead } | null }; null when the
-// section showed none of these, or gate-off.
+// Marks a draft whose section showed time-sensitive VISIT STATUS (a fresh tech
+// position, a delay, a passed window, a missed visit): { signature } from
+// visit-loops-facts visitStatusSignature. The send boundary holds it to the LIVE
+// ETA freshness window AND rebuilds the facts, refusing if the signature changed.
+// null when the section showed none of these, or gate-off.
 function visitLoopStatus(context) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
-  const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
-  if (!v.techPosition && !v.lateAlert && !v.pastWindow && !v.missedVisit) return null;
-  const tp = v.techPosition;
-  const stops = Number(tp && tp.stopsAhead);
-  const position = tp && typeof tp === 'object' && tp.status !== 'stale' && tp.visitId != null && tp.techId != null
-    && tp.stopsAhead != null && Number.isFinite(stops) && stops >= 0
-    ? { visitId: String(tp.visitId), techId: String(tp.techId), stopsAhead: Math.round(stops) }
-    : null;
-  return { position };
+  const signature = require('./visit-loops-facts').visitStatusSignature(context && context.visitLoops);
+  return signature ? { signature } : null;
 }
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed

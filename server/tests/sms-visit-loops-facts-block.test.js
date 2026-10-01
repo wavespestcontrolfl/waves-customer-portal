@@ -254,17 +254,15 @@ describe('validateOpenLoopAnswer', () => {
 });
 
 describe('visitLoopStatus', () => {
-  test('gate on: marks any time-sensitive status line; carries a fresh position\'s count; otherwise null', () => {
-    const tp = { techName: 'Sam', status: 'en_route', stopsAhead: 2, visitId: 'v1', techId: 't1' };
-    expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toBeNull();
+  test('gate on: the visit-status signature when a time-sensitive line shows; otherwise null', () => {
+    const tp = { techName: 'Sam', status: 'en_route', stopsAhead: 2, visitId: 'v1', atThisVisit: false };
+    expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toBeNull(); // gate off
     process.env[GATE] = 'true';
-    expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toEqual({ position: { visitId: 'v1', techId: 't1', stopsAhead: 2 } });
-    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } })).toEqual({ position: null });
-    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, stopsAhead: null } } })).toEqual({ position: null });
-    // a started visit's position (no count) persists no recount snapshot, so a valid reply stays sendable
-    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'on_site', stopsAhead: null } } })).toEqual({ position: null });
-    expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn' } } })).toEqual({ position: null });
-    expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1' } } })).toEqual({ position: null });
+    expect(visitLoopStatus({ visitLoops: { techPosition: tp } })).toEqual({ signature: 'pos:v1:en_route:false:2' });
+    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } })).toBeNull();
+    expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn', date: '2026-09-30', reason: 'not_completed' } } })).toEqual({ signature: 'missed:Lawn:2026-09-30:not_completed' });
+    expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1' }, lateAlert: { visitId: 'v1', type: 'tech_late', missingTracking: false } } }))
+      .toEqual({ signature: 'late:v1:tech_late:false|past:v1' });
     expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBeNull(); // commitments have their own recheck
     expect(visitLoopStatus({})).toBeNull();
   });

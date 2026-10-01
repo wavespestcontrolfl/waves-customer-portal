@@ -168,21 +168,6 @@ async function countStopsAhead(conn, visit, now) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Send-time recount (agent-decision-send-checks): the stops before `visitId` now,
-// or null when that claim no longer holds at all (visit gone, started, moved off
-// today, or reassigned). Throws on a read error — the caller fails closed.
-async function currentStopsAhead({ conn = db, visitId, techId, now = new Date() }) {
-  const visit = await conn('scheduled_services').where({ id: visitId })
-    .first('id', 'visit_id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state');
-  // started by status OR by tracker (the tracker can lead a lagging status), or done
-  if (!visit || !NOT_STARTED_STATUSES.includes(visit.status)
-    || LIVE_TRACK_STATES.includes(visit.track_state) || visit.track_state === 'complete') return null;
-  if (String(visit.technician_id) !== String(techId) || calendarDay(visit.scheduled_date) !== etDateString(now)) return null;
-  const recorded = await conn('service_records').where({ scheduled_service_id: visitId }).first('id');
-  if (recorded) return null;
-  return countStopsAhead(conn, visit, now);
-}
-
 async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
   const visit = todayRows.find((r) => r.technician_id);
   if (!visit) return null;
@@ -252,7 +237,7 @@ async function loadLateAlert(todayRows, { conn, deriveWindow }) {
     return visit && alertMatchesOccurrence(payload, visit);
   });
   if (!alert) return null;
-  const where = { visitType: visit.service_type || null, windowDisplay: windowLabel(visit, deriveWindow) };
+  const where = { visitId: String(visit.id), visitType: visit.service_type || null, windowDisplay: windowLabel(visit, deriveWindow) };
   // no-show-detector raises the same two types on missing tracking alone (stage 1
   // is 45 min into an open window): that is a tracking gap, not confirmed lateness.
   if (payload?.evidence === 'missing_tracking') {
@@ -494,4 +479,22 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   return out;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, familyKey, currentStopsAhead, commitmentRevision };
+// The time-sensitive VISIT STATUS facts a reply can restate, as one comparable
+// string (null when none): a fresh tech position (its visit, status, at-this-visit,
+// stop count), a delay or tracking gap (its visit and kind), a passed window (its
+// visit), a missed visit (type, day, reason). The send boundary rebuilds the facts
+// for the customer and refuses when this changed — a reschedule, a completion, a
+// resolved alert or a moved route all show up here, with no recheck per fact.
+function visitStatusSignature(visitLoops) {
+  const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
+  const tp = v.techPosition && v.techPosition.status !== 'stale' ? v.techPosition : null;
+  const parts = [
+    tp && `pos:${tp.visitId}:${tp.status}:${tp.atThisVisit === true}:${tp.stopsAhead ?? ''}`,
+    v.lateAlert && `late:${v.lateAlert.visitId}:${v.lateAlert.type}:${v.lateAlert.missingTracking === true}`,
+    v.pastWindow && `past:${v.pastWindow.visitId}`,
+    v.missedVisit && `missed:${v.missedVisit.type}:${v.missedVisit.date}:${v.missedVisit.reason}`,
+  ].filter(Boolean);
+  return parts.length ? parts.join('|') : null;
+}
+
+module.exports = { loadVisitLoops, emptyVisitLoops, familyKey, commitmentRevision, visitStatusSignature };

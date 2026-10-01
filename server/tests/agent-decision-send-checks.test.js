@@ -519,27 +519,46 @@ describe('open-loop commitments recheck', () => {
       .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true });
   });
 
-  describe('stop-count recount (visit_loop_status)', () => {
-    const { etDateString } = require('../utils/datetime-et');
-    const today = etDateString(new Date());
-    const position = { visitId: 'v1', techId: 't1', stopsAhead: 2 };
+  describe('visit status (visit_loop_status): freshness window + rebuilt-facts signature', () => {
+    const facts = require('../services/visit-loops-facts');
     const fresh = () => new Date(Date.now() - 60000).toISOString();
-    const withPos = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: fresh(), visit_loop_status: { position } }) });
-    const routeDb = ({ visit, ahead, recorded = null }) => {
-      const conn = (table) => {
-        const q = { where: () => q, whereNotIn: () => q, whereNotExists: () => q, modify: (fn) => { fn(q); return q; }, first: async (...cols) => (cols.includes('route_order') ? visit : { count: String(ahead) }) };
-        if (table === 'service_records') return { where: () => ({ first: async () => recorded }) };
-        return table === 'scheduled_services' ? q : null;
-      };
-      conn.raw = (sql) => ({ raw: sql });
-      return conn;
-    };
-    const visit = (over = {}) => ({ id: 'v1', technician_id: 't1', route_order: 5, scheduled_date: today, status: 'confirmed', ...over });
+    const loops = (over = {}) => ({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [], ...over });
+    const drafted = loops({ techPosition: { visitId: 'v1', status: 'en_route', atThisVisit: false, stopsAhead: 2 } });
+    const signature = facts.visitStatusSignature(drafted);
+    const withStatus = (over = {}) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: fresh(), visit_loop_status: { signature } }), ...over });
+    let spy;
+    afterEach(() => spy && spy.mockRestore());
+    const nowFacts = (v) => { spy = jest.spyOn(facts, 'loadVisitLoops').mockResolvedValue(v); };
 
-    test('the count is recounted whatever the wording (a paraphrase carries it too)', async () => {
-      const body = 'Sorry for the delay. Jamie has two jobs ahead of yours.';
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toBeNull();
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 1 }) })).resolves.toBe('stop_count_stale');
+    test('unchanged facts pass; any change (stop count, a started visit, a new delay, a resolved miss) refuses, whatever the wording', async () => {
+      nowFacts(drafted);
+      await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBeNull();
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1' }));
+      for (const changed of [
+        loops({ techPosition: { visitId: 'v1', status: 'en_route', atThisVisit: false, stopsAhead: 1 } }),
+        loops({ techPosition: { visitId: 'v1', status: 'on_site', atThisVisit: true, stopsAhead: null } }),
+        loops({ techPosition: drafted.techPosition, lateAlert: { visitId: 'v1', type: 'tech_late', missingTracking: false } }),
+        loops(),
+      ]) {
+        nowFacts(changed);
+        await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBe('visit_status_changed');
+        spy.mockRestore();
+      }
+    });
+
+    test('a missed visit that was rebooked or completed since drafting refuses', async () => {
+      const missed = loops({ missedVisit: { type: 'Pest Control', date: '2026-09-30', reason: 'not_completed' } });
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: fresh(), visit_loop_status: { signature: facts.visitStatusSignature(missed) } }) });
+      nowFacts(missed);
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
+      spy.mockRestore();
+      nowFacts(loops());
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('visit_status_changed');
+    });
+
+    test('no customer: refused (the facts cannot be rebuilt)', async () => {
+      nowFacts(drafted);
+      await expect(openLoopsBlockReason({ decision: withStatus({ customer_id: null }) })).resolves.toBe('visit_status_changed');
     });
 
     test('an unreadable recheck reads as infrastructure, so the composer keeps the card', () => {
@@ -548,34 +567,24 @@ describe('open-loop commitments recheck', () => {
       expect(blockReasonIsEtaInfrastructure('open-loop facts stale (commitment_closed)')).toBe(false);
     });
 
-    test('same count passes; a moved count, a started visit, or a reassignment refuses', async () => {
-      const body = 'Sorry for the delay. Sam has 2 stops before yours.';
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toBeNull();
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 1 }) })).resolves.toBe('stop_count_stale');
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ status: 'on_site' }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
-      // the tracker can lead a lagging 'confirmed' status
-      for (const trackState of ['en_route', 'on_property', 'complete']) {
-        await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ track_state: trackState }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
-      }
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ technician_id: 't2' }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: null, ahead: 2 }) })).resolves.toBe('stop_count_stale');
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 2, recorded: { id: 'sr1' } }) })).resolves.toBe('stop_count_stale');
+    test('visit status is held to the 15-minute freshness window; no stamp = expired', async () => {
+      nowFacts(drafted);
+      const at = (msAgo) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date(Date.now() - msAgo).toISOString(), visit_loop_status: { signature } }) });
+      await expect(openLoopsBlockReason({ decision: at(14 * 60000) })).resolves.toBeNull();
+      await expect(openLoopsBlockReason({ decision: at(16 * 60000) })).resolves.toBe('visit_status_expired');
+      const noStamp = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature } }) });
+      await expect(openLoopsBlockReason({ decision: noStamp })).resolves.toBe('visit_status_expired');
     });
 
-    test('visit status is held to the 15-minute freshness window, whatever the body says; no stamp = expired', async () => {
-      const at = (msAgo) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date(Date.now() - msAgo).toISOString(), visit_loop_status: { position: null } }) });
-      await expect(openLoopsBlockReason({ decision: at(14 * 60000), outgoingBody: 'Sorry for the delay.' })).resolves.toBeNull();
-      await expect(openLoopsBlockReason({ decision: at(16 * 60000), outgoingBody: 'Sorry for the delay.' })).resolves.toBe('visit_status_expired');
-      const noStamp = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { position: null } }) });
-      await expect(openLoopsBlockReason({ decision: noStamp, outgoingBody: 'ok' })).resolves.toBe('visit_status_expired');
-    });
-
-    test('the provider-boundary form recounts from the in-memory position', async () => {
+    test('the provider-boundary form rebuilds from the in-memory status for the claim\'s customer', async () => {
       const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
-      const check = openLoopsProviderPreSendCheck({ commitmentIds: null, status: { position }, factsGeneratedAt: new Date() });
-      await expect(check({ dbi: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toEqual({ ok: true });
-      await expect(check({ dbi: routeDb({ visit: visit(), ahead: 1 }) }))
-        .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (stop_count_stale)' });
+      const check = openLoopsProviderPreSendCheck({ commitmentIds: null, customerId: 'c1', status: { signature }, factsGeneratedAt: new Date() });
+      nowFacts(drafted);
+      await expect(check({ dbi: () => null })).resolves.toEqual({ ok: true });
+      spy.mockRestore();
+      nowFacts(loops());
+      await expect(check({ dbi: () => null }))
+        .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (visit_status_changed)' });
     });
   });
 
