@@ -75,8 +75,9 @@ const NOTIFICATION_VERSION_SQL = "md5(concat_ws('|', title, body, link, detail, 
 // the emitters that close a row inside their own fenced UPDATE spread
 // doneColumns into it instead. An auto-close selects rows by the condition it
 // judged and `done_at IS NULL`, never by read state (a row someone opened is
-// still open work), and passes keepExisting: done_at, done_by, resolution and
-// read_at are then COALESCEd, so a person's own read or done stands.
+// still open work), and passes keepExisting: done_at, resolution and read_at
+// are then COALESCEd, so a person's own read and done time stand; done_by
+// names the latest closer (see doneColumns).
 const MAX_RESOLUTION_CHARS = 200;
 const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
 
@@ -98,7 +99,12 @@ function doneColumns({ by, resolution = null, at = new Date(), keepExisting = fa
   if (!keepExisting) return columns;
   return {
     done_at: conn.raw('COALESCE(done_at, ?::timestamptz)', [columns.done_at]),
-    done_by: conn.raw('COALESCE(done_by, ?)', [columns.done_by]),
+    // done_by is the LATEST closer, not COALESCEd: a system close of a row a
+    // person already marked done now owns it (the condition really cleared,
+    // and its state — a resolved digest, a dropped dedupeKey — is not what a
+    // reopen could restore), so PERSON_DONE_BY_SQL refuses its reopen. The
+    // first done_at, the person's resolution and their read still stand.
+    done_by: columns.done_by,
     resolution: conn.raw('COALESCE(resolution, ?)', [columns.resolution]),
     read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [columns.done_at]),
   };

@@ -59,16 +59,27 @@ describe('markAdminDone', () => {
     const patch = db.__q.update.mock.calls[0][0];
     // keepExisting: the first done (a person's own included) and an earlier read stand; an unread row is read at the done instant.
     expect(patch).toMatchObject({
-      done_at: 'COALESCE(done_at, ?::timestamptz)', done_by: 'COALESCE(done_by, ?)',
+      done_at: 'COALESCE(done_at, ?::timestamptz)', done_by: 'claude',
       resolution: 'COALESCE(resolution, ?)', read_at: 'COALESCE(read_at, ?::timestamptz)',
     });
     const bound = Object.fromEntries(db.raw.mock.calls.map(([sql, bindings]) => [sql, bindings]));
-    expect(bound['COALESCE(done_by, ?)']).toEqual(['claude']);
+    expect(bound['COALESCE(done_by, ?)']).toBeUndefined(); // done_by is the plain latest closer
     expect(bound['COALESCE(done_at, ?::timestamptz)'][0]).toBeInstanceOf(Date);
     expect(bound['COALESCE(read_at, ?::timestamptz)']).toEqual(bound['COALESCE(done_at, ?::timestamptz)']);
     const resolution = bound['COALESCE(resolution, ?)'][0];
     expect(resolution).toMatch(/^Fixed in PR word word.*…$/);
     expect(resolution.length).toBeLessThanOrEqual(200);
+  });
+
+  test('a system close of a row a person already marked done takes done_by (so it is no longer reopenable) but keeps their done time and resolution', () => {
+    const cols = NotificationService._private.doneColumns({ by: 'ops-crons', resolution: 'Check ran clean', keepExisting: true });
+    expect(cols.done_by).toBe('ops-crons');
+    expect(cols.done_at).toBe('COALESCE(done_at, ?::timestamptz)'); // this suite's db.raw mock returns the SQL
+    expect(cols.resolution).toBe('COALESCE(resolution, ?)');
+    // PERSON_DONE_BY_SQL (the reopen gate) does not accept a system component.
+    const re = /done_by ~ '\^\[0-9\]\+\$'/;
+    expect(NotificationService._private.PERSON_DONE_BY_SQL).toMatch(re);
+    expect(NotificationService._private.PERSON_DONE_BY_SQL).not.toMatch(/ops-crons/);
   });
 
   test('expectedVersion fences the update on the md5 content version of the one row', async () => {

@@ -803,7 +803,8 @@ describe('voicemail supersedes a missed-call bell for the same call (hook P1)', 
     const patch = notifications.update.mock.calls[0][0];
     expect(Object.keys(patch).sort()).toEqual(['done_at', 'done_by', 'read_at', 'resolution']);
     expect(patch.done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
-    expect(patch.done_by).toEqual({ sql: 'COALESCE(done_by, ?)', bindings: ['supersede'] });
+    // done_by names the latest closer (a system close owns a person-done row: no reopen).
+    expect(patch.done_by).toBe('supersede');
     expect(patch.resolution.sql).toBe('COALESCE(resolution, ?)');
     // An unread row is read at the done instant; a person's own read stands.
     expect(patch.read_at.sql).toBe('COALESCE(read_at, ?::timestamptz)');

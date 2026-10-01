@@ -452,7 +452,9 @@ async function loadDigestRows(db, since, focusId) {
   const pinned = await base()
     .whereNull('done_at')
     .where((q) =>
-      q.where((u) => u.whereNull('read_at').andWhereRaw(IS_ACT_OR_REVIEW))
+      // Read is not done: an opened ACT/REVIEW digest stays pinned until it
+      // is done or its check resolved it.
+      q.where((u) => u.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'").andWhereRaw(IS_ACT_OR_REVIEW))
         .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
           .andWhereRaw(IS_FIX)
           .andWhere((r) => r.whereRaw("metadata->>'source' = 'ops-crons'").orWhereRaw("metadata->>'fallOff' = 'true'")))

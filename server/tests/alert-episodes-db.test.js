@@ -72,7 +72,7 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect(await close(['close-unread', 'close-read'])).toBe(0);
   });
 
-  test('done state: a close is also done (resolution kept, a person\'s own done stands) and a comeback puts the row back in the bell', async () => {
+  test('done state: a close is also done (a person\'s resolution and done time stand; the close takes done_by) and a comeback puts the row back in the bell', async () => {
     const auto = await bell('done-auto');
     const person = await bell('done-person');
     expect(await NotificationService.markAdminDone([person.id], { by: '7', resolution: 'Handled by phone' })).toBe(1);
@@ -85,7 +85,9 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect([a.done_by, a.resolution]).toEqual(['episodes', 'Series priced']);
     expect(a.read_at).not.toBeNull();
     const p = await get(person.id);
-    expect([p.done_by, p.resolution]).toEqual(['7', 'Handled by phone']);
+    // The system close takes done_by (so the person's old reopen token can't put a
+    // cleared alert back); their resolution and done time stand.
+    expect([p.done_by, p.resolution]).toEqual(['episodes', 'Handled by phone']);
     const listed = (await NotificationService.getAdminNotifications(500)).map((r) => r.id);
     expect(listed).not.toContain(auto.id);
     expect(listed).not.toContain(person.id);
@@ -101,17 +103,23 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     // A person reopens a done row: done fields clear, read_at stays. The reopen
     // is fenced on the full-precision done_at the Recently-done list served.
     const tokenOf = async (id) => (await db('notifications').where({ id }).first(db.raw('done_at::text AS done_at_token'))).done_at_token;
-    const doneToken = await tokenOf(person.id);
+    // A person's Done that a system close then took over (the check cleared it)
+    // is not reopenable, even with the person's own token (Codex #5462 r5 P1).
+    expect(await NotificationService.reopenAdminDone(person.id, { expectedDoneAt: await tokenOf(person.id) })).toBe('not_reopenable');
+    // A person's Done no system touched is.
+    const manual = await bell('done-manual');
+    expect(await NotificationService.markAdminDone([manual.id], { by: '7', resolution: 'Handled by phone' })).toBe(1);
+    const doneToken = await tokenOf(manual.id);
     // A stale list (an older close of the same row) cannot clear it...
-    expect(await NotificationService.reopenAdminDone(person.id, { expectedDoneAt: '2020-01-01 00:00:00.000001+00' })).toBe('changed');
-    expect((await get(person.id)).done_at).not.toBeNull();
+    expect(await NotificationService.reopenAdminDone(manual.id, { expectedDoneAt: '2020-01-01 00:00:00.000001+00' })).toBe('changed');
+    expect((await get(manual.id)).done_at).not.toBeNull();
     // ...nor can one that names a microsecond neighbour of the real close.
-    expect(await NotificationService.reopenAdminDone(person.id, { expectedDoneAt: doneToken.replace(/(\d)([+-]\d+)$/, (_m, d, z) => `${(Number(d) + 1) % 10}${z}`) })).toBe('changed');
-    expect(await NotificationService.reopenAdminDone(person.id, { expectedDoneAt: doneToken })).toBe('reopened');
-    const reopened = await get(person.id);
+    expect(await NotificationService.reopenAdminDone(manual.id, { expectedDoneAt: doneToken.replace(/(\d)([+-]\d+)$/, (_m, d, z) => `${(Number(d) + 1) % 10}${z}`) })).toBe('changed');
+    expect(await NotificationService.reopenAdminDone(manual.id, { expectedDoneAt: doneToken })).toBe('reopened');
+    const reopened = await get(manual.id);
     expect([reopened.done_at, reopened.done_by, reopened.resolution]).toEqual([null, null, null]);
     expect(reopened.read_at).not.toBeNull();
-    expect(await NotificationService.reopenAdminDone(person.id, { expectedDoneAt: doneToken })).toBe('not_found');
+    expect(await NotificationService.reopenAdminDone(manual.id, { expectedDoneAt: doneToken })).toBe('not_found');
 
     // A system close (done_by is a component, not a person) is never reopenable.
     expect(await helpers.closeAdminAlertKeys(db, [key('done-auto')], 'gap resolved again', { resolution: 'Series priced' })).toBe(1);

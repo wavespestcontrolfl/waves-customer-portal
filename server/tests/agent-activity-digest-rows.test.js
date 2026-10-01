@@ -52,7 +52,7 @@ test('the pinned predicate keeps unresolved FIX rows only when something can res
       "metadata->>'source' = 'ops-crons'",
       "metadata->>'fallOff' = 'true'", // the in-process senders that call retireIfClean stamp this
     ]));
-    expect(pinned._ops.filter((o) => o[0] === 'whereNull' && o[1] === 'read_at').length).toBe(2); // ACT/[Review] rule + legacy FIX rule
+    expect(pinned._ops.filter((o) => o[0] === 'whereNull' && o[1] === 'read_at').length).toBe(1); // legacy FIX rule only: an opened ACT/[Review] stays pinned until done (read is not done)
     // the windowed query admits rows resolved inside the window
     expect(windowed._ops.some((o) => o[0] === 'orWhereRaw' && /resolvedAt/.test(String(o[1])))).toBe(true);
   });

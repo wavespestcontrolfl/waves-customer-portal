@@ -50,7 +50,7 @@ test('retires not-yet-resolved rows (read or unread) by opsKey + source and stam
   // and an unread row is read at the done instant. Selected by the resolved marker, never read_at or done_at.
   expect(patch.read_at.sql).toBe('COALESCE(read_at, ?::timestamptz)');
   expect(patch.done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
-  expect(patch.done_by).toEqual({ sql: 'COALESCE(done_by, ?)', bindings: ['ops-crons:3-clean-runs'] });
+  expect(patch.done_by).toBe('ops-crons:3-clean-runs'); // the latest closer: a person-done digest the check resolved is no longer reopenable
   expect(patch.read_at.bindings).toEqual(patch.done_at.bindings);
   // dedupeKey is removed so a recurrence inside the rolling window rings again.
   expect(patch.metadata.sql).toBe("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb");
