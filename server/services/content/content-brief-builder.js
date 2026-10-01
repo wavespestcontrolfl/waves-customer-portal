@@ -23,6 +23,7 @@ const {
   isFaqBlockedService, PAGE_CITY_SLUGS, ALLOWED_INTERNAL_LINKS, isKnownGoodInternalRoute,
 } = require('./content-guardrails');
 const { buildPhotoSlots } = require('./licensed-photo-library');
+const { confirmPhotoSubject } = require('./photo-subject-confirmer');
 // "List-shaped" detection is shared with the miner's listicle_family bucket
 // (single grammar — a mined listicle opportunity must actually receive the
 // overlay). Never fork a private copy of the regexes here.
@@ -459,6 +460,12 @@ const SERVICE_ID_ALIASES = {
 
 // ── main API ────────────────────────────────────────────────────────
 
+// The brief's topic string (target_keyword): one fallback chain, shared by
+// the brief itself and the photo-subject confirmation that judges it.
+function briefTargetKeyword(opportunity) {
+  return opportunity?.query || opportunity?.signal_metadata?.representative_query || null;
+}
+
 class ContentBriefBuilder {
   /**
    * Compose a brief for a specific opportunity (does not claim).
@@ -537,7 +544,14 @@ class ContentBriefBuilder {
       : null;
     const relatedPosts = await this._loadRelatedPosts(opp, decision, publishTargetSites);
 
-    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, publishTargetSites });
+    // Single-subject photo slot: a topic the library matcher refuses ONLY for
+    // an and/or/from/not connector may still get its species' photos when an
+    // LLM CONFIRMS the code-found candidate (photo-subject-confirmer.js). No
+    // candidate or any non-confirmation → null → no photo, as before. Never
+    // throws, and makes no call for a topic that has no candidate.
+    const photoSubject = await this._confirmPhotoSubject(opp, decision);
+
+    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, publishTargetSites, photoSubject });
     if (persist) brief.id = await this._persist(brief);
     return brief;
   }
@@ -759,7 +773,16 @@ class ContentBriefBuilder {
     });
   }
 
-  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [], publishTargetSites = null }) {
+  // The confirmation is bound to the EXACT topic it judged: _composeBrief
+  // honors it only when that topic is the brief's own target_keyword.
+  async _confirmPhotoSubject(opp, decision) {
+    if (decision.page_type !== 'supporting-blog' && decision.page_type !== 'customer-question') return null;
+    const topic = briefTargetKeyword(opp);
+    const confirmed = await confirmPhotoSubject(topic);
+    return confirmed ? { ...confirmed, topic } : null;
+  }
+
+  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [], publishTargetSites = null, photoSubject = null }) {
     const pageType = decision.page_type;
 
     // Overlay answer-engine extractability requirements for AEO-gap briefs.
@@ -917,7 +940,7 @@ class ContentBriefBuilder {
     // photo_slots computation below (voice_constraints) resolves the SAME
     // topic string as the brief's own target_keyword, never a second,
     // independently-drifting copy of this fallback chain.
-    const targetKeyword = opportunity.query || opportunity.signal_metadata?.representative_query || null;
+    const targetKeyword = briefTargetKeyword(opportunity);
 
     return {
       facts_pack: factsPack,
@@ -1081,8 +1104,23 @@ class ContentBriefBuilder {
         // library (never a generated/guessed asset) keyed off the brief's own
         // target_keyword — a slot with no verified match carries photo: null
         // and is never backfilled with AI art (see licensed-photo-library.js).
-        const withPhotoSlots = (pageType === 'supporting-blog' || pageType === 'customer-question')
-          ? { ...withRetry, photo_slots: buildPhotoSlots(targetKeyword) }
+        // `photoSubject` is the LLM-confirmed species for a topic the matcher
+        // refused only for a connector word (resolved in compose(), async).
+        // buildPhotoSlots re-derives that candidate from the topic and honors
+        // the slug only when it still matches; the brief records it so the
+        // stored brief shows WHY these photos are allowed. The draft-time
+        // gate needs nothing more: it judges photos against photo_slots only.
+        const photoSlots = (pageType === 'supporting-blog' || pageType === 'customer-question')
+          ? buildPhotoSlots(targetKeyword, { confirmedSlug: photoSubject?.topic === targetKeyword ? photoSubject.slug : null })
+          : null;
+        const withPhotoSlots = photoSlots
+          ? {
+            ...withRetry,
+            photo_slots: photoSlots,
+            ...(photoSubject?.slug && photoSubject.topic === targetKeyword && photoSlots.some((slot) => slot.photo)
+              ? { photo_subject: { slug: photoSubject.slug, confirmed_by: photoSubject.confirmed_by || 'llm' } }
+              : {}),
+          }
           : withRetry;
         // Related-post link allowance rides here (not internal_links_to_add,
         // which is a MUST-appear checklist) — see _loadRelatedPosts. No

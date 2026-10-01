@@ -145,6 +145,10 @@ describe('mixed-visit matrix', () => {
     expect(build([NONE('label'), null]).state).toBeNull();
   });
 
+  test('records the completion instant the lines are anchored to (the watering text checks freshness against it)', () => {
+    expect(build([HOLD(24)]).completedAt).toBe(new Date(COMPLETED).toISOString());
+  });
+
   test('completedAt missing or invalid -> no claim at all', () => {
     for (const completedAt of [null, undefined, '', 'not a date']) {
       const r = buildWateringInstruction({ rules: [HOLD(24)], completedAt });
@@ -579,5 +583,121 @@ describe('plan-dependent copy is composed per render, never frozen', () => {
     expect(build([WATER_IN({ water_in_inches: 0.5 })]).waterInInches).toBe(0.5);
     expect(build([HOLD(24), LATE()]).waterInInches).toBe(0.25);
     expect(build([HOLD(24)]).waterInInches).toBeNull();
+  });
+});
+
+// ── Label mow hold (P2b) ─────────────────────────────────────────────────
+// A SEPARATE result beside the watering lines: it never enters `lines` (the
+// watering text sends those verbatim) and never depends on the watering state.
+describe('mow hold', () => {
+  const entry = (rule, mowHoldDays) => ({ name: 'Product', rule, mowHoldDays });
+  const mow = (rules, completedAt = COMPLETED) => buildWateringInstruction({ rules, completedAt }).mowHold;
+
+  test('a label day is 24 elapsed hours from completion, rounded UP to the hour, with the exact line', () => {
+    // 2026-09-30 14:40 ET (a Wednesday) + 48 h = Fri 2:40 PM -> 3 PM.
+    expect(mow([entry(HOLD(24), 2)])).toEqual({
+      days: 2,
+      untilAt: '2026-10-02T19:00:00.000Z',
+      untilDate: '2026-10-02',
+      untilLabel: 'Fri 3 PM',
+      line: 'Mowing: hold off until Fri 3 PM, 2 days after today\'s treatment.',
+    });
+  });
+
+  test('one day reads "1 day", and a late-afternoon visit never reads as "any time tomorrow"', () => {
+    expect(mow([entry(HOLD(24), 1)])).toMatchObject({ untilLabel: 'Thu 3 PM', line: 'Mowing: hold off until Thu 3 PM, 1 day after today\'s treatment.' });
+    // Thu 4 PM ET visit, 24 h label: never before Fri 4 PM.
+    expect(mow([entry(HOLD(24), 1)], '2026-10-01T20:00:00Z')).toMatchObject({ untilAt: '2026-10-02T20:00:00.000Z', untilLabel: 'Fri 4 PM' });
+  });
+
+  test('ET clock and date, not UTC (late evening ET is already the next UTC day)', () => {
+    // 2026-09-30 21:30 ET = 2026-10-01T01:30Z; +24 h = Thu 9:30 PM -> 10 PM.
+    expect(mow([entry(HOLD(24), 1)], '2026-10-01T01:30:00Z')).toMatchObject({ untilDate: '2026-10-01', untilLabel: 'Thu 10 PM' });
+  });
+
+  test('crosses the early-November fall-back on elapsed hours', () => {
+    // Sat Oct 31 4:30 PM EDT + 24 h = Sun Nov 1 3:30 PM EST -> 4 PM.
+    expect(mow([entry(HOLD(24), 1)], '2026-10-31T20:30:00Z')).toMatchObject({ untilAt: '2026-11-01T21:00:00.000Z', untilDate: '2026-11-01', untilLabel: 'Sun 4 PM' });
+  });
+
+  test('crosses the March spring-forward on elapsed hours', () => {
+    // Fri Mar 6 2026 12:00 EST + 72 h = Mon Mar 9 1:00 PM EDT.
+    expect(mow([entry(HOLD(24), 3)], '2026-03-06T17:00:00Z')).toMatchObject({ untilDate: '2026-03-09', untilLabel: 'Mon 1 PM' });
+  });
+
+  test('month, year and leap-day ends; six or more days out names the date', () => {
+    expect(mow([entry(HOLD(24), 3)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-02', untilLabel: 'Sat 12 PM' });
+    expect(mow([entry(HOLD(24), 7)], '2026-12-30T17:00:00Z')).toMatchObject({
+      untilDate: '2027-01-06',
+      untilLabel: 'Wed, Jan 6 at 12 PM',
+      line: 'Mowing: hold off until Wed, Jan 6 at 12 PM, 7 days after today\'s treatment.',
+    });
+    expect(mow([entry(HOLD(24), 3)], '2028-02-27T17:00:00Z')).toMatchObject({ untilDate: '2028-03-01', untilLabel: 'Wed 12 PM' });
+    expect(mow([entry(HOLD(24), 14)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-13' });
+  });
+
+  test('the longest label hold across the applied products wins', () => {
+    expect(mow([entry(HOLD(24), 2), entry(NONE(), 5), entry(WATER_IN(), 3)])).toMatchObject({ days: 5, untilDate: '2026-10-05', untilLabel: 'Mon 3 PM' });
+  });
+
+  test('null, absent and invalid values are ignored; no valid value means no mow hold at all', () => {
+    for (const bad of [null, undefined, 0, -1, 15, 1.5, '2', '', NaN, Infinity, true, [2], {}]) {
+      expect(mow([entry(HOLD(24), bad)])).toBeNull();
+    }
+    // An invalid value beside a valid one never lengthens or breaks it.
+    expect(mow([entry(HOLD(24), 15), entry(HOLD(24), 2), entry(HOLD(24), '9')])).toMatchObject({ days: 2 });
+    // Bare rules (no wrapper) and entries without the key carry no claim.
+    expect(mow([HOLD(24)])).toBeNull();
+    expect(mow([{ name: 'x', rule: HOLD(24) }])).toBeNull();
+  });
+
+  test('independent of the watering state: unknown or no-claim watering still gets the line', () => {
+    const unknown = buildWateringInstruction({ rules: [entry(null, 2), entry(HOLD(24), null)], completedAt: COMPLETED });
+    expect(unknown.state).toBeNull();
+    expect(unknown.lines).toEqual([]);
+    expect(unknown.mowHold).toMatchObject({ days: 2, untilLabel: 'Fri 3 PM' });
+    // A hold-vs-water-in conflict (no claim) too.
+    const conflict = buildWateringInstruction({ rules: [entry(HOLD(48), 4), entry(WATER_IN({ water_in_by_hours: 24 }), null)], completedAt: COMPLETED });
+    expect(conflict.state).toBeNull();
+    expect(conflict.mowHold).toMatchObject({ days: 4 });
+  });
+
+  test('never touches the watering lines or the rest of the instruction', () => {
+    for (const rules of [[HOLD(24)], [WATER_IN()], [HOLD(24), LATE()], [NONE()]]) {
+      const plain = buildWateringInstruction({ rules, completedAt: COMPLETED });
+      const withMow = buildWateringInstruction({ rules: rules.map((rule) => entry(rule, 3)), completedAt: COMPLETED });
+      const { mowHold: _a, products: _p1, ...plainRest } = plain;
+      const { mowHold, products: _p2, ...withRest } = withMow;
+      expect(withRest).toEqual(plainRest);
+      expect(mowHold).toMatchObject({ days: 3 });
+      expect(withMow.lines.join(' ')).not.toMatch(/mow/i);
+      expect(composeBannerLines(withMow, WITH_PLAN).join(' ')).not.toMatch(/mow/i);
+      expect(plain.mowHold).toBeNull();
+    }
+  });
+
+  test('no products or no completion time: no mow hold', () => {
+    expect(buildWateringInstruction({ rules: [], completedAt: COMPLETED }).mowHold).toBeNull();
+    expect(buildWateringInstruction({ rules: [entry(HOLD(24), 2)], completedAt: null }).mowHold).toBeNull();
+  });
+
+  test('the copy is plain ASCII, with no drying or re-entry claim', () => {
+    const { line } = mow([entry(HOLD(24), 2)]);
+    expect(line).toMatch(/^[\x20-\x7e]+$/);
+    expect(line).not.toMatch(/dry|dried|wait|safe/i);
+    expect(findBannedCustomerCopy(line)).toEqual([]);
+    expect(reentrySafetyClaimFinding(line)).toBeFalsy();
+  });
+
+  test('isValidMowHold accepts only a complete frozen shape', () => {
+    const { isValidMowHold } = require('../services/service-report/lawn-watering-instruction');
+    const good = mow([entry(HOLD(24), 2)]);
+    expect(isValidMowHold(good)).toBe(true);
+    // A record frozen before untilAt existed still replays as written.
+    const { untilAt: _u, ...legacy } = good;
+    expect(isValidMowHold({ ...legacy, untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' })).toBe(true);
+    for (const bad of [null, undefined, 'x', [], {}, { ...good, days: 0 }, { ...good, days: 15 }, { ...good, days: '2' }, { ...good, untilDate: 'Friday' }, { ...good, untilAt: 'later' }, { ...good, untilLabel: '' }, { ...good, line: '' }]) {
+      expect(isValidMowHold(bad)).toBe(false);
+    }
   });
 });

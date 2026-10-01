@@ -228,7 +228,7 @@ app.use((req, res, next) => {
 // middleware terminates OPTIONS for non-allowlisted origins without an
 // Access-Control-Allow-Origin header, which would break third-party embeds.
 // (Approved public surface — see AGENTS.md.) Keep this above the global cors().
-app.use('/api/public/pest-forecast', (req, res, next) => {
+app.use(['/api/public/pest-forecast', '/api/public/yard-calendar'], (req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
@@ -835,6 +835,7 @@ app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
+app.use('/api/public/yard-calendar', require('./routes/public-yard-calendar'));
 app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));

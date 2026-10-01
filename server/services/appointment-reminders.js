@@ -13,6 +13,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { heldVisitSubquery, isStreetLevelHoldVisit } = require('./street-level-hold');
 // Boundary-rotation generation guard (codex #3233 r37).
 const PROCESS_BOOT_AT = new Date();
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -3034,6 +3035,11 @@ const AppointmentReminders = {
             .whereRaw('customers.id = ss.customer_id')
             .whereNotNull('customers.deleted_at');
         })
+        // Owner ruling 2026-09-30: a street-level address hold (unconfirmed visit
+        // on a web-form address Google matched only to the street) arms NO
+        // reminders until the office confirms; the confirm hook registers them.
+        // Scoped to that hold only — every other pending row keeps arming.
+        .whereNotExists(function () { heldVisitSubquery(this, 'ss'); })
         .orderBy('ss.scheduled_date', 'asc')
         .limit(SELF_HEAL_REGISTRATION_LIMIT)
         .select('ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.created_at');
@@ -3253,9 +3259,19 @@ const AppointmentReminders = {
         if (r.scheduled_service_id) {
           const svc = await db('scheduled_services')
             .where({ id: r.scheduled_service_id })
-            .first('status', 'visit_id');
+            .first('status', 'visit_id', 'customer_confirmed', 'source_action');
           svcVisitId = svc?.visit_id || null;
           const svcStatus = String(svc?.status || '').toLowerCase();
+          // Owner ruling 2026-09-30: no 72h/24h reminder for a street-level
+          // address hold until the office confirms — even if a reminder row
+          // already exists. The row stays armed (nothing is marked sent), so it
+          // fires normally once the confirm hook stamps the visit confirmed.
+          // (Only an unconfirmed voice_agent-source row can be one, so nothing else pays for the lookup.)
+          if (svc && svc.customer_confirmed === false && svc.source_action === 'voice_agent' && await isStreetLevelHoldVisit(r.scheduled_service_id)) {
+            logger.info(`[appt-remind] Holding reminders for ${r.scheduled_service_id} — street-level address hold awaiting office confirm`);
+            results.skipped++;
+            continue;
+          }
           if (REMINDER_BLOCKING_STATUSES.has(svcStatus)) {
             if (SELF_HEAL_TERMINAL_STATUSES.has(svcStatus)) {
               await db('appointment_reminders')

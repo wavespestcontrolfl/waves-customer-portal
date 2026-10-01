@@ -319,12 +319,12 @@ describe('scheduler ad-spend sync registration', () => {
   test('Google Ads daily sync is scheduled and no-ops without GOOGLE_ADS_* env', () => {
     expect(src).toMatch(/cron\.schedule\('0 6 \* \* \*'/);
     expect(src).toMatch(/googleAds\.isConfigured\(\)/);
-    expect(src).toMatch(/googleAds\.syncDailyPerformance\(7\)/);
+    expect(src).toMatch(/googleAds\.syncDailyPerformance\(7[,)]/);
   });
 
   test('Meta Ads daily sync is scheduled and no-ops without META_ADS_* env', () => {
     expect(src).toMatch(/cron\.schedule\('15 6 \* \* \*'/);
     expect(src).toMatch(/metaAds\.isConfigured\(\)/);
-    expect(src).toMatch(/metaAds\.syncDailyPerformance\(7\)/);
+    expect(src).toMatch(/metaAds\.syncDailyPerformance\(7[,)]/);
   });
 });

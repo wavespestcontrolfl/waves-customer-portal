@@ -17,10 +17,18 @@ jest.mock('../services/sms-followup-sla', () => ({
   followupPromiseBlockReason: jest.fn(() => null),
 }));
 jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
+jest.mock('../services/sms-eta-freshness', () => ({
+  etaClaimBlockReason: jest.fn(async () => null),
+  // The ONE shared infrastructure-failure set (round-42 P2) is consulted by the wrappers.
+  isEtaInfrastructureFailure: (reason) => jest.requireActual('../services/sms-eta-freshness').isEtaInfrastructureFailure(reason),
+}));
+jest.mock('../models/db', () => jest.fn());
+const db = require('../models/db');
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
-const { agentDecisionSendBlockReason, parseInputSnapshot } = require('../services/agent-decision-send-checks');
+const { etaClaimBlockReason } = require('../services/sms-eta-freshness');
+const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
 const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers', ...over });
@@ -31,6 +39,7 @@ beforeEach(() => {
   followupPromiseBlockReason.mockReset().mockReturnValue(null);
   outgoingAmountsStale.mockReset().mockResolvedValue({ stale: false });
   drafter.reservicePromiseStillEligible.mockReset().mockResolvedValue(null);
+  etaClaimBlockReason.mockReset().mockResolvedValue(null);
 });
 
 test('parseInputSnapshot: string, object, malformed, absent', () => {
@@ -170,5 +179,249 @@ describe('re-service promise revalidation (Codex round-3 P2)', () => {
       promisedLanes: null,
       decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
     });
+  });
+});
+
+// Re-service runs BEFORE the ETA recheck (main's order, ETA appended): a failing re-service
+// recheck short-circuits, and both checks run on a clean pass.
+describe('re-service + LIVE ETA ordering on the same send path', () => {
+  test('a re-service refusal short-circuits before the ETA recheck', async () => {
+    drafter.reservicePromiseStillEligible.mockResolvedValue('no longer eligible for a free pest re-service');
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' })).resolves.toBe('re-service promise unsendable (no longer eligible for a free pest re-service)');
+    expect(etaClaimBlockReason).not.toHaveBeenCalled();
+  });
+
+  test('a clean re-service recheck still reaches the ETA recheck', async () => {
+    etaClaimBlockReason.mockResolvedValue('eta_claim_no_longer_en_route');
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' })).resolves.toBe('live ETA unsendable (eta_claim_no_longer_en_route)');
+    expect(drafter.reservicePromiseStillEligible).toHaveBeenCalled();
+  });
+});
+
+// LIVE ETA (independent review + Codex round-1 finding, PR #5334): checked
+// last, after open times/follow-up/amounts all pass, and fed the decision's
+// own live_eta_snapshot + facts_generated_at straight from its snapshot.
+describe('LIVE ETA send-time recheck', () => {
+  test('a stale/blocked LIVE ETA refuses the send with its reason', async () => {
+    etaClaimBlockReason.mockResolvedValue('eta_claim_no_longer_en_route');
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'The tech is 12 minutes away.' }))
+      .resolves.toBe('live ETA unsendable (eta_claim_no_longer_en_route)');
+  });
+
+  test('a clean LIVE ETA recheck falls through to null like every other passing check', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'The tech is 12 minutes away.' })).resolves.toBeNull();
+  });
+
+  test('the recheck receives the decision\'s own live_eta_snapshot and facts_generated_at', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({
+        input_snapshot: JSON.stringify({ ...SNAP, live_eta_snapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] }, facts_generated_at: '2026-09-29T14:00:00.000Z' }),
+      }),
+      outgoingBody: 'The tech is 12 minutes away.',
+    });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: '2026-09-29T14:00:00.000Z',
+      outgoingBody: 'The tech is 12 minutes away.',
+    }));
+  });
+
+  test('an earlier failing check (open times) short-circuits before the ETA recheck ever runs', async () => {
+    drafter.planOpenTimesRecheck.mockReturnValue({ action: 'refuse', reason: 'edited_offer_text' });
+    await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' });
+    expect(etaClaimBlockReason).not.toHaveBeenCalled();
+  });
+});
+
+// The scheduler's queued-send path (Codex round-10 P2, PR #5334): one flat
+// call into this same ETA check, reading the claimed decision row itself.
+describe('scheduledEtaBlockReason — the scheduler seam over the same ETA check', () => {
+  const rowFor = (row) => { db.mockImplementation(() => ({ where: () => ({ first: async () => row }) })); };
+
+  test('reads the decision row and hands its live_eta_snapshot + facts_generated_at to the shared check', async () => {
+    rowFor({ input_snapshot: { live_eta_snapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] }, facts_generated_at: '2026-09-29T14:00:00.000Z' } });
+    etaClaimBlockReason.mockResolvedValue('eta_claim_stale_facts');
+    await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'The tech is 12 minutes away.' })).resolves.toBe('eta_claim_stale_facts');
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: '2026-09-29T14:00:00.000Z',
+    }));
+  });
+
+  test('a JSON-string snapshot is parsed; a clean recheck returns null', async () => {
+    rowFor({ input_snapshot: JSON.stringify({ facts_generated_at: '2026-09-29T14:00:00.000Z' }) });
+    await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'Thanks!' })).resolves.toBeNull();
+  });
+
+  test('skip: an earlier revalidation already blocked — no read, no recheck', async () => {
+    db.mockClear();
+    await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'x', skip: true })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+    expect(etaClaimBlockReason).not.toHaveBeenCalled();
+  });
+
+  test('fails CLOSED when the row read throws', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'x' })).resolves.toBe('eta_recheck_failed');
+  });
+});
+
+// Codex round-40 P2 (PR #5334): the same ETA check at the TRUE provider boundary.
+describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provider-boundary predicate', () => {
+  const rowFor = (row) => { db.mockImplementation(() => ({ where: () => ({ first: async () => row }) })); };
+
+  test('a clean recheck lets the send through; the body is read lazily at call time', async () => {
+    rowFor({ input_snapshot: { facts_generated_at: '2026-09-29T14:00:00.000Z' } });
+    let body = 'Thanks!';
+    const check = etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => body });
+    body = 'The tech is 9 minutes away.'; // rewritten after the check was built (spacing guard)
+    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: true });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ outgoingBody: 'The tech is 9 minutes away.' }));
+  });
+
+  test('a stale ETA at the boundary is a TERMINAL refusal', async () => {
+    rowFor({ input_snapshot: { facts_generated_at: '2026-09-29T14:00:00.000Z' } });
+    etaClaimBlockReason.mockResolvedValue('eta_claim_no_longer_en_route');
+    const verdict = await etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'The tech is 9 minutes away.' })();
+    expect(verdict).toEqual({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'live ETA unsendable (eta_claim_no_longer_en_route)' });
+  });
+
+  test('an unreadable recheck is RETRYABLE (never sent unverified, never terminal)', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    const verdict = await etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'x' })();
+    expect(verdict).toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  test('compose: undefined entries are skipped; nothing to run -> undefined; the first refusal wins and later checks do not run', async () => {
+    expect(composeProviderPreSendChecks(undefined, undefined)).toBeUndefined();
+    const only = jest.fn(async () => ({ ok: true }));
+    expect(composeProviderPreSendChecks(undefined, only)).toBe(only);
+    const first = jest.fn(async () => ({ ok: false, code: 'FIRST' }));
+    const second = jest.fn(async () => ({ ok: true }));
+    const both = composeProviderPreSendChecks(first, second);
+    await expect(both({ dbi: 'trx' })).resolves.toEqual({ ok: false, code: 'FIRST' });
+    expect(second).not.toHaveBeenCalled();
+    const ok1 = jest.fn(async () => ({ ok: true }));
+    const bad2 = jest.fn(async () => ({ ok: false, code: 'SECOND', retryable: true }));
+    await expect(composeProviderPreSendChecks(ok1, bad2)({ dbi: 'trx' })).resolves.toEqual({ ok: false, code: 'SECOND', retryable: true });
+    expect(ok1).toHaveBeenCalledWith({ dbi: 'trx' });
+  });
+
+  test('the scheduler composes it AFTER the entry point\'s own predicate, for decision-linked sends only', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, composeProviderPreSendChecks }');
+    expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
+  });
+});
+
+// Codex round-41 P2: the in-memory-snapshot variant (auto-send executor).
+describe('etaSnapshotProviderPreSendCheck', () => {
+  test('hands the held snapshot + facts time to the shared check, body read lazily', async () => {
+    let body = 'Thanks!';
+    const snap = { entries: [{ minutes: 9, scheduledServiceIds: ['s1'] }] };
+    const check = etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', getBody: () => body });
+    body = 'The tech is 9 minutes away.';
+    await expect(check()).resolves.toEqual({ ok: true });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', techNames: [], promptVersion: null, outgoingBody: 'The tech is 9 minutes away.' });
+  });
+  test('stale -> terminal refusal; a throwing recheck -> retryable', async () => {
+    etaClaimBlockReason.mockResolvedValue('eta_claim_stale_facts');
+    await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+    etaClaimBlockReason.mockRejectedValue(new Error('db down'));
+    await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+});
+
+// Codex round-42 P2 (PR #5334): ONE shared set of infrastructure-failure reasons.
+describe('infrastructure failures are retryable at every wrapper, never permanently stale', () => {
+  const { ETA_INFRASTRUCTURE_FAILURE_REASONS, isEtaInfrastructureFailure } = jest.requireActual('../services/sms-eta-freshness');
+  const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
+
+  test('the exported set names both codes; verdicts about the message are not in it', () => {
+    expect([...ETA_INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(['eta_claim_recheck_failed', 'eta_claim_recompute_unavailable', 'eta_recheck_failed']);
+    for (const verdict of ['eta_claim_stale_facts', 'eta_claim_no_longer_en_route', 'eta_claim_no_snapshot', 'eta_claim_superseded_fix', 'eta_claim_visit_not_today']) {
+      expect(isEtaInfrastructureFailure(verdict)).toBe(false);
+    }
+    expect(Object.isFrozen(ETA_INFRASTRUCTURE_FAILURE_REASONS)).toBe(true);
+  });
+
+  test.each(['eta_claim_recheck_failed', 'eta_recheck_failed'])('the provider-boundary predicate (row-reading variant) treats %p as RETRYABLE', async (reason) => {
+    db.mockImplementation(() => ({ where: () => ({ first: async () => ({ input_snapshot: {} }) }) }));
+    etaClaimBlockReason.mockResolvedValue(reason);
+    await expect(etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  test.each(['eta_claim_recheck_failed', 'eta_recheck_failed'])('the provider-boundary predicate (in-memory snapshot variant) treats %p as RETRYABLE', async (reason) => {
+    etaClaimBlockReason.mockResolvedValue(reason);
+    await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  test('a real verdict stays terminal in both variants', async () => {
+    db.mockImplementation(() => ({ where: () => ({ first: async () => ({ input_snapshot: {} }) }) }));
+    etaClaimBlockReason.mockResolvedValue('eta_claim_no_longer_en_route');
+    await expect(etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+    await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+  });
+
+  test('the immediate Agent Review seam can tell an unreadable recheck from a stale verdict', async () => {
+    etaClaimBlockReason.mockResolvedValue('eta_claim_recheck_failed');
+    const unreadable = await agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}) }), outgoingBody: 'The tech is on the way.' });
+    expect(unreadable).toBe('live ETA unsendable (eta_claim_recheck_failed)');
+    expect(blockReasonIsEtaInfrastructure(unreadable)).toBe(true);
+    expect(blockReasonIsEtaInfrastructure('live ETA unsendable (eta_claim_stale_facts)')).toBe(false);
+    expect(blockReasonIsEtaInfrastructure('amount no longer authorized (x)')).toBe(false);
+    expect(blockReasonIsEtaInfrastructure(null)).toBe(false);
+  });
+
+  test('the persisted tech_names ride into the shared check; older decisions send an empty list', async () => {
+    etaClaimBlockReason.mockResolvedValue(null);
+    await agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({ tech_names: ['Sam'] }) }), outgoingBody: 'x' });
+    expect(etaClaimBlockReason).toHaveBeenLastCalledWith(expect.objectContaining({ techNames: ['Sam'] }));
+    await agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}) }), outgoingBody: 'x' });
+    expect(etaClaimBlockReason).toHaveBeenLastCalledWith(expect.objectContaining({ techNames: [] }));
+  });
+
+  test('the scheduler defers an unreadable early recheck to the provider-boundary check (source pin)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(src).toContain("isEtaInfrastructureFailure(rawEtaReason) ? null : rawEtaReason");
+  });
+  test('the Agent Review route does not retire a card over an unreadable recheck (source pin)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-communications.js'), 'utf8');
+    expect(src).toContain('blockReasonIsEtaInfrastructure(blockReason)');
+  });
+});
+
+// Codex #5334 P1 (round after b8809beece): the boundary ETA predicates read through the HANDOFF's own connection (`dbi`).
+describe('provider-boundary ETA predicates use the handoff connection (dbi)', () => {
+  const trxFor = (row) => {
+    const trx = jest.fn(() => ({ where: () => ({ first: async () => row }) }));
+    return trx;
+  };
+  test('etaProviderPreSendCheck reads the decision row AND the freshness recheck through dbi, never the root pool', async () => {
+    db.mockReset().mockImplementation(() => { throw new Error('root pool must not be touched'); });
+    const trx = trxFor({ input_snapshot: { facts_generated_at: '2026-09-29T14:00:00.000Z' } });
+    await expect(etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'x' })({ channel: 'sms', dbi: trx })).resolves.toEqual({ ok: true });
+    expect(trx).toHaveBeenCalledWith('agent_decisions');
+    expect(db).not.toHaveBeenCalled();
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
+  });
+  test('etaSnapshotProviderPreSendCheck hands dbi to the shared freshness check as dbh', async () => {
+    const trx = jest.fn();
+    await etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })({ dbi: trx });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
+  });
+  test('the repeatable afterMarker re-run also gets the connection', async () => {
+    const trx = jest.fn();
+    const check = etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' });
+    await check.afterMarker({ dbi: trx });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
+  });
+  test('composed: the context reaches every component', async () => {
+    const trx = jest.fn();
+    const lane = jest.fn(async () => ({ ok: true }));
+    const composed = composeProviderPreSendChecks(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' }), lane);
+    await composed({ dbi: trx });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ dbh: trx }));
+    expect(lane).toHaveBeenCalledWith({ dbi: trx });
   });
 });

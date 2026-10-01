@@ -36,7 +36,7 @@ function fakeTrx({ openAlertIds = [], updateReturns = [] } = {}) {
   const whereNull = jest.fn(() => ({ update }));
   const where = jest.fn(() => ({ whereNull }));
 
-  const notificationsChain = { whereIn: () => notificationsChain, whereNull: () => notificationsChain, update: jest.fn() };
+  const notificationsChain = { whereIn: () => notificationsChain, whereNull: () => notificationsChain, where: () => notificationsChain, update: jest.fn() };
 
   const trx = jest.fn((table) => {
     if (table === 'notifications') return notificationsChain;

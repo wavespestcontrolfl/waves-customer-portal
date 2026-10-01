@@ -631,10 +631,11 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(sqls).toHaveLength(0);
   });
 
-  test('no fence handed: unfenced write, no ownership read (audit/backfill callers)', async () => {
+  test('no fence handed: unfenced write, no ownership read, but the CALL row lock is still taken first (audit/backfill callers; codex #5446 r2 P1)', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision);
-    expect(sqls.some((q) => /\bcall_log\b/.test(q.sql))).toBe(false);
+    expect(sqls.some((q) => /processing_token/.test(q.sql))).toBe(false);
+    expect(sqls[0].sql).toMatch(/^select "id" from "call_log" where "id" = \? limit \? for update$/i);
     expect(rd(sqls)).toHaveLength(3);
     expect(rd(sqls)[1].sql).toMatch(/for update/i); // the lock needs a transaction: the no-fence path opens one
   });
@@ -829,7 +830,7 @@ describe('every route_feedback writer takes the route_decisions row lock (codex 
     expect(triage).toMatch(/withLockedRouteDecisions\(db, \{ callLogId, mode: 'enforce' \}, async \(trx, rows\) => \{[\s\S]*?trx\('route_feedback'\)/);
     expect(triage).not.toMatch(/db\('route_feedback'\)\s*\.insert/);
     const ai = fs.readFileSync(path.join(root, 'routes/ai-assistant.js'), 'utf8');
-    expect(ai).toMatch(/withLockedRouteDecisions\(db, \{[\s\S]*?writeFeedback\(trx, routeDecision\)/);
+    expect(ai).toMatch(/withLockedRouteDecisions\(db, \{[\s\S]*?writeFeedback\(trx, picked\.decision\)/);
     expect(ai).not.toMatch(/db\('route_feedback'\)\s*\.insert/);
   });
 
@@ -843,8 +844,12 @@ describe('every route_feedback writer takes the route_decisions row lock (codex 
       return qb;
     };
     conn.transaction = async (fn) => fn(conn);
+    conn.raw = (...a) => knex.raw(...a);
     const seen = await withLockedRouteDecisions(conn, { callLogId: 'c1', decisionId: 'rd-1', mode: 'enforce' }, async (trx, rows) => rows);
     expect(seen).toEqual([{ id: 'rd-1' }]);
-    expect(sqls[0].sql).toMatch(/^select \* from "route_decisions" where "call_log_id" = \? and "id" = \? and "mode" = \? for update$/i);
+    // the call row first (codex #5446 r1 P1), then the decision rows
+    expect(sqls[0].sql).toMatch(/^select "id" from "call_log" where "id" = \? limit \? for update$/i);
+    // ...read with its revision (xmin as text) for the displayed-revision check
+    expect(sqls[1].sql).toMatch(/^select \*, route_decisions\.xmin::text AS revision from "route_decisions" where "call_log_id" = \? and "id" = \? and "mode" = \? for update$/i);
   });
 });

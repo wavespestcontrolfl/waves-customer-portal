@@ -6,6 +6,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(),
+  // A system retire closes the row done (read is not done).
+  _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
   // The real guard, so an in-place rewrite is judged on the text a fresh post stores.
   normalizeAdminText: (...args) => jest.requireActual('../services/notification-service').normalizeAdminText(...args),
 }));
@@ -178,7 +180,9 @@ test('gated off → no scan, and any standing list is retired', async () => {
   expect(await runFollowUpSlaWatcher({ now: NOW })).toEqual({ skipped: true, reason: 'gated_off' });
   expect(listOpenCommitments).not.toHaveBeenCalled();
   expect(updates).toHaveLength(1);
-  expect(updates[0].patch.read_at).toBe(NOW);
+  // Retired as done (read is not done), by the pager.
+  expect(updates[0].patch).toMatchObject({ done_by: 'followup-sla' });
+  expect(updates[0].patch.done_at).toBeTruthy();
   // Flagged emptied, so a re-enabled pager posts its list fresh.
   expect(String(updates[0].patch.metadata)).toMatch(/emptied/);
 });
@@ -266,7 +270,8 @@ test('a new miss joining the list re-posts it and retires the older post', async
   expect((await runFollowUpSlaWatcher({ now: NOW })).alerted).toBe(1);
   expect(rollingCall()[1]).toBe('2 missed follow-ups in the last 24 hours');
   expect(rollingCall()[3].link).toBe('/admin/communications#tab=owed');
-  expect(updates).toEqual([{ table: 'notifications', patch: { read_at: NOW } }]);
+  expect(updates).toHaveLength(1);
+  expect(updates[0]).toMatchObject({ table: 'notifications', patch: { done_by: 'followup-sla', resolution: 'Replaced by a newer missed-follow-up list' } });
 });
 
 test('items only dropping off rewrite the latest post in place, read state kept — no new ping', async () => {
@@ -287,7 +292,8 @@ test('an emptied list is retired and flagged, so a miss that returns later (e.g.
   listOpenCommitments.mockResolvedValue([]);
   await runFollowUpSlaWatcher({ now: NOW });
   expect(updates).toHaveLength(1);
-  expect(updates[0].patch.read_at).toBe(NOW);
+  expect(updates[0].patch).toMatchObject({ done_by: 'followup-sla' });
+  expect(updates[0].patch.done_at).toBeTruthy();
   expect(JSON.parse(updates[0].patch.metadata).emptied).toBe(true);
 
   mockDb({ standingRow: { ...posted(['a'], { emptied: true }), read_at: NOW } });

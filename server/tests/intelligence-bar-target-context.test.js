@@ -860,7 +860,7 @@ test('outside-write tools are refused inside a customer-scoped task, admitted ou
     // No task at all (nothing customer-specific): admitted, like every other scope:'none' writer.
     expect(await Context.validateRecordTarget({}, { targets: [] }, { toolName })).toBeNull();
   }
-  expect(OUTSIDE_WRITE_TOOL_NAMES.size).toBe(11);
+  expect(OUTSIDE_WRITE_TOOL_NAMES.size).toBe(13);
 });
 
 test('a phone or email literal that resolved nobody fails scoped and selector-free record readers closed', async () => {

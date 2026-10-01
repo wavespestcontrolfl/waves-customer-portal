@@ -21,7 +21,8 @@ const logger = require('./logger');
 const TwilioService = require('./twilio');
 const { getIo } = require('../sockets');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
-const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require('./customer-tracking-eta');
+const { calculateBoundedTrackingEta, finiteNumber, techMappingCutoff } = require('./customer-tracking-eta');
+const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('./geocoder');
 const { stampedAddressDiverges } = require('./stamped-address');
 const {
@@ -187,6 +188,31 @@ function operationalStatusForTrackState(trackState) {
   }[trackState] || trackState || null;
 }
 
+// The customer-facing tracker state — the ONE derivation the public
+// tracking page (track-public.js) keys its live-vehicle field off of, and
+// the canonical answer to "is this visit customer-facing en_route right
+// now" for anything else that renders live-tracking facts (e.g.
+// context-aggregator's LIVE ETA block, sms-eta-freshness's send-time
+// recheck). Never read scheduled_services.status alone for that question:
+// the admin-side status flip and this tracker flip are two separate writes
+// (server/routes/tech-track.js commits status='en_route' via
+// transitionJobStatus BEFORE calling markEnRoute below, and does not roll
+// the status back if that second write fails), so a visit can sit with
+// status='en_route' while track_state is still 'scheduled' — the tracking
+// page would show no live vehicle for it. Terminal OPERATIONAL statuses win
+// over track_state (several cancellation paths change status without
+// cancelling tracking, and completion tracking is best-effort after
+// commit): a stale track_state='en_route' must never keep reading as a live
+// vehicle once the visit has gone terminal. Everything else maps 1:1 from
+// the canonical track_state machine.
+function customerTrackState(row) {
+  if (!row) return null;
+  if (row.status === 'no_show') return 'no_show';
+  if (row.status === 'cancelled' || row.status === 'skipped') return 'cancelled';
+  if (row.status === 'completed') return 'complete';
+  return row.track_state || null;
+}
+
 function emitCustomerTrackRefresh(svc, trackState, updatedAt = new Date()) {
   if (!svc?.customer_id) return;
   const io = getIo();
@@ -227,10 +253,13 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
     return null;
   }
   try {
-    const [ts, dest] = await Promise.all([
-      db('tech_status')
-        .where({ tech_id: technicianId })
-        .first('lat', 'lng', 'location_updated_at'),
+    // The tech's position comes from the SHARED remap-aware lookup (Codex round-40 P2)
+    // — the same one the public tracker and the AI ETA use — so a technician just
+    // pointed at a different vehicle never gets an ETA from the OLD vehicle's cached
+    // point: a tech_status fix older than the mapping change is bypassed for the
+    // configured device's own position, and an unverifiable one yields no ETA.
+    const [tech, dest] = await Promise.all([
+      db('technicians').where({ id: technicianId }).first('bouncie_imei_changed_at'),
       serviceId
         ? db('scheduled_services as s')
           .leftJoin('customers as c', 's.customer_id', 'c.id')
@@ -251,6 +280,11 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
           .where({ id: customerId })
           .first('latitude', 'longitude'),
     ]);
+    const ts = await resolveFreshTechPosition({
+      techId: technicianId,
+      cachedNotBefore: techMappingCutoff(tech?.bouncie_imei_changed_at),
+      logPrefix: 'track-transitions',
+    });
     const techLat = finiteNumber(ts?.lat);
     const techLng = finiteNumber(ts?.lng);
     // A divergent stamp makes the primary coords the WRONG destination —
@@ -259,11 +293,7 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
     let custLat = finiteNumber(dest?.service_lat) ?? (diverges ? null : finiteNumber(dest?.latitude));
     let custLng = finiteNumber(dest?.service_lng) ?? (diverges ? null : finiteNumber(dest?.longitude));
     if (techLat == null || techLng == null) {
-      logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no GPS in tech_status`);
-      return null;
-    }
-    if (!isFreshTimestamp(ts.location_updated_at)) {
-      logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} GPS stale (updated ${ts.location_updated_at})`);
+      logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no fresh GPS position`);
       return null;
     }
     if (custLat == null || custLng == null) {
@@ -289,7 +319,7 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
       techLng,
       customerLat: custLat,
       customerLng: custLng,
-      techUpdatedAt: ts.location_updated_at,
+      techUpdatedAt: ts.lastReportedAt,
       logPrefix: 'track-transitions',
     });
     if (!eta?.minutes) {
@@ -520,6 +550,19 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
   return { smsSent, smsOutcome, visitClaim, claimToken };
 }
 
+// The tracker flip runs under the visit's row lock with the street-level hold re-read on the
+// same connection: promoteReusedRowToStreetLevelHold locks this row before filing its card, so
+// a hold that commits after the unlocked fast-path check is seen here and the flip is skipped
+// (returns null; otherwise the write's row count). The lock is raw so the CAS stays the only
+// builder call. No caller holds this row's lock when it calls the flips.
+async function flipUnlessStreetLevelHeld(serviceId, write) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT 1 FROM scheduled_services WHERE id = ? FOR UPDATE', [serviceId]);
+    if (await require('./street-level-hold').isStreetLevelHoldVisit(serviceId, trx)) return null;
+    return write(trx);
+  });
+}
+
 async function markEnRouteCore(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
@@ -548,6 +591,12 @@ async function markEnRouteCore(serviceId, opts = {}) {
     return { ok: false, reason: `terminal_status: ${svc.status}` };
   }
   if (String(svc.status) === 'cancelled') return { ok: false, reason: 'already_cancelled' };
+  // A live street-level address hold is not advanced by ANY field path (geofence, Bouncie, timer start):
+  // the office confirms the address first. The shared seam skips the advance (ids only in the log).
+  if (await require('./street-level-hold').isStreetLevelHoldVisit(serviceId)) {
+    logger.info(`[track-transitions] markEnRoute skipped for ${serviceId}: street_level_hold`);
+    return { ok: false, reason: 'street_level_hold' };
+  }
   if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
     return { ok: false, reason: 'future_scheduled_date' };
   }
@@ -717,13 +766,17 @@ async function markEnRouteCore(serviceId, opts = {}) {
   // en_route — and the stale-clear variant would additionally erase its
   // lifecycle columns. A tuple change makes the write miss; the race path
   // below re-reads and reports whatever state won, with no side effects.
-  const updated = await db('scheduled_services')
+  const updated = await flipUnlessStreetLevelHeld(serviceId, (trx) => trx('scheduled_services')
     .where({ id: serviceId, track_state: 'scheduled' })
     .where('status', svc.status)
     .where('scheduled_date', svc.scheduled_date)
     .update({
       ...staleFlipClears, track_state: 'en_route', en_route_at: now, updated_at: now,
-    });
+    }));
+  if (updated === null) {
+    logger.info(`[track-transitions] markEnRoute skipped for ${serviceId}: street_level_hold`);
+    return { ok: false, reason: 'street_level_hold' };
+  }
 
   if (updated === 0) {
     // Someone else won the race. Re-read and report THEIR state — not a
@@ -962,6 +1015,12 @@ async function markOnProperty(serviceId, opts = {}) {
     return { ok: false, reason: `terminal_status: ${svc.status}` };
   }
   if (String(svc.status) === 'cancelled') return { ok: false, reason: 'already_cancelled' };
+  // A live street-level address hold is not advanced by ANY field path (geofence, Bouncie, timer start):
+  // the office confirms the address first. The shared seam skips the advance (ids only in the log).
+  if (await require('./street-level-hold').isStreetLevelHoldVisit(serviceId)) {
+    logger.info(`[track-transitions] markOnProperty skipped for ${serviceId}: street_level_hold`);
+    return { ok: false, reason: 'street_level_hold' };
+  }
   if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
     return { ok: false, reason: 'future_scheduled_date' };
   }
@@ -1081,8 +1140,8 @@ async function markOnProperty(serviceId, opts = {}) {
     // the re-read below distinguishes a genuine arrival race from a
     // conflicting rewrite.
     const { applyTrackLifecycleCas } = require('./rebooker');
-    const updated = await applyTrackLifecycleCas(
-      db('scheduled_services')
+    const updated = await flipUnlessStreetLevelHeld(serviceId, (trx) => applyTrackLifecycleCas(
+      trx('scheduled_services')
         .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null })
         .whereIn('track_state', ['scheduled', 'en_route']),
       svc,
@@ -1091,7 +1150,11 @@ async function markOnProperty(serviceId, opts = {}) {
         track_state: 'on_property',
         ...onSiteUpdates,
         updated_at: now,
-      });
+      }));
+    if (updated === null) {
+      logger.info(`[track-transitions] markOnProperty skipped for ${serviceId}: street_level_hold`);
+      return { ok: false, reason: 'street_level_hold' };
+    }
     if (updated === 0) {
       // Lost the flip to a concurrent signal. We can't assume the winner owned
       // the send — a geofence drive-past wins with suppressArrivalSms and leaves
@@ -1563,8 +1626,16 @@ module.exports = {
   portalOrigin,
   isFutureScheduledDate,
   isStaleLiveAttempt,
+  customerTrackState,
+  // Exported for real use (Codex round-4 P2, PR #5334): context-aggregator's
+  // upcomingServices[].trackState normalizes customerTrackState's raw
+  // track_state value ('on_property', ...) to buildFactsBlock's
+  // operational-style labels ('on_site', ...) with this SAME function — not
+  // a second copy of the mapping.
+  operationalStatusForTrackState,
   _test: {
     operationalStatusForTrackState,
     classifyArrivalSend,
+    resolveEnRouteEtaMinutes,
   },
 };

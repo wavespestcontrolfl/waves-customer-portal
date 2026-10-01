@@ -135,6 +135,11 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // the one fact the text carries; missed-call-text-back.js passes this same
   // list to getTemplate at render time.
   missed_call_text_back: Object.freeze(['callback_clause']),
+  // Lawn watering text: the frozen watering lines ARE the message. A body
+  // edited to drop {watering_lines} would otherwise render as a bare lead-in
+  // with no instruction; lawn-watering-sms.js passes this same requiredVars
+  // list to getTemplate at render time.
+  lawn_watering_instruction: Object.freeze(['watering_lines']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {

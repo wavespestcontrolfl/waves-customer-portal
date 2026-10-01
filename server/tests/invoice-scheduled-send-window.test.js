@@ -219,7 +219,7 @@ describe('processScheduledSends send-window handling', () => {
 
       expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 1, failed: 0, deferred: 0 });
       expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
-      expect(db).toHaveBeenCalledTimes(4);
+      expect(db).toHaveBeenCalledTimes(5); // +1: the end-of-sweep stranded hold-claim alert read
     });
 
   describe('collections dispute hold at the delivery boundary (owner ruling 2026-09-30)', () => {
@@ -292,7 +292,7 @@ describe('processScheduledSends send-window handling', () => {
 
     expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 1, failed: 0, deferred: 0 });
     expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
-    expect(db).toHaveBeenCalledTimes(4);
+    expect(db).toHaveBeenCalledTimes(5); // +1: the end-of-sweep stranded hold-claim alert read
   });
 
   test('outside the window: an email-only invoice (third-party payer) sends at its requested time', async () => {
@@ -424,7 +424,7 @@ describe('processScheduledSends send-window handling', () => {
     // no requeue/restore update follows. Only 4 db() calls total (stale
     // recovery, due query, and one claim flip per invoice); a 5th
     // (unqueued) call would throw and fail this test outright.
-    expect(db).toHaveBeenCalledTimes(4);
+    expect(db).toHaveBeenCalledTimes(5); // +1: the end-of-sweep stranded hold-claim alert read
     expect(claimA.update).toHaveBeenCalledTimes(1);
     // The second invoice, behind the held one, still sent — held invoices
     // are not counted in the {sent, failed, deferred} tuple this returns.
@@ -980,7 +980,7 @@ describe('processScheduledSends send-window handling', () => {
       expect(voidSpy).toHaveBeenCalledWith('svc-1', {
         invoiceId: 'inv-1', refusedClaimToken: 'claim-1',
       });
-      expect(db).toHaveBeenCalledTimes(3);
+      expect(db).toHaveBeenCalledTimes(4); // +1: the end-of-sweep stranded hold-claim alert read
     } finally { voidSpy.mockRestore(); }
   });
 
@@ -994,7 +994,7 @@ describe('processScheduledSends send-window handling', () => {
       email: { error: 'SMTP rejected', deliveryOutcome: 'not_sent' }, creditApplied: 25 });
 
     expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 0, deferred: 0 });
-    expect(db).toHaveBeenCalledTimes(3);
+    expect(db).toHaveBeenCalledTimes(4); // +1: the end-of-sweep stranded hold-claim alert read
   });
 
   test('a delivered leg with no durable timestamp is parked instead of automatically retried', async () => {
@@ -1012,7 +1012,7 @@ describe('processScheduledSends send-window handling', () => {
     });
 
     expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 0, deferred: 0 });
-    expect(db).toHaveBeenCalledTimes(3);
+    expect(db).toHaveBeenCalledTimes(4); // +1: the end-of-sweep stranded hold-claim alert read
   });
 
   // #4131 slice 4: zero-due visit invoices are settled or deferred BEFORE
@@ -1046,7 +1046,7 @@ describe('processScheduledSends send-window handling', () => {
       expect(sendSpy).not.toHaveBeenCalled();
       expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
       // Only the stale-recovery sweep and the due read — no claim flip.
-      expect(db).toHaveBeenCalledTimes(2);
+      expect(db).toHaveBeenCalledTimes(3); // +1: the end-of-sweep stranded hold-claim alert read
     });
 
     // Pre-push audit P1: this pre-claim path used to name its success
