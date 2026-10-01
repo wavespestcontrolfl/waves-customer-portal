@@ -131,7 +131,24 @@ describe('the shown range stays inside the label band', () => {
   it('reads a single-rate band as one amount', () => {
     const rate = injectionLabelRate({ name: 'ArborJet Mn-Jet Fe Micros', default_rate: '5-15', default_unit: 'ml/inch dbh' });
     expect(injectionLabelText(rate, rate.bands[0])).toBe('1 tsp per inch of trunk');
-    expect(injectionDoseText(rate, 10, 'low')).toBe('≈ 1½ fl oz');
+    // 50 mL is 1.69 fl oz: 1½ would be 11% short, so the exact amount reads.
+    expect(injectionDoseText(rate, 10, 'low')).toBe('1.69 fl oz');
+  });
+
+  it('never shows a single-rate dose more than 5% under it', () => {
+    const phospho = injectionLabelRate(PHOSPHO_JET);
+    // 10.5 in at 3.5 mL per inch: 36.75 mL, never "≈ 1 fl oz" (29.6 mL).
+    expect(injectionDoseText(phospho, 10.5, '')).toBe('1.24 fl oz');
+    const mnJet = injectionLabelRate({ name: 'ArborJet Mn-Jet Fe Micros', default_rate: '5-15', default_unit: 'ml/inch dbh' });
+    for (const [rate, pick] of [[phospho, ''], [mnJet, 'low']]) {
+      for (let tenths = 10; tenths <= 119; tenths += 1) {
+        const inches = tenths / 10;
+        const exact = injectionBand(rate, inches, pick).low * inches;
+        const [shown] = shownMl(injectionDoseText(rate, inches, pick));
+        expect(shown, `${inches} in`).toBeGreaterThanOrEqual(exact * 0.95 - 1e-9);
+        expect(shown, `${inches} in`).toBeLessThanOrEqual(exact + 0.0005 * ML_PER_FL_OZ);
+      }
+    }
   });
 });
 

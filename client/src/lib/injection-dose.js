@@ -128,11 +128,25 @@ export function injectionBand(rate, trunkInches, pickKey) {
   return bands.find((band) => band.key === pickKey) || null;
 }
 
+// A single-rate dose in the truck's measures, never more than 5% under it
+// (the job card's spoon tolerance): a spoon or a quarter fl oz at or just
+// under the dose when one is that close, else the exact fl oz, cut (never
+// rounded up) to hundredths.
+const FIXED_DOSE_TOLERANCE = 0.05;
+function fixedDoseText(ml) {
+  const flOz = ml / ML_PER_FL_OZ;
+  if (flOz < 1) return formatMeasuredAmount(ml, "ml");
+  const quarter = Math.floor(flOz * 4 + 1e-9) / 4;
+  if ((flOz - quarter) / flOz <= FIXED_DOSE_TOLERANCE) return formatMeasuredAmount(ml, "ml", { truckMeasures: true });
+  return `${Math.floor(flOz * 100 + 1e-9) / 100} fl oz`;
+}
+
 // An mL range in spoons or ounces, rounded inside it (the job card's truck
 // measures); "½ fl oz – 2 fl oz" reads "½ – 2 fl oz" when both ends share a
-// unit. A single-rate label is one amount, measured at or just under it.
+// unit. A single rate is one amount, measured at or just under it (see
+// fixedDoseText).
 function rangeText(lowMl, highMl) {
-  if (lowMl === highMl) return formatMeasuredAmount(lowMl, "ml", { truckMeasures: true });
+  if (lowMl === highMl) return fixedDoseText(lowMl);
   const text = formatMeasuredRange(lowMl, highMl, "ml", { truckMeasures: true });
   const shared = /^(.+?) (tsp|fl oz) – (.+?) \2$/.exec(text || "");
   return shared ? `${shared[1]} – ${shared[3]} ${shared[2]}` : text;
