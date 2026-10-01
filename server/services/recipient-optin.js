@@ -197,7 +197,9 @@ async function applyMarkerEntry(h, customer, phoneKey, visits = {}, replays) {
       h('scheduled_services').where({ id: visitId, customer_id: customerId })
         .whereNotIn('status', [...DEMOTE_STALE_VISIT_STATUSES]).first('id'),
       h('appointment_reminders').where({ scheduled_service_id: visitId, cancelled: true }).first('id'),
-      scheduledServiceApptTime(visitId),
+      // A failed lookup throws (the savepoint rolls back and the YES / sweep
+      // retries) — never read as "not in the future", which would drop the entry.
+      scheduledServiceApptTime(visitId, { throwOnError: true }),
     ]);
     // An entry older than the cap is dropped too (NaN set_at never expires).
     if (!visit || pulled || !(arrival?.getTime() > Date.now()) || Date.now() - Date.parse(entry.set_at) > MARKER_MAX_AGE_MS) {

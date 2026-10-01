@@ -368,6 +368,16 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(state.customer.service_preferences.unconsented_slot_phone_keys).toEqual([OTHER]);
   });
 
+  test('an arrival lookup that fails rolls back the YES pass and keeps the entry (never dropped as not-future)', async () => {
+    const { scheduledServiceApptTime } = require('../services/appointment-reminders');
+    scheduledServiceApptTime.mockRejectedValueOnce(new Error('db down'));
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: confirmed() });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(replays).toEqual([]);
+    expect(entryOf(state, KEY, 's1')).toBeDefined();
+    expect(scheduledServiceApptTime).toHaveBeenCalledWith('s1', { throwOnError: true });
+  });
+
   test('two bookings for the same recipient before the reply: BOTH visits replay', async () => {
     const { dbh } = fakeDb({ customer: spouseRow({ service_preferences: { demote_primary_on_optin: { [KEY]: { s1: { demote: true, set_at: 'x' }, s2: { demote: true, set_at: 'x' } } } } }), optinRows: confirmed() });
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
