@@ -107,6 +107,10 @@ function isUsableAdsReport(advice) {
   // Required (may be empty): an omitted list is an off-contract answer, not a
   // deliberate "nothing to change" — it must not be texted as one.
   if (!Array.isArray(advice.recommendations) || !advice.recommendations.every(isUsableRecommendation)) return false;
+  // Same for every action-bearing secondary list: a missing one is an
+  // incomplete answer, and the SMS summary / empty state would otherwise read
+  // it as "nothing flagged".
+  if (!Object.keys(ADS_LIST_FIELDS).every((key) => Array.isArray(advice[key]))) return false;
   return Object.entries(ADS_LIST_FIELDS).every(([key, [label, ...fields]]) => advice[key] == null
     || advice[key].every((item) => isText(item[label]) && fields.every((f) => isRenderable(item[f]))
       && ADS_LIST_EVIDENCE[key](item)));
@@ -187,12 +191,6 @@ async function loadGbpSummary(d30) {
 
 const numOrNull = (v) => (v == null ? null : Number(v));
 
-// Fallback advice may carry a one-click Apply only for an active Google
-// campaign the route can push to.
-function isFallbackControllable(c, adsConfigured) {
-  return c.platform === 'google_ads' && c.status === 'active'
-    && !(c.linked && !adsConfigured);
-}
 
 function budgetChangesSection(budgetLog) {
   const rows = budgetLog.slice(0, ADVISOR_MAX_BUDGET_CHANGES).map(b => ({
@@ -208,10 +206,16 @@ function budgetChangesSection(budgetLog) {
 }
 
 function searchTermsSection(searchTerms) {
-  return JSON.stringify(searchTerms.filter((t) => Number(t.cost) > 0).slice(0, ADVISOR_MAX_SEARCH_TERMS).map(t => ({
+  const spent = searchTerms.filter((t) => Number(t.cost) > 0);
+  const rows = JSON.stringify(spent.slice(0, ADVISOR_MAX_SEARCH_TERMS).map(t => ({
     term: t.search_term, clicks: t.clicks, spend: Number(t.cost),
     conversions: Number(t.conversions), convValue: Number(t.conversion_value), roas: Number(t.roas),
   })), null, 2);
+  // The query reads one row past the cap so a truncated list is disclosed
+  // rather than presented as every term that cost money.
+  return spent.length > ADVISOR_MAX_SEARCH_TERMS
+    ? `${rows}\n(TRUNCATED: only the ${ADVISOR_MAX_SEARCH_TERMS} highest-spend terms are listed; more terms had spend. Do not conclude there is no other waste.)`
+    : rows;
 }
 
 function gscSection(gscSummary) {
@@ -320,7 +324,7 @@ class CampaignAdvisor {
 
     // With no provider key at all, return a data-only summary
     if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
-      return this.storeFallbackAdvice(campaignSummaries, inputs.targets, inputs.budgetLog);
+      return this.storeFallbackAdvice(campaignSummaries);
     }
 
     try {
@@ -337,12 +341,12 @@ class CampaignAdvisor {
       return advice;
     } catch (err) {
       logger.error(`AI Advisor failed: ${err.message}`);
-      return this.storeFallbackAdvice(campaignSummaries, inputs.targets, inputs.budgetLog);
+      return this.storeFallbackAdvice(campaignSummaries);
     }
   }
 
-  async storeFallbackAdvice(campaignSummaries, targets, budgetLog = []) {
-    const fallback = this.generateFallbackAdvice(campaignSummaries, targets, budgetLog);
+  async storeFallbackAdvice(campaignSummaries) {
+    const fallback = this.generateFallbackAdvice(campaignSummaries);
     await this.storeReport(fallback);
     return fallback;
   }
@@ -359,8 +363,9 @@ class CampaignAdvisor {
     // refreshed by a recent daily sync carry in-window totals.
     const searchTerms = await db('ad_search_terms')
       .where('updated_at', '>=', new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS))
+      .where('cost', '>', 0)
       .orderBy('cost', 'desc')
-      .limit(ADVISOR_MAX_SEARCH_TERMS);
+      .limit(ADVISOR_MAX_SEARCH_TERMS + 1);
 
     const serviceAttribution = await db('ad_service_attribution')
       .where('lead_date', '>=', d30);
@@ -416,7 +421,7 @@ class CampaignAdvisor {
 CAMPAIGN PERFORMANCE:
 ${JSON.stringify(campaignSummaries, null, 2)}
 
-SEARCH TERMS WITH SPEND (by spend, up to ${ADVISOR_MAX_SEARCH_TERMS}, last 30 days — this is the complete list of terms that cost money):
+SEARCH TERMS WITH SPEND (by spend, up to ${ADVISOR_MAX_SEARCH_TERMS}, last 30 days — every term that cost money unless marked TRUNCATED below):
 ${searchTermsSection(inputs.searchTerms)}
 
 SERVICE-LINE ATTRIBUTION (last 30 days):
@@ -535,75 +540,28 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
     return advice;
   }
 
-  generateFallbackAdvice(summaries, targets, budgetLog = []) {
-    const recommendations = [];
-    // Same no-repeat/no-reversal rule as the model prompt: a campaign whose
-    // budget or mode changed in the last 7 days gets no fallback advice at all
-    // (not even manual prose) — the rules below can't see why it changed.
-    const recentlyChanged = new Set(budgetLog.map((b) => String(b.campaign_id)));
-    const minRoas = parseFloat(targets?.min_roas || 4.0);
-
-    // Only google_ads campaigns get apply_action/apply_value — other platforms
-    // are managed in their own Ads Manager, so their recs stay advisory. A rec
-    // that can't carry a concrete executable value stays advisory too (the
-    // client only renders Apply when the value is concrete), and the apply
-    // fields must mirror the /advisor/apply guards: a STOP rec for a campaign
-    // already stopped is a no-op the route rejects, and a budget rec for a
-    // throttled (spent/stop) campaign can't take effect — either would render
-    // an Apply button that is guaranteed to 422.
-    const adsConfigured = adsClientConfigured();
-    for (const c of summaries) {
-      // Mirrors /advisor/apply: only active Google campaigns take one-click
-      // changes (a paused campaign's apply would 422), and a LINKED campaign
-      // needs a configured client for its live push.
-      if (recentlyChanged.has(String(c.id))) continue;
-      const controllable = isFallbackControllable(c, adsConfigured);
-      if (c.last7d.roas > 0 && c.last7d.roas < minRoas * 0.5) {
-        recommendations.push({
-          priority: 'high', campaign: c.name,
-          action: `Set to STOP mode — 7-day ROAS ${c.last7d.roas}x is less than half of ${minRoas}x target`,
-          reasoning: 'Underperforming campaign burning budget',
-          ...(controllable && c.budgetMode !== 'stop'
-            && !(c.linked && c.dailyBudgetBase == null) // linked + no base can't push live
-            ? { campaign_id: c.id, apply_action: 'change_mode', apply_value: 'stop' }
-            : {}),
-        });
-      } else if (c.last7d.lostISBudget > 20 && c.last7d.roas >= minRoas) {
-        // setBudget sets the BASE daily budget, so derive the target from the
-        // base (current can be throttled by spent/stop mode); +25%, whole dollars.
-        const baseBudget = Number(c.dailyBudgetBase ?? c.dailyBudgetCurrent);
-        // Math.max keeps tiny budgets from rounding to a no-op "increase".
-        const target = Number.isFinite(baseBudget) && baseBudget > 0
-          ? Math.max(Math.round(baseBudget * 1.25), Math.floor(baseBudget) + 1)
-          : null;
-        // target <= 3x base mirrors the route's bound: a tiny budget's
-        // whole-dollar minimum (e.g. $0.30 -> $1) would otherwise carry an
-        // Apply button that deterministically 422s as out-of-bounds.
-        const budgetApplicable = controllable && target
-          && target <= baseBudget * 3
-          && (!c.budgetMode || c.budgetMode === 'base');
-        recommendations.push({
-          priority: 'medium', campaign: c.name,
-          action: target
-            ? `Increase daily budget from $${baseBudget} to $${target} — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`
-            : `Increase budget — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`,
-          reasoning: 'Profitable campaign with headroom',
-          ...(budgetApplicable ? { campaign_id: c.id, apply_action: 'increase_budget', apply_value: target } : {}),
-        });
-      }
-    }
-
+  // Owner ruling 2026-10-01: recommend only real, evidence-backed changes.
+  // The fixed ROAS / lost-IS rules this fallback used to apply can't judge
+  // data volume or recent changes, so when no AI report is available it now
+  // reports the numbers and recommends nothing (no Apply buttons, no prose).
+  generateFallbackAdvice(summaries) {
+    const totals = summaries.reduce((acc, c) => ({
+      spend: acc.spend + (Number(c.last7d?.spend) || 0),
+      conversions: acc.conversions + (Number(c.last7d?.conversions) || 0),
+    }), { spend: 0, conversions: 0 });
     return {
       date: etDateString(),
-      grade: recommendations.length === 0 ? 'B' : 'C',
-      overall_assessment: `Auto-generated report: ${summaries.length} campaigns reviewed, ${recommendations.length} actions identified.`,
-      recommendations,
+      grade: 'N/A',
+      overall_assessment: `AI advisor unavailable — no recommendations generated. Last 7 days across ${summaries.length} campaign${summaries.length === 1 ? '' : 's'}: $${totals.spend.toFixed(2)} spend, ${totals.conversions} conversion${totals.conversions === 1 ? '' : 's'}. Regenerate later for an analysed report.`,
+      recommendations: [],
       waste_alerts: [],
       scaling_opportunities: [],
       capacity_warnings: [],
-      insights: ['AI advisor not available — showing rule-based analysis only.'],
+      seo_insights: [],
+      insights: ['AI advisor not available — no recommendations were generated.'],
     };
   }
+
 
   async storeReport(advice) {
     try {

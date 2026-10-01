@@ -39,11 +39,12 @@ const mockBudgetRow = (i, budgetTo = 8) => ({
   created_at: '2026-09-30T12:00:00Z',
 });
 let mockBudgetLog = [];
+let mockSearchTerms = SEARCH_TERMS;
 const mockLimits = [];
 jest.mock('../models/db', () => jest.fn((table) => {
   const rowsFor = {
     ad_campaigns: [CAMPAIGN],
-    ad_search_terms: SEARCH_TERMS,
+    ad_search_terms: mockSearchTerms,
     ad_budget_log: mockBudgetLog,
   };
   const b = {
@@ -63,7 +64,7 @@ const EMPTY_REPORT = {
   overall_assessment: 'About $46 over 30 days and 2 conversions is too little data to conclude anything.',
   grade: 'B',
   recommendations: [],
-  waste_alerts: [],
+  waste_alerts: [], scaling_opportunities: [], capacity_warnings: [], seo_insights: [],
   insights: [],
 };
 
@@ -184,20 +185,39 @@ describe('Codex r4 on #5486', () => {
     expect(mockDispatch.mock.calls[0][2].reserveFallbackBudget).toBe(true);
   });
 
-  test('fallback advice says nothing about a campaign changed in the last 7 days (no Apply, no manual prose)', () => {
+  test('fallback advice recommends nothing at all (owner quality bar), and reports the numbers', () => {
     const summary = {
       id: 'c-1', name: 'Synthetic Search', platform: 'google_ads', status: 'active', linked: false,
       budgetMode: 'base', dailyBudgetBase: 20, dailyBudgetCurrent: 20,
-      last7d: { roas: 1, lostISBudget: 0 },
+      last7d: { roas: 1, lostISBudget: 40, spend: 12.5, conversions: 1 },
     };
-    const fresh = advisor.generateFallbackAdvice([summary], { min_roas: 4 });
-    expect(fresh.recommendations[0].apply_action).toBe('change_mode');
-    const changed = advisor.generateFallbackAdvice([summary], { min_roas: 4 }, [{ campaign_id: 'c-1' }]);
-    expect(changed.recommendations).toEqual([]);
-    // An unchanged campaign in the same run is still advised on.
-    const mixed = advisor.generateFallbackAdvice([summary, { ...summary, id: 'c-2' }], { min_roas: 4 }, [{ campaign_id: 'c-1' }]);
-    expect(mixed.recommendations).toHaveLength(1);
-    expect(mixed.recommendations[0].campaign_id).toBe('c-2');
+    const fb = advisor.generateFallbackAdvice([summary]);
+    expect(fb.recommendations).toEqual([]);
+    expect(fb.grade).toBe('N/A');
+    expect(fb.overall_assessment).toMatch(/AI advisor unavailable — no recommendations generated/);
+    expect(fb.overall_assessment).toContain('$12.50 spend, 1 conversion');
+  });
+
+});
+
+describe('search-term truncation (Codex r6 on #5486)', () => {
+  afterEach(() => { mockSearchTerms = SEARCH_TERMS; });
+  const term = (i) => ({ search_term: `synthetic term ${i}`, clicks: 1, cost: String(200 - i), conversions: '0', conversion_value: '0', roas: '0' });
+
+  test('101 spend rows: the prompt lists 100 and says the list is TRUNCATED', async () => {
+    mockSearchTerms = Array.from({ length: 101 }, (_, i) => term(i));
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    const { text } = mockDispatch.mock.calls[0][1];
+    expect(text).toContain('"term": "synthetic term 99"');
+    expect(text).not.toContain('"term": "synthetic term 100"');
+    expect(text).toMatch(/TRUNCATED: only the 100 highest-spend terms/);
+  });
+
+  test('100 or fewer: no truncation note', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/TRUNCATED: only/);
   });
 });
 
@@ -263,9 +283,11 @@ describe('empty recommendations', () => {
     expect(advisor.normalizeAdsReport({ ...EMPTY_REPORT }).recommendations).toEqual([]);
   });
 
-  test('the rule-based fallback with no actions stores and reads as an empty list', () => {
-    const fb = advisor.generateFallbackAdvice([], null);
+  test('the fallback stores as an ungraded, empty report (never mistaken for an AI answer)', () => {
+    const fb = advisor.generateFallbackAdvice([]);
     expect(fb.recommendations).toEqual([]);
-    expect(advisor.isUsableAdsReport(fb)).toBe(true);
+    expect(fb.grade).toBe('N/A');
+    // Not an AI-shaped answer: it never passes the leg validator.
+    expect(advisor.isUsableAdsReport(fb)).toBe(false);
   });
 });

@@ -922,7 +922,8 @@ function canAutoApply(rec) {
   return Number.isFinite(n) && n > 0;
 }
 function advisorGradeColor(g) {
-  if (!g) return "#71717A";
+  // No grade, or an ungraded report (AI unavailable): neutral, never red.
+  if (!g || g === "N/A") return "#71717A";
   if (g.startsWith("A")) return "#15803D";
   if (g.startsWith("B")) return "#18181B";
   if (g.startsWith("C")) return "#A16207";

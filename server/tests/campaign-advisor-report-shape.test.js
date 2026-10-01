@@ -11,7 +11,7 @@ jest.mock('../services/twilio', () => ({}));
 
 const { isUsableAdsReport, normalizeAdsReport } = require('../services/ads/campaign-advisor');
 
-const GOOD = { grade: 'B', overall_assessment: 'ROAS steady, one campaign underspending.', recommendations: [] };
+const GOOD = { grade: 'B', overall_assessment: 'ROAS steady, one campaign underspending.', recommendations: [], waste_alerts: [], scaling_opportunities: [], capacity_warnings: [], seo_insights: [] };
 
 describe('isUsableAdsReport', () => {
   test('accepts a minimal usable report', () => {
@@ -100,6 +100,7 @@ describe('rendered items must be usable as given', () => {
       waste_alerts: [{ search_term: 'free pest control', spend: 12.5, conversions: 0, action: 'add_negative', extra: [1] }],
       scaling_opportunities: [{ campaign: 'Pest', current_budget: 20, suggested_budget: 30, headroom_reason: 'IS lost to budget' }],
       capacity_warnings: [{ area: 'Venice', utilization: 95, recommendation: 'slow spend' }],
+      seo_insights: [],
       insights: ['CPA is down'],
     })).toBe(true);
   });
@@ -169,4 +170,12 @@ describe('secondary findings need numeric evidence (Codex r3 on #5486)', () => {
       seo_insights: [{ detail: 'pest control venice at position 11, 420 impressions', type: 'opportunity', action: 'add FAQ' }],
     })).toBe(true);
   });
+});
+
+describe('action-bearing lists are required (Codex r6 on #5486)', () => {
+  test.each(['waste_alerts', 'scaling_opportunities', 'capacity_warnings', 'seo_insights'])(
+    'a report missing %s is incomplete, not "nothing flagged"', (key) => {
+      const { [key]: _omitted, ...partial } = GOOD;
+      expect(isUsableAdsReport(partial)).toBe(false);
+    });
 });

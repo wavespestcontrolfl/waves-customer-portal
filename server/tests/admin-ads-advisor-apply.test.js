@@ -432,76 +432,13 @@ test('manager-thrown in-lock rechecks (budget_noop / budget_out_of_bounds) map t
   expect(mockIncrement).not.toHaveBeenCalled();
 });
 
-describe('rule-based fallback recommendations are executable', () => {
+describe('rule-based fallback (owner ruling 2026-10-01)', () => {
   const advisor = require('../services/ads/campaign-advisor');
-
-  const summary = (over = {}) => ({
-    id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
-    dailyBudgetBase: 20, dailyBudgetCurrent: 20,
-    last7d: { roas: 6, lostISBudget: 30 }, last30d: {}, trending: 'flat',
-    ...over,
-  });
-
-  test('increase_budget fallback carries campaign_id and a concrete apply_value', () => {
-    const advice = advisor.generateFallbackAdvice([summary()], { min_roas: 4 });
-    const rec = advice.recommendations.find(r => r.apply_action === 'increase_budget');
-    expect(rec).toBeDefined();
-    expect(rec.campaign_id).toBe('c-1');
-    expect(rec.apply_value).toBe(25); // $20 base +25%
-    expect(rec.action).toMatch(/\$20 to \$25/);
-  });
-
-  test('increase_budget fallback with no known base budget stays advisory', () => {
-    const advice = advisor.generateFallbackAdvice(
-      [summary({ dailyBudgetBase: null, dailyBudgetCurrent: null })], { min_roas: 4 });
-    const rec = advice.recommendations[0];
-    expect(rec).toBeDefined();
-    expect(rec.apply_action).toBeUndefined();
-    expect(rec.apply_value).toBeUndefined();
-  });
-
-  test('fallback recs for a paused campaign stay advisory (apply would 422)', () => {
-    const advice = advisor.generateFallbackAdvice(
-      [summary({ status: 'paused' })], { min_roas: 4 });
-    const rec = advice.recommendations[0];
-    expect(rec).toBeDefined();
-    expect(rec.apply_action).toBeUndefined();
-  });
-
-  test('increase_budget fallback on a throttled (spent/stop) campaign stays advisory', () => {
-    // The route rejects budget applies outside base mode — the fallback must
-    // not render an Apply button that is guaranteed to 422.
-    const advice = advisor.generateFallbackAdvice(
-      [summary({ budgetMode: 'spent' })], { min_roas: 4 });
-    const rec = advice.recommendations[0];
-    expect(rec).toBeDefined();
-    expect(rec.apply_action).toBeUndefined();
-    expect(rec.apply_value).toBeUndefined();
-  });
-
-  test('STOP fallback for a campaign already in stop mode stays advisory (no-op apply)', () => {
-    const advice = advisor.generateFallbackAdvice(
-      [summary({ budgetMode: 'stop', last7d: { roas: 1, lostISBudget: 0 } })], { min_roas: 4 });
-    const rec = advice.recommendations[0];
-    expect(rec).toBeDefined();
-    expect(rec.apply_action).toBeUndefined();
-  });
-
-  test('STOP fallback carries campaign_id + apply_value for google_ads only', () => {
+  test('recommends nothing and offers no Apply, whatever the campaign numbers', () => {
     const advice = advisor.generateFallbackAdvice([
-      summary({ last7d: { roas: 1, lostISBudget: 0 } }),
-      summary({ id: 'c-m', name: 'Meta Retargeting', platform: 'facebook', last7d: { roas: 1, lostISBudget: 0 } }),
+      { id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads', status: 'active', budgetMode: 'base', dailyBudgetBase: 20, last7d: { roas: 1, lostISBudget: 40, spend: 50, conversions: 2 } },
     ], { min_roas: 4 });
-
-    const google = advice.recommendations.find(r => r.campaign === 'Pest Bradenton');
-    expect(google.apply_action).toBe('change_mode');
-    expect(google.apply_value).toBe('stop');
-    expect(google.campaign_id).toBe('c-1');
-
-    const meta = advice.recommendations.find(r => r.campaign === 'Meta Retargeting');
-    expect(meta).toBeDefined();
-    expect(meta.apply_action).toBeUndefined();
-    expect(meta.campaign_id).toBeUndefined();
+    expect(advice.recommendations).toEqual([]);
   });
 });
 
@@ -588,16 +525,6 @@ describe('normalizeRecommendations r7 — name required, linkage-aware', () => {
     expect(rec.apply_action).toBeUndefined();
   });
 
-  test('STOP fallback for a linked campaign with no base stays advisory', () => {
-    const advice = advisor.generateFallbackAdvice([{
-      id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
-      linked: true, dailyBudgetBase: null, dailyBudgetCurrent: 40,
-      last7d: { roas: 1, lostISBudget: 0 }, last30d: {}, trending: 'flat',
-    }], { min_roas: 4 });
-    const rec = advice.recommendations[0];
-    expect(rec).toBeDefined();
-    expect(rec.apply_action).toBeUndefined();
-  });
 });
 
 describe('normalize/fallback r9 — client availability and tiny-budget bound', () => {
@@ -616,24 +543,5 @@ describe('normalize/fallback r9 — client availability and tiny-budget bound', 
     expect(rec.apply_action).toBeUndefined();
   });
 
-  test('fallback recs for a linked campaign stay advisory when the client is unconfigured', () => {
-    mockAdsConfigured.mockReturnValue(false);
-    const advice = advisor.generateFallbackAdvice([{
-      id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
-      linked: true, dailyBudgetBase: 20, dailyBudgetCurrent: 20,
-      last7d: { roas: 6, lostISBudget: 30 }, last30d: {}, trending: 'flat',
-    }], { min_roas: 4 });
-    expect(advice.recommendations[0].apply_action).toBeUndefined();
-  });
 
-  test('tiny-budget fallback whose whole-dollar minimum exceeds the 3x bound stays advisory', () => {
-    const advice = advisor.generateFallbackAdvice([{
-      id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
-      linked: false, dailyBudgetBase: 0.3, dailyBudgetCurrent: 0.3,
-      last7d: { roas: 6, lostISBudget: 30 }, last30d: {}, trending: 'flat',
-    }], { min_roas: 4 });
-    const rec = advice.recommendations[0];
-    expect(rec).toBeDefined();
-    expect(rec.apply_action).toBeUndefined(); // $1 target would be > 3x $0.30
-  });
 });
