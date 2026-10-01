@@ -617,7 +617,11 @@ const CLOCK_TIME_RE = /(?<![\w.:])(?:(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:a\.?m\
 // duration is weeks, or three-plus days, is not a duration claim - unless the
 // clause has label context (checked by the caller).
 const LONG_QTY_WORD_RE = /^(?:three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|several|a\s+few|few|a\s+couple\s+of|couple\s+of|a\s+couple|couple)\b/;
+// Neither duration pattern can match without a digit (TIME_EXPR_RE) or a time word (every TIME_UNIT_SRC / VAGUE_WHOLE_SRC
+// alternative contains one of these stems): such a clause skips both, keeping a reply of hundreds of short clauses linear and cheap.
+const DURATION_PREFILTER_RE = /\d|sec|min|hour|hr|day|night|week|morning/i;
 function durationsIn(clause) {
+  if (!DURATION_PREFILTER_RE.test(clause)) return [];
   const out = [];
   for (const m of clause.matchAll(new RegExp(TIME_EXPR_RE.source, 'gi'))) {
     const top = Number(m[2] ?? m[1]);
@@ -763,6 +767,21 @@ const RAIN_REASSURE_RE = /\b(?:won'?t|will\s+not|doesn'?t|does\s+not|wouldn'?t|w
 const WASH_VERB_OUT_RE = /\b(?:rins(?:e|es|ed|ing)|wash(?:es|ed|ing)?|(?:pressure|power)[-\s]?wash\w*|hos(?:e|es|ed|ing)|spray(?:s|ed|ing)?\s+down|wip(?:e|es|ed|ing)\s+(?:down|off)|mop(?:s|ped|ping)?)\b/;
 const WASH_OBJECT_OUT_RE = /\b(?:treatment|treatments|treated|spray|sprayed|application|applied|product|products|granules?|fertilizer|it|them|this|that|those|lawn|grass|yard|patio|deck|driveway|surfaces?)\b/;
 const washesTreatment = (text) => WASH_VERB_OUT_RE.test(text) && WASH_OBJECT_OUT_RE.test(text);
+// The sentence-level facts are the same for every clause of a sentence: computed once per sentence, not once per clause (a
+// 2,000-character sentence of ~700 short clauses re-scanned the whole sentence per clause - quadratic, CI timing test r35).
+let sentenceFactsMemo = { sentence: null, facts: null };
+function sentenceLevelFacts(sentence) {
+  if (sentenceFactsMemo.sentence !== sentence) {
+    sentenceFactsMemo = {
+      sentence,
+      facts: {
+        rainSentence: RAIN_WORD_RE.test(sentence) || MOISTURE_WORD_RE.test(sentence) || washesTreatment(sentence),
+        preVisit: isPreVisitAccess(sentence),
+      },
+    };
+  }
+  return sentenceFactsMemo.facts;
+}
 function clauseFacts({ clause, staffCarry, sentence, question, replyContext, replyDryCondition }) {
   const being = BEING_RE.test(clause);
   // a results timeline ("7 to 10 days", "a couple of weeks") is no duration claim
@@ -774,8 +793,7 @@ function clauseFacts({ clause, staffCarry, sentence, question, replyContext, rep
     duration,
     clock: hasClockTime(clause),
     rain: RAIN_WORD_RE.test(clause) || MOISTURE_WORD_RE.test(clause) || washesTreatment(clause),
-    rainSentence: RAIN_WORD_RE.test(sentence) || MOISTURE_WORD_RE.test(sentence) || washesTreatment(sentence),
-    preVisit: isPreVisitAccess(sentence),
+    ...sentenceLevelFacts(sentence),
     sched: (clock) => isSchedulingClause(clause, { staffCarry, clock, sentence }),
   };
 }
