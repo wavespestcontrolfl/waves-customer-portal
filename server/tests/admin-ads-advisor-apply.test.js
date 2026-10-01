@@ -50,8 +50,6 @@ jest.mock('../services/ads/budget-manager', () => ({
 let mockCampaignById = null;   // row returned by the id lookup (.first())
 let mockNameMatches = [];      // rows returned by the name lookup (awaited builder)
 const mockIncrement = jest.fn().mockResolvedValue(1);
-let mockRecentChange = null;   // ad_budget_log row inside the 7-day window
-const mockBudgetLogWheres = [];
 jest.mock('../models/db', () => jest.fn((table) => {
   if (table === 'ad_campaigns') {
     const b = {
@@ -65,10 +63,6 @@ jest.mock('../models/db', () => jest.fn((table) => {
   }
   if (table === 'ad_advisor_reports') {
     return { where: () => ({ increment: mockIncrement }) };
-  }
-  if (table === 'ad_budget_log') {
-    const b = { where: (...a) => { mockBudgetLogWheres.push(a); return b; }, first: () => Promise.resolve(mockRecentChange) };
-    return b;
   }
   const b = { where: () => b, orderBy: () => b, first: () => Promise.resolve(null), then: (r, j) => Promise.resolve([]).then(r, j) };
   return b;
@@ -97,26 +91,20 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockCampaignById = null;
   mockNameMatches = [];
-  mockRecentChange = null;
-  mockBudgetLogWheres.length = 0;
 });
 
-test('a campaign changed in the last 7 days refuses one-click Apply (Codex r12 on #5486)', async () => {
+test('a campaign changed in the last 7 days refuses one-click Apply, checked under the budget-manager lock (Codex r12 on #5486)', async () => {
   mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20, budget_mode: 'base' }];
-  mockRecentChange = { created_at: new Date().toISOString() };
+  mockSetBudget.mockRejectedValue(Object.assign(new Error('"Pest Bradenton" had a budget or mode change in the last 7 days'), { code: 'recent_change' }));
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
 
   expect(res.status).toBe(409);
   expect(res.body.applied).toBe(false);
   expect(res.body.error).toMatch(/change in the last 7 days/);
-  expect(mockSetBudget).not.toHaveBeenCalled();
-  expect(mockSetMode).not.toHaveBeenCalled();
   expect(mockIncrement).not.toHaveBeenCalled();
-  expect(mockBudgetLogWheres[0]).toEqual([{ campaign_id: 'c-1' }]);
-  const [col, op, since] = mockBudgetLogWheres[1];
-  expect([col, op]).toEqual(['created_at', '>=']);
-  expect(Date.now() - since.getTime()).toBeGreaterThanOrEqual(7 * 86400000 - 1000);
+  const since = mockSetBudget.mock.calls[0][3].requireNoChangeSince;
+  expect(Math.abs(Date.now() - 7 * 86400000 - since.getTime())).toBeLessThan(60000);
 });
 
 test('increase_budget resolves the campaign by name and applies', async () => {
@@ -127,7 +115,7 @@ test('increase_budget resolves the campaign by name and applies', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
   expect(mockIncrement).toHaveBeenCalledTimes(1);
 });
 
@@ -143,7 +131,7 @@ test('campaignId is preferred over the name lookup', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith(UUID_A, 25, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith(UUID_A, 25, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
 });
 
 test('a malformed (non-UUID) campaign_id falls back to the name lookup instead of a 500', async () => {
@@ -155,7 +143,7 @@ test('a malformed (non-UUID) campaign_id falls back to the name lookup instead o
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
 });
 
 test('change_mode applies via setMode', async () => {
@@ -166,7 +154,7 @@ test('change_mode applies via setMode', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetMode).toHaveBeenCalledWith('c-9', 'stop', expect.any(String), { requireLivePush: true, requireActive: true, trigger: 'advisor' });
+  expect(mockSetMode).toHaveBeenCalledWith('c-9', 'stop', expect.any(String), { requireLivePush: true, requireActive: true, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
 });
 
 test('unlinked campaign (no live push attempted) still counts as applied', async () => {
@@ -246,7 +234,7 @@ test('a sane budget within 3× of the base still applies', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
 });
 
 test('budget bound falls back to the current daily budget when no base exists', async () => {

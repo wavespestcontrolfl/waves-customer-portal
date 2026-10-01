@@ -380,10 +380,16 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
         results.push(data);
       }
 
-      // An incomplete snapshot keeps the matched rows it got but neither
-      // retires the rest nor counts as a successful run: the advisor reads
-      // search terms as UNAVAILABLE until a complete sync lands.
-      if (unmatched > 0) return;
+      // An incomplete snapshot is rolled back whole: the last complete
+      // snapshot and its success record stay as they were, so a partial run
+      // is never mixed into data the advisor reads as complete (and once that
+      // record ages past 48h the advisor reads search terms as UNAVAILABLE).
+      if (unmatched > 0) {
+        throw Object.assign(
+          new Error(`${unmatched} search-term row(s) belong to campaigns missing locally; snapshot incomplete, nothing written`),
+          { code: 'search_terms_incomplete' },
+        );
+      }
 
       // Terms missing from this snapshot had no activity in the window.
       await trx('ad_search_terms')
@@ -398,12 +404,6 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
         .merge({ value: syncedAt.toISOString(), updated_at: syncedAt });
     });
 
-    if (unmatched > 0) {
-      throw Object.assign(
-        new Error(`${unmatched} search-term row(s) belong to campaigns missing locally; snapshot incomplete, not marked synced`),
-        { code: 'search_terms_incomplete' },
-      );
-    }
     logger.info(`[google-ads] Synced ${results.length} search terms`);
     return results;
   } catch (err) {

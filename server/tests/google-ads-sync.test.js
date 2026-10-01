@@ -333,7 +333,7 @@ describe('syncSearchTerms retires terms missing from the latest snapshot (Codex 
     });
   });
 
-  test('rows for a campaign missing locally: no retirement, no success record, and the run fails (Codex r12)', async () => {
+  test('rows for a campaign missing locally: the run throws inside the transaction (rolled back), so no retirement and no success record (Codex r12)', async () => {
     mockCustomerQuery.mockResolvedValue([{
       campaign: { id: 999 }, search_term_view: { search_term: 'synthetic orphan term', status: 'NONE' },
       metrics: { impressions: 3, clicks: 1, cost_micros: 2_000_000, conversions: 0, conversions_value: 0 },

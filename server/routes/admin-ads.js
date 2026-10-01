@@ -618,7 +618,7 @@ async function applyLive(fn, res) {
       res.status(502).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
-    if (err.code === 'mode_conflict') {
+    if (err.code === 'mode_conflict' || err.code === 'recent_change') {
       res.status(409).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
@@ -696,16 +696,10 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
     }
 
     // Same 7-day no-repeat/no-reversal rule the advisor applies when it
-    // writes the report, rechecked at click time: a change logged after the
-    // report (capacity cron, manual edit, an earlier Apply) makes its
-    // one-click recommendation stale.
-    const recentChange = await db('ad_budget_log')
-      .where({ campaign_id: campaign.id })
-      .where('created_at', '>=', new Date(Date.now() - 7 * 86400000))
-      .first('created_at');
-    if (recentChange) {
-      return res.status(409).json({ applied: false, error: `"${campaign.campaign_name}" had a budget or mode change in the last 7 days, so this recommendation may repeat or undo it. Make the change manually if it's still right.` });
-    }
+    // writes the report, rechecked by the budget manager under the campaign
+    // row lock: a change logged after the report (capacity cron, manual edit,
+    // an earlier Apply) makes its one-click recommendation stale.
+    const requireNoChangeSince = new Date(Date.now() - 7 * 86400000);
 
     let result;
     if (isBudgetAction) {
@@ -744,7 +738,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' }), res);
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {
@@ -757,7 +751,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (value === campaign.budget_mode) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already in ${value} mode — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, auditReason || `Advisor: set ${value}`, { requireLivePush: true, requireActive: true, trigger: 'advisor' }), res);
+      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, auditReason || `Advisor: set ${value}`, { requireLivePush: true, requireActive: true, requireNoChangeSince, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     }
 
