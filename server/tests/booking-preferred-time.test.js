@@ -48,6 +48,7 @@ function builder(table) {
     whereNotIn: () => { b._liveOnly = true; return b; },
     whereRaw: (sql, vals) => { mockRaws.push({ table, op: 'whereRaw', arg: sql, vals }); if (/<= \?/.test(String(sql))) b._requestedBy = vals && vals[0]; return b; },
     orWhereRaw: () => b,
+    whereNotExists: () => b, // the resend's later-close exclusion (proven on PostgreSQL)
     leftJoin: () => b,
     join: () => b,
     orderBy: () => b,
