@@ -94,8 +94,13 @@ async function decideCustomer(run) {
   if (error) return decision('hold', 'prefs_unreadable');
   run.customer = customer;
   run.channels = channelsFor(run, prefs, customer);
-  return run.channels.length ? null : decision('pause', 'no_reachable_channel');
+  return null;
 }
+
+// Judged AFTER delivery evidence is recovered: a touch whose every leg already reached the customer is
+// done even if the customer has since lost their last reachable channel (pausing it would leave a
+// completed final notice open and alert staff over nothing).
+const decideReachable = (run) => (run.channels.length ? null : decision('pause', 'no_reachable_channel'));
 
 // ── stage 3: recover first ───────────────────────────────────────────────
 
@@ -237,6 +242,18 @@ async function finishDelivered(run, facts) {
 // purpose: nothing may hold on to an event object across a change of stage.
 const currentEvent = (run) => (run.progress || []).find((e) => e.metadata.notificationEventKey === run.eventKey) || null;
 
+// A customer with no reachable channel today: completeness is judged against the legs THAT touch selected
+// (an empty list would make every event vacuously complete). Only a fully settled touch with something
+// delivered is recovered; anything else falls through to the reachability pause.
+function decideUnreachableRecovery(event) {
+  const selected = Array.isArray(event?.metadata?.selectedChannels) ? event.metadata.selectedChannels : [];
+  const settled = selected.length > 0 && event.delivered.size > 0
+    && selected.every((c) => event.delivered.has(c) || event.resolved.has(c) || event.waived.has(c));
+  return settled
+    ? decision('settle', 'already_delivered', { facts: { event, delivered: event.delivered, deliveredAt: event.deliveredAt, deliveredNow: [] } })
+    : null;
+}
+
 async function decideRecovery(run) {
   let progress;
   try {
@@ -253,6 +270,7 @@ async function decideRecovery(run) {
   // re-plan), and everything that reads "this touch's events" selects by the CURRENT key.
   run.progress = progress;
   const event = currentEvent(run);
+  if (!run.channels.length) return decideUnreachableRecovery(event);
   if (!event || event.delivered.size === 0) return event?.complete ? decision('pause', 'all_channels_terminal') : null;
   // Delivered before: settle from the ledger. No render, no set read.
   if (event.complete || await nextStageArrived(run, event)) {
@@ -487,7 +505,7 @@ async function decideAfterSet(run, set) {
 
 async function runClaimed(claimed, opts) {
   const run = { ...opts, schedule: claimed.schedule, claimStamp: claimed.claimStamp };
-  const early = await decideCustomer(run) || await decideRecovery(run);
+  const early = await decideCustomer(run) || await decideRecovery(run) || decideReachable(run);
   if (early) return applyDecision(run, early);
   const set = await resolveDunnableSet(run.schedule.customer_id, { now: run.now });
   const stop = await decideAfterSet(run, set);
@@ -598,11 +616,24 @@ async function decideShadowPolicy(run, set) {
   if (unclaimable.length === allowed.length - deduped.length && unclaimable.length) {
     return decision('hold', 'REMINDER_OUTCOME_UNCONFIRMED', { denied, unclaimable });
   }
-  if (deduped.length === allowed.length) return decision('settle', 'already_delivered', { denied });
+  if (deduped.length === allowed.length) return dedupedDisposition(event, deduped, denied, pending, verdicts);
   run.policyDenied = denied; // a partial send: the claimable allowed channels go, these do not
   run.unclaimable = unclaimable;
   run.deduped = deduped;
   return null;
+}
+
+// Every owed channel that was not denied is already delivered. Judged by the SAME disposition live uses on
+// the facts the send would have produced: a durably denied leg is waived (the touch settles), a transiently
+// denied one stays owed (live leaves the step TOLD and retries it), so shadow holds instead of settling.
+function dedupedDisposition(event, deduped, denied, pending, verdicts) {
+  if (!denied.length) return decision('settle', 'already_delivered', { denied });
+  const delivered = new Set([...(event?.delivered || []), ...deduped]);
+  const waived = new Set([...(event?.waived || []), ...denied.filter((c) => verdictDurablyDenied(verdicts[pending.indexOf(c)]))]);
+  const results = Object.fromEntries(denied.map((c) => [c, { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }]));
+  const complete = denied.every((c) => waived.has(c));
+  const { kind } = Schedule.dispositionOf({ delivered, complete, results });
+  return kind === 'advance' ? decision('settle', 'policy_waived', { denied }) : decision('hold', 'COLLECTIONS_POLICY', { denied });
 }
 
 // The ledger row a channel's keyed reservation already has, shaped as recordContact returns a reused one.
@@ -628,7 +659,7 @@ async function standingReservation(run, channel) {
 async function judgeShadowSchedule(schedule, set, { now }) {
   const run = { schedule, now, operatorInitiated: false, claimStamp: null, readOnly: true };
   const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
-  const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAfterSet(run, set)
+  const stop = await decideCustomer(run) || await decideRecovery(run) || decideReachable(run) || await decideAfterSet(run, set)
     || await decideSet(run, set) || await decideShadowPolicy(run, set);
   if (!stop) {
     line('send', {

@@ -1342,6 +1342,22 @@ describe('shadow models an ambiguous reservation before logging a send (R5-2)', 
       expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder kind=multi members=3 total_cents=\d+ deduped=email/);
     });
 
+    test('R10-1: an old-delivered email with the text TRANSIENTLY denied is a would-HOLD (live leaves the step told and retries), not a settle; nothing is written', async () => {
+      old('email', { delivered: true });
+      mockPolicy.mockImplementation(async ({ channel }) => (channel === 'email' ? { allowed: true } : { allowed: false, durable: false }));
+      untouched(await shadow());
+      expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=COLLECTIONS_POLICY denied=sms/);
+      expect(lines()).not.toMatch(/would settle/);
+    });
+
+    test('R10-1: the same with the text DURABLY denied settles on the waiver, as live completes the episode', async () => {
+      old('email', { delivered: true });
+      mockPolicy.mockImplementation(async ({ channel }) => (channel === 'email' ? { allowed: true } : { allowed: false, durable: true }));
+      untouched(await shadow());
+      expect(lines()).toMatch(/SHADOW would settle customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=policy_waived/);
+      expect(lines()).not.toMatch(/would hold/);
+    });
+
     test('an old send_failed reservation is claimable (live reopens it); a resolved one is refused like live', async () => {
       prefs = { invoice_channels: ['email'] };
       old('email', { send_failed: true });
@@ -2645,5 +2661,74 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
     const tally = await Runner.shadowRun(NOW);
     expect(tally.failed).toBe(1);
     expect(tally.promote).toBe(1);
+  });
+});
+
+describe('delivery evidence is recovered before an unreachable customer is paused (R10-2)', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  // the customer asked for texts only, then lost their number: no reachable channel today
+  const unreachable = () => { prefs = { invoice_channels: ['sms'] }; customer.phone = null; };
+  const reserve = (stepId, metadata = {}) => mockLedger.push({
+    id: `done-${stepId}`, customer_id: CUSTOMER_ID, channel: 'sms', source: 'invoice_followups_customer', occurred_at: ago(0.5),
+    invoice_ids: ['inv-a', 'inv-b'], idempotency_key: `k-${stepId}`,
+    metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:${stepId}`, delivered: true, selectedChannels: ['sms'], ...metadata },
+  });
+
+  test('a complete touch + no reachable channel advances (no pause, no alert)', async () => {
+    unreachable();
+    reserve('d60_reminder');
+    expect((await run()).outcome).toBe('advanced');
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(Schedule.advance).toHaveBeenCalledTimes(1);
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a complete FINAL notice + no reachable channel completes (completeFinal) naming what it named', async () => {
+    setup({ stepIndex: 5, sentDaysAgo: 100 });
+    unreachable();
+    reserve('d90_final_notice');
+    expect((await run()).outcome).toBe('completed');
+    expect([...Schedule.completeFinal.mock.calls[0][1].namedInvoiceIds].sort()).toEqual(['inv-a', 'inv-b']);
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('an INCOMPLETE touch (a selected leg never delivered) + no reachable channel is paused as before', async () => {
+    unreachable();
+    reserve('d60_reminder', { selectedChannels: ['sms', 'email'] });
+    expect(await run()).toMatchObject({ outcome: 'paused', reason: 'no_reachable_channel' });
+    expect(Schedule.advance).not.toHaveBeenCalled();
+  });
+
+  test('no touch at all + no reachable channel is paused as before; a deleted customer still pauses first', async () => {
+    unreachable();
+    expect(await run()).toMatchObject({ outcome: 'paused', reason: 'no_reachable_channel' });
+    customer.deleted_at = new Date();
+    reserve('d60_reminder');
+    expect(await run()).toMatchObject({ outcome: 'paused', reason: 'customer_deleted' });
+  });
+
+  test('SHADOW follows the same order: complete touch => would settle; incomplete => would pause; nothing written', async () => {
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    unreachable();
+    mockLedger.push({
+      id: 'done', customer_id: CUSTOMER_ID, channel: 'sms', source: 'invoice_followups_customer', occurred_at: ago(0.5),
+      invoice_ids: ['inv-a', 'inv-b'], idempotency_key: 'k-done',
+      metadata: { notificationEventKey: 'customer-dunning:s-open:1:d60_reminder', delivered: true, selectedChannels: ['sms'] },
+    });
+    const database = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }]);
+    await Runner.shadowRun(NOW);
+    expect(lines()).toMatch(/SHADOW would settle .* reason=already_delivered/);
+    expect(lines()).not.toMatch(/would pause/);
+    logger.info.mockClear();
+    mockLedger[mockLedger.length - 1].metadata.selectedChannels = ['sms', 'email'];
+    const again = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }]);
+    await Runner.shadowRun(NOW);
+    expect(lines()).toMatch(/SHADOW would pause .* reason=no_reachable_channel/);
+    expect(database.writes).toEqual([]);
+    expect(again.writes).toEqual([]);
   });
 });
