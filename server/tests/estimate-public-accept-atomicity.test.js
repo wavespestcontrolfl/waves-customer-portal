@@ -135,7 +135,20 @@ jest.mock('../models/db', () => {
       // → rows (commitReservation's graduation UPDATE uses the latter).
       state.ops.push({ type: 'update', table, data: obj });
       const hits = matched();
-      hits.forEach((row) => Object.assign(row, obj));
+      hits.forEach((row) => {
+        // Emulate the atomic JSON-path stamps (jsonb_set on estimate_data) the
+        // accept writes — assigning the raw token would clobber the column.
+        const raw = obj.estimate_data && obj.estimate_data.__raw;
+        if (raw && /jsonb_set/.test(raw)) {
+          const key = /'\{(\w+)\}'/.exec(raw)[1];
+          const wasString = typeof row.estimate_data === 'string';
+          const cur = (wasString ? JSON.parse(row.estimate_data) : row.estimate_data) || {};
+          cur[key] = /'true'::jsonb/.test(raw) ? true : obj.estimate_data.bindings[0];
+          Object.assign(row, { ...obj, estimate_data: wasString ? JSON.stringify(cur) : cur });
+        } else {
+          Object.assign(row, obj);
+        }
+      });
       return {
         returning: async () => hits.map((r) => ({ ...r })),
         then: (res, rej) => Promise.resolve(hits.length).then(res, rej),
@@ -2433,6 +2446,20 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     const res = await putAccept(TOKEN, {});
     expect(res.status).toBe(200);
     expect(storedEstimate().status).toBe('accepted');
+  });
+
+  test('pre-push P0: 409 stale -> reload -> accept on a no-capture path durably marks the accept so the webhook can never enroll the discarded intent', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const stale = await putAccept(TOKEN, CAPTURED);
+    expect(stale.status).toBe(409);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
+    // The reloaded tab accepts without the (dropped) intent.
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    const data = typeof storedEstimate().estimate_data === 'string' ? JSON.parse(storedEstimate().estimate_data) : storedEstimate().estimate_data;
+    expect(data.acceptedRecurringCardSetupIntentId).toBe(RecurringCards.ACCEPTED_NO_CAPTURE_MARKER);
   });
 
   test('P1: the accept transaction lands on a different customer than the resolver judged — 409 ACCEPT_BILLING_CHANGED before conversion', async () => {

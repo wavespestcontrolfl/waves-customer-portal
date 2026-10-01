@@ -11123,6 +11123,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         });
       }
 
+      // GitHub Codex #5481 r2 pre-push P0: an accept that commits WITHOUT a
+      // verified capture must say so durably. A SetupIntent a tab captured and
+      // the accept then refused (CONSENT_VARIANT_STALE: gate flipped, another
+      // tab saved a method, opt-out) stays succeeded in Stripe; after the
+      // reload the customer accepts on a no-capture path (no intent stamp) and
+      // the setup_intent.succeeded retry would read the unstamped accept as a
+      // LEGACY one and enroll that discarded card (undoing an opt-out, base
+      // consent). The marker makes every intent for this estimate "superseded"
+      // to the recovery. One-time / invoice-mode accepts never enroll anyway.
+      if (!(recurringCardVerification?.ok && recurringCardVerification.setupIntentId)
+        && !treatAsOneTime && !billByInvoice) {
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardSetupIntentId}', to_jsonb(?::text))",
+            [RecurringCards.ACCEPTED_NO_CAPTURE_MARKER],
+          ),
+        });
+      }
+
       // PR-B: an explicit Auto Pay opt-out keeps the card but is never
       // enrolled — stamp it with the accepted intent so the setup_intent
       // recovery (stripe-webhook.js) honors the same decision.

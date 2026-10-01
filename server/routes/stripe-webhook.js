@@ -5012,7 +5012,9 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     }
     const acceptedIntentId = estimateData?.acceptedRecurringCardSetupIntentId || null;
     if (acceptedIntentId && acceptedIntentId !== setupIntent.id) {
-      logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} superseded by accepted ${acceptedIntentId} (estimate ${estimate.id}) — not enrolling`);
+      logger.info(acceptedIntentId === RecurringCards.ACCEPTED_NO_CAPTURE_MARKER
+        ? `[stripe-webhook] recurring card intent ${setupIntent.id} was never bound — estimate ${estimate.id} accepted without a verified capture — not enrolling`
+        : `[stripe-webhook] recurring card intent ${setupIntent.id} superseded by accepted ${acceptedIntentId} (estimate ${estimate.id}) — not enrolling`);
       return;
     }
     // The intent the accept COMMITTED with was judged under the customer

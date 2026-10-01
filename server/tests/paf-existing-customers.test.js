@@ -124,6 +124,12 @@ describe('accept route wiring (source pins)', () => {
     expect(src).toMatch(/recurringCardPolicy\.customerId && String\(recurringCardPolicy\.customerId\) !== String\(customerId\)/);
   });
 
+  test('pre-push P0: an accept without a verified capture stamps the no-capture marker (recurring, non-invoice lanes) and the webhook honors it', () => {
+    expect(src).toMatch(/if \(!\(recurringCardVerification\?\.ok && recurringCardVerification\.setupIntentId\)\s*&& !treatAsOneTime && !billByInvoice\) \{[\s\S]{0,400}RecurringCards\.ACCEPTED_NO_CAPTURE_MARKER/);
+    expect(read('routes/stripe-webhook.js')).toMatch(/acceptedIntentId && acceptedIntentId !== setupIntent\.id/);
+    expect(read('services/recurring-card-on-file.js')).toMatch(/const ACCEPTED_NO_CAPTURE_MARKER = 'no_capture_at_accept';/);
+  });
+
   test('locked-customer drift aborts the accept with a reloadable 409 BEFORE any conversion / enrollment (inside the accept transaction)', () => {
     expect(src).toMatch(
       /if \(recurringCardPolicy\.afterVisitCard === true\s*&& await RecurringCards\.pafExistingDriftUnderLock\(trx, \{ customerId, policy: recurringCardPolicy \}\)\) \{[\s\S]{0,300}err\.status = 409;[\s\S]{0,120}err\.code = 'ACCEPT_BILLING_CHANGED';\s*throw err;/,

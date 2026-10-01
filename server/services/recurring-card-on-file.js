@@ -1899,7 +1899,13 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
   return { scanned: rows.length, resumed };
 }
 
+// Stamped into estimate_data.acceptedRecurringCardSetupIntentId by an accept
+// that committed without a verified capture: no SetupIntent may ever be
+// recovered/enrolled for it by the setup_intent.succeeded webhook.
+const ACCEPTED_NO_CAPTURE_MARKER = 'no_capture_at_accept';
+
 module.exports = {
+  ACCEPTED_NO_CAPTURE_MARKER,
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   payAfterFirstVisitCardRail,

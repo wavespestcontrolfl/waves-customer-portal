@@ -49,6 +49,7 @@ jest.mock('../services/notification-service', () => ({
 const mockCompleteEnrollment = jest.fn(async () => ({ enrolled: true }));
 jest.mock('../services/recurring-card-on-file', () => ({
   isRecurringCardOnFileEnabled: jest.fn(() => true),
+  ACCEPTED_NO_CAPTURE_MARKER: 'no_capture_at_accept',
   resolveRecurringCaptureTender: jest.fn(async () => 'card'),
   completeRecurringCardEnrollment: (...a) => mockCompleteEnrollment(...a),
 }));
@@ -127,6 +128,17 @@ describe('estimate_recurring_card recovery records the accepted consent variant'
     }));
     await handleSetupIntentSucceeded(SETUP_INTENT);
     expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+});
+
+describe('estimate_recurring_card recovery never enrolls an intent the accept did not bind (PAF-B r2 pre-push P0)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('an accept that committed with NO verified capture (marker) never recovers a later-succeeding / discarded intent', async () => {
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'no_capture_at_accept' }));
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+    expect(require('../services/stripe').retrieveSetupIntent).not.toHaveBeenCalled();
   });
 });
 
