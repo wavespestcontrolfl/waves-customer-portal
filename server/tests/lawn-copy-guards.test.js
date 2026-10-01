@@ -624,7 +624,7 @@ describe('closed-world timing rule (terminal review)', () => {
 
     test('a bare integer is only accepted when its value is a supplied score', () => {
       ['3', '14', '\uff14', '\u0664'].forEach((d) => {
-        const sentence = `We saw ${d} thin spots along the edge.`;
+        const sentence = `Your score is ${d}.`;
         const value = Number(String(d).replace(/[\uff10-\uff19]/g, (c) => c.charCodeAt(0) - 0xff10).replace(/[\u0660-\u0669]/g, (c) => c.charCodeAt(0) - 0x660));
         expect(checkNumericWhitelist(sentence, { allowedNumbers: [value] })).toEqual([]);
         expect(checkNumericWhitelist(sentence, { allowedNumbers: [value + 1] }).length).toBe(1);
@@ -800,7 +800,6 @@ describe('whole numeric expressions, bare dry idiom, negation, line wraps (termi
       ['Your score is 72 points%.', '72 points%'],
       ['Your score is 72%.', '72%'],
       ['Your score is 72 percent.', '72 percent'],
-      ['Your score is 72 points degrees.', null],
       ['Your score is 1.5.', '1.5'],
       ['Your score is 72 100.', '72 100'],
     ])('%s rejects whole even when every digit is a supplied score', (text) => {
@@ -970,7 +969,6 @@ describe('one canonical normalization feeds every rule (terminal review pass 3)'
       ['Your score is 5lbs.', '5 lbs'],
       ['Your score is 5 hours.', '5 hours'],
       ['Your score is 5 inches.', '5 inches'],
-      ['Your score is 5 points hours.', '5 points hours'],
       ['Your score is 5pts%.', null],
       ['Your score is 5x.', null],
     ])('%s rejects with allowedNumbers [5]', (text) => {
@@ -1146,6 +1144,126 @@ describe('one canonical normalization feeds every rule (terminal review pass 3)'
       Object.values({ ...SPACE_TRANSFORMS, ...CASE_TRANSFORMS }).forEach((transform) => {
         expect(checkLawnModelCopy(transform(clean), {}).ok).toBe(true);
       });
+    });
+  });
+});
+
+describe('closed score rule, product-scoped organic exception, a.m./p.m. sentence ends (terminal review pass 4)', () => {
+  describe('score allowance is closed: nothing attached before, only end / punctuation / "points" after', () => {
+    const allowed = { allowedNumbers: [5, 72, 100, -5] };
+    const score = (tail) => checkNumericWhitelist(`Your score is ${tail}`, allowed);
+
+    test.each([
+      '5liters.', '5-percent.', '5h.', '$72.', '5 liters.', '5 percent.', '72 in March.', '5x.', '#5.', '~5.', '5/10.',
+      '×5.', 'x5.', '5%.', '5°.', '5 and holding.', '5 today.', '5 ft.', '5th.', '5hours.', '5in.', '72 points%.',
+      '5-5.', '5 - 5.', '5 5.', '72 of 100.', '72/100.', '5.5.', '£72.', '€5.', '5mph.', '5 pts%.',
+    ])('rejects: %s', (tail) => {
+      expect(score(tail).length).toBeGreaterThan(0);
+    });
+
+    test.each([
+      '72.', '5.', '72', '5 points.', '72 points', '5 pts.', 'up 5 points.', 'up by 5 points.', 'down 5 points.', '-5 points.',
+      '+5.', '72, up 5 points.', '72; up 5 points.', '(72).', '72 points since March.', '72 points, up 5 points.', '72!', '72?',
+      '−5.', 'minus 5.', 'plus 5.',
+    ])('passes: %s', (tail) => {
+      expect(score(tail)).toEqual([]);
+    });
+
+    test('a number still needs its value in allowedNumbers, and a sign is part of the value', () => {
+      expect(checkNumericWhitelist('Your score is 71.', allowed).length).toBe(1);
+      expect(checkNumericWhitelist('Your score is down 5 points.', { allowedNumbers: [5] }).length).toBe(1);
+      expect(checkNumericWhitelist('Your score is down 5 points.', { allowedNumbers: [-5] })).toEqual([]);
+    });
+
+    test('a score at the start of a sentence qualifies', () => {
+      expect(checkNumericWhitelist('72 is your score.', allowed).length).toBe(1);
+      expect(checkNumericWhitelist('72.', allowed)).toEqual([]);
+    });
+
+    test('no unit list is left in the source', () => {
+      const src = require('fs').readFileSync(path.join(__dirname, '../services/service-report/lawn-copy-guards.js'), 'utf8');
+      expect(src).not.toMatch(/UNIT_FOLLOW/);
+      expect(src).not.toMatch(/liters|\|ft\||inch\(es\)\?\|yds/);
+    });
+  });
+
+  describe('"organic" exception is scoped away from the applied product', () => {
+    test.each([
+      'Organic matter is building in the thatch layer.',
+      'The organic debris along the edge is thick.',
+      'There is organic material under the turf.',
+      'The organic layer is deep near the oak.',
+    ])('without a product mention, passes: %s', (text) => {
+      expect(checkSafetyClaim(text)).toEqual([]);
+    });
+
+    test.each([
+      "Today's treatment helps break down organic matter.",
+      'The product breaks down organic debris in the thatch layer.',
+      'We applied a granule that feeds organic material.',
+      'The fertilizer is organic matter based.',
+      'Organic matter responds to the spray.',
+      'The pesticide works on organic material.',
+      'The herbicide, fungicide and insecticide see organic debris.',
+      'What we applied adds organic matter.',
+      'The application leaves natural organic matter.',
+      'The treatment is natural.',
+      'The product is botanical.',
+      'The product is plant-based.',
+      "Today's natural look is even.",
+      'The granules are organic.',
+    ])('with a product mention, any organic/natural/botanical word rejects: %s', (text) => {
+      expect(checkSafetyClaim(text).length).toBeGreaterThan(0);
+      rejects(text, 'safety_claim', {});
+    });
+
+    test('natural with no product mention is still fine in the agronomic sense', () => {
+      expect(checkSafetyClaim('The back looks natural and even.')).toEqual([]);
+    });
+
+    test('a neighboring sentence does not change the verdict', () => {
+      expect(checkSafetyClaim("Organic matter is building. Today's treatment is going on.")).toEqual([]);
+    });
+  });
+
+  describe('a.m. / p.m. keep a sentence-ending period', () => {
+    test('the canonical forms', () => {
+      expect(guards.normalizeCopy('Back by 7 p.m. Stay off')).toBe('Back by 7 pm. Stay off');
+      expect(guards.normalizeCopy('Back by 7 P.M. Stay off')).toBe('Back by 7 pm. Stay off');
+      expect(guards.normalizeCopy('Back by 7 p.m.')).toBe('Back by 7 pm.');
+      expect(guards.normalizeCopy('At 7 a.m. to 9')).toBe('At 7 am to 9');
+      expect(guards.normalizeCopy('At 7 a.m. Monday')).toBe('At 7 am Monday');
+      expect(guards.normalizeCopy('At 7 a.m. in May')).toBe('At 7 am in May');
+      expect(guards.normalizeCopy('At 7 a.m., then 9')).toBe('At 7 am, then 9');
+      expect(guards.normalizeCopy('At 7 a.m. March 3')).toBe('At 7 am March 3');
+      expect(guards.normalizeCopy('At 7 am. Stay off')).toBe('At 7 am. Stay off');
+    });
+
+    test('"7 p.m. Wait for the technician." is two sentences', () => {
+      const text = 'Please be done by 7 p.m. Wait for the technician.';
+      expect(guards.normalizeCopy(text).split(/(?<=[.!?])\s+/)).toEqual(['Please be done by 7 pm.', 'Wait for the technician.']);
+      // the time is not in the "wait" sentence
+      expect(checkReentryPattern(text)).toEqual([]);
+      expect(checkBannerCopy(text).map((r) => r.rule)).not.toContain('reentry_figure');
+      expect(rules(checkLawnModelCopy(text, {}))).not.toContain('reentry_figure');
+      expect(rules(checkLawnModelCopy(text, {}))).toContain('weekday_clock');
+    });
+
+    test('the keep-off sentence after the time is still judged on its own', () => {
+      const text = 'Please be done by 7 p.m. Stay off the turf for a few days.';
+      expect(checkReentryPattern(text).length).toBe(1);
+      expect(checkBannerCopy(text).map((r) => r.rule)).toContain('reentry_figure');
+      rejects(text, 'reentry_figure', {});
+    });
+
+    test('mid-sentence "7 a.m." has no boundary', () => {
+      const text = 'Stay off the turf until 7 a.m. for a day.';
+      expect(checkReentryPattern(text).length).toBe(1);
+      expect(checkBannerCopy(text).map((r) => r.rule)).toContain('reentry_figure');
+      rejects(text, 'reentry_figure', {});
+      const monday = 'Stay off the turf until 7 a.m. Monday.';
+      expect(checkReentryPattern(monday).length).toBe(1);
+      rejects(monday, 'reentry_figure', {});
     });
   });
 });

@@ -28,8 +28,9 @@
  *                      shortly, later, "a while", ago, yesterday, eventually).
  *   numeric            any spelled number word, and any digit or fraction except
  *                      the score allowance: a bare signed integer or "<n>
- *                      points" (no attached or following unit: 5hours, 5th, 5 ft
- *                      all reject) whose value, sign included, is in
+ *                      points" in a CLOSED form (nothing attached before it; only
+ *                      the end, punctuation or "points" after it) whose value,
+ *                      sign included, is in
  *                      facts.allowedNumbers ("-5", "minus 5", "down 5 points"
  *                      are -5; "+5", "plus 5", "up 5 points" are 5). The whole
  *                      expression is read first: "1 / 2", "72 / 100", "72 of
@@ -53,7 +54,9 @@
  *   banned_copy        G1/G6: the shared findBannedCustomerCopy list (cleared,
  *                      resolved, gone, guarantee, fixed re-entry figures ...).
  *   safety_claim       AGENTS.md: no pesticide is "safe" (pet-safe, safe for kids,
- *                      non-toxic, kid-friendly, natural, organic ...). Only a
+ *                      non-toxic, kid-friendly, natural, organic ...; "organic
+ *                      matter" is fine only when the sentence does not mention
+ *                      the product or treatment). Only a
  *                      sentence that is exactly "safe once dry" (subject: the
  *                      lawn, turf, grass, yard, area or surface, never a product
  *                      or treatment) is allowed.
@@ -123,11 +126,22 @@ const FOLDS = [
   [/[​-‍⁠﻿]/g, () => ''],
 ];
 
+// "p.m." / "a.m." fold to "pm" / "am". When the period ends the sentence ("7
+// p.m. Stay off") it is kept; mid-sentence ("7 a.m. to 9", "7 a.m. Monday") it is
+// not. A sentence ends there only when the next word starts with a capital that
+// is not a weekday or month name.
+const MERIDIEM_CONTINUATION_RE = /^\s+(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/i;
+function foldMeridiem(match, letter, offset, whole) {
+  const rest = whole.slice(offset + match.length);
+  const ended = match.endsWith('.') && (rest === '' || (/^\s+["'(]?[A-Z]/.test(rest) && !MERIDIEM_CONTINUATION_RE.test(rest)));
+  return `${letter.toLowerCase()}m${ended ? '.' : ''}`;
+}
+
 function canonicalParagraph(paragraph) {
   return paragraph
     .replace(/\s+/g, ' ')
     .replace(/(\d),(?=\d{3}\b)/g, '$1')
-    .replace(/\b([ap])\.\s?m\b\.?/gi, '$1m')
+    .replace(/\b([ap])\.\s?m\b\.?/gi, foldMeridiem)
     .replace(/(\d)(?=[a-z])/gi, '$1 ')
     .trim();
 }
@@ -176,20 +190,22 @@ const NUMBER_WORD_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|t
 // any time word, relative phrase, number word or digit
 const ANY_TIMING_RE = new RegExp([TIME_WORD_RE, RELATIVE_TIME_RE, NUMBER_WORD_RE].map((re) => re.source).concat('\\d').join('|'), 'i');
 
-// The score allowance: a bare signed integer, optionally followed by "points".
+// The score allowance is a CLOSED form, not a unit list. An integer qualifies
+// only when ALL hold on the normalized sentence:
+//  - it is a single integer (digits joined by spaces or operators, decimals and
+//    fractions are one multi-part expression that rejects whole),
+//  - the character before it (before its sign, if any) is the start of the
+//    sentence, a space or "(" -- so "$72", "#5", "~5", "x5" never qualify,
+//  - what follows is the end of the sentence, punctuation (. , ; : ! ? )) or
+//    the separate word "points" (after which a space or punctuation may follow).
+// Anything else next to it (letters attached or spaced, -, /, %, a degree sign,
+// digits) means it is not a score and it rejects as numeric.
 // The sign is "-", "minus", "+", "plus", or "up"/"down" ("up 5 points" is +5,
-// "down 5" is -5). The WHOLE numeric expression is tokenized before anything is
-// allowed: digits joined by spaces or operators ("1 / 2", "72 / 100", "72 of
-// 100", "3 - 4", "72 out of 100", "1.5") and a unit tail ("72 points%", "72%",
-// "72 degrees") make the expression something other than a single integer, so
-// it rejects whole instead of leaving a stripped fragment behind.
+// "down 5" is -5).
 const NUM_TERM_SRC = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)';
 const NUM_JOIN_SRC = '(?:\\s*(?:[/\\-+x\u00d7*:,%\u00b0]|\\bof\\b|\\bout\\s+of\\b|\\bto\\b|\\bor\\b|\\band\\b)\\s*|\\s+)';
-// A unit that follows a number: attached suffixes (th, ft ...) and any time word
-// make it a measurement or duration, never a bare score.
-const UNIT_FOLLOW_SRC = `(?:\\s*[%°]|\\s+(?:percent|pct|degrees?|deg|th|st|nd|rd|ft|feet|foot|inch(?:es)?|yds?|yards?|mm|cm|km|mi|miles?|in|x|m|g|l|pt|qt|lbs?|pounds?|oz|ounces?|gal|gallons?|sq|acres?|mph|mg|ml|kg|${TIME_WORDS_SRC})\\b)`;
 const NUMERIC_EXPR_RE = new RegExp(
-  `(?<![\\w.])(?<sign>[+-]\\s*|minus\\s+|plus\\s+|(?:up|down)\\s+(?:by\\s+)?)?(?<expr>${NUM_TERM_SRC}(?:${NUM_JOIN_SRC}${NUM_TERM_SRC})*)(?<points>\\s+(?:points?|pts)\\b)?(?<unit>${UNIT_FOLLOW_SRC})?`,
+  `(?<![\\w.])(?<sign>[+-]\\s*|minus\\s+|plus\\s+|(?:up|down)\\s+(?:by\\s+)?)?(?<expr>${NUM_TERM_SRC}(?:${NUM_JOIN_SRC}${NUM_TERM_SRC})*)(?<points>\\s+(?:points?|pts)\\b)?`,
   'gi'
 );
 
@@ -205,16 +221,23 @@ function toNumberSet(list) {
 const isNegativeSign = (sign) => /^(?:-|minus|down)/i.test(sign || '');
 // only a whole token that is a signed integer, optionally followed by the word
 // "points", qualifies; any attached or following unit rejects the expression
-const isSingleScore = ({ expr, unit }) => /^\d+$/.test(expr) && !unit;
+const PRECEDES_SCORE_RE = /^(?:|[ (])$/;
+const FOLLOWS_SCORE_RE = /^(?:$|[.,;:!?)])/;
+const FOLLOWS_POINTS_RE = /^(?:$|[\s.,;:!?)])/;
+
+function isScoreToken(groups, before, after) {
+  if (!/^\d+$/.test(groups.expr) || !PRECEDES_SCORE_RE.test(before)) return false;
+  return groups.points ? FOLLOWS_POINTS_RE.test(after) : FOLLOWS_SCORE_RE.test(after);
+}
 
 function checkNumericSentence(sentence, allowed) {
   const reasons = [];
   const rest = sentence.replace(NUMERIC_EXPR_RE, (full, ...args) => {
     const groups = args[args.length - 1];
+    const offset = args[args.length - 3];
     const value = (isNegativeSign(groups.sign) ? -1 : 1) * Number(groups.expr);
-    if (!(isSingleScore(groups) && allowed.has(value))) {
-      reasons.push({ rule: 'numeric', match: full.trim(), detail: 'not a single supplied score value' });
-    }
+    const ok = isScoreToken(groups, sentence.slice(offset - 1 < 0 ? 0 : offset - 1, offset), sentence.slice(offset + full.length)) && allowed.has(value);
+    if (!ok) reasons.push({ rule: 'numeric', match: full.trim(), detail: 'not a single supplied score value' });
     return ' ';
   });
   (rest.match(/\S*\d\S*/g) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'digits outside the score allowance' }));
@@ -441,10 +464,19 @@ const SAFETY_CLAIM_RE = new RegExp([
 // "organic fertilizer"), not the agronomic sense ("organic matter in the thatch").
 const NATURAL_CLAIM_RE = /\b(?:all[- ])?(?:natural(?:ly)?|organic(?!\s+(?:matter|material|debris|layer|buildup|content))|botanical|plant-based|chemical-free)\b(?:[^.!?]{0,40}\b(?:treatment|product|pesticide|application|chemical|spray|fertili[sz]er|herbicide|insecticide|fungicide|granules?|material|solution|control)s?\b)|\b(?:treatment|product|pesticide|application|chemical|spray|fertili[sz]er|herbicide|insecticide|fungicide|granules?|material|solution|control)s?\b[^.!?]{0,40}\b(?:all[- ])?(?:natural(?:ly)?|organic(?!\s+(?:matter|material|debris|layer|buildup|content))|botanical|plant-based|chemical-free)\b/i;
 
+// Once a sentence also mentions the applied product or treatment, ANY natural /
+// organic / botanical word is a claim about it, including "organic matter".
+const PRODUCT_CONTEXT_RE = /\b(?:products?|treatments?|applications?|applied|pesticides?|herbicides?|fungicides?|insecticides?|fertili[sz]ers?|sprays?|sprayed|granules?)\b|\btoday's\b/i;
+const NATURAL_ANY_RE = /\b(?:all[- ])?(?:natural(?:ly)?|organic|botanical|plant-based|chemical-free)\b/i;
+
+function naturalClaim(sentence) {
+  return PRODUCT_CONTEXT_RE.test(sentence) ? sentence.match(NATURAL_ANY_RE) : sentence.match(NATURAL_CLAIM_RE);
+}
+
 function checkSafetyClaim(input) {
   return sentencesOf(input)
     .filter((sentence) => !SAFE_IDIOM_SENTENCE_RE.test(sentence))
-    .map((sentence) => sentence.match(SAFETY_CLAIM_RE) || sentence.match(NATURAL_CLAIM_RE))
+    .map((sentence) => sentence.match(SAFETY_CLAIM_RE) || naturalClaim(sentence))
     .filter(Boolean)
     .map((m) => ({ rule: 'safety_claim', match: m[0] }));
 }
