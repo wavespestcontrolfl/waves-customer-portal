@@ -940,7 +940,17 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // mandate wording switches between one-time and recurring on the
   // setup_future_usage change.
   useEffect(() => {
-    if (!paymentIntentId || awaitingConfirm) return;
+    if (!paymentIntentId) return;
+    // A save-card change after Continue produced a quote invalidates that
+    // quote: the PaymentIntent's consent stamp no longer matches the choice
+    // and the server's /finalize fence would refuse it. Drop back to the
+    // review step and sync the intent now (a stamp change replaces it and
+    // re-mounts Elements), so the next Continue quotes a consistent session
+    // instead of the fence reloading the page (pre-push Codex on #5434).
+    if (awaitingConfirm) {
+      setAwaitingConfirm(false);
+      setQuoteData(null);
+    }
     syncAmountForMethod(selectedMethod, !!saveCard);
   }, [saveCard]);
 
