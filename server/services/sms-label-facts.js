@@ -1285,8 +1285,6 @@ function cleaningKinds(text) {
 const WATERING_EFFECT_OBJECT_SRC = '(?:treatment|treated|spray\\w*|application|applied|product|granules?|fertiliz\\w*|it|that)';
 // Effectiveness wording is about the treatment whatever its grammar ("make it less effective", "affect how well it works", "whether it
 // works", #5520 r4).
-// A sentence that starts another subject: an explicit switch, or a pest product / pest named as what is (in)effective.
-const TOPIC_SWITCH_RE = /\b(?:separately|unrelated|another\s+(?:question|thing)|different\s+(?:question|topic)|also|bait|baits|traps?|granules?\s+for|ants?|roach(?:es)?|termites?|mosquito\w*|fleas?|ticks?)\b/;
 const WATERING_EFFECTIVENESS_RE = /\b(?:less\s+effective|effectiveness|(?:how\s+well|whether|if)\s+(?:it|the\s+(?:treatment|spray|product|application))\s+(?:still\s+)?works?|stop\s+(?:it\s+)?(?:from\s+)?working)\b/;
 const WATERING_EFFECT_RE = new RegExp(`\\b(?:(?:weaken\\w*|affect\\w*|hurt\\w*|harm\\w*|ruin\\w*|undo\\w*|dilut\\w*|impact\\w*|reduc\\w*|cancel\\w*|mess(?:es|ed)?\\s+(?:up|with)|interfer\\w*\\s+with|(?:have|has)\\s+an?\\s+effect\\s+on)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?|(?:a\\s+)?(?:problem|issue|matter|bother)\\s+(?:for|with|to)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?)${WATERING_EFFECT_OBJECT_SRC}\\b`);
 function wateringKinds(text) {
@@ -1295,15 +1293,10 @@ function wateringKinds(text) {
   if (context) return ['reentry', 'rain'];
   // a re-entry topic beside the watering ("will the sprinklers hurt the dogs if they walk on it?") goes to the general classifier first
   if (OTHER_REENTRY_TOPIC_RE.test(text)) return null;
-  // the effect / effectiveness wording must be in the SAME sentence as the watering (#5520 r5: "My sprinkler is broken. Separately,
-  // is the ant bait less effective in winter?" is not about watering)
-  // The NEXT sentence counts too when it points back at the watering ("The sprinklers ran. Will that make it less effective?") and does
-  // not switch topic ("Separately, ...", or a subject of its own such as "the ant bait").
-  const sentences = text.split(/[.!?;]+/);
-  const effectIn = (sentence) => WATERING_EFFECT_RE.test(sentence) || WATERING_EFFECTIVENESS_RE.test(sentence);
-  const pointsBack = (sentence) => /\b(?:it|that|this|they|them)\b/.test(sentence) && !TOPIC_SWITCH_RE.test(sentence);
-  return sentences.some((sentence, i) => WATERING_RE.test(sentence)
-    && (effectIn(sentence) || (i + 1 < sentences.length && pointsBack(sentences[i + 1]) && effectIn(sentences[i + 1])))) ? ['rain'] : [];
+  // (whole message, not per sentence: binding the effect wording to the watering sentence dropped real questions that point back across
+  // sentences - "The sprinklers ran. Will that make the ant bait less effective?" - so an unrelated effectiveness question beside a
+  // sprinkler mention asks rain too, and a person answers it. Fail closed.)
+  return WATERING_EFFECT_RE.test(text) || WATERING_EFFECTIVENESS_RE.test(text) ? ['rain'] : [];
 }
 
 function askedKindsOf(inboundText) {

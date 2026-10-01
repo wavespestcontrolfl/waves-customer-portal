@@ -3343,8 +3343,11 @@ describe('follow-up 2 (#5520 r5 + the 2026-10-01 prod sweep): the inbound langua
       expect([t, english(t)]).toEqual([t, false]);
     }
   });
-  test('effectiveness wording must share a sentence with the watering (r5 P2); "times" is not a visit (r5 P2)', () => {
-    expect(labelFactsLib.askedLabelKinds('My sprinkler is broken. Separately, is the ant bait less effective in winter?')).toEqual([]);
+  test('effectiveness wording beside watering asks rain across sentences (fail closed); "times" is not a visit (r5 P2)', () => {
+    // whole-message on purpose (fail closed): a sprinkler mention beside any effectiveness question asks rain, and one pointing back
+    // across sentences is never dropped
+    expect(labelFactsLib.askedLabelKinds('My sprinkler is broken. Separately, is the ant bait less effective in winter?')).toEqual(['rain']);
+    expect(labelFactsLib.askedLabelKinds('The sprinklers ran. Will that make the ant bait less effective?')).toEqual(['rain']);
     expect(labelFactsLib.askedLabelKinds('Will the sprinklers make it less effective?')).toEqual(['rain']);
     // a following sentence that points back at the watering still counts, and the reply guard then holds a bare answer
     const asked = labelFactsLib.askedLabelKinds('The sprinklers ran. Will that make it less effective?');
