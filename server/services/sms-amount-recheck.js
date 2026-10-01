@@ -55,6 +55,10 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
+    // This recheck only ever reads ctx.billing — getContextForCustomer's
+    // default already skips the LIVE ETA lookup (Codex round-2 P2, PR
+    // #5334: the drafting paths that render the fact opt in explicitly via
+    // { includeLiveEta: true }), so no GPS/Distance Matrix call happens here.
     const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
     // With real answers on, the drafter's clause-aware guard is the whole
     // rule (Codex #5194 r1 P1; r5: its checks are a superset of the pooled

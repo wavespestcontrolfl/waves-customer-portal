@@ -4534,7 +4534,25 @@ function initScheduledJobs() {
                 reserviceReason = reason;
               }
             }
-            if (anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale) {
+            // LIVE ETA revalidation (independent review + Codex round-1
+            // finding, PR #5334): a minutes-away/ETA claim is a draft-time
+            // GPS snapshot — this scheduled reply can fire long after the
+            // visit stopped being en_route, or after the 15-minute freshness
+            // window on its own facts. Same shared check the immediate
+            // /sms send and the auto-send executor run (sms-eta-freshness),
+            // same fail-closed block+retire path, no new mechanism.
+            const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale;
+            const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
+            // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
+            // retire the decision as stale here. The send proceeds to the provider-boundary
+            // check, which re-reads and, if still unreadable, refuses RETRYABLY onto the
+            // bounded retry rail — never sent unverified, never permanently stale.
+            const etaReason = require('./agent-decision-send-checks').isEtaInfrastructureFailure(rawEtaReason) ? null : rawEtaReason;
+            if (etaReason == null && rawEtaReason != null) {
+              logger.warn(`[scheduled-sms] ${msg.id} live ETA recheck unreadable (${rawEtaReason}); deferring to the provider-boundary check`);
+            }
+            if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
                 : amountsStale
@@ -4543,7 +4561,9 @@ function initScheduledJobs() {
                     ? 'stale_open_times_agent_decision'
                     : slaStale
                       ? 'stale_sla_agent_decision'
-                      : 'stale_reservice_agent_decision';
+                      : reserviceStale
+                        ? 'stale_reservice_agent_decision'
+                        : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4575,7 +4595,9 @@ function initScheduledJobs() {
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
                         : slaStale
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
-                          : `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`,
+                          : reserviceStale
+                            ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
+                            : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4833,6 +4855,18 @@ function initScheduledJobs() {
                 : undefined,
             },
           };
+          // LIVE ETA at the TRUE provider boundary (Codex round-40 P2): the recheck above ran
+          // before the recipient lookup and messaging-policy awaits, so a visit that changes
+          // state during them could still get "9 minutes away" delivered. The same shared
+          // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
+          // its request), composed AFTER any predicate the entry point registered.
+          if (claimMeta.agent_decision_id) {
+            const { etaProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            replayInput.providerPreSendCheck = composeProviderPreSendChecks(
+              replayInput.providerPreSendCheck,
+              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+            );
+          }
           return require('./messaging/deferred-replay-registry')
             .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           };

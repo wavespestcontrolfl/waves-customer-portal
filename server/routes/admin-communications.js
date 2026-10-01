@@ -186,7 +186,11 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
     if (blockReason) {
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
-      await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+      // A recheck that could not READ the live state (round-42 P2) refuses this attempt but
+      // does NOT retire the card: nothing is known to be stale, so the reviewer can retry.
+      if (!require('../services/agent-decision-send-checks').blockReasonIsEtaInfrastructure(blockReason)) {
+        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+      }
       return null;
     }
     return decision;
@@ -1087,6 +1091,14 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       ...(cardClaim ? { operatorInitiated: true } : {}),
+      // LIVE ETA at the TRUE provider boundary (Codex round-41 P2): the decision's ETA
+      // check ran in verifyAgentDraftDecision, before this route's many link / claim /
+      // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
+      // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      ...(verifiedAgentDecision?.id ? {
+        providerPreSendCheck: require('../services/agent-decision-send-checks')
+          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+      } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
       // phone-locked handoff call-booking-link-text.js's own worker holds —
