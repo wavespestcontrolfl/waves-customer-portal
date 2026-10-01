@@ -238,6 +238,28 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a voided combined invoice replaced on its anchor governs the members, never reads as a split', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const stamped = (await rowsOf(trx, est.estimateId)).filter((row) => row.first_application_invoice_id && !row.recurring_parent_id);
+      expect(stamped.length).toBeGreaterThanOrEqual(2);
+      const anchor = stamped[0];
+      await trx('invoices').where({ id: anchor.first_application_invoice_id }).update({ scheduled_service_id: anchor.id, status: 'void' });
+      const replacement = await require('../services/invoice').create({ database: trx, customerId: est.customerId,
+        title: 'First Service Application', lineItems: [{ description: 'First service application', quantity: 1, unit_price: 250 }],
+        dueDate: '2026-10-04' });
+      await trx('invoices').where({ id: replacement.id }).update({ scheduled_service_id: anchor.id });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 1, ok: 1, problems: 0, failed: 0 });
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('OK results: the first rings once, later ones go to the Activity feed quietly', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

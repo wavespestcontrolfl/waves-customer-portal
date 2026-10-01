@@ -148,25 +148,39 @@ function acceptedPrograms(estimate) {
   })) return null;
   const acceptedFrequency = data.customerSelection?.frequency || null;
   const fallback = acceptedFrequency || inferFrequencyKeyFromEstimateData(data);
+  // The converter's own scheduling units (combineRecurringServicesForScheduling,
+  // the same call recurring-schedule-audit's classifier makes): a legacy
+  // rodent program dropped from the lines above rides back in as a supplement
+  // unit, exactly as conversion schedules it.
+  const supplements = converter.supplementalCompanionLines(data);
+  const { remaining, combos, standalone } = converter.combineRecurringServicesForScheduling(lines, {
+    acceptFrequency: acceptedFrequency, supplementalCompanions: supplements,
+  });
+  const units = [
+    ...[...remaining, ...standalone.map((unit) => unit.service)].map((service) => ({ service, sources: [service] })),
+    ...combos.map((combo) => ({ service: combo.service, sources: combo.combinedFrom })),
+  ];
 
   const programs = new Map();
-  for (const line of lines) {
-    const family = converter.seedingFamilyKey(line);
+  for (const { service, sources } of units) {
     // Commercial lines, billing riders and contradictory terms are scheduled
     // by the office; they have no auto-seeded cadence to verify here.
-    if (!converter.converterFollowUpSeedingPattern(line, {}, fallback, acceptedFrequency)) continue;
-    const program = programs.get(family) || { family, perVisit: 0, visits: null, priced: true };
-    const perVisit = converter.lineAnnualPerVisitAmount(line, acceptedFrequency);
-    if (perVisit > 0) program.perVisit += perVisit; else program.priced = false;
-    const visits = converter.acceptedPestSelectionVisits(line, acceptedFrequency)
-      ?? converter.visitsPerYearForRecurringService(line);
-    if (visits > 0) program.visits = Math.max(program.visits || 0, visits);
-    programs.set(family, program);
+    if (!converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency)) continue;
+    for (const line of sources) {
+      const family = converter.seedingFamilyKey(line);
+      const program = programs.get(family) || { family, perVisit: 0, visits: null, priced: true };
+      const perVisit = converter.lineAnnualPerVisitAmount(line, acceptedFrequency);
+      if (perVisit > 0) program.perVisit += perVisit; else program.priced = false;
+      const visits = converter.acceptedPestSelectionVisits(line, acceptedFrequency)
+        ?? converter.visitsPerYearForRecurringService(line);
+      if (visits > 0) program.visits = Math.max(program.visits || 0, visits);
+      programs.set(family, program);
+    }
   }
   // Dollar comparison only when the lines demonstrably add up to what the
   // customer accepted (a manual discount / plan credit / cadence change breaks
   // the equality, and a guessed price would page falsely).
-  const annualFromLines = lines.reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0);
+  const annualFromLines = [...lines, ...supplements].reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0);
   const reconciles = Number(estimate.annual_total) > 0
     && Math.abs(annualFromLines - Number(estimate.annual_total)) <= 1;
   for (const program of programs.values()) {
@@ -198,7 +212,18 @@ function firstApplicationAmount(invoice) {
     const raw = item?.amount != null ? Number(item.amount) : Number(item?.unit_price) * Number(item?.quantity ?? 1);
     return Number.isFinite(raw) ? raw : 0;
   };
-  const base = items.filter((item) => InvoiceService.lineIsBaseApplication(item) && amountOf(item) > 0);
+  // An invoice-mode recurring accept (estimate-public.js
+  // buildEstimateInvoiceModeDraft, recognized by
+  // isInvoiceModeRecurringAcceptInvoice) bills the first visit as one
+  // "<services> (<cadence> recurring — first <visit>)" line with no
+  // _primary client id; every positive line on it but its setup fee is
+  // service dollars.
+  const { isInvoiceModeRecurringAcceptInvoice } = require('./estimate-first-application-invoice');
+  const isSetupFee = (item) => /setup fee/i.test(String(item?.description || '')) && !/waiv/i.test(String(item?.description || ''));
+  const isBase = isInvoiceModeRecurringAcceptInvoice(invoice)
+    ? (item) => item?.category !== 'deposit_credit' && !isSetupFee(item)
+    : (item) => InvoiceService.lineIsBaseApplication(item);
+  const base = items.filter((item) => isBase(item) && amountOf(item) > 0);
   if (!base.length) return null;
   const discounts = items.filter((item) => item?.category !== 'deposit_credit' && amountOf(item) < 0);
   return Math.round([...base, ...discounts].reduce((sum, item) => sum + amountOf(item), 0) * 100) / 100;
@@ -492,28 +517,45 @@ async function markPrepaidCoverage(conn, rows) {
   }
 }
 
-// Sets row.has_own_live_invoice on a stamped member the office split off onto
-// its own invoice: the same evidence first-application-sibling-split.js
-// resolves a split on (flagOwnLiveInvoices) — a live invoice linked to the
-// member's own id that bills its base application. The combined invoice
-// itself (linked to the anchor) is never the anchor's "own" invoice.
-async function markOwnFirstInvoices(conn, rows) {
+// Loads every stamped combined invoice and the live invoices on its members'
+// own rows, then classifies them the way first-application-sibling-split.js
+// does: the GOVERNING invoice (resolveGoverningInvoice — the stamped one, or a
+// live base-application replacement on its anchor once it went void/refunded)
+// is what the combined members are judged against, keyed by the stamped id;
+// any OTHER live base-application invoice on a member's own row is that
+// member's split-off invoice (flagOwnLiveInvoices' evidence:
+// row.has_own_live_invoice + row.own_first_invoice).
+async function loadFirstInvoices(conn, rows) {
+  const invoices = new Map();
   const stamped = rows.filter((row) => row.first_application_invoice_id && !row.recurring_parent_id);
-  if (!stamped.length) return;
+  if (!stamped.length) return invoices;
   const InvoiceService = require('./invoice');
   const { invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
-  const own = await conn('invoices')
-    .whereIn('scheduled_service_id', stamped.map((row) => row.id))
-    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
-    .select('id', 'scheduled_service_id', 'line_items');
+  const { resolveGoverningInvoice } = require('./first-application-sibling-split');
+  const columns = ['id', 'status', 'total', 'subtotal', 'line_items', 'notes', 'scheduled_service_id', 'created_at'];
+  const stampedIds = [...new Set(stamped.map((row) => String(row.first_application_invoice_id)))];
+  const stampedInvoices = await conn('invoices').whereIn('id', stampedIds).select(columns);
+  const ownerIds = [...new Set([...stamped.map((row) => String(row.id)),
+    ...stampedInvoices.map((invoice) => invoice.scheduled_service_id).filter(Boolean).map(String)])];
+  const live = await conn('invoices').whereIn('scheduled_service_id', ownerIds)
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES).select(columns);
+  const governingIds = new Set(stampedIds);
+  for (const invoice of stampedInvoices) {
+    const onAnchor = live.filter((other) => String(other.id) !== String(invoice.id)
+      && String(other.scheduled_service_id) === String(invoice.scheduled_service_id));
+    const governing = resolveGoverningInvoice(invoice, onAnchor);
+    invoices.set(String(invoice.id), governing);
+    governingIds.add(String(governing.id));
+  }
   const byRow = new Map(stamped.map((row) => [String(row.id), row]));
-  for (const invoice of own) {
+  for (const invoice of live) {
     const row = byRow.get(String(invoice.scheduled_service_id));
-    if (row && String(invoice.id) !== String(row.first_application_invoice_id) && invoiceBillsBaseApplication(invoice)) {
+    if (row && !governingIds.has(String(invoice.id)) && invoiceBillsBaseApplication(invoice)) {
       row.has_own_live_invoice = true;
       row.own_first_invoice = invoice;
     }
   }
+  return invoices;
 }
 
 async function loadContext(conn, estimate) {
@@ -545,14 +587,7 @@ async function loadContext(conn, estimate) {
     .select('s.*', 'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
   await markPrepaidCoverage(conn, rows);
-  await markOwnFirstInvoices(conn, rows);
-  const invoiceIds = [...new Set(rows.map((row) => row.first_application_invoice_id).filter(Boolean))];
-  const invoices = new Map();
-  if (invoiceIds.length) {
-    for (const invoice of await conn('invoices').whereIn('id', invoiceIds).select('id', 'status', 'total', 'subtotal', 'line_items')) {
-      invoices.set(String(invoice.id), invoice);
-    }
-  }
+  const invoices = await loadFirstInvoices(conn, rows);
   const techIds = [...new Set(rows.map((row) => row.technician_id).filter(Boolean))];
   const technicians = new Map();
   if (techIds.length) {

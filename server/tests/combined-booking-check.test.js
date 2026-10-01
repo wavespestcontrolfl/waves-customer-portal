@@ -163,6 +163,22 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['lawn_care']) })).toBeNull();
   });
 
+  test('a pest + legacy rodent accept is a multi-service booking (the rodent rides as a supplement)', () => {
+    const est = estimate([PEST], { monthly_total: 85, annual_total: 1020 });
+    est.estimate_data.result.recurring.rodentBaitMo = 35;
+    const accepted = check.acceptedPrograms(est);
+    expect([...accepted.programs.keys()]).toEqual(['pest_control', 'rodent_bait']);
+  });
+
+  test('an invoice-mode combined invoice is read from its recurring first-visit line', () => {
+    const invoiceMode = { id: 'inv-1', status: 'sent',
+      notes: 'Auto-generated from accepted estimate #estimate-1 (invoice-mode recurring). Monthly equivalent: $100.00/mo.',
+      line_items: [{ description: 'Pest + Lawn (quarterly recurring — first quarterly visit)', quantity: 1, unit_price: 250, amount: 250 },
+        { description: 'Bait Station Setup — one-time setup fee', quantity: 1, unit_price: 49, amount: 49 }] };
+    expect(check.firstApplicationAmount(invoiceMode)).toBe(250);
+    expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: invoiceMode }).ok).toBe(true);
+  });
+
   test('a combined route row keeps a left-out family\'s share of its price', () => {
     // Lawn + tree run as one combined route row; tree is held.
     const combo = lawnRows({ key: 'lawn_tree_shrub_combo', type: 'Lawn + Tree & Shrub', price: 160, invoiceId: null,
