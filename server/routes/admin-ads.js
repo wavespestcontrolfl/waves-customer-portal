@@ -365,7 +365,7 @@ router.post('/sync/meta', requireAdmin, async (req, res, next) => {
 // job_health (written by runExclusive around the daily syncs). The PPC
 // dashboard shows it so a dead sync no longer reads as "no data".
 const SYNC_JOBS = [
-  { platform: 'google_ads', job: 'google-ads-sync', configured: () => getGoogleAds().isConfigured() },
+  { platform: 'google_ads', job: 'google-ads-sync', configured: () => require('../services/ads/google-ads-config').isConfigured() },
   { platform: 'facebook', job: 'meta-ads-campaigns', configured: () => getMetaAds().isConfigured() },
   { platform: 'facebook', job: 'meta-ads-performance', configured: () => getMetaAds().isConfigured() },
 ];

@@ -181,6 +181,17 @@ describe('syncDailyPerformance', () => {
   });
 });
 
+describe('syncDailyPerformance pagination backstop', () => {
+  test('a truncated insights walk fails the scheduler path (rows so far still persist)', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [], paging: { next: 'https://graph.facebook.com/more' } }),
+    });
+    await expect(MetaAds.syncDailyPerformance(7)).resolves.toEqual([]);
+    await expect(MetaAds.syncDailyPerformance(7, { throwOnError: true })).rejects.toThrow(/insights: pagination incomplete/);
+  });
+});
+
 describe('sync failure propagation (scheduler opt-in)', () => {
   const graphError = () => jest.fn().mockResolvedValue({ ok: false, status: 400, json: async () => ({ error: { message: 'Invalid token' } }) });
 

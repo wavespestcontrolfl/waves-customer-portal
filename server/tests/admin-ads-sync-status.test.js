@@ -29,7 +29,9 @@ jest.mock('../models/db', () => jest.fn((table) => {
   };
   return builder;
 }));
-jest.mock('../services/ads/google-ads', () => ({ isConfigured: jest.fn(() => true) }));
+jest.mock('../services/ads/google-ads-config', () => ({ isConfigured: jest.fn(() => true) }));
+// sync-status must never load the heavy Google Ads SDK module just to read config.
+jest.mock('../services/ads/google-ads', () => { throw new Error('google-ads SDK module must not load for sync-status'); });
 jest.mock('../services/ads/meta-ads', () => ({ isConfigured: jest.fn(() => false) }));
 
 const express = require('express');

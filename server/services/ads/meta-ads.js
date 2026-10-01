@@ -267,7 +267,7 @@ async function syncDailyPerformanceLocked(days = 7) {
     const since = dateStr(Date.now() - days * 86400000);
     const until = dateStr(Date.now());
 
-    const rows = await graphGet('insights', {
+    const { rows, complete } = await graphGetPaged('insights', {
       fields: 'campaign_id,impressions,clicks,spend,ctr,cpc,actions,action_values,date_start',
       params: { level: 'campaign', time_increment: 1, time_range: { since, until } },
     });
@@ -292,6 +292,11 @@ async function syncDailyPerformanceLocked(days = 7) {
         await db('ad_performance_daily').insert({ id: uuidv4(), ...data, created_at: new Date() });
       }
       results.push(data);
+    }
+    // Rows fetched so far are persisted, but a walk cut off by the page
+    // backstop is missing data: fail the job rather than record a healthy sync.
+    if (!complete) {
+      throw new Error(`Meta API insights: pagination incomplete after ${results.length} rows`);
     }
     logger.info(`[meta-ads] Synced ${results.length} daily performance rows`);
     return results;

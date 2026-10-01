@@ -413,6 +413,33 @@ describe('sync failure propagation + removed-campaign reconcile', () => {
     expect(mockReconcileUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'removed' }));
   });
 
+  test('reconciles against the metric-free identity query, so a zero-metric live campaign is kept', async () => {
+    // Metrics query omits campaign 222 (all-zero metrics); identity query returns both.
+    mockCustomerQuery
+      .mockResolvedValueOnce([{
+        campaign: { id: 111, name: 'Pest Bradenton', status: 2, advertising_channel_type: 'SEARCH' },
+        campaign_budget: { amount_micros: 30_000_000 },
+      }])
+      .mockResolvedValueOnce([{ campaign: { id: 111 } }, { campaign: { id: 222 } }]);
+    mockQueryFirst.mockResolvedValue({ id: 'row-1', platform_campaign_id: '111', daily_budget_base: '30', updated_at: new Date(Date.now() - 3600_000) });
+    mockUpdate.mockResolvedValue(1);
+
+    await GoogleAds.syncCampaigns();
+
+    const identityGaql = mockCustomerQuery.mock.calls[1][0];
+    expect(identityGaql).toMatch(/SELECT\s+campaign\.id\s+FROM campaign/);
+    expect(identityGaql).not.toMatch(/metrics\./);
+    expect(mockWhereNotIn).toHaveBeenCalledWith('platform_campaign_id', ['111', '222']);
+  });
+
+  test('does not reconcile when the identity query fails', async () => {
+    mockCustomerQuery
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('INTERNAL_ERROR'));
+    await expect(GoogleAds.syncCampaigns({ throwOnError: true })).rejects.toThrow('INTERNAL_ERROR');
+    expect(mockReconcileUpdate).not.toHaveBeenCalled();
+  });
+
   test('does not reconcile when the campaign fetch errored', async () => {
     mockCustomerQuery.mockRejectedValue(new Error('PERMISSION_DENIED'));
     await GoogleAds.syncCampaigns();

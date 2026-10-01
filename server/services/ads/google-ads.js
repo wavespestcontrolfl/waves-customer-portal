@@ -14,15 +14,9 @@ let _customer = null;
 /**
  * Returns true when all required env vars are present.
  */
-function isConfigured() {
-  return !!(
-    process.env.GOOGLE_ADS_DEVELOPER_TOKEN &&
-    process.env.GOOGLE_ADS_CLIENT_ID &&
-    process.env.GOOGLE_ADS_CLIENT_SECRET &&
-    process.env.GOOGLE_ADS_REFRESH_TOKEN &&
-    process.env.GOOGLE_ADS_CUSTOMER_ID
-  );
-}
+// Env-only check lives in a dependency-free module so callers that only need
+// "is Google configured?" (admin sync-status) don't load the SDK.
+const { isConfigured } = require('./google-ads-config');
 
 /**
  * Lazy-initialise the API client + customer handle.
@@ -180,10 +174,21 @@ async function syncCampaigns({ throwOnError = false } = {}) {
     // this fetch began is left for tomorrow's sync. Rows with a NULL
     // platform_campaign_id are untouched (explicit whereNotNull: knex compiles an
     // empty NOT IN list to always-true).
+    //
+    // The metrics query above is NOT a complete identity list: Google omits
+    // rows whose selected metrics are all zero, so a quiet live campaign can be
+    // missing from it. Reconcile against a metric-free identity query instead;
+    // if that query fails, the catch below skips the reconcile entirely.
+    const identityRows = await customer.query(`
+      SELECT campaign.id
+      FROM campaign
+      WHERE campaign.status != 'REMOVED'
+    `);
+    const liveIds = identityRows.map((row) => String(row.campaign?.id)).filter((id) => id && id !== 'undefined');
     const removed = await db('ad_campaigns')
       .where({ platform: 'google_ads' })
       .whereNotNull('platform_campaign_id')
-      .whereNotIn('platform_campaign_id', results.map((r) => String(r.platform_campaign_id)))
+      .whereNotIn('platform_campaign_id', liveIds)
       .whereNot('status', 'removed')
       .where('updated_at', '<', fetchStartedAt)
       .update({ status: 'removed', updated_at: new Date() });
