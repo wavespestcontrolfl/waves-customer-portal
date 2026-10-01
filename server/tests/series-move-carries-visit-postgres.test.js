@@ -269,6 +269,21 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     expect(dateOnly(pest.scheduled_date)).toBe(dateOnly(f.pest[0].scheduled_date));
   });
 
+  test('a carried partner\'s pending call follow-up keeps its spacing', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const followDay = addDays(dateOnly(f.pest[0].scheduled_date), 14);
+    const [child] = await db('scheduled_services').insert({
+      id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, status: 'pending', customer_confirmed: false,
+      parent_service_id: f.pest[0].id, source_action: 'ai_call_pipeline_followup', service_type: 'Quarterly Pest Control',
+      scheduled_date: followDay, window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 30,
+    }).returning('*');
+    const result = await moveLawnSeries(f, { days: 3 });
+    const moved = await db('scheduled_services').where({ id: child.id }).first();
+    expect(dateOnly(moved.scheduled_date)).toBe(addDays(followDay, 3));
+    expect(result.followUpOccurrences.map((k) => String(k.id))).toContain(String(child.id));
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

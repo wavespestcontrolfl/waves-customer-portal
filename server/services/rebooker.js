@@ -812,6 +812,57 @@ function planCarriedTargets(vg, sib, entry, updateData, dateStr) {
   });
 }
 
+// Whether a grouped visit can ride its swept occurrence: exactly one swept
+// row in the visit (one visit, one stop — two occurrences of one series
+// cannot share it) with at least one partner, and every partner movable (the
+// unit mover's own rule) and still at this stop. Throws the refusal.
+function assertPartnersCanRide({ sweptInVisit, partners, allowLive, vg }) {
+  if (sweptInVisit.length !== 1 || !partners.length) {
+    throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+  }
+  const occ = sweptInVisit[0];
+  const notMovable = partners.find((partner) => !vg.UNIT_MOVE_STATUSES.has(String(partner.status))
+    && !(allowLive && vg.UNIT_MOVE_LIVE_STATUSES.has(String(partner.status))));
+  if (notMovable) {
+    throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${notMovable.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: notMovable.id, isOperational: true });
+  }
+  const detached = partners.find((partner) => dateOnly(partner.scheduled_date) !== dateOnly(occ.scheduled_date)
+    || String(partner.property_id || '') !== String(occ.property_id || ''));
+  if (detached) {
+    throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: detached.id, isOperational: true });
+  }
+}
+
+// Pending call-created follow-ups of the partners a series sweep will carry:
+// each partner lands on its occurrence's projected day, so its follow-ups are
+// planned against that day (pre-lock read, like the anchor's own plan).
+async function planCarriedFollowUps(conn, carryPartners, siblings, projectedById) {
+  const out = [];
+  for (const sib of siblings) {
+    const toDate = projectedById.get(String(sib.id));
+    const partners = toDate && sib.visit_id ? (carryPartners.get(String(sib.visit_id)) || []) : [];
+    for (const partner of partners) {
+      const fromDate = dateOnly(partner.scheduled_date);
+      const plan = await planCallFollowUpShift({ conn, parentServiceId: partner.id, fromDate, toDate });
+      if (plan.length) out.push({ partnerId: String(partner.id), fromDate, toDate, plan });
+    }
+  }
+  return out;
+}
+
+// Shift those follow-ups inside the sweep's transaction, only for a partner
+// that actually landed on the day it was planned for, against the locked plan.
+async function shiftCarriedFollowUps(conn, partnerPlans, carriedMembers, report) {
+  const landed = new Map(carriedMembers.map((k) => [String(k.id), dateOnly(k.date)]));
+  for (const p of partnerPlans) {
+    if (landed.get(p.partnerId) !== p.toDate) continue;
+    await shiftCallFollowUpsForParentMove({
+      conn, parentServiceId: p.partnerId, fromDate: p.fromDate, toDate: p.toDate,
+      occupancyHeld: true, suppressTechNotice: true, plan: p.plan, report,
+    });
+  }
+}
+
 // Dispatch-due rebase for a carried partner (mutates pUpdate). Returns true
 // when the partner lands windowless awaiting placement: its slot display and
 // route order clear, and the caller pre-closes its reminder.
@@ -2381,6 +2432,9 @@ class SmartRebooker {
     // locks (their destination days join rung 1) and handed to the shift
     // as the locked set.
     let followUpPlan = [];
+    // Carried partners' own pending call follow-ups (GATE_SERIES_MOVE_CARRIES_VISIT),
+    // planned with the anchor's: [{ partnerId, fromDate, toDate, plan }].
+    let partnerFollowUpPlans = [];
 
     // Live lifecycle states (en_route, on_site) and intentional drop-offs
     // (skipped) must NOT be steamrolled back to 'confirmed' by a series
@@ -2669,6 +2723,7 @@ class SmartRebooker {
       // whole trx so the caller offers a different anchor slot instead.
       {
         const projectedDates = [];
+        const projectedById = new Map();
         for (let i = startIdx; i < siblings.length; i++) {
           const sib = siblings[i];
           const oi = i - startIdx;
@@ -2683,7 +2738,9 @@ class SmartRebooker {
             cadenceSlotDate(oi);
             continue;
           }
-          projectedDates.push(projectOccurrenceDate(oi, sib));
+          const projected = projectOccurrenceDate(oi, sib);
+          projectedDates.push(projected);
+          projectedById.set(String(sib.id), projected);
         }
         if (projectedDates.length) {
           // Date-wide occupancy locks for EVERY target date this sweep will
@@ -2703,7 +2760,10 @@ class SmartRebooker {
           followUpPlan = await planCallFollowUpShift({
             conn: trx, parentServiceId: serviceId, fromDate: dateOnly(service.scheduled_date), toDate: seriesDateStr,
           });
-          const followUpDays = followUpPlan.map((k) => k.new_day);
+          // A carried partner's follow-ups keep their spacing too, so their
+          // destination days join rung 1 here as well.
+          partnerFollowUpPlans = await planCarriedFollowUps(trx, carryPartners0, siblings, projectedById);
+          const followUpDays = [...followUpPlan, ...partnerFollowUpPlans.flatMap((p) => p.plan)].map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
           // Reviewed Apply's callback takes customer-comms. Maintenance owns
           // that lock in the opposite order, so never wait for maintenance
@@ -2932,31 +2992,12 @@ class SmartRebooker {
               // checked, fenced or excluded from the probes as a carry).
               if (carriesVisit && grouped && !preserveCommitment) {
                 // The visit moves WITH this occurrence (owner ruling
-                // 2026-10-01). Frozen visits were refused above; what is left
-                // to verify is that every partner can ride: movable status
-                // (the unit mover's own rule), still at this stop, and not a
-                // second swept row of the same visit (one visit, one stop —
-                // two occurrences of one series cannot share it).
-                const occ = siblings.find((x) => sweptSet.has(String(x.id)) && String(x.visit_id) === vid);
+                // 2026-10-01); frozen visits were refused above.
                 const sweptInVisit = siblings.filter((x) => sweptSet.has(String(x.id)) && String(x.visit_id) === vid);
                 const partners = carryPartnersLocked.get(vid) || [];
-                if (sweptInVisit.length > 1 || !partners.length) {
-                  throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
-                }
-                const { UNIT_MOVE_STATUSES, UNIT_MOVE_LIVE_STATUSES } = vg;
-                for (const partner of partners) {
-                  const movable = UNIT_MOVE_STATUSES.has(String(partner.status))
-                    || (options.allowLive === true && UNIT_MOVE_LIVE_STATUSES.has(String(partner.status)));
-                  if (!movable) {
-                    throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${partner.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: partner.id, isOperational: true });
-                  }
-                  if (dateOnly(partner.scheduled_date) !== dateOnly(occ.scheduled_date)
-                    || String(partner.property_id || '') !== String(occ.property_id || '')) {
-                    throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: partner.id, isOperational: true });
-                  }
-                }
+                assertPartnersCanRide({ sweptInVisit, partners, allowLive: options.allowLive === true, vg });
                 const visitRow = await trx('service_visits').where({ id: vid }).first();
-                carry.byVisit.set(vid, { visit: visitRow, partners, occurrenceId: String(occ.id) });
+                carry.byVisit.set(vid, { visit: visitRow, partners, occurrenceId: String(sweptInVisit[0].id) });
                 carry.partnerIds.push(...partners.map((x) => String(x.id)));
               }
             }
@@ -3826,6 +3867,10 @@ class SmartRebooker {
       if (followUpsShifted > 0) {
         logger.info(`[rebooker] shifted ${followUpsShifted} call-created follow-up visit(s) with series anchor ${serviceId} (-> ${seriesDateStr})`);
       }
+      // Same shift for each carried partner that landed on its planned day
+      // (one that did not move, or moved elsewhere, keeps its follow-ups);
+      // shifted and skipped children join the same report.
+      await shiftCarriedFollowUps(trx, partnerFollowUpPlans, carriedMembers, followUpReport);
       // Shifted call follow-ups ride the operation so the durable effects
       // pass syncs THEIR reminder rows too (codex r19 P1) — never part of
       // the cadence set (counts, ack, close, text).
