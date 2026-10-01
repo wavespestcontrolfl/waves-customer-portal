@@ -207,8 +207,12 @@ async function getGbpRows(since, endDate) {
 
 async function getCrmRows(since, endDate) {
   try {
+    // Prospects only (scopeToProspects): 'handled' /book requests and other
+    // non-engaged rows are not GBP leads (codex #5477 r7).
+    const { scopeToProspects } = require('../lead-statuses');
     const rows = await db('leads')
       .whereNull('leads.deleted_at')
+      .modify((qb) => scopeToProspects(qb, 'leads'))
       .where('leads.first_contact_at', '>=', since)
       .where('leads.first_contact_at', '<', addDateStringDays(endDate, 1))
       .leftJoin('lead_sources as ls', 'leads.lead_source_id', 'ls.id')

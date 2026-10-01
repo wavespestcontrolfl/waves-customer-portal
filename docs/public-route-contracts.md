@@ -948,23 +948,77 @@ row or bell). Recency is `extracted_data.last_requested_at`, written only by a
 submit — office edits (status, notes, assignment) never extend the dedupe
 window or the suppression. Filing a lead also stamps its
 `ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
-public lead. A booking NEVER closes a preferred-time request (owner ruling
-2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
-on both the first commit and the `txResult.existing` replay; a free re-service
-callback visit is skipped) never marks the lead won and never touches its funnel
-row — the booking's own attribution runs exactly as for any other booking.
-Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
-booked customer's open preferred-time leads (phone match) whose
-`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
-booked <service> for <date> (visit <id>) on /book — close this request if
-nothing else is needed" — deduped per (lead, visit) through
-`lead_activities.metadata`, so a replay never stacks notes; a newer request is
-new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+public lead. A booking closes a preferred-time request on its own (owner ruling
+2026-10-01, replacing the 2026-09-30 note-only rule): a completed self-booking
+(`createSelfBooking`, every service type, on both the first commit and the
+`txResult.existing` replay; a free re-service callback visit is skipped) moves
+each of the booked customer's open preferred-time leads whose
+`last_requested_at` is at or before the booking (60 s of clock slack) to the
+terminal status `handled`. A lead qualifies only when its phone matches (last
+10 digits), its `customer_id` is null or the booked customer, AND its identity
+corroborates the booked customer (`corroboratesBookedCustomer`): it is linked
+to that customer, or its email matches the customer's non-blank email, or its
+first AND last name both match. A phone match alone never closes a request (a
+shared household or reassigned number). The booked visit must also carry every
+service line the request asked for (`inferServiceLine` per part of a composite
+such as `Lawn Care + Pest Control` or `Lawn & Pest`, on both sides); a request
+that named no service is answered by any booking, and one asking for a line the
+visit does not carry (a lawn + pest request, then a lawn-only booking) stays
+open for the office. It must also be for the same property, judged by /book's own address matcher
+(`addressMatchesCustomer`: normalized street with suffix variants, unit value,
+zip) against the visit's service address (its own stamp, else the customer's);
+a customer with two homes on one phone who asks at A and books at B, or at
+another unit of the same building, keeps the A request open (a side with no
+street does not block the close). The audit row and the FYI name the visit's service and day
+as read under the visit lock. A request staff attached an estimate
+to (`leads.estimate_id` set) is never closed and never converted by the
+booking: it stays open, as before this change, and converts the way any
+estimate-linked lead does (the estimate's acceptance,
+`markLinkedLeadEstimateAccepted`) or by staff. `handled` means closed, neither
+won nor lost, and is set through
+`closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel stage
+(`handled` has no funnel mapping, so the `ad_service_attribution` stage stays
+as it is and nothing is uploaded to Google or Meta for the request); the
+booking's own attribution runs exactly as for any other booking. Once the
+booking has its own funnel row, the closed request's row is removed
+(`dropSupersededPreferredFunnelRows`), so the journey counts as one lead; only
+by the booking whose close is the request's CURRENT one (a request reopened and
+closed again by a later booking is that booking's). First
+touch keeps the credit (owner ruling 2026-10-01): when the request's row came
+in paid (`is_paid`: a paid click, or paid UTMs whose click id was stripped)
+and the booking's own row has no paid click id, the booking's
+row first takes the request's touch (source, detail, lead date, click ids,
+UTM campaign/term, `is_paid`; the earliest paid request by first-contact
+instant wins, and the transfer is recorded on that request's close audit
+(`touch_to`) so a close that runs in parts (a replay closing an older request
+later) still ends on the earliest contact; when the
+booking converted a genuine lead instead of writing its own row, that lead's
+booked row is the target, and it keeps its own touch when its first contact
+(`leads.first_contact_at`, the instant, not the row's calendar `lead_date`)
+came no later than the request's; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
+is credited, and reported, to that ad. Every other lead surface
+treats `handled` as closed: it is out of the open set, out of every prospect
+denominator (conversion, win and lost rates), and never re-attached by a later
+form, call, estimate or email fan-out. The close runs inside the per-(lead,
+visit) transaction that takes, in order, the booked customer `FOR SHARE`
+(the visit's CURRENT owner, so a merge since the booking is judged on the
+winner; re-reading their phone, name and email), the booked visit `FOR UPDATE` (still
+live, not cancelled / skipped / rescheduled / no_show, and not a callback; customer before visit, the order a customer merge
+uses), and the lead `FOR UPDATE` (still `book_preferred_time`, open, not
+converted or deleted, no estimate attached, phone still matching the
+customer's current phone, `customer_id` null or the booker's, identity still
+corroborated, same service line), then writes ONE `status_change` activity row
+("Closed automatically — customer booked <service> for <date> (visit <id>) on
+/book"), deduped per (lead, visit) through `lead_activities.metadata`, so a
+replay never closes twice; a newer request is new work and stays open. The office
+gets ONE admin FYI per close (area Leads, category `lead`, linked to the lead,
+deduped per (lead, visit)) and nothing else: no customer message of any kind.
+`handled` is system-set only: the Leads PATCH refuses it (unless the lead already has it), and moves a lead off it only when the caller sends `seen_status: 'handled'` together with `seen_updated_at` matching the lead's current `updated_at` (so a request reopened and closed again by a later booking is not overwritten from a view of the earlier close) (the status its page showed; the Leads page sends it with every status change and mark-lost, and a caller that sends none is refused with 409) and the Intelligence Bar tools never offer it; staff can reopen a handled request to any other status. Writers that read a lead open and write later re-assert it at the write, so a close in between wins: attaching an estimate (`attachLeadToEstimate`, 409 when the lead closed since) and the Agent Ops mark-contacted / follow-up / draft actions (409). The lead's `first_contact_channel`
 is `booking`, so the shared customer-originated-contact allowlist
 (`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
-booking that committed while a submit was still in flight (its note ran before
-the lead was visible) is reconciled by the submit after its commit: the lead gets
-the same note and NO `new_lead` bell rings; with no live booking since the
+booking that committed while a submit was still in flight (its close ran before
+the lead was visible) is reconciled by the submit after its commit: the lead
+closes the same way (with the admin FYI) and NO `new_lead` bell rings; with no live booking since the
 request began the bell rings as usual. A repeat submit inside 24h merges only that
 request's own fields into `extracted_data`; the lead's first-touch UTM /
 referrer / landing URL are written once at creation and kept. The service line

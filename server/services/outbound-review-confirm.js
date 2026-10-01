@@ -31,7 +31,7 @@ function dateOnly(value) {
 
 // Statuses that mirror the call pipeline's TERMINAL_LEAD_STATUSES — a lead in
 // one of these is not "active" for the fallback lookup below.
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'handled'];
 
 /**
  * Run the confirm side effects for `svc` (a scheduled_services row already

@@ -132,6 +132,10 @@ Then, by severity:
   the full finding as `text`. `raiseAdminAlert` refuses a `broken` spec and says so.
 - **`fyi`**: `raiseAdminAlert` writes nothing and returns
   `{ id: null, suppressed: true, reason: 'fyi' }`. An FYI fact belongs on its page.
+  The one exception is an emitter the owner has ruled should leave a row: it passes
+  `fyiRow: true` in `opts` and the FYI is written like a `needs-you` row, with
+  `metadata.severity` still `fyi` (today only the `/book` preferred-time request that
+  closes itself when the customer books, under category `lead`).
 
 A rule violation never costs an alert. Outside tests, a `needs-you` spec that breaks the
 rule still rings, with its headline cut to 60, the structured fields that are valid
