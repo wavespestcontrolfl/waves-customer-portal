@@ -281,6 +281,19 @@ describe('processScheduledSends send-window handling', () => {
     });
   });
 
+  test('outside the window: an invoice whose Text leg is planned for the visit summary sends its email at its requested time', async () => {
+    isWithinSendWindowET.mockReturnValue(false);
+    const planned = { ...dueRow, scheduled_send_error: 'SUMMARY_TEXT_PLANNED' };
+    db.mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [planned] }))
+      .mockReturnValueOnce(chain({ returning: [claimedRow(planned)] }));
+    sendSpy.mockResolvedValue({ ok: true, sms: { ok: false, code: 'text_carried_by_summary' }, email: { ok: true }, creditApplied: 0 });
+
+    expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 1, failed: 0, deferred: 0 });
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(db).toHaveBeenCalledTimes(3);
+  });
+
   test('outside the window: an email-only invoice (third-party payer) sends at its requested time', async () => {
     isWithinSendWindowET.mockReturnValue(false);
     const staleRecovery = chain();

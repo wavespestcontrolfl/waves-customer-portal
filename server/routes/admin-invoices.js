@@ -1865,7 +1865,9 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
         status: 'scheduled',
         scheduled_send_at: when,
         scheduled_send_attempts: 0,
-        scheduled_send_error: null,
+        // The accepted-Text/pending-Email marker (a Text leg the visit summary text carries)
+        // survives a reschedule: clearing it would text the pay link a second time.
+        scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED%' OR scheduled_send_error LIKE 'SUMMARY_TEXT_PLANNED%' THEN scheduled_send_error ELSE NULL END"),
         scheduled_request_review: Boolean(requestReview),
         scheduled_review_delay_minutes: requestReview ? reviewDelayMinutes : null,
         updated_at: new Date(),

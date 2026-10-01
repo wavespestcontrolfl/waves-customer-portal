@@ -137,6 +137,30 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
   return { recipient };
 }
 
+// The customer row, delivery preferences and channel choice the invoice email is addressed
+// from: the raw customers row (no account-primary fallback) and the customer's own
+// notification_prefs, refused the way sendInvoiceEmail refuses. One function for the
+// sender and for anything that must know whether this email would go (the visit-summary
+// fold, billing-text-verdict.js), so they cannot drift apart.
+async function loadInvoiceEmailContext(invoice, options = {}) {
+  const customer = await db('customers').where({ id: invoice.customer_id })
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .first();
+  if (!customer) return { refusal: { ok: false, error: 'Customer not found' } };
+  let prefsLookupFailed = false;
+  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
+    prefsLookupFailed = true;
+    return null;
+  });
+  if (options.billingDeliveryCategory && !invoice.payer_id) {
+    if (prefsLookupFailed) return { refusal: { ok: false, error: 'Invoice delivery preferences unavailable', code: 'billing_prefs_unavailable' } };
+    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
+      return { refusal: { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' } };
+    }
+  }
+  return { customer, prefs };
+}
+
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
@@ -172,21 +196,9 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   }
   // Amount the customer pays = total − applied account credit (what Stripe charges).
   const amountDue = invoiceAmountDue(invoice);
-  const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
-    .first();
-  if (!customer) return { ok: false, error: 'Customer not found' };
-  let prefsLookupFailed = false;
-  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
-    prefsLookupFailed = true;
-    return null;
-  });
-  if (options.billingDeliveryCategory && !invoice.payer_id) {
-    if (prefsLookupFailed) return { ok: false, error: 'Invoice delivery preferences unavailable', code: 'billing_prefs_unavailable' };
-    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
-      return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
-    }
-  }
+  const emailContext = await loadInvoiceEmailContext(invoice, options);
+  if (emailContext.refusal) return emailContext.refusal;
+  const { customer, prefs } = emailContext;
 
   // Third-party Bill-To reroute. When this invoice carries a payer snapshot,
   // attach the payer (for the PDF bill-to block) and — unless the operator
@@ -970,6 +982,8 @@ module.exports = {
   sendInvoiceEmail,
   sendReceiptEmail,
   resolveReceiptEmailRecipient,
+  loadInvoiceEmailContext,
+  invoiceRecipientFor,
   inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,

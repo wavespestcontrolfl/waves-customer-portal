@@ -1555,7 +1555,31 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
     const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
     expect(shifted).toBe(0);
-    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('2026-07-16 → 2026-07-19'), expect.objectContaining({ metadata: expect.objectContaining({ parentServiceId: 'svc-parent' }) }));
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('2026-07-16 → 2026-07-19'), expect.objectContaining({
+      // Opens the follow-up that kept its date, on that day.
+      link: '/admin/dispatch?tab=schedule&date=2026-07-16&appointment=kid-1',
+      metadata: expect.objectContaining({ parentServiceId: 'svc-parent' }),
+    }));
+  });
+
+  test('the card links a follow-up proven to still sit on its day, never a "changed" entry that sorts first', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const a = { id: 'kid-a', technician_id: 't1', day: '2026-07-10', new_day: '2026-07-13', window_start: null, window_end: null, estimated_duration_minutes: null };
+    const b = { id: 'kid-b', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
+    // kid-a drifted under the lock (earlier planned day, unproven); kid-b lost its slot to a clash (kept in place).
+    const { conn } = fakeConn({ kids: [{ ...a, new_day: '2026-07-14' }, b] });
+    occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+    await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true, plan: [a, b] });
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.any(String),
+      expect.objectContaining({ link: '/admin/dispatch?tab=schedule&date=2026-07-16&appointment=kid-b' }));
+
+    // Only unproven entries: the plain schedule view.
+    notifyAdmin.mockClear();
+    const { conn: conn2 } = fakeConn({ kids: [{ ...a, new_day: '2026-07-14' }] });
+    await shiftCallFollowUpsForParentMove({ conn: conn2, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true, plan: [a] });
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.any(String), expect.any(String),
+      expect.objectContaining({ link: '/admin/dispatch?tab=schedule' }));
   });
 
   test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {

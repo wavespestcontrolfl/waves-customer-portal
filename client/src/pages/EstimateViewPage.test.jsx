@@ -7,7 +7,7 @@ import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 import WavesShell from '../components/brand/WavesShell';
 import TrustFooter from '../components/brand/TrustFooter';
-import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.js';
 
 const { oneTimeOnlyIntelligenceCopy, resolveOneTimeServiceCopy } = oneTimeCopyModule;
@@ -915,6 +915,52 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.getByText('Interceptor traps under bed legs for post-treatment monitoring')).toBeInTheDocument();
     expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
     expect(screen.queryByText(/30-day guarantee|No contract/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('OneTimeBreakdownCard lawn guide row (one-time lawn lines)', () => {
+  const request = { token: 'tok-otl', customerEmail: 'a@b.com', customerPhone: '+19415551234', disabled: false, preview: false };
+  const lawnBreakdown = (service) => ({ total: 450, items: [{ service, label: 'Lawn work', amount: 450, kind: 'charge' }] });
+
+  it.each(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing'])('offers the lawn_care guide on a one-time %s row', (service) => {
+    render(<OneTimeBreakdownCard breakdown={lawnBreakdown(service)} serviceDetailsRequest={request} />);
+    const link = screen.getByLabelText('View the PDF').closest('a');
+    // The one-time card asks for the one-time variant of the guide.
+    expect(link.getAttribute('href')).toMatch(/\/estimates\/tok-otl\/service-details\/lawn_care\/pdf\?scope=one_time$/);
+    expect(screen.getByRole('button', { name: /Email me the PDF/ })).toBeInTheDocument();
+  });
+
+  it('the email send carries the one-time scope hint', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, channel: 'email' }) }));
+    const prior = global.fetch;
+    global.fetch = fetchMock;
+    try {
+      render(<OneTimeBreakdownCard breakdown={lawnBreakdown('plugging')} serviceDetailsRequest={request} />);
+      fireEvent.click(screen.getByRole('button', { name: /Email me the PDF/ }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ service: 'lawn_care', channel: 'email', scope: 'one_time' });
+    } finally {
+      global.fetch = prior;
+    }
+  });
+
+  it('renders no guide row when the caller did not opt in', () => {
+    render(<OneTimeBreakdownCard breakdown={lawnBreakdown('plugging')} />);
+    expect(screen.queryByLabelText('View the PDF')).not.toBeInTheDocument();
+  });
+
+  it('renders no guide row for one-time work that is not a lawn line', () => {
+    render(<OneTimeBreakdownCard
+      breakdown={{ total: 150, items: [{ service: 'one_time_pest', label: 'One-time pest treatment', amount: 150, kind: 'charge' }] }}
+      serviceDetailsRequest={request}
+    />);
+    expect(screen.queryByLabelText('View the PDF')).not.toBeInTheDocument();
+  });
+
+  it('oneTimeLawnGuideOffered only matches the four lawn specialty keys', () => {
+    expect(oneTimeLawnGuideOffered({ items: [{ service: 'top_dressing' }] })).toBe(true);
+    expect(oneTimeLawnGuideOffered({ items: [{ service: 'lawn_care' }, { service: 'termite_foam' }] })).toBe(false);
+    expect(oneTimeLawnGuideOffered(null)).toBe(false);
   });
 });
 
