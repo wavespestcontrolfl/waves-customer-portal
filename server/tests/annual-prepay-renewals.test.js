@@ -7742,3 +7742,261 @@ describe('stamp-time price check (secure-prepay rail, #5387) — a repriced visi
     });
   });
 });
+
+describe('restampUnstampedActiveTerms — the nightly leg for active terms a failed stamp pass left unstamped', () => {
+  const termRow = (id, extra = {}) => ({
+    id,
+    customer_id: `customer-${id}`,
+    prepay_invoice_id: `inv-${id}`,
+    status: 'active',
+    prepay_amount: 360,
+    term_start: '2026-10-01',
+    term_end: '2027-09-30',
+    coverage_service_type: 'Quarterly Pest Control',
+    coverage_visit_count: 4,
+    ...extra,
+  });
+  const visit = (id, termId, scheduled_date, extra = {}) => ({
+    id, customer_id: `customer-${termId}`, scheduled_date, status: 'pending', service_type: 'Quarterly Pest Control',
+    estimated_price: 100, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, ...extra,
+  });
+  const stamped = (id, termId, scheduled_date) => visit(id, termId, scheduled_date, {
+    prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: termId,
+  });
+  const COLUMNS = { prepaid_amount: {}, prepaid_method: {}, prepaid_at: {}, annual_prepay_term_id: {}, updated_at: {} };
+  const SECURE_MINT_RECORD = {
+    metadata: { source: 'secure_plan_choice', per_visit_amount: 100, annual_prepay_term_id: 'term-h' },
+  };
+  const { notifyAdmin } = require('../services/notification-service');
+
+  // forShare is not part of the shared query() stand-in.
+  const shareable = (q) => { q.forShare = jest.fn(() => q); return q; };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.raw = jest.fn().mockResolvedValue({ rows: [] });
+    db.transaction = jest.fn(async (cb) => cb(db));
+    _private.resetCachesForTests();
+  });
+
+  // One entry per term, in order: the canonical-rows read, and — for a term
+  // that reaches the refresh — the invoice share lock + the paid-backing
+  // recheck (annual_prepay_terms as t, second read onward).
+  function queues({ terms, perTerm, extra = {} }) {
+    const scheduled = [query({ columnInfo: COLUMNS })];
+    const invoices = [];
+    const recheck = [];
+    perTerm.forEach((entry) => {
+      scheduled.push(query({ rows: entry.rows }));
+      if (entry.reachesRefresh) {
+        invoices.push(shareable(query({ first: { id: 'inv' } })));
+        recheck.push(query({ first: entry.recheck === undefined ? entry.term : entry.recheck }));
+      }
+    });
+    return setDbQueues({
+      'annual_prepay_terms as t': [query({ rows: terms }), ...recheck],
+      scheduled_services: scheduled,
+      invoices,
+      notifications: [query({ first: undefined }), query({ first: undefined })],
+      ...extra,
+    });
+  }
+
+  test('an active paid term with an unstamped canonical visit is re-stamped through the activation path, in one transaction', async () => {
+    const term = termRow('term-1');
+    queues({
+      terms: [term],
+      perTerm: [{
+        term,
+        reachesRefresh: true,
+        rows: [stamped('v1', 'term-1', '2026-10-15'), visit('v2', 'term-1', '2027-01-15'), visit('v3', 'term-1', '2027-04-15'), visit('v4', 'term-1', '2027-07-15')],
+      }],
+    });
+    const refresh = jest.fn(async () => term);
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-1' }), db);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.raw).toHaveBeenCalledWith('select 1');
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the term select is the paid-backed covered set narrowed to live, open-window, configured terms with an unstamped visit', async () => {
+    const terms = [termRow('term-1')];
+    const q = query({ rows: terms });
+    setDbQueues({
+      'annual_prepay_terms as t': [q],
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows: [stamped('v1', 'term-1', '2026-10-15')] })],
+    });
+
+    await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn() });
+
+    expect(q.whereIn).toHaveBeenCalledWith('t.status', ['active', 'renewal_pending']);
+    expect(q.where).toHaveBeenCalledWith('t.term_end', '>=', '2026-10-20');
+    const existsCall = q.whereRaw.mock.calls.find(([sql]) => /exists \(\s*select 1 from scheduled_services/.test(sql));
+    expect(existsCall).toBeTruthy();
+    // Terminal statuses (incl. completed) never make a term a candidate.
+    expect(existsCall[1]).toEqual(expect.arrayContaining(['completed', 'cancelled', 'annual_prepay_invoice']));
+  });
+
+  test('a fully stamped term is left untouched: no refresh, no transaction, no writes, no alert', async () => {
+    const term = termRow('term-1');
+    queues({
+      terms: [term],
+      perTerm: [{
+        rows: [
+          stamped('v1', 'term-1', '2026-10-15'), stamped('v2', 'term-1', '2027-01-15'),
+          stamped('v3', 'term-1', '2027-04-15'),
+          // A completed unstamped visit is the pending-window reconcile's, not ours.
+          visit('v4', 'term-1', '2027-07-15', { status: 'completed' }),
+        ],
+      }],
+    });
+    const refresh = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 0, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a visit prepaid some other way (cash) or by another term is not a gap', async () => {
+    const term = termRow('term-1');
+    queues({
+      terms: [term],
+      perTerm: [{
+        rows: [
+          stamped('v1', 'term-1', '2026-10-15'),
+          visit('v2', 'term-1', '2027-01-15', { prepaid_amount: 120, prepaid_method: 'cash' }),
+          visit('v3', 'term-1', '2027-04-15', { prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'other-term' }),
+          stamped('v4', 'term-1', '2027-07-15'),
+        ],
+      }],
+    });
+    const refresh = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary.restamped).toBe(0);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  test('a price-held visit stays held: the only unstamped canonical row is held, so nothing is refreshed or alerted', async () => {
+    // Sold at $100 per visit; v2 was repriced to $125 after the sale.
+    const term = termRow('term-h');
+    queues({
+      terms: [term],
+      perTerm: [{
+        rows: [stamped('v1', 'term-h', '2026-10-15'), visit('v2', 'term-h', '2027-01-15', { estimated_price: 125 })],
+      }],
+      extra: { activity_log: [query({ first: SECURE_MINT_RECORD })] },
+    });
+    const refresh = jest.fn();
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 0, held: 1, skipped: 0, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a term that stopped being paid-backed between the read and the lock is skipped, not refreshed', async () => {
+    const term = termRow('term-1');
+    queues({
+      terms: [term],
+      perTerm: [{ term, recheck: undefined, reachesRefresh: true, rows: [visit('v1', 'term-1', '2026-10-15')] }],
+    });
+    // The paid-backing recheck finds nothing (refund landed first).
+    const refresh = jest.fn();
+    const tableQueue = db.getMockImplementation();
+    let termReads = 0;
+    db.mockImplementation((table) => {
+      if (table === 'annual_prepay_terms as t') {
+        termReads += 1;
+        if (termReads === 2) return query({ first: undefined });
+      }
+      return tableQueue(table);
+    });
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 0, held: 0, skipped: 1, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  test('one term throwing does not stop the others: it is logged and alerted, the next term is still re-stamped', async () => {
+    const bad = termRow('term-bad');
+    const good = termRow('term-good');
+    queues({
+      terms: [bad, good],
+      perTerm: [
+        { term: bad, reachesRefresh: true, rows: [visit('v1', 'term-bad', '2026-10-15')] },
+        { term: good, reachesRefresh: true, rows: [visit('v1', 'term-good', '2026-10-15')] },
+      ],
+    });
+    const refresh = jest.fn(async (t) => {
+      if (t.id === 'term-bad') throw new Error('price lookup failed');
+      return t;
+    });
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 2, restamped: 1, held: 0, skipped: 0, failed: 1 });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Annual prepay: visits not marked as covered',
+      expect.stringMatching(/price lookup failed/),
+      expect.objectContaining({ metadata: expect.objectContaining({
+        reason: 'restamp_sweep_failed',
+        annual_prepay_term_id: 'term-bad',
+        dedupeKey: 'annual-prepay-first-visit:term-bad:restamp_sweep_failed',
+      }) }),
+    );
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringMatching(/restamp sweep failed for term term-bad/));
+  });
+
+  test('a repeat failure inside the 7-day window does not file a second alert', async () => {
+    const bad = termRow('term-bad');
+    const alreadyFiled = query({ first: { id: 'notif-existing' } });
+    queues({
+      terms: [bad],
+      perTerm: [{ term: bad, reachesRefresh: true, rows: [visit('v1', 'term-bad', '2026-10-15')] }],
+      extra: { notifications: [alreadyFiled] },
+    });
+    const refresh = jest.fn(async () => { throw new Error('still failing'); });
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary.failed).toBe(1);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    // The dedupe is time-boxed (7 days), not once-ever: a term still broken a
+    // week later is raised again.
+    expect(alreadyFiled.where.mock.calls.map((c) => c[0])).toContain('created_at');
+  });
+
+  test('a failed term select or a missing table returns an empty summary and never throws', async () => {
+    const failing = query({});
+    failing.select = jest.fn(() => { throw new Error('connection terminated'); });
+    setDbQueues({
+      'annual_prepay_terms as t': [failing],
+      scheduled_services: [query({ columnInfo: COLUMNS })],
+    });
+    const refresh = jest.fn();
+    await expect(AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh }))
+      .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 });
+
+    _private.resetCachesForTests();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(false) };
+    await expect(AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh }))
+      .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+});

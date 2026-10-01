@@ -5692,6 +5692,145 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   return summary;
 }
 
+// ---------------------------------------------------------------------------
+// RESTAMP LEG — closes the "activated but never stamped" window.
+//
+// syncTermForInvoicePayment flips a term pending -> active in its own
+// transaction and only THEN stamps its visits (refreshTermSnapshot). When that
+// stamp pass throws (a lost price lookup now fails CLOSED, #5387), the Stripe
+// webhook only logs: the term is active and paid, its canonical visits are
+// unstamped, activatePaidPendingTerms ignores it (it only picks up
+// payment_pending terms) and nothing else re-stamps an ordinary active term
+// until somebody edits that customer's schedule. A covered visit that
+// COMPLETES in that window bills the customer on top of the prepay.
+//
+// This leg re-runs the SAME stamp path (refreshTermSnapshot) for exactly the
+// terms that need it, from the daily workflow that already carries
+// reconcileCoveredTermsSweep. Idempotent by construction: a term whose
+// canonical visits are all stamped, terminal, prepaid elsewhere or price-held
+// is never refreshed, so a second run writes nothing.
+//
+// A price-held visit (holdPriceDriftedRows) is left held ON PURPOSE: the
+// stamp-time price check owns that decision and already told the office once.
+// A term that fails is logged and alerted (fileCoverageException's 7-day
+// per-term dedupe, no failure counter / migration) and the sweep moves on.
+// ---------------------------------------------------------------------------
+const RESTAMP_FAILED_REASON = 'restamp_sweep_failed';
+
+function rowStampedByTerm(term, row) {
+  return row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(row.prepaid_amount) > 0
+    && row.annual_prepay_term_id != null
+    && String(row.annual_prepay_term_id) === String(term.id);
+}
+
+// One term: decide from the canonical rows whether a refresh has anything to
+// do, then run it under the paid-backing recheck. Returns 'clean' (nothing
+// unstamped), 'held' (only price-held rows are unstamped), 'skipped' (no
+// longer a paid live term) or 'restamped'.
+async function restampOneTerm(term, conn, refresh) {
+  const rows = await coverageRowsForTerm(term, conn);
+  const open = rows.filter((row) => row.id
+    && !PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
+    && !rowPrepaidElsewhere(term, row)
+    && !rowStampedByTerm(term, row));
+  if (!open.length) return 'clean';
+  const { heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
+  if (!open.some((row) => !heldIds.has(String(row.id)))) return 'held';
+
+  // Paid-backing recheck under a share lock on the prepay invoice (same
+  // shape as keepEndAtTermLapseCoverage): a refund / void / dispute reopen
+  // racing this run serializes on the invoice row, so stamps are never
+  // written for coverage that was just clawed back. One transaction keeps the
+  // attach + stamp atomic — a failure rolls the partial work back and the
+  // next run starts clean.
+  const run = async (t) => {
+    if (term.prepay_invoice_id) {
+      await t('invoices').where({ id: term.prepay_invoice_id }).forShare().first('id');
+    }
+    const fresh = await coveredTermsAsOf(t, null)
+      .where('t.id', term.id)
+      .whereIn('t.status', ACTIVE_STATUSES)
+      .first('t.*');
+    if (!fresh) return 'skipped';
+    await refresh(fresh, t);
+    // attach swallows its own SQL errors and a failed statement aborts this
+    // transaction (its COMMIT would quietly roll back while we count the term
+    // restamped) — this probe fails in an aborted transaction instead.
+    await t.raw('select 1');
+    return 'restamped';
+  };
+  return conn.isTransaction ? run(conn) : conn.transaction(run);
+}
+
+async function restampUnstampedActiveTerms({ today = etDateString(), conn = db, refresh = refreshTermSnapshot } = {}) {
+  const summary = { scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 };
+  if (!(await annualPrepayTableExists())) return summary;
+  const todayKey = dateOnly(today) || etDateString();
+  let terms = [];
+  try {
+    const cols = await scheduledServiceColumns();
+    if (!cols.annual_prepay_term_id || !cols.prepaid_method || !cols.prepaid_amount) return summary;
+    const excluded = [...PREPAID_UPDATE_EXCLUDED_STATUSES];
+    // Cheap prefilter: paid-backed (coveredTermsAsOf — the one "which terms
+    // hold money" definition) LIVE terms with an open or future window that
+    // have at least one non-terminal visit in their window not already
+    // stamped by this term. coverageRowsForTerm (the canonical selection)
+    // then runs only for those.
+    terms = await coveredTermsAsOf(conn, null)
+      .whereIn('t.status', ACTIVE_STATUSES)
+      .where('t.term_end', '>=', todayKey)
+      .whereNotNull('t.coverage_service_type')
+      .where('t.coverage_visit_count', '>', 0)
+      .where('t.prepay_amount', '>', 0)
+      .whereRaw(
+        `exists (
+          select 1 from scheduled_services ss
+          where ss.customer_id = t.customer_id
+            and ss.scheduled_date between t.term_start and t.term_end
+            and lower(coalesce(ss.status, '')) not in (${excluded.map(() => '?').join(', ')})
+            and not (
+              ss.prepaid_method = ?
+              and coalesce(ss.prepaid_amount, 0) > 0
+              and ss.annual_prepay_term_id::text = t.id::text
+            )
+        )`,
+        [...excluded, ANNUAL_PREPAY_PREPAID_METHOD],
+      )
+      .orderBy('t.term_end', 'asc')
+      .select('t.*');
+  } catch (err) {
+    logger.warn(`[annual-prepay] restamp sweep query failed: ${err.message}`);
+    return summary;
+  }
+
+  for (const row of terms) {
+    summary.scanned += 1;
+    try {
+      const term = { ...row, term_start: dateOnly(row.term_start), term_end: dateOnly(row.term_end) };
+      const outcome = await restampOneTerm(term, conn, refresh);
+      if (outcome === 'restamped') {
+        summary.restamped += 1;
+        logger.info(`[annual-prepay] restamp sweep re-applied coverage for term ${row.id}`);
+      } else if (outcome === 'held') summary.held += 1;
+      else if (outcome === 'skipped') summary.skipped += 1;
+    } catch (err) {
+      summary.failed += 1;
+      logger.warn(`[annual-prepay] restamp sweep failed for term ${row.id}: ${err.message}`);
+      // After the rolled-back transaction, on the bare connection: a notice
+      // filed inside a rolled-back scope would outlive it. 7-day per-term
+      // dedupe (fileCoverageException's default) — no failure counter needed.
+      await fileCoverageException(row, RESTAMP_FAILED_REASON,
+        `This customer's paid annual prepay has visits that are not marked as covered, and the automatic re-check could not fix them (${err.message}). Until they are stamped, a visit that is completed can bill the customer on top of the prepay. Open the customer's schedule and save any visit to re-apply coverage, or check the term.`,
+        { title: 'Annual prepay: visits not marked as covered' });
+    }
+  }
+  if (summary.restamped || summary.failed) {
+    logger.info(`[annual-prepay] restamp sweep: ${JSON.stringify(summary)}`);
+  }
+  return summary;
+}
+
 /**
  * Customer IDs whose prepay coverage is active on `asOf` (ET date string;
  * defaults to today). A customer in this set has paid for the current period up
@@ -10392,6 +10531,7 @@ module.exports = {
   activatePaidPendingTerms,
   suspendActiveTermsForDisputedInvoice,
   reconcileCoveredTermsSweep,
+  restampUnstampedActiveTerms,
   getActivelyCoveredCustomerIds,
   getCardExpiryExemptCustomerIds,
   getCardExpiryExemptions,

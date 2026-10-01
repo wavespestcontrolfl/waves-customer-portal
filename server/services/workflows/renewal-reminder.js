@@ -38,6 +38,22 @@ async function runTermiteRenewalChargeLeg() {
   }
 }
 
+// Re-applies annual-prepay coverage to live paid terms whose canonical visits
+// were left unstamped because a stamp pass failed (webhook activation only
+// logs). Runs BEFORE the covered-term sweep so the sweep's pending-window
+// reconcile sees freshly stamped rows. Outside checkAndSend for the same
+// complexity reason as the termite leg; never throws.
+async function runPrepayRestampLeg(prepay) {
+  try {
+    const service = prepay || require('../annual-prepay-renewals');
+    if (service.restampUnstampedActiveTerms) {
+      await service.restampUnstampedActiveTerms();
+    }
+  } catch (err) {
+    logger.error(`Annual prepay restamp sweep failed: ${err.message}`);
+  }
+}
+
 class RenewalReminder {
   /**
    * Check all customers for upcoming renewal dates and send reminders
@@ -55,6 +71,11 @@ class RenewalReminder {
     } catch (err) {
       logger.error(`Annual prepay renewal reminder failed: ${err.message}`);
     }
+
+    // Restamp leg first (see runPrepayRestampLeg): a stamp pass that failed
+    // at activation must not leave a covered visit billing on top of the
+    // prepay any longer than one daily run.
+    await runPrepayRestampLeg(annualPrepay);
 
     // Daily catch-all reconcile for live covered terms: recovers
     // pending-window settle/credit/reversal work whose one-shot
