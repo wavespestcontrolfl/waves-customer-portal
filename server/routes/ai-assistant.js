@@ -10,7 +10,7 @@ const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
-const { withLockedRouteDecisions, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
+const { withLockedRouteDecisions, innerJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
 
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
@@ -423,9 +423,22 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
     }
 
     if (callIds.length && await tableExists('route_feedback')) {
-      const feedbackRows = await db('route_feedback')
-        .whereIn('call_log_id', callIds)
-        .orderBy('updated_at', 'desc');
+      // The verdict shown beside a call's decision is the one that decision
+      // carries (innerJoinRouteFeedback, the ONE join every reader uses: only the
+      // row the verdict points at — codex #5377 r9 P1), so a newer decision
+      // reads unreviewed. Calls with no decision
+      // row keep their by-call verdict.
+      const chosenIds = [...routeDecisionByCall.values()].map((row) => row.id).filter(Boolean);
+      const feedbackRows = [];
+      if (chosenIds.length) {
+        feedbackRows.push(...await innerJoinRouteFeedback(db('route_decisions').whereIn('route_decisions.id', chosenIds))
+          .select('route_feedback.*'));
+      }
+      const undecided = callIds.filter((id) => !routeDecisionByCall.has(id));
+      if (undecided.length) {
+        feedbackRows.push(...await db('route_feedback').whereIn('call_log_id', undecided));
+      }
+      feedbackRows.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
       for (const row of feedbackRows) {
         if (!routeFeedbackByCall.has(row.call_log_id)) routeFeedbackByCall.set(row.call_log_id, row);
       }
