@@ -2477,6 +2477,50 @@ describe('final notice, D2/D4/D5/D11', () => {
     expect(mockResolve).not.toHaveBeenCalled();
   });
 
+  describe('R12: a final notice completes only what a DELIVERED notice named', () => {
+    const FINAL_KEY = `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`;
+    const reserve = (channel, ids, metadata) => mockLedger.push({
+      id: `r-${channel}`, customer_id: CUSTOMER_ID, channel, source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ids, idempotency_key: keyFor(FINAL_KEY, channel),
+      metadata: { notificationEventKey: FINAL_KEY, selectedChannels: ['email', 'sms'], ...metadata },
+    });
+    const seed = () => {
+      setup({ stepIndex: 5, sentDaysAgo: 95, ids: ['inv-a', 'inv-b', 'inv-d'] });
+      prefs = { invoice_channels: ['email', 'sms'] };
+      reserve('email', ['inv-a', 'inv-b'], { delivered: true }); // an earlier email named A+B
+      reserve('sms', ['inv-a', 'inv-b', 'inv-c'], { send_failed: true }); // a failed text quoted A+B+C
+    };
+    const failPostSendRead = () => {
+      const impl = fakeDb.getMockImplementation();
+      fakeDb.mockImplementation((table) => {
+        if (table === 'collections_contact_ledger' && mockSendMessage.mock.calls.length > 0) throw new Error('ledger down');
+        return impl(table);
+      });
+    };
+
+    test('post-send progress read FAILS: the text delivered now names A+B+D, so completion is A+B+D (never the failed snapshot\'s C)', async () => {
+      seed();
+      failPostSendRead();
+      expect((await run()).outcome).toBe('completed');
+      expect([...Schedule.completeFinal.mock.calls[0][1].namedInvoiceIds].sort()).toEqual(['inv-a', 'inv-b', 'inv-d']);
+    });
+
+    test('the same with the post-send read healthy completes the same A+B+D', async () => {
+      seed();
+      expect((await run()).outcome).toBe('completed');
+      expect([...Schedule.completeFinal.mock.calls[0][1].namedInvoiceIds].sort()).toEqual(['inv-a', 'inv-b', 'inv-d']);
+    });
+
+    test('a delivered leg with no readable invoice ids is still unreadable: held, nothing completed', async () => {
+      setup({ stepIndex: 5, sentDaysAgo: 95 });
+      prefs = { invoice_channels: ['sms'] };
+      reserve('sms', null, { delivered: true }); // delivered long ago, the reservation recorded no invoices
+      mockLedger[0].occurred_at = ago(120);
+      expect(await run()).toMatchObject({ outcome: 'held', reason: 'delivered_evidence_unreadable' });
+      expect(Schedule.completeFinal).not.toHaveBeenCalled();
+    });
+  });
+
   test('a failed final notice alerts at once (paused on the final step) — markPaused carries the alert', async () => {
     setup({ stepIndex: 5, sentDaysAgo: 95 });
     mockLoadContext.mockResolvedValue({ error: mockBlocked('NO_EMAIL_RECIPIENT', 'none') });

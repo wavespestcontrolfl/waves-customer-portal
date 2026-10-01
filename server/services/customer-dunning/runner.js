@@ -104,6 +104,11 @@ const decideReachable = (run) => (run.channels.length ? null : decision('pause',
 
 // ── stage 3: recover first ───────────────────────────────────────────────
 
+const metadataOf = (entry) => {
+  if (typeof entry?.metadata !== 'string') return entry?.metadata || {};
+  try { return JSON.parse(entry.metadata); } catch { return {}; }
+};
+
 const parseIds = (value) => {
   if (Array.isArray(value)) return value;
   try { return JSON.parse(value || '[]'); } catch { return []; }
@@ -119,27 +124,32 @@ function namedInvoiceIds(event) {
 }
 
 /**
- * The invoices a final notice named, leg by leg: from the delivered
- * reservations (event entries, including a restored one), or — for a leg
- * delivered in THIS tick — the set this tick quoted. A delivered leg with
- * neither is unreadable; the caller must not complete anything for it.
+ * The invoices a final notice named, leg by leg. A leg delivered in THIS tick named the set this tick quoted
+ * (run.memberIds) - never an entry: when the post-send progress read fails the loaded entries are the
+ * recover-first snapshots, and a failed or pending leg's snapshot may quote other invoices than the notice
+ * that actually went out. A leg delivered EARLIER is read from its delivered reservation (event entries,
+ * including a restored one); a failed or pending snapshot is never evidence. A delivered leg with neither is
+ * unreadable; the caller must not complete anything for it.
  */
 function namedForFinal(run, facts) {
   const ids = new Set();
   const covered = new Set();
+  const sentNow = new Set(run.memberIds?.length ? facts.deliveredNow || [] : []);
+  for (const channel of sentNow) {
+    if (!facts.delivered.has(channel)) continue;
+    run.memberIds.forEach((id) => ids.add(String(id)));
+    covered.add(channel);
+  }
   for (const entry of facts.event?.entries || []) {
-    if (!facts.delivered.has(entry.channel)) continue;
+    if (!facts.delivered.has(entry.channel) || covered.has(entry.channel)) continue;
+    const meta = metadataOf(entry);
+    if (meta.send_failed === true && meta.delivered !== true) continue; // a failed attempt's snapshot, not a delivered notice
     const named = parseIds(entry.invoice_ids);
     if (!named.length) continue;
     named.forEach((id) => ids.add(String(id)));
     covered.add(entry.channel);
   }
-  const unreadable = [];
-  for (const channel of facts.delivered) {
-    if (covered.has(channel)) continue;
-    if ((facts.deliveredNow || []).includes(channel) && run.memberIds?.length) run.memberIds.forEach((id) => ids.add(String(id)));
-    else unreadable.push(channel);
-  }
+  const unreadable = [...facts.delivered].filter((channel) => !covered.has(channel));
   return { ids: [...ids], unreadable };
 }
 
