@@ -25,7 +25,6 @@ const LEAD_STATUSES = [
   'duplicate',
   'handled',
 ];
-const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
 // 'handled' is system-set only (a /book request closed by the customer's own
 // booking, codex #5477 r9): readable and filterable, never written by a tool.
 const WRITABLE_LEAD_STATUSES = LEAD_STATUSES.filter((s) => s !== 'handled');

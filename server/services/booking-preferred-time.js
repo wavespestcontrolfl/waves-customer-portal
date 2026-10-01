@@ -407,17 +407,13 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   // being written (the reconcile's lookup ran just before that booking
   // committed): re-read THIS lead's status right before ringing, and stay silent
   // for one that is already handled.
-  let closedMeanwhile = false;
   if (created && notify && !alreadyBooked) {
     try {
-      const row = await db('leads').where({ id: leadId }).first('status');
-      closedMeanwhile = !!row && row.status === CLOSED_STATUS;
+      const now = await db('leads').where({ id: leadId }).first('status');
+      if (now?.status === CLOSED_STATUS) return { created, leadId };
     } catch (err) {
       logger.warn(`[booking:preferred-time] pre-bell status recheck failed: ${err.message}`);
     }
-  }
-
-  if (created && notify && !alreadyBooked && !closedMeanwhile) {
     try {
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('new_lead', {
@@ -617,14 +613,15 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
           trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
         );
         const stillOurs = current
-          && liveTen === ten
           && current.lead_type === LEAD_TYPE
           && OPEN_LEAD_STATUSES.includes(current.status)
           && !current.converted_at
           && !current.deleted_at
           && !current.estimate_id // staff may have attached an estimate since the query above
           && current.requested_in_time === true
-          && String(current.phone || '').replace(/\D/g, '').slice(-10) === ten // same last-10 rule as tenMatch
+          // the lead's phone (same last-10 rule as tenMatch) and the customer's CURRENT
+          // phone both still match the number the request was found by
+          && [String(current.phone || '').replace(/\D/g, '').slice(-10), liveTen].every((phone) => phone === ten)
           && (!current.customer_id || String(current.customer_id) === String(customerId))
           && corroboratesBookedCustomer(current, liveCustomer, customerId)
           && sameServiceLine(current.service_interest, liveVisit.service_type);
