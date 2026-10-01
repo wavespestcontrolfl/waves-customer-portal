@@ -363,6 +363,8 @@ const STATUS_ALTERNATIVES = [
   'owe[sd]?', 'owing', 'due', 'overdue', 'outstanding', 'balance', 'delinquent', 'arrears', 'late fees?', 'past due',
   'all set', 'all good', 'squared(?: away| up)?', 'taken care of', 'good to go', 'up to date', 'caught up', 'current', 'in good standing',
   'nothing (?:more |else |further )?(?:owed|due|to pay|needed)', 'no (?:balance|charges?|payments?|record)', 'zero',
+  // (Codex round-53 P2: a cash / check SUBJECT in a state - "Your cash is here", "The check came in", "that check cleared")
+  '(?:your|the|that|this)\\s+(?:cash|che(?:ck|que)s?)\\b(?:\\s+[\\w$.,-]+){0,2}?\\s+(?:is|was|were|are|has|have|came|arrived|got|went|cleared|bounced|posted|landed|showed)\\b',
   // (Codex round-52 P2: cash, and a received / collected / picked-up cash or check, are receipts too)
   '(?:have|has|had|got|gotten|received|collected|picked up)\\s+(?:your|the)\\s+(?:payments?|funds|money|transfer|deposit|che(?:ck|que)s?|zelle|ach|cash)', '(?:got|have|has)\\s+(?:it|that|this|them)',
   "(?:don'?t|do not|can'?t|cannot|haven'?t|have not|hasn'?t|has not|didn'?t|did not|not)\\s+(?:\\w+\\s+){0,2}?(?:see|seen|find|found|show|showing|reflect\\w*|there)",

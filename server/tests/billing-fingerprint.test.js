@@ -96,3 +96,25 @@ test('the fingerprint hashes payer activation, self-pay overrides and estimate d
   expect(BILLING_FINGERPRINT_SQL).toContain('FROM estimate_deposits d');
   expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(10);
 });
+
+// Codex round-53: retry fields drive the failed-payment balance; a denial approved with Zelle off is rechecked when it is set up
+test('the payments hash includes retry_count and next_retry_at', () => {
+  expect(BILLING_FINGERPRINT_SQL).toContain('stripe_payment_intent_id, retry_count, next_retry_at,');
+});
+describe('a denial that stood because Zelle was not set up', () => {
+  const dbiWith = () => { const dbi = jest.fn(); dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] }); return dbi; };
+  const denial = (zelleDenial) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleDenial, getBody: () => "We don't accept Zelle." });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); });
+  test('still not set up => ok; set up during the send => refused (retryable)', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    await expect(denial({ invoiceId: null, recipientConfigured: false })({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    await expect(denial({ invoiceId: null, recipientConfigured: false })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', retryable: true });
+  });
+  test('a no-open-invoice denial (recipient set) stands while the recipient stays set', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    await expect(denial({ invoiceId: null, recipientConfigured: true })({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
+    delete process.env.ZELLE_RECIPIENT;
+    await expect(denial({ invoiceId: null, recipientConfigured: true })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false });
+  });
+});

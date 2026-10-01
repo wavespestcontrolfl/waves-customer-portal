@@ -28,7 +28,7 @@ const IN_FLIGHT_PAYMENTS_SQL = `SELECT id, metadata, stripe_payment_intent_id, s
 // Processing invoices come back as ids (capped) and are judged through the LIVE payer verdict in JS (Codex round-41 P1): a processing
 // invoice that resolves to a payer today is the payer's money in flight, not the homeowner's.
 const IN_FLIGHT_INVOICE_SQL = `SELECT id FROM invoices
-  WHERE customer_id = ? AND payer_id IS NULL AND lower(status) = 'processing'
+  WHERE customer_id = ? AND payer_id IS NULL AND payer_statement_id IS NULL AND lower(status) = 'processing'
     AND (scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')
   LIMIT ${IN_FLIGHT_PAYMENTS_LIMIT}`;
 const rowsOf = (res) => (res && (res.rows || (Array.isArray(res) ? res : []))) || [];

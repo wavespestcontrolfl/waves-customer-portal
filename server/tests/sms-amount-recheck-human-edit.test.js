@@ -90,7 +90,7 @@ describe('no snapshot: the body\'s explicit target beats the inbound\'s', () => 
     // denial about B (eligible now) => stale, even though the inbound named A (ineligible)
     await expect(zelleDenialStale({ customerId: 'c1', dbh: idDb, inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?', body: 'Zelle is not available for invoice WPC-2026-0002.' })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
     // no reference in the body => the inbound (A, ineligible) => the denial stands
-    await expect(zelleDenialStale({ customerId: 'c1', dbh: idDb, inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?', body: "Zelle isn't available for this account right now." })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-A' } });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh: idDb, inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?', body: "Zelle isn't available for this account right now." })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-A', recipientConfigured: true } });
   });
 });
 
@@ -123,7 +123,7 @@ describe('a Zelle offer AND a denial in one reply are both rechecked', () => {
   });
   test('offer to B is eligible and A is ineligible => the DENIAL about A stands, the reply is fine', async () => {
     visibility = jest.spyOn(pay, 'payPageZelleVisibility').mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-B', reason: 'not_eligible' }));
-    await expect(run()).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-B', zelleDenial: { invoiceId: 'inv-A' } });
+    await expect(run()).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-B', zelleDenial: { invoiceId: 'inv-A', recipientConfigured: true } });
     expect([...new Set(checkedIds)].sort()).toEqual(['inv-A', 'inv-B']); // (the denial's PaymentIntent baseline reads A once more)
   });
   test('the denial about A is now STALE (A became eligible) — caught even though the offer branch passed', async () => {

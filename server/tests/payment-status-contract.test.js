@@ -623,3 +623,11 @@ describe('local review pass 1', () => {
     expect(kinds(billing({ hasDepositActivity: true }))).not.toContain('no_payment_since');
   });
 });
+
+// Codex round-53 P2: a cash / check subject in a state is a receipt claim
+test.each(['Your cash is here.', 'The check is here.', 'That check cleared.'])('held: %s', (b) => {
+  expect(c.assertsPaymentStatus(b, { inboundText: 'Did you get my cash?' })).toBe(true);
+});
+test.each(['Please bring the check to the visit.', 'You can leave the cash with the tech.'])('not a status: %s', (b) => {
+  expect(c.assertsPaymentStatus(b, { inboundText: 'Can I pay cash?' })).toBe(false);
+});

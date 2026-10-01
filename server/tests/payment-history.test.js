@@ -69,8 +69,10 @@ describe('hasInFlightMoney', () => {
     expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/IN \('pending', 'processing', 'requires_action'\)/);
     expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/LIMIT 200/);
     expect(IN_FLIGHT_INVOICE_SQL).toMatch(/FROM invoices/);
-    expect(IN_FLIGHT_INVOICE_SQL).toMatch(/payer_id IS NULL AND lower\(status\) = 'processing'/);
+    expect(IN_FLIGHT_INVOICE_SQL).toMatch(/payer_id IS NULL AND payer_statement_id IS NULL AND lower\(status\) = 'processing'/);
     expect(IN_FLIGHT_INVOICE_SQL).toMatch(/scheduled_send_error NOT LIKE 'payer_billed:%'/);
+    // Codex round-53 P2: a statement-accrued invoice processing is the payer's money in flight, not the homeowner's
+    expect(IN_FLIGHT_INVOICE_SQL).toMatch(/payer_statement_id IS NULL/);
   });
   test('an own in-flight payment => true; nothing => false; a processing own invoice => true', async () => {
     expect(await hasInFlightMoney('c1', flightDb({ candidates: [{ id: 'p1', metadata: null }] }))).toBe(true);

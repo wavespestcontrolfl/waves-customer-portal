@@ -86,6 +86,20 @@ const ZELLE_NEGATION_RE = new RegExp(
 // Round-12 P1: an UNSPACED em/en dash ends a clause too ("processing—does that answer…").
 const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s?[—–]\s?|\s-\s/;
 
+// Codex round-53 P2: a negator governing a payment-METHOD LIST carries to Zelle at its end ("We don't take cards and Zelle", "We
+// don't accept checks, cards, or Zelle") - splitting on the commas / "and" first would leave a bare "Zelle." that reads as an offer.
+// Such a sentence stays ONE clause and is a denial, unless a contrast word breaks the list ("We don't take cards but Zelle works").
+const ZELLE_LIST_NEGATION_RE = new RegExp(
+  `\\b${ZELLE_NEGATOR}\\s+(?:(?:currently|really|accept|take|offer|support|use|do|process|allow)\\s+)+(?:(?!\\b(?:but|however|though|although|except|instead|only|yet)\\b)[^.;!?\\n])*?\\bzelle\\b`,
+  'i',
+);
+function zelleClauses(body) {
+  return String(body || '').split(/(?<=[.!?;\n])\s+/).flatMap((sentence) => (
+    ZELLE_WORD_RE.test(sentence) && ZELLE_LIST_NEGATION_RE.test(sentence) ? [sentence] : sentence.split(CLAUSE_SPLIT_RE)
+  ));
+}
+const isNegatedZelleClause = (clause) => ZELLE_NEGATION_RE.test(clause) || ZELLE_LIST_NEGATION_RE.test(clause);
+
 // null (no affirmative Zelle mention in this clause), else 'offer'. A clause mentioning Zelle is a live instruction unless it
 // is negated; a payment-RECEIPT clause is no longer a separate kind - a received payment is stated only by a rendered
 // sentence, and a rendered sentence never names a manual tender (payment-status-contract.tenderWord), so it never mentions Zelle.
@@ -94,7 +108,7 @@ function classifyZelleClause(clause) {
   if (!ZELLE_WORD_RE.test(text)) return null;
   // A clause carrying ANY transfer contact is a live instruction — always checked, negation or not (Codex round-6 pre-push audit P1).
   if (zelleBodyContacts(text).length) return 'offer';
-  return ZELLE_NEGATION_RE.test(text) ? null : 'offer';
+  return isNegatedZelleClause(text) ? null : 'offer';
 }
 // Codex round-16 P1: Zelle context carries across clauses. A reply that affirms Zelle in one
 // clause and then gives the TRANSFER INSTRUCTION in another that never says "Zelle"
@@ -113,18 +127,18 @@ function isTransferInstructionClause(clause) {
 // Zelle") is excluded from hasAffirmativeZelleMention on purpose, but it is a live claim too: the recipient
 // is an env setting and the invoice's eligibility moves, so the denial can go stale before it sends.
 function hasNegativeZelleAvailabilityClaim(body) {
-  return String(body || '').split(CLAUSE_SPLIT_RE)
-    .some((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause));
+  return zelleClauses(body)
+    .some((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && isNegatedZelleClause(clause));
 }
 // Codex round-32 P2: a reply can hold BOTH a Zelle offer and a Zelle denial ("Zelle isn't available for invoice A. You can
 // Zelle invoice B."). Every seam validates each independently, each against ITS OWN clause text (so each clause's invoice
 // reference targets its own check): { offerText, denialText } — '' when none.
 function zelleClauseTexts(body) {
   const text = String(body || '');
-  const clauses = text.split(CLAUSE_SPLIT_RE);
+  const clauses = zelleClauses(text);
   const kindOf = (clause) => {
     if (classifyZelleClause(clause) === 'offer') return 'offer';
-    if (ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause)) return 'denial';
+    if (ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && isNegatedZelleClause(clause)) return 'denial';
     return null;
   };
   const kinds = clauses.map(kindOf);
@@ -152,9 +166,9 @@ function zelleClauseTexts(body) {
   return { offerText, denialText: kinds.includes('denial') ? denials.join(' ') : '' };
 }
 function hasAffirmativeZelleMention(body) {
-  const clauses = String(body || '').split(CLAUSE_SPLIT_RE);
+  const clauses = zelleClauses(body);
   if (clauses.some((clause) => classifyZelleClause(clause) === 'offer')) return true;
-  const zelleAffirmed = clauses.some((clause) => ZELLE_WORD_RE.test(clause) && !ZELLE_NEGATION_RE.test(clause));
+  const zelleAffirmed = clauses.some((clause) => ZELLE_WORD_RE.test(clause) && !isNegatedZelleClause(clause));
   return zelleAffirmed && clauses.some((clause) => !ZELLE_WORD_RE.test(clause) && isTransferInstructionClause(clause));
 }
 
@@ -293,14 +307,15 @@ function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = 
 // "Zelle isn't available right now") is false whatever the invoice state is, so it is stale outright (fail closed: scope must be stated).
 const ZELLE_DENIAL_SCOPE_RE = /\b(?:this|that|your|these|those|my|the)\s+(?:[\w#-]+\s+){0,2}?(?:accounts?|invoices?|bills?|balances?)\b|\binvoices?\s*#?\s*[\w-]*\d|#\s?\d{3,}|\bWPC-\d{4}-\d+|\bfor\s+you\b/i;
 function hasUnscopedZelleDenial(body) {
-  return String(body || '').split(CLAUSE_SPLIT_RE)
-    .filter((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause))
+  return zelleClauses(body)
+    .filter((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && isNegatedZelleClause(clause))
     .some((clause) => !ZELLE_DENIAL_SCOPE_RE.test(clause));
 }
 const ZELLE_DENIAL_UNVERIFIABLE = new Set(['zelle_recheck_failed', 'payer_unverifiable', 'credit_unverifiable']);
 async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null, body = null } = {}) {
   const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
-  if (!manualPayOptionsFromEnv()?.zelle?.recipient) return { stale: false };
+  // Codex round-53 P2: every standing denial carries what it stood on, so the provider boundary can tell if Zelle was set up meanwhile
+  if (!manualPayOptionsFromEnv()?.zelle?.recipient) return { stale: false, zelleDenial: { invoiceId: null, recipientConfigured: false } };
   if (body && hasUnscopedZelleDenial(body)) return { stale: true, reason: 'zelle_now_available' };
   if (!customerId) return { stale: true, reason: 'zelle_recheck_failed' };
   try {
@@ -324,7 +339,9 @@ async function zelleDenialVerdict({ ctx, customerId, body, inboundMessage, dbh }
     // Codex round-25 P1: no open invoice at all => nothing to pay by Zelle, the denial stands. An UNRESOLVED
     // target (several open invoices, none identified) is UNVERIFIABLE — the draft asks which invoice instead of
     // denying — so a denial is blocked.
-    return target.reason === 'no_open_invoice' ? { stale: false } : { stale: true, reason: 'zelle_target_ambiguous' };
+    return target.reason === 'no_open_invoice'
+      ? { stale: false, zelleDenial: { invoiceId: null, recipientConfigured: true } }
+      : { stale: true, reason: 'zelle_target_ambiguous' };
   }
   const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: target.invoiceId, dbh });
   if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
@@ -332,7 +349,7 @@ async function zelleDenialVerdict({ ctx, customerId, body, inboundMessage, dbh }
   // the denial can't be confirmed, so block (Codex round-21 P2); only confirmed reasons let it stand
   if (ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason)) return { stale: true, reason: eligibility.reason };
   // the invoice the denial was judged for: the provider-boundary check reruns this same eligibility for it (owner ruling 2026-10-01)
-  return { stale: false, zelleDenial: { invoiceId: target.invoiceId } };
+  return { stale: false, zelleDenial: { invoiceId: target.invoiceId, recipientConfigured: true } };
 }
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing

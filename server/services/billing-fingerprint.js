@@ -11,7 +11,7 @@
 const db = require('../models/db');
 
 const BILLING_FINGERPRINT_SQL = `SELECT md5(concat_ws('#',
-  (SELECT string_agg(concat_ws('|', id, status, amount, refund_status, refund_amount, payer_id, stripe_payment_intent_id,
+  (SELECT string_agg(concat_ws('|', id, status, amount, refund_status, refund_amount, payer_id, stripe_payment_intent_id, retry_count, next_retry_at,
      superseded_by_payment_id, payment_date, md5(COALESCE(metadata::text, ''))), ',' ORDER BY id)
    FROM payments WHERE customer_id = ?),
   (SELECT string_agg(concat_ws('|', id, status, total, credit_applied, payer_id, payer_statement_id, scheduled_send_error, due_date,
@@ -66,6 +66,13 @@ function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleIn
     if (recheck.hasAffirmativeZelleMention(body)) {
       const offer = await zelleOfferStillEligible({ recheck, customerId, zelleInvoiceId, body, dbh });
       if (!offer.ok) return offer;
+    }
+    if (zelleDenial && recheck.hasNegativeZelleAvailabilityClaim(body)) {
+      // a recipient configured (or removed) since the recheck changes every denial's premise (Codex round-53 P2)
+      const configured = !!require('../routes/pay-v2-helpers').manualPayOptionsFromEnv()?.zelle?.recipient;
+      if (configured !== (zelleDenial.recipientConfigured !== false)) {
+        return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: 'Zelle setup changed since the recheck', retryable: true };
+      }
     }
     if (zelleDenial?.invoiceId && recheck.hasNegativeZelleAvailabilityClaim(body)) {
       return zelleDenialStillStands({ recheck, customerId, invoiceId: zelleDenial.invoiceId, dbh });
