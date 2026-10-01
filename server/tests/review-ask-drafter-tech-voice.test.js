@@ -274,6 +274,10 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(isGreetingOnlySentence('Thanks again.', new Set())).toBe(true);
     expect(isGreetingOnlySentence("It's Adam.", new Set(['adam']))).toBe(true);
     expect(isGreetingOnlySentence('Thanks for the new deck.', new Set())).toBe(false);
+    // Terminal pass 6: first-person requests are bare requests too.
+    const { isAskOnlySentence } = Drafter.__private;
+    expect(isAskOnlySentence('Would you leave me a Google review? {review_url}', new Set())).toBe(true);
+    expect(isAskOnlySentence('A Google review would mean a lot to me.', new Set())).toBe(true);
   });
 
   test('terminal pass 5: every record line carries its date, and today is stated', async () => {
@@ -283,6 +287,13 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const text = mockDispatch.mock.calls[0][1].text;
     expect(text).toContain('[customer, 2026-09-10] I saw ants today');
     expect(text).toMatch(/Today: \d{4}-\d{2}-\d{2}/);
+  });
+
+  test('terminal pass 6: a hyphenated name passes the greeting check end to end', async () => {
+    const hi = { ...GOOD, body: "Hi Mary-Jane. I know you had to get to work. A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
+    mockDispatch.mockResolvedValue(reply(hi));
+    judge([{ ask_only: false, greeting_only: true, supported: true, quote: null }, { ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: true, supported: false, quote: null }]);
+    expect(await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Mary-Jane', customer: { id: 'cust-1', first_name: 'Mary-Jane' } })).toBe(hi.body);
   });
 
   test('a bare link after a question stays with its sentence', () => {

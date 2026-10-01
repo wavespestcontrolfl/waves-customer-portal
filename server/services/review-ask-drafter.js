@@ -807,7 +807,8 @@ Return the sentences in the same order.`;
 // Words a pure review request may use besides the link and the name.
 const ASK_WORDS = new Set(`a an the google review reviews would will really also help helps mean means lot us
   if you your get chance quick leave leaving it much big great be appreciate appreciated thanks thank and so too
-  could can please share sharing mind post posting give giving drop write writing time`.split(/\s+/));
+  could can please share sharing mind post posting give giving drop write writing time
+  me to my for our`.split(/\s+/));
 
 // Sentences as the checker sees them. A bare link ("Google review? {review_url}")
 // stays with the sentence before it, so the ask is judged whole.
@@ -840,7 +841,8 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline 
   const timeoutMs = deadline - Date.now();
   if (timeoutMs < TECH_VOICE_MIN_STAGE_MS) return "out_of_time";
   const sentences = techVoiceSentences(body);
-  const names = new Set([firstName, ...String(techName || "").split(/\s+/)].filter(Boolean).map((n) => n.toLowerCase()));
+  // Split names the way sentences are split ("Mary-Jane" → mary, jane).
+  const names = new Set([firstName, techName].join(" ").toLowerCase().match(/[a-z']+/g) || []);
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
     laneId: "review_ask_fact_check",
     // Rules ride the system channel; the user message is data only, so a
