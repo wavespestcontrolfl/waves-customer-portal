@@ -28,6 +28,7 @@ import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard'
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
+import YardMonthCard, { useYardMonth } from '../components/portal/YardMonthCard';
 import { etDateString, formatETDateTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
@@ -9080,6 +9081,25 @@ const ARTICLES = [
   },
 ];
 
+// Local Conditions slot on the Learn tab. GATE_PORTAL_YARD_CALENDAR (dark): the
+// server answers {available:false} off the gate and the existing
+// WeatherPestWidget renders exactly as before; on, the yard-month card takes
+// its place. The loading panel is the widget's own first state, so neither
+// path shows a different placeholder.
+function LocalConditionsSlot({ customer, nextService, onOpenPhotoId }) {
+  const yard = useYardMonth();
+  if (yard.status === 'loading') return (
+    <PortalStatePanel
+      icon="cloud"
+      eyebrow="Local Conditions"
+      title="Loading local conditions"
+      message="Checking weather and seasonal pest pressure for your area."
+    />
+  );
+  if (yard.status === 'on') return <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} />;
+  return <WeatherPestWidget customer={customer} nextService={nextService} />;
+}
+
 function WeatherPestWidget({ customer, nextService }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -9490,7 +9510,7 @@ function ContentCard({ post, large, compact }) {
   );
 }
 
-function LearnTab({ customer }) {
+function LearnTab({ customer, onOpenPhotoId = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [alerts, setAlerts] = useState([]);
@@ -9718,7 +9738,7 @@ function LearnTab({ customer }) {
         </div>
       </section>
 
-      <WeatherPestWidget customer={customer} nextService={nextService} />
+      <LocalConditionsSlot customer={customer} nextService={nextService} onOpenPhotoId={onOpenPhotoId} />
 
       {alerts.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -17349,7 +17369,7 @@ export default function PortalPage() {
             wateringPlanCustomerId={wateringPlanCustomerId}
             onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
           />)}
-        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} onOpenPhotoId={photoIdAvailable ? () => setShowPhotoId(true) : null} />}
         </PortalRefreshArea>
       </main>
 
@@ -17423,4 +17443,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
