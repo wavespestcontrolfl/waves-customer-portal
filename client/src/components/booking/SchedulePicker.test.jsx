@@ -61,7 +61,7 @@ describe('picked time', () => {
     );
     const time = screen.getByRole('button', { name: /Choose 1:00 PM/ });
     expect(time).toHaveAttribute('aria-pressed', 'true');
-    expect(time).toHaveTextContent('✓');
+    expect(time.querySelector('.wpk-time-check svg')).not.toBeNull();
     fireEvent.click(time);
     expect(onSelectSlot).not.toHaveBeenCalled();
     // A different time still selects.

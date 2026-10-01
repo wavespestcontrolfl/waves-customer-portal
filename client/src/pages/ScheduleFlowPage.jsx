@@ -1191,7 +1191,8 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
 // that emailed pick is still the selection; a commit error that cleared it
 // (SLOT_TAKEN) keeps the card up with the error, so the reason is never
 // rendered only at the bottom of the page.
-function EmailPickCard({ slot, movedNotice, error, submitting, onBook, onPickAnother }) {
+function EmailPickCard({ slot, movedNotice, error: submitError, showError, submitting, onBook, onPickAnother }) {
+  const error = showError ? submitError : null;
   if (!slot && !error) return null;
   return (
     <Card data-inspection-email-pick="">
@@ -1427,12 +1428,9 @@ const FLOWS = {
     // it unconditionally for every flow).
     stateChangedCodes: [],
     stateChangedMessage: null,
-    // ?slot= preselect fallback (email link): "we moved you" is a picked-slot
-    // note like reschedule's ReanchorNote, sourced from page state via the
-    // third ctx arg (this flow is the only one that uses it).
-    pickedNote: (_data, _slot, ctx) => (ctx?.slotMovedNotice
-      ? <div className="wpk-picked-note"><div data-glass="soft" style={SOFT_NOTE}>{ctx.slotMovedNotice}</div></div>
-      : null),
+    // The ?slot= preselect's "we moved you" note lives in EmailPickCard at
+    // the top, with the emailed pick it describes — never under the picker.
+    pickedNote: () => null,
   },
 };
 
@@ -1478,6 +1476,12 @@ export default function ScheduleFlowPage({ flow }) {
   // Set when the commit ran from EmailPickCard, so its error shows there.
   const [bookedFromTop, setBookedFromTop] = useState(false);
   const pickerRef = useRef(null);
+  // The "we moved you" note describes the emailed pick only — it goes
+  // whenever that pick does (another time picked, search dropped it,
+  // SLOT_TAKEN, address change), never left under a later pick.
+  useEffect(() => {
+    if (!emailPick) setSlotMovedNotice(null);
+  }, [emailPick]);
   // The address text the gate resolved (never persisted until commit) —
   // carried into the commit payload alongside the picked slot.
   const [resolvedAddress, setResolvedAddress] = useState('');
@@ -1542,12 +1546,7 @@ export default function ScheduleFlowPage({ flow }) {
     const kept = held ? findSlotInDays(days, held) : null;
     if (held && !kept) setSelectedSlot(null);
     else if (kept) setSelectedSlot(kept);
-    if (emailPickRef.current) {
-      const keptEmail = findSlotInDays(days, emailPickRef.current);
-      setEmailPick(keptEmail);
-      // Its "we moved you" note goes with it — never under a later pick.
-      if (!keptEmail) setSlotMovedNotice(null);
-    }
+    if (emailPickRef.current) setEmailPick(findSlotInDays(days, emailPickRef.current));
     if (!days.length) {
       setSelectedDate(null);
       return;
@@ -1714,12 +1713,11 @@ export default function ScheduleFlowPage({ flow }) {
     } catch { /* keep the filtered calendar + reset link */ }
   };
 
-  // `slot` overrides the selection: EmailPickCard books its own emailed time
-  // even after the customer browsed another day (which clears the selection).
-  const confirm = async ({ fromTop = false, slot = null } = {}) => {
-    const slotToBook = slot || selectedSlot;
+  // The slot is explicit: the inline Book passes the selection, EmailPickCard
+  // its own emailed time — still bookable after the customer browsed another
+  // day (which clears the selection). fromTop routes errors to that card.
+  const confirm = async (slotToBook, fromTop) => {
     if (!slotToBook || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
-    if (slot) setSelectedSlot(slot);
     setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
@@ -1780,10 +1778,7 @@ export default function ScheduleFlowPage({ flow }) {
         // a later availability update — the refresh is best-effort and can
         // leave `data` untouched, which would re-arm the card's Book button
         // on a known-unavailable time.
-        if (emailPick && sameSlot(slotToBook, emailPick)) {
-          setEmailPick(null);
-          setSlotMovedNotice(null);
-        }
+        setEmailPick((prev) => (sameSlot(prev, slotToBook) ? null : prev));
         setAiFiltered(false); // refreshed availability spans the full window
         setAiSession((n) => n + 1); // remount the card — its recap is stale too
         // Inspection only: a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY
@@ -1872,16 +1867,18 @@ export default function ScheduleFlowPage({ flow }) {
         }}
         details={details}
         onDetails={setDetails}
-        topCard={flow === 'inspection' ? (
+        // Inspection's Hero only; emailPick is only ever set by its ?slot=.
+        topCard={(
           <EmailPickCard
             slot={emailPick}
             movedNotice={slotMovedNotice}
-            error={bookedFromTop ? submitError : null}
+            error={submitError}
+            showError={bookedFromTop}
             submitting={submitting}
-            onBook={() => confirm({ fromTop: true, slot: emailPick })}
+            onBook={() => confirm(emailPick, true)}
             onPickAnother={() => pickerRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })}
           />
-        ) : null}
+        )}
         selectedPests={selectedPests}
         onTogglePest={(key) => setPestsByLane((prev) => {
           const current = prev[selectedLane] || [];
@@ -1945,9 +1942,8 @@ export default function ScheduleFlowPage({ flow }) {
             setSubmitError(null);
             // Another time replaces the emailed one — its top card (and its
             // "we moved you" note) no longer describe what Book will book.
-            if (!emailPick || !sameSlot(slot, emailPick)) {
+            if (!sameSlot(slot, emailPick)) {
               setEmailPick(null);
-              setSlotMovedNotice(null);
               setBookedFromTop(false);
             }
           }}
@@ -1959,13 +1955,12 @@ export default function ScheduleFlowPage({ flow }) {
                 type="button"
                 data-glass-accent=""
                 className="wpk-action-btn"
-                onClick={() => confirm()}
+                onClick={() => confirm(selectedSlot, false)}
                 disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
               >
                 {cfg.actionLabel({ submitting, lane: selectedLane, slot })}
               </button>
-              {/* The emailed pick's note already sits in EmailPickCard. */}
-              {cfg.pickedNote(data, slot, { slotMovedNotice: emailPick ? null : slotMovedNotice })}
+              {cfg.pickedNote(data, slot)}
             </>
           )}
           empty={(

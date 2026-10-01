@@ -297,7 +297,7 @@ export function PickerTimesPanel({
                   onClick={() => { if (!picked) onSelect(stamped); }}
                 >
                   <span className="wpk-time-main">
-                    {picked ? <span className="wpk-time-check" aria-hidden="true">✓</span> : null}
+                    {picked ? <span className="wpk-time-check" aria-hidden="true"><Icon name="check" size={16} /></span> : null}
                     {slot.start_label}
                     {slot.nearby ? <span className="wpk-nearby-pill">Tech nearby</span> : null}
                   </span>
@@ -386,7 +386,7 @@ export function SchedulePickerStyles() {
       .wpk-time-main { display: inline-flex; align-items: center; gap: 8px; }
       .wpk-time-detail { font-size: 14px; font-weight: 500; color: ${S.muted}; }
       .wpk-slot-picked .wpk-time-btn { border-color: ${COLORS.glassNavy}; color: ${COLORS.glassNavy}; box-shadow: inset 0 0 0 1px ${COLORS.glassNavy}; }
-      .wpk-time-check { font-weight: 800; }
+      .wpk-time-check { display: inline-flex; }
       /* The glass theme forces every [data-glass] border with !important;
          the picked chip's navy ring must survive it or the pick only reads
          by its check mark. */
