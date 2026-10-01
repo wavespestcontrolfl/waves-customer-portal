@@ -246,6 +246,29 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED' });
   });
 
+  test('a partner that was a one-off exception and is carried back onto its cadence date rejoins the cadence', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    // The pest row was moved off its cadence day earlier: cadence = the day after.
+    const cadence = addDays(dateOnly(f.pest[0].scheduled_date), 1);
+    await db('scheduled_services').where({ id: f.pest[0].id }).update({
+      date_exception: true, date_exception_source: 'admin', date_exception_at: new Date(), date_exception_cadence_date: cadence,
+    });
+    await moveLawnSeries(f);
+    const pest = await db('scheduled_services').where({ id: f.pest[0].id }).first();
+    expect(dateOnly(pest.scheduled_date)).toBe(cadence);
+    expect(pest.date_exception).toBe(false);
+    expect(pest.date_exception_cadence_date).toBeNull();
+  });
+
+  test('automatic initiators never carry: the call pipeline keeps the refusal', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    await expect(moveLawnSeries(f, { by: 'ai_call_pipeline' })).rejects.toMatchObject({ statusCode: 409 });
+    const pest = await db('scheduled_services').where({ id: f.pest[0].id }).first();
+    expect(dateOnly(pest.scheduled_date)).toBe(dateOnly(f.pest[0].scheduled_date));
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

@@ -1614,6 +1614,19 @@ describe('caller wiring (source)', () => {
     // provider handoff (a partner moved or detached since makes it obsolete).
     expect(effects).toContain('!anchorStillOnRecordedSlot(svc) || !(await stopStillOnRecordedStart(svc))');
     expect(effects).toContain('return anchorStillOnRecordedSlot(row) && await stopStillOnRecordedStart(row)');
+    // The partner plans' maintenance locks join the sweep's own, in one
+    // sorted pass (two sweeps carrying each other's plans cannot deadlock).
+    const reb = read('../services/rebooker.js');
+    expect(reb).toContain('...[...carryPartners0.values()].flat().map(partnerSeriesRoot).filter(Boolean).map(String),');
+    expect(reb).toContain("for (const root of maintenanceRoots) {");
+    // Staff allowlist: automatic/customer initiators never carry.
+    expect(reb).toContain("const SERIES_CARRY_STAFF_INITIATORS = new Set(['admin', 'tech']);");
+    // The edit modal commits field edits before the series move: under the
+    // gate it refuses a sweep that would carry any grouped stop, up front.
+    const sched = read('../routes/admin-schedule.js');
+    const planner = sched.slice(sched.indexOf('async function planCollectiveEditDateMove'), sched.indexOf("router.put('/:id/update-details'"));
+    expect(planner).toContain("if (require('../config/feature-gates').seriesMoveCarriesVisitLive()) {");
+    expect(planner.indexOf('seriesMoveCarriesVisitLive()')).toBeGreaterThan(planner.indexOf('ackedIds = preview.occurrenceIds.map(String);'));
     // Partners are not follow-ups (synced notify-off, never closed).
     expect(read('../services/rebooker.js')).not.toMatch(/\.\.\.carriedMembers\.map\(/);
   });

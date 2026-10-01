@@ -299,15 +299,19 @@ function collectiveMoveGateOn() {
 // grouped visit carries every live partner row to the new stop INSIDE the
 // sweep's own transaction (carryVisitPartners in rescheduleSeries) instead of
 // refusing with VISIT_SERIES_MOVE_UNSUPPORTED. STAFF only: a customer-facing
-// initiator (customer_self_serve, customer_sms, …) and automatic nudges keep
-// today's refusal, as does an explicit single-row member move.
+// or automatic initiator keeps today's refusal, as do an explicit single-row
+// member move and a reviewed (conflict-snapshot) move.
+const SERIES_CARRY_STAFF_INITIATORS = new Set(['admin', 'tech']);
 function seriesCarriesVisitFor(initiatedBy, options = {}) {
   if (options.visitPolicy === 'single') return false;
   // A reviewed move (call reschedule Apply) approved a conflict snapshot
   // that never included partner rows — it keeps today's refusal.
   if (Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) return false;
-  const by = String(initiatedBy || '');
-  if (/^customer/i.test(by) || by === 'auto_dispatch') return false;
+  // An explicit STAFF allowlist (the board, edit modal and IB moves run as
+  // 'admin'; Quick Move as 'tech' or 'admin'): every automatic or
+  // customer-driven initiator — ai_call_pipeline, auto_dispatch, customer* —
+  // keeps the refusal.
+  if (!SERIES_CARRY_STAFF_INITIATORS.has(String(initiatedBy || ''))) return false;
   return require('../config/feature-gates').seriesMoveCarriesVisitLive();
 }
 
@@ -739,6 +743,132 @@ function needsLifecycleRewind(service = {}) {
     || service.track_sms_sent_at
     || service.arrival_sms_sent_at,
   );
+}
+
+// GATE_SERIES_MOVE_CARRIES_VISIT — a carried partner's own recurring plan:
+// its parent, or the row itself when it is a plan's template root.
+function partnerSeriesRoot(partner) {
+  return partner.recurring_parent_id || (partner.is_recurring === true ? partner.id : null);
+}
+
+// The date-exception patch for a carried partner landing on `dateStr`: a
+// one-off exception carried back onto its own cadence date rejoins the
+// cadence (the sweep's own rejoin rule); anything else is stamped as a
+// one-off, so the partner plan's cadence never shifts.
+function partnerExceptionPatch(partner, dateStr, initiatedBy) {
+  if (partner.date_exception === true && partner.date_exception_cadence_date
+    && dateOnly(partner.date_exception_cadence_date) === dateStr) {
+    return DATE_EXCEPTION_CLEAR;
+  }
+  return dateExceptionStamp(partner, initiatedBy);
+}
+
+// The write a carried partner gets, or null when it already sits where the
+// stop lands. `target` is planMemberTargets' row for it (window shifted by the
+// anchor's start delta, else kept); `techOverride` is undefined unless the
+// move reassigned the anchor. Like a swept sibling, a partner keeps its own
+// status — only a live row that is rewound lands back on 'confirmed'.
+function planPartnerUpdate({ partner, target, date, dateStr, techOverride, initiatedBy, now }) {
+  const partnerDateChanges = dateOnly(partner.scheduled_date) !== dateStr;
+  const techChanges = techOverride !== undefined && (techOverride || null) !== (partner.technician_id || null);
+  const shifted = !!target && target.shifted;
+  const windowChanges = shifted
+    && (hhmm(target.start) !== hhmm(partner.window_start) || hhmm(target.end) !== hhmm(partner.window_end));
+  if (!partnerDateChanges && !windowChanges && !techChanges) return null;
+  const liveStatus = LIVE_OVERRIDE_STATUSES.has(partner.status);
+  const partnerRewound = liveStatus || (partnerDateChanges && needsLifecycleRewind(partner));
+  const pUpdate = {
+    scheduled_date: date,
+    window_start: shifted ? target.start : partner.window_start,
+    window_end: shifted ? target.end : partner.window_end,
+    status: liveStatus ? 'confirmed' : partner.status,
+    updated_at: now,
+    ...(partnerRewound ? LIVE_LIFECYCLE_RESET : {}),
+    ...(partnerDateChanges ? { route_order: null, ...partnerExceptionPatch(partner, dateStr, initiatedBy) } : {}),
+    ...(techOverride !== undefined ? { technician_id: techOverride } : {}),
+    ...(techChanges ? { route_order: null } : {}),
+  };
+  const keptTech = techOverride !== undefined ? techOverride : (partner.technician_id || null);
+  return { pUpdate, partnerDateChanges, techChanges, keptTech, liveStatus, partnerRewound };
+}
+
+// Each carried member's target at the occurrence's new stop (the unit
+// mover's own planner): only a start that actually moved shifts the partners
+// (by the anchor's own delta); a date-only landing keeps each partner's
+// window. A windowless landing (cleared anchor / parked sibling) keeps them
+// too — a windowless row connects to any stop.
+function planCarriedTargets(vg, sib, entry, updateData, dateStr) {
+  const startMoved = !!updateData.window_start && hhmm(updateData.window_start) !== hhmm(sib.window_start);
+  return vg.planMemberTargets({
+    members: [sib, ...entry.partners],
+    primary: sib,
+    visitWindowStart: entry.visit ? entry.visit.window_start : null,
+    win: startMoved ? { start: updateData.window_start, end: updateData.window_end } : { start: null, end: null },
+    newDateStr: dateStr,
+  });
+}
+
+// Dispatch-due rebase for a carried partner (mutates pUpdate). Returns true
+// when the partner lands windowless awaiting placement: its slot display and
+// route order clear, and the caller pre-closes its reminder.
+function applyPartnerPlacementPatch(partner, pUpdate) {
+  const awaitingPlacement = !pUpdate.window_start && !!partner.recurring_dispatch_due_date;
+  Object.assign(pUpdate, recurringDispatchDuePatch(partner, pUpdate));
+  if (awaitingPlacement) Object.assign(pUpdate, { time_window: null, window_display: null, route_order: null });
+  return awaitingPlacement;
+}
+
+// A plan must never get two of its own visits on one day: the carried
+// partner may not land where another live row of ITS plan already sits
+// (rows moving in this sweep excluded).
+async function assertPartnerPlanDayFree(trx, partner, dateStr, excludeIds) {
+  const root = partnerSeriesRoot(partner);
+  if (!root) return;
+  const clash = await trx('scheduled_services')
+    .whereRaw('(id = ? OR recurring_parent_id = ?)', [root, root])
+    .whereNotIn('id', excludeIds)
+    .whereNotIn('status', ['completed', 'cancelled'])
+    .where('scheduled_date', dateStr)
+    .first('id');
+  if (clash) {
+    throw Object.assign(new Error('That date lands on another visit in a grouped service\'s own plan — pick a different time'), {
+      statusCode: 409,
+      isOperational: true,
+      code: 'SLOT_TAKEN',
+      memberId: partner.id,
+    });
+  }
+}
+
+// CAS write of a carried partner, pinned to the row as the sweep read it
+// (same tuple shape as a swept sibling's, plus visit_id). Returns the
+// RETURNING rows; a lost race is a retryable 409.
+async function writePartnerCas(trx, partner, pUpdate) {
+  const updated = await applyTrackLifecycleCas(
+    trx('scheduled_services').where({
+      id: partner.id,
+      status: partner.status,
+      scheduled_date: partner.scheduled_date,
+      window_start: partner.window_start,
+      window_end: partner.window_end ?? null,
+      technician_id: partner.technician_id ?? null,
+      visit_id: partner.visit_id,
+      ...((!pUpdate.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
+        ? { estimated_duration_minutes: partner.estimated_duration_minutes ?? null }
+        : {}),
+    }),
+    partner,
+  ).update(pUpdate, SERIES_MOVE_SNAPSHOT_COLUMNS);
+  const rows = Array.isArray(updated) ? updated : null;
+  if ((rows ? rows.length : updated) === 0) {
+    throw Object.assign(new Error('Cannot reschedule — a grouped appointment changed concurrently'), {
+      statusCode: 409,
+      isOperational: true,
+      code: 'SLOT_TAKEN',
+      memberId: partner.id,
+    });
+  }
+  return rows;
 }
 
 function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
@@ -2513,7 +2643,7 @@ class SmartRebooker {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([vid, rows]) => `${vid}:${rows.map((r) => [
           String(r.id), r.status, dateOnly(r.scheduled_date), hhmm(r.window_start) || '', hhmm(r.window_end) || '',
-          String(r.technician_id || ''), String(r.property_id || ''),
+          String(r.technician_id || ''), String(r.property_id || ''), String(partnerSeriesRoot(r) || ''),
         ].join('|')).join(',')}`).join(';');
       const carryPartners0 = carriesVisit ? await readCarryPartners(siblings) : new Map();
       // Rows moved together with the sweep: probes must not count their old
@@ -2673,10 +2803,23 @@ class SmartRebooker {
           // inserts a child after the snapshot; the sweep then commits its
           // known siblings while the new child sits on the old cadence
           // (codex r8 P1).
-          await trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-            ['recurring-series-maintenance', String(parentId)],
-          );
+          // Carried partners' OWN plans too (GATE_SERIES_MOVE_CARRIES_VISIT):
+          // a partner landing on a new day must not race that plan's
+          // completion top-up inserting the same day (the plan-day block in
+          // carryVisitPartners reads under it). All keys in one sorted pass,
+          // so two sweeps carrying each other's plans cannot deadlock. A
+          // partner set that changed while waiting is caught by the locked
+          // re-read below.
+          const maintenanceRoots = [...new Set([
+            String(parentId),
+            ...[...carryPartners0.values()].flat().map(partnerSeriesRoot).filter(Boolean).map(String),
+          ])].sort();
+          for (const root of maintenanceRoots) {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['recurring-series-maintenance', root],
+            );
+          }
           if (deferFuturePlacement) {
             // The reminder sender holds this same fence through SMS/email
             // delivery. Take it before the freeze read and every row write:
@@ -3017,184 +3160,112 @@ class SmartRebooker {
       // kept). No message is sent here: the series notice, decided once for
       // the whole move, covers the visit; the effects pass handles the
       // partner's reminder row like an occurrence's (carriedVisitMembers).
+      // A carried partner's landing window against the shared occupancy probe:
+      // advisory surfaces commit the clash and ride the operation's
+      // overlapDates card, as a swept row does; other callers abort the
+      // whole move (all-or-none). A partner is never parked windowless: the
+      // beyond-horizon placeholder carve-out is a series-cadence rule, and a
+      // partner is another plan's row.
+      const probePartnerSlot = async (partner, pUpdate, keptTech, dateStr) => {
+        const occEnd = occupancyProbeEnd(
+          pUpdate.window_start,
+          pUpdate.window_end,
+          process.env.REBOOKER_NULL_END_OCCUPANCY === 'off' ? null : partner.estimated_duration_minutes,
+        );
+        const clash = (await probeMoveConflicts({
+          conn: trx,
+          target: { id: partner.id, date: dateStr, windowStart: pUpdate.window_start, windowEnd: occEnd, technicianId: keptTech, changes: pUpdate },
+          excludeServiceIds: probeExcludeIds,
+          options,
+          travel: seriesTravel,
+        })).rows;
+        if (!clash.length) return;
+        if (clash[0].warning) arrivalWarnings.set(dateStr, clash[0].warning);
+        if (!overlapAdvisory) {
+          throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+            memberId: partner.id,
+          });
+        }
+        overlapWarnDates.add(dateStr);
+      };
+      // Before a carried partner's write: its OWN plan must not get two visits
+      // on one day (the sweep's seriesClash block, under the date-occupancy
+      // lock and the partner plan's maintenance lock, both already held),
+      // save-time tech eligibility, and the slot-reserve lock — what a swept
+      // row takes too.
+      const fencePartner = async ({ partner, dateStr, partnerDateChanges, techChanges, keptTech }) => {
+        if (partnerDateChanges) await assertPartnerPlanDayFree(trx, partner, dateStr, [...sweptIds, ...carry.partnerIds]);
+        if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr);
+        if (keptTech) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `${keptTech}:${dateStr}`],
+          );
+        }
+      };
+      // Everything recorded for a carried partner once its row is written:
+      // status history, the post-commit cleanup entry (with the LANDED
+      // status — a live partner went back to 'confirmed' — and the
+      // technician it was pinned to), the operation row (partner: true —
+      // never counted as this series' cadence, exception or movable rows),
+      // and the result's carriedVisitMembers.
+      const recordCarriedPartner = async ({ partner, pUpdate, updatedPartnerRows, partnerRewound, sib, date }) => {
+        if (pUpdate.status !== partner.status) {
+          await trx('job_status_history').insert({
+            job_id: partner.id,
+            from_status: partner.status,
+            to_status: pUpdate.status,
+            transitioned_by: null,
+          });
+        }
+        if (partnerRewound) rewoundSiblings.push({ ...partner, status: pUpdate.status, customer_id: service.customer_id });
+        const carriedRef = { visitId: String(sib.visit_id), forOccurrenceId: String(sib.id) };
+        moveRows.push({
+          id: partner.id,
+          anchor: false,
+          partner: true,
+          ...carriedRef,
+          exception: false,
+          before: snapshotRow(partner),
+          after: snapshotRow({ ...partner, ...pUpdate, ...(updatedPartnerRows?.[0] || {}) }),
+        });
+        carriedMembers.push({
+          id: partner.id,
+          ...carriedRef,
+          date,
+          windowStart: pUpdate.window_start || null,
+          windowEnd: pUpdate.window_end || null,
+        });
+      };
       const carryVisitPartners = async (sib, date, updateData, { isAnchor, anchorTechChanges, sibRewound }) => {
         const entry = carry.byVisit.get(String(sib.visit_id || ''));
         if (!entry) return;
         const vg = require('./visit-groups');
         const dateStr = String(date).split('T')[0];
-        // Window: only a start that actually moved shifts the partners (by
-        // the anchor's own delta); a date-only landing keeps each partner's
-        // window. A windowless landing (cleared anchor / parked sibling)
-        // keeps them too — a windowless row connects to any stop.
-        const startMoved = !!updateData.window_start && hhmm(updateData.window_start) !== hhmm(sib.window_start);
-        const planned = vg.planMemberTargets({
-          members: [sib, ...entry.partners],
-          primary: sib,
-          visitWindowStart: entry.visit ? entry.visit.window_start : null,
-          win: startMoved ? { start: updateData.window_start, end: updateData.window_end } : { start: null, end: null },
-          newDateStr: dateStr,
-        });
+        const planned = planCarriedTargets(vg, sib, entry, updateData, dateStr);
         const techOverride = isAnchor && anchorTechChanges ? (options.technicianId || null) : undefined;
         let anyLivePartner = false;
-        let dateChanged = dateOnly(entry.visit ? entry.visit.scheduled_date : sib.scheduled_date) !== dateStr;
+        const dateChanged = dateOnly(entry.visit ? entry.visit.scheduled_date : sib.scheduled_date) !== dateStr;
         for (const partner of entry.partners) {
-          const target = planned.find((t) => String(t.id) === String(partner.id));
-          const partnerDateChanges = dateOnly(partner.scheduled_date) !== dateStr;
-          const techChanges = techOverride !== undefined && (techOverride || null) !== (partner.technician_id || null);
-          const windowChanges = !!target && target.shifted
-            && (hhmm(target.start) !== hhmm(partner.window_start) || hhmm(target.end) !== hhmm(partner.window_end));
-          if (!partnerDateChanges && !windowChanges && !techChanges) continue;
-          const liveStatus = LIVE_OVERRIDE_STATUSES.has(partner.status);
+          const plan = planPartnerUpdate({
+            partner, date, dateStr, initiatedBy, techOverride, now: trx.fn.now(),
+            target: planned.find((t) => String(t.id) === String(partner.id)),
+          });
+          if (!plan) continue;
+          const { pUpdate, partnerDateChanges, techChanges, keptTech, liveStatus, partnerRewound } = plan;
           anyLivePartner = anyLivePartner || liveStatus;
-          const partnerRewound = liveStatus || (partnerDateChanges && needsLifecycleRewind(partner));
-          const keptTech = techOverride !== undefined ? techOverride : (partner.technician_id || null);
-          const pUpdate = {
-            scheduled_date: date,
-            window_start: target && target.shifted ? target.start : partner.window_start,
-            window_end: target && target.shifted ? target.end : partner.window_end,
-            // Like a swept sibling, a partner keeps its own status — only a
-            // live row that is rewound lands back on 'confirmed'.
-            status: liveStatus ? 'confirmed' : partner.status,
-            updated_at: trx.fn.now(),
-            ...(partnerRewound ? LIVE_LIFECYCLE_RESET : {}),
-            ...(partnerDateChanges ? { route_order: null, ...dateExceptionStamp(partner, initiatedBy) } : {}),
-            ...(techOverride !== undefined ? { technician_id: techOverride } : {}),
-          };
-          if (techChanges) pUpdate.route_order = null;
-          // The partner's OWN plan must not get two visits on one day — the
-          // same hard block the sweep applies to its own series (seriesClash),
-          // under the date-occupancy lock already held for dateStr.
-          const partnerRoot = partner.recurring_parent_id || (partner.is_recurring ? partner.id : null);
-          if (partnerDateChanges && partnerRoot) {
-            const partnerClash = await trx('scheduled_services')
-              .whereRaw('(id = ? OR recurring_parent_id = ?)', [partnerRoot, partnerRoot])
-              .whereNotIn('id', [...sweptIds, ...carry.partnerIds])
-              .whereNotIn('status', TERMINAL)
-              .where('scheduled_date', dateStr)
-              .first('id');
-            if (partnerClash) {
-              throw Object.assign(new Error('That date lands on another visit in a grouped service\'s own plan — pick a different time'), {
-                statusCode: 409,
-                isOperational: true,
-                code: 'SLOT_TAKEN',
-                memberId: partner.id,
-              });
-            }
-          }
-          if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr);
-          if (keptTech) {
-            await trx.raw(
-              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-              ['slot-reserve', `${keptTech}:${dateStr}`],
-            );
-          }
+          await fencePartner({ partner, dateStr, partnerDateChanges, techChanges, keptTech });
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
-          if (pUpdate.window_start) {
-            const occEnd = occupancyProbeEnd(
-              pUpdate.window_start,
-              pUpdate.window_end,
-              process.env.REBOOKER_NULL_END_OCCUPANCY === 'off' ? null : partner.estimated_duration_minutes,
-            );
-            const clash = (await probeMoveConflicts({
-              conn: trx,
-              target: {
-                id: partner.id,
-                date: dateStr,
-                windowStart: pUpdate.window_start,
-                windowEnd: occEnd,
-                technicianId: keptTech,
-                changes: pUpdate,
-              },
-              excludeServiceIds: probeExcludeIds,
-              options,
-              travel: seriesTravel,
-            })).rows;
-            if (clash.length) {
-              if (clash[0].warning) arrivalWarnings.set(dateStr, clash[0].warning);
-              if (overlapAdvisory) {
-                // Same advisory contract as a swept row: the clash commits and
-                // rides the operation's overlapDates card.
-                overlapWarnDates.add(dateStr);
-              } else {
-                // Non-advisory callers abort the whole move (all-or-none), as
-                // a clash on a swept row does. (A partner is never parked
-                // windowless: the beyond-horizon placeholder carve-out is a
-                // series-cadence rule, and a partner is another plan's row.)
-                throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
-                  statusCode: 409,
-                  isOperational: true,
-                  code: 'SLOT_TAKEN',
-                  memberId: partner.id,
-                });
-              }
-            }
-          }
-          const awaitingPlacement = !pUpdate.window_start && !!partner.recurring_dispatch_due_date;
-          Object.assign(pUpdate, recurringDispatchDuePatch(partner, pUpdate));
-          if (awaitingPlacement) {
-            pUpdate.time_window = null;
-            pUpdate.window_display = null;
-            pUpdate.route_order = null;
-          }
-          const updatedPartner = await applyTrackLifecycleCas(
-            trx('scheduled_services').where({
-              id: partner.id,
-              status: partner.status,
-              scheduled_date: partner.scheduled_date,
-              window_start: partner.window_start,
-              window_end: partner.window_end ?? null,
-              technician_id: partner.technician_id ?? null,
-              visit_id: partner.visit_id,
-              ...((!pUpdate.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
-                ? { estimated_duration_minutes: partner.estimated_duration_minutes ?? null }
-                : {}),
-            }),
-            partner,
-          ).update(pUpdate, SERIES_MOVE_SNAPSHOT_COLUMNS);
-          const updatedPartnerRows = Array.isArray(updatedPartner) ? updatedPartner : null;
-          if ((updatedPartnerRows ? updatedPartnerRows.length : updatedPartner) === 0) {
-            throw Object.assign(new Error('Cannot reschedule — a grouped appointment changed concurrently'), {
-              statusCode: 409,
-              isOperational: true,
-              code: 'SLOT_TAKEN',
-              memberId: partner.id,
-            });
-          }
+          if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
+          const awaitingPlacement = applyPartnerPlacementPatch(partner, pUpdate);
+          const updatedPartnerRows = await writePartnerCas(trx, partner, pUpdate);
           if (awaitingPlacement && partner.window_start) {
             await require('./appointment-reminders').precloseWindowlessReminderInTx(trx, partner.id);
           }
-          if (pUpdate.status !== partner.status) {
-            await trx('job_status_history').insert({
-              job_id: partner.id,
-              from_status: partner.status,
-              to_status: pUpdate.status,
-              transitioned_by: null,
-            });
-          }
-          // The cleanup refreshes the tracker with the LANDED status (a live
-          // partner went back to 'confirmed') and releases the technician
-          // the partner was pinned to (its original technician_id).
-          if (partnerRewound) rewoundSiblings.push({ ...partner, status: pUpdate.status, customer_id: service.customer_id });
-          moveRows.push({
-            id: partner.id,
-            anchor: false,
-            // A visit partner carried by another series' move — never counted
-            // as this series' cadence, exception or movable rows.
-            partner: true,
-            visitId: String(sib.visit_id),
-            forOccurrenceId: String(sib.id),
-            exception: false,
-            before: snapshotRow(partner),
-            after: snapshotRow({ ...partner, ...pUpdate, ...(updatedPartnerRows?.[0] || {}) }),
-          });
-          carriedMembers.push({
-            id: partner.id,
-            visitId: String(sib.visit_id),
-            forOccurrenceId: String(sib.id),
-            date,
-            windowStart: pUpdate.window_start || null,
-            windowEnd: pUpdate.window_end || null,
-          });
+          await recordCarriedPartner({ partner, pUpdate, updatedPartnerRows, partnerRewound, sib, date });
         }
         // Re-key the visit to the new stop from the rows as written: date, the
         // window union of its live members, stop key + seq (both stop locks

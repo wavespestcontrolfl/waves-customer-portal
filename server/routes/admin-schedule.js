@@ -10737,10 +10737,7 @@ async function planCollectiveEditDateMove(req) {
   if (row.visit_id) {
     const vg = require('../services/visit-groups');
     const members = await vg.openMembers(db, row.visit_id);
-    // GATE_SERIES_MOVE_CARRIES_VISIT (owner ruling 2026-10-01): the series
-    // writer carries the grouped partners with each occurrence, so a grouped
-    // anchor no longer refuses here. The frozen-visit refusal below stays.
-    if (members.length >= 2 && !require('../config/feature-gates').seriesMoveCarriesVisitLive()) {
+    if (members.length >= 2) {
       throw Object.assign(
         httpError(409, 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
         { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
@@ -10801,6 +10798,25 @@ async function planCollectiveEditDateMove(req) {
       );
     }
     ackedIds = preview.occurrenceIds.map(String);
+  }
+  // GATE_SERIES_MOVE_CARRIES_VISIT: a later occurrence in a grouped visit
+  // would be CARRIED by the series writer, which can still refuse (a frozen
+  // visit, an unmovable partner, the partner plan's own day) after this
+  // handler has committed the other field edits — a partial save. This
+  // surface moves no grouped stop: refuse before anything is written; the
+  // schedule board moves the whole stop with its partners.
+  if (require('../config/feature-gates').seriesMoveCarriesVisitLive()) {
+    const vg = require('../services/visit-groups');
+    const visitIds = [...new Set((await db('scheduled_services').whereIn('id', ackedIds).whereNotNull('visit_id')
+      .select('visit_id')).map((r) => String(r.visit_id)))];
+    for (const visitId of visitIds) {
+      if ((await vg.openMembers(db, visitId)).length >= 2) {
+        throw Object.assign(
+          httpError(409, 'A later visit in this plan is grouped with another service at the same stop. Move the plan from the schedule (each stop moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
+          { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+        );
+      }
+    }
   }
   let win = { start: null, end: null };
   const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
