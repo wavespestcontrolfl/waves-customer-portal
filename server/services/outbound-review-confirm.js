@@ -902,11 +902,16 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // (Recognized by its card whatever its state: a hold the completion settled without approving — an
     // incomplete / declined closeout — stays a non-activatable hold.)
     if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db, { includeClosedOut: true })) {
-      const approved = (row.status === 'completed' && !!row.field_confirmed_at)
-        // The recorded approval binds to the address the office confirmed: a correction after it voids it
-        // (the office re-confirms the new address), so a retry never releases the hold for an unseen address.
-        || (row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId)
-          && await approvedAddressStillCurrent(db, serviceId));
+      const officeApproved = row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId);
+      // The recorded approval binds to the address the office confirmed: a correction after it voids it
+      // (the office re-confirms the new address), so a retry never releases the hold for an unseen address.
+      const addressVoided = officeApproved && !(await approvedAddressStillCurrent(db, serviceId));
+      const approved = (row.status === 'completed' && !!row.field_confirmed_at) || (officeApproved && !addressVoided);
+      if (addressVoided) {
+        // An earlier attempt's hook may already have resolved the hold's review card: bring it back, or the
+        // unconfirmed visit would be hidden from the office's open queue.
+        await reopenHoldCardForRestoredVisit(serviceId, db);
+      }
       if (!approved) {
         logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
         return false;
@@ -1048,6 +1053,8 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
   const bindAddress = svc.source_action === 'voice_agent' && !opts.skipCardRequest;
   if (bindAddress && !(await approvedAddressStillCurrent(dbh, svc.id))) {
     logger.info(`[${routeTag}] office-confirm activation skipped for ${svc.id}: the visit address changed after the approval`);
+    // A previous attempt's hook may have resolved the hold's card: reopen it so the office sees the hold.
+    await reopenHoldCardForRestoredVisit(svc.id, dbh);
     return false;
   }
   try {

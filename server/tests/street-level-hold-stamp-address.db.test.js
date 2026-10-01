@@ -24,7 +24,7 @@ postgres('the activation stamp is bound to the approved address (real PostgreSQL
     schema = `hold_stamp_${randomUUID().replace(/-/g, '')}`;
     knex = knexFactory({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 4 } });
     await knex.raw('CREATE SCHEMA ??', [schema]);
-    for (const table of ['scheduled_services', 'triage_items', 'call_log']) {
+    for (const table of ['scheduled_services', 'triage_items', 'call_log', 'job_status_history']) {
       await knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
   }, 60000);
@@ -34,7 +34,7 @@ postgres('the activation stamp is bound to the approved address (real PostgreSQL
   });
 
   beforeEach(async () => {
-    for (const table of ['triage_items', 'scheduled_services', 'call_log']) await knex(table).del();
+    for (const table of ['job_status_history', 'triage_items', 'scheduled_services', 'call_log']) await knex(table).del();
   });
 
   async function seed({ witness = NORM, cardStatus = 'open' } = {}) {
@@ -92,6 +92,30 @@ postgres('the activation stamp is bound to the approved address (real PostgreSQL
     const onSite = await seed();
     await knex('scheduled_services').where({ id: onSite.visitId }).update({ service_address_line1: '1240 Sample Newbuild Trl' });
     expect(await stamp(onSite.visitId, false)).toBe(1);
+  });
+
+  describe('a retry that rejects a changed address leaves the hold visible to the office', () => {
+    const { activateLegacyOutboundReviewRowIfNeeded, runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+    async function approvedThenCorrected() {
+      const seeded = await seed({ cardStatus: 'resolved' });   // an earlier attempt's hook resolved the card
+      await knex('job_status_history').insert({ job_id: seeded.visitId, from_status: 'pending', to_status: 'confirmed', transitioned_by: randomUUID() });   // a user-attributed approval (the office confirm route's row)
+      await knex('scheduled_services').where({ id: seeded.visitId }).update({ service_address_line1: '1240 Sample Newbuild Trl' });
+      return seeded;
+    }
+
+    test('the lazy / sweep activation: not activated, card reopened', async () => {
+      const { visitId, callId } = await approvedThenCorrected();
+      expect(await activateLegacyOutboundReviewRowIfNeeded(knex, visitId, 'legacy-activation-sweep')).toBe(false);
+      expect(await confirmed(visitId)).toBe(false);
+      expect((await knex('triage_items').where({ call_log_id: callId }).first()).status).toBe('open');
+    });
+
+    test('the office-confirm activation: no legs run, nothing stamped, card reopened', async () => {
+      const { visitId, callId } = await approvedThenCorrected();
+      expect(await runOfficeConfirmActivation(knex, { id: visitId, source_action: 'voice_agent' }, 'admin-dispatch')).toBe(false);
+      expect(await confirmed(visitId)).toBe(false);
+      expect((await knex('triage_items').where({ call_log_id: callId }).first()).status).toBe('open');
+    });
   });
 
   test('a visit a rejection took (cancelled) is never stamped', async () => {

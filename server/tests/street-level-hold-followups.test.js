@@ -208,7 +208,8 @@ describe('finding 6: the office approval is bound to the address it was given fo
 
   test('the activation guard consults the witness only for a confirmed (office-approved) hold, never for a performed completion', () => {
     const s = read('../services/outbound-review-confirm.js');
-    expect(s).toContain("(row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId)\n          && await approvedAddressStillCurrent(db, serviceId))");
-    expect(s).toContain("(row.status === 'completed' && !!row.field_confirmed_at)");
+    expect(s).toContain("const officeApproved = row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId);");
+    expect(s).toContain('const addressVoided = officeApproved && !(await approvedAddressStillCurrent(db, serviceId));');
+    expect(s).toContain("const approved = (row.status === 'completed' && !!row.field_confirmed_at) || (officeApproved && !addressVoided);");
   });
 });
