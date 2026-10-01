@@ -15,6 +15,7 @@ const { dateOnlyToNoonUtc } = require('./time-format');
 const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-diagnosis');
 const { buildLawnInsightCards, issueRestatesAftercare } =require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
+const { lawnReportLeadLive } = require('../../config/feature-gates');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
@@ -263,7 +264,10 @@ function mapMowing(mowingHeight, grassLabel) {
   // Status + recommendation only apply when a numeric reading was captured; a
   // photo-only visit surfaces just the image.
   const status = measured == null ? null : (MOW_STATUS[mowingHeight.status] || 'ideal');
-  const rec = status == null
+  // Lead mode: an out-of-band reading leaves the recommendation null — the
+  // mowing finding card already says "Raise/Lower the mower one setting".
+  const outOfBand = status === 'too_short' || status === 'too_tall';
+  const rec = status == null || (outOfBand && lawnReportLeadLive())
     ? null
     : status === 'too_short'
       ? `Your ${grassLabel} is being kept a bit short. Short mowing makes turf show heat and dry stress faster — consider raising the mower one setting.`

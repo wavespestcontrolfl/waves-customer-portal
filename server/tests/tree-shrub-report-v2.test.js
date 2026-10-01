@@ -293,6 +293,19 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     expect(buildTreeShrubReportV2({ treeShrubAssessment: null })).toBeNull();
   });
 
+  it('payload is byte-identical whether or not the lawn report lead gate is live (lawn-only gate)', () => {
+    const build = () => JSON.stringify(buildTreeShrubReportV2({ treeShrubAssessment: assessment() }));
+    const previous = process.env.GATE_LAWN_REPORT_LEAD;
+    try {
+      delete process.env.GATE_LAWN_REPORT_LEAD;
+      const off = build();
+      process.env.GATE_LAWN_REPORT_LEAD = 'true';
+      expect(build()).toBe(off);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = previous;
+    }
+  });
+
   it('builds the snapshot headline from the most severe insight (spec example)', () => {
     const v2 = buildTreeShrubReportV2({ treeShrubAssessment: assessment() });
     expect(v2).toBeTruthy();

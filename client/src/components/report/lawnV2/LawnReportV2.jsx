@@ -433,7 +433,7 @@ function SliderArrow({ dir, onClick, disabled }) {
   );
 }
 
-export function LawnPhotoStrip({ photos = [], summary = null, embedded = false }) {
+export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, lead = false }) {
   const print = usePrint();
   const pics = (photos || []).filter((p) => p && p.url);
   const scroller = useRef(null);
@@ -498,7 +498,13 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false }
           ) : null}
         </div>
       ) : null}
-      {summary ? <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p> : null}
+      {summary && lead ? (
+        <details open={print} style={{ marginTop: 12 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Technician notes</summary>
+          <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p>
+        </details>
+      ) : null}
+      {summary && !lead ? <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p> : null}
     </Frame>
   );
 }
@@ -530,14 +536,14 @@ const CATEGORY_DETAIL = {
   },
 };
 
-export function VisualDiagnosisCards({ categories = [] }) {
+export function VisualDiagnosisCards({ categories = [], lead = false, scoreExplanation = null }) {
   const print = usePrint();
   const [barsRef, mounted] = useInViewOnce(0.25);
   const cats = categories.filter(Boolean);
   if (!cats.length) return null;
   return (
     <Card>
-      <CardTitle sub="Five diagnostic categories scored from today’s field photos with AI-assisted image analysis and verified by your technician. Tap a row for details.">Turf Health Analysis</CardTitle>
+      <CardTitle sub={lead ? (scoreExplanation || 'Scored from today’s photos. Tap a row for details.') : 'Five diagnostic categories scored from today’s field photos with AI-assisted image analysis and verified by your technician. Tap a row for details.'}>Turf Health Analysis</CardTitle>
       {/* Visual-primary rows: the score ring + bar + status carry the read at a glance;
           the plain-language detail lives in the dropdown. */}
       {/* minmax(0, 1fr), not the implicit auto track: an auto track is sized to
@@ -628,13 +634,17 @@ const sameText = (a, b) => {
 };
 
 export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
+  const print = usePrint();
   const top = [...insights.filter(Boolean)]
     .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
     .slice(0, limit);
   if (!top.length) return null;
+  // Lead mode: a healthy report's only card is the 'overall' reassurance, which
+  // the lead's headline already says, so the whole card is left out.
+  if (lead && top.every((card) => card.category === 'overall')) return null;
   return (
     <Card>
-      <CardTitle sub="Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.">Priority Findings & Action Plan</CardTitle>
+      <CardTitle sub={lead ? null : 'Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.'}>{lead ? 'Priority findings' : 'Priority Findings & Action Plan'}</CardTitle>
       {/* minmax(0, 1fr) for the same reason as the diagnosis rows: an auto track
           sized to the headline's longest word + the status pill blew past the
           card on a 320px phone. */}
@@ -649,6 +659,43 @@ export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
             // so the card never prints a second, different "Next visit".
             nextVisitPlan: (lead.next || sameText(lead.next, card.nextVisitPlan)) ? null : card.nextVisitPlan,
           } : card;
+          if (lead) {
+            // A finding is its headline, status and what we saw. The reason it
+            // matters stays inline only for needs_attention; a step or plan the
+            // lead could not carry stays visible; the rest folds into "More
+            // about this" (opened in print/PDF).
+            const showWhy = it.status === 'needs_attention';
+            const showPlan = inLead && Boolean(it.nextVisitPlan);
+            const more = [
+              !showWhy && it.whyItMatters ? <InsightLine key="why" label="Why it matters" value={it.whyItMatters} size={16} /> : null,
+              it.wavesAction ? <InsightLine key="did" label="What Waves did" value={it.wavesAction} size={16} /> : null,
+              !showPlan && it.nextVisitPlan ? <InsightLine key="next" label="Next visit" value={it.nextVisitPlan} size={16} /> : null,
+            ].filter(Boolean);
+            const confidenceLabel = it.confidence && INSIGHT_CONFIDENCE[it.confidence] ? INSIGHT_CONFIDENCE[it.confidence] : null;
+            return (
+              <div key={i} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD, padding: '14px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap' }}>
+                  <div style={{ flex: '1 1 auto', minWidth: 0, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16.5, color: TEXT, lineHeight: 1.25 }}>{it.headline}</div>
+                  <StatusPill status={it.status || 'tracking'} small />
+                </div>
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {it.whatWeSaw ? <InsightLine label="What we saw" value={it.whatWeSaw} size={16} /> : null}
+                  {showWhy && it.whyItMatters ? <InsightLine label="Why it matters" value={it.whyItMatters} size={16} /> : null}
+                  {it.customerAction ? <InsightLine label="Your next step" value={it.customerAction} strong size={16} /> : null}
+                  {showPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} size={16} /> : null}
+                </div>
+                {more.length || confidenceLabel ? (
+                  <details open={print} style={{ marginTop: 10 }}>
+                    <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>More about this</summary>
+                    <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+                      {more}
+                      {confidenceLabel ? <div style={{ fontSize: 14, color: MUTED, fontStyle: 'italic' }}>{confidenceLabel}</div> : null}
+                    </div>
+                  </details>
+                ) : null}
+              </div>
+            );
+          }
           return (
             <div key={i} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD, padding: '14px 16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap' }}>
@@ -808,8 +855,9 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
 }
 
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────
-export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null }) {
+export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null, lead = false }) {
   const mounted = useMounted();
+  const print = usePrint();
   if (!water) return null;
   // Missing readings stay missing card-wide: Number(null)/Number('') are a
   // finite 0, and a rain-unknown payload must not render a false `Rain 0"`
@@ -863,6 +911,8 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   const stackedExtent = (hasRain ? rain : 0) + (hasIrr && irrOnFile ? irrigation : 0);
   const axisMax = Math.max(hasTotal ? total : 0, stackedExtent, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
+  const explanationShown = Boolean(water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)));
+  const afterNote = Boolean(aftercare && aftercare.watering);
 
   return (
     <Card>
@@ -914,7 +964,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           watering instruction — the legacy balance explanation ("more
           irrigation time will help") can contradict a hold or a
           rain-conditional plan (codex gh-r21). */}
-      {water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
+      {!lead && explanationShown ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
       {water.scheduleUnconfirmed ? (
@@ -936,14 +986,30 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           cover — treatment-first still, but no "counts as a run" claim
           (codex gh-r16). */}
       <WeekPlanCallout weekPlan={water.weekPlan} aftercare={aftercare} />
+      {/* Lead mode: the reading, the plan and the label note fold into one
+          expander (opened in print/PDF) under the plan. The static "Coverage
+          watch" callout is gone there: the coverage finding and the balanced
+          explanation already say it. */}
+      {lead && (explanationShown || afterNote) ? (
+        <details open={print} style={{ marginTop: 12 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Why this reading</summary>
+          {explanationShown ? <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p> : null}
+          {afterNote ? (
+            <div className="lawn-callout-after" style={{ marginTop: 10, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
+              <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
+              {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 14, color: MUTED }}>{aftercare.reentry}</div> : null}
+            </div>
+          ) : null}
+        </details>
+      ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
-      {water.coverageWatch ? (
+      {!lead && water.coverageWatch ? (
         <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>Coverage watch:</strong> total weekly water looks adequate, but a few areas may not be getting even coverage — worth checking that your sprinklers reach those spots rather than watering the whole lawn more.
         </div>
       ) : null}
       {/* Watering after today, from the product label (or a safe default). */}
-      {aftercare && aftercare.watering ? (
+      {!lead && afterNote ? (
         <div className="lawn-callout-after" style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
           {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 14, color: MUTED }}>{aftercare.reentry}</div> : null}
