@@ -50,7 +50,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
     await jobsMigration.up(mockPg);
     await customerInitiatedMigration.up(mockPg);
-    await mockPg.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.timestamp('receipt_sent_at'); });
+    await mockPg.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.timestamp('receipt_sent_at'); t.uuid('visit_completion_packet_id'); });
   });
   afterAll(async () => {
     await mockPg?.destroy();

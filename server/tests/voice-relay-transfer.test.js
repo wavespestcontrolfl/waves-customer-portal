@@ -172,6 +172,18 @@ describe('executeTool transfer_to_office', () => {
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
   });
 
+  test('the no-context bell opens the call itself when its call_log row resolves', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const db = require('../models/db');
+    const first = jest.fn().mockResolvedValue({ id: 'call-uuid-1' });
+    db.mockReturnValueOnce({ where: () => ({ first }) });
+    const { ctx } = ctxFor({ writeHandoff: jest.fn().mockRejectedValueOnce(new Error('pool down')).mockResolvedValueOnce(1) });
+    await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, ctx);
+    await new Promise((r) => setImmediate(r));
+    expect(triggerNotification).toHaveBeenCalledWith('alert', 'Sandy transfer without context', expect.any(String),
+      expect.objectContaining({ link: '/admin/communications#tab=calls&call=call-uuid-1' }));
+  });
+
   test('a 0-row packet write (owner fence / terminal guard refused) ABORTS the transfer — a stale socket never ends the call or rings staff', async () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { ctx } = ctxFor({ writeHandoff: jest.fn(async () => 0) });

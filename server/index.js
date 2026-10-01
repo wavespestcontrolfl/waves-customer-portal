@@ -270,6 +270,14 @@ app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, 
 // response the page never reads, so this route sets no CORS headers.
 app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
 
+// /book "Can't find a time?" preferred-time request (GATE_BOOK_PREFERRED_TIME,
+// dark). The guard (no-store/noindex/no-referrer headers + the generic
+// unknown-route 404 while the gate is off) is mounted ABOVE the global cors()
+// (an allowed-origin OPTIONS preflight would answer 204 while dark), the global
+// `/api/` limiter (429) and the body parsers (400/413) — the same position the
+// other dark public routes use (codex P0 r1 on #5399). The route re-runs it.
+app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredTimePreParserGuard);
+
 // Signed satellite image proxy (lead-form lookup, service report, portal
 // station map): serves Google imagery WITHOUT the server Maps key ever
 // reaching a customer. Mounted ABOVE the global cors() (which would otherwise

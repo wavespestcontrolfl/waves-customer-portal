@@ -1098,7 +1098,8 @@ router.post('/sms', async (req, res) => {
           message: Body || 'Photo',
           source,
           area: numberConfig.area || 'Unknown',
-          link: '/admin/communications',
+          // The unknown sender's thread, named by the message (no phone in a link).
+          link: `/admin/communications?message=${encodeURIComponent(MessageSid)}`,
         });
       } catch (e) { logger.error(`Domain lead notification failed: ${e.message}`); }
     }
