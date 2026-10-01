@@ -116,6 +116,10 @@ const lastLedgerPatch = () => mockState.updates.filter((u) => u.table === 'vendo
 const ledgerStatus = () => mockState.updates.filter((u) => u.table === 'vendor_orders').map((u) => u.row.status).filter(Boolean).pop();
 const requestStatus = () => mockState.updates.filter((u) => u.table === 'product_restock_requests').map((u) => u.row.status).pop();
 
+// A system retire closes the bell as done (read is not done): done_at, done_by
+// and resolution all carry doneColumns' keep-existing expressions.
+const closedDone = (u) => u.row.done_at != null && u.row.done_by != null && u.row.resolution != null;
+
 test('master gate off → no claim; the request is handed off with the sweep\'s deduped bell (Codex r18 P2)', async () => {
   process.env.GATE_AUTO_ORDER = 'false';
   const a = mockAdapter();
@@ -222,7 +226,7 @@ test('the claim retires the request\'s manual bell in its own transaction; a fai
   expect(await run(a)).toMatchObject({ status: 'placed' });
   const retired = mockState.updates.filter((u) => u.table === 'notifications');
   expect(retired).toHaveLength(2); // the request's manual bell + the ledger's (dry-run) bell keyspace
-  expect(retired.every((u) => u.row.read_at instanceof Date)).toBe(true);
+  expect(retired.every(closedDone)).toBe(true);
   mockState.updates = []; mockState.ledgerRows = [];
   mockState.bellRetireThrows = true;
   const b = mockAdapter();
@@ -241,7 +245,7 @@ test('a claim another pod inserts while the hand-off bell is being written retir
     const r = await run(mockAdapter());
     expect(r).toEqual({ requestId: 'req-1', skipped: 'gated', autoOrderLive: true });
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(mockState.updates.some((u) => u.table === 'notifications' && u.row.read_at instanceof Date)).toBe(true); // the just-written bell retired
+    expect(mockState.updates.some((u) => u.table === 'notifications' && closedDone(u))).toBe(true); // the just-written bell retired
   } finally { mockState.liveAutoOrderAfterBell = null; mockState.bellRung = false; }
 });
 
@@ -286,7 +290,7 @@ test('re-arming a dry-run row retires its "nothing was submitted" bell inside th
   expect(await run(dry)).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
   mockState.updates = []; mockState.ledgerRows = [];
   expect(await run(mockAdapter())).toMatchObject({ status: 'placed' });
-  const retired = mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at instanceof Date);
+  const retired = mockState.updates.filter((u) => u.table === 'notifications' && closedDone(u));
   expect(retired.length).toBeGreaterThanOrEqual(2); // the request's manual bell + the ledger's dry-run bell
 });
 
@@ -296,7 +300,7 @@ test('an adapter without its credential does not CLAIM either: handed back with 
   expect(r).toMatchObject({ skipped: 'adapter_unconfigured', belled: true });
   expect(mockState.ledgerRows).toHaveLength(0);
   expect(a.place).not.toHaveBeenCalled();
-  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at instanceof Date)).toHaveLength(0);
+  expect(mockState.updates.filter((u) => u.table === 'notifications' && closedDone(u))).toHaveLength(0);
 });
 
 test('the claim stamps the SKU + link it actually authorized onto the request when the eligible price row changed since the sweep (Codex r21 P2)', async () => {
@@ -629,7 +633,7 @@ test.each([
   expect(cancel.closed_at).toBeInstanceOf(Date);
   expect(JSON.parse(cancel.metadata)).toMatchObject({ vendorId: 'vend-sm', autoOrderCancelled: reason });
   // The sweep's manual bell for the withdrawn need is retired with the cancel (Codex r24 P1).
-  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(1);
+  expect(mockState.updates.filter((u) => u.table === 'notifications' && closedDone(u))).toHaveLength(1);
 });
 
 test('a claim-time cancel of a request with a re-claimable dry-run row retires that row\'s own bell too (Codex r30 P1)', async () => {
@@ -638,7 +642,7 @@ test('a claim-time cancel of a request with a re-claimable dry-run row retires t
   try {
     const r = await run(mockAdapter());
     expect(r).toMatchObject({ skipped: 'auto_reorder_disabled', cancelled: true });
-    expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(2); // the sweep's request bell + the dry-run ledger bell
+    expect(mockState.updates.filter((u) => u.table === 'notifications' && closedDone(u))).toHaveLength(2); // the sweep's request bell + the dry-run ledger bell
     expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.evidence && !u.row.status)).toBe(true); // evidence.bell stripped
   } finally { mockState.requestLedger = null; }
 });
@@ -970,7 +974,7 @@ test('a delivered bell whose version stamp hits zero rows (the bell was replaced
   mockState.bellStampMiss = false;
   // ONLY the just-inserted v1 notification is retired — staff never read v1's instructions beside v2 (Codex r23 P1) — and v2's own notification is untouched: a delayed
   // v1 delivery must never retire the current bell, whose row is already stamped and would never re-ring (hook r31 P1).
-  const retired = mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at);
+  const retired = mockState.updates.filter((u) => u.table === 'notifications' && closedDone(u));
   expect(retired).toHaveLength(1);
   expect(retired[0].raws).toEqual([[expect.stringContaining("dedupeKey' = ?"), ['auto-order:ledger-9:v1']]]);
 });

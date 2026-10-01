@@ -98,6 +98,7 @@ router.post('/queries/:id/file-back', async (req, res) => {
     if (!query) return res.status(404).json({ error: 'Query not found' });
 
     const paths = query.articles_referenced || [];
+    if (WikiQA.drewOnCatalog(paths)) return res.status(409).json({ error: WikiQA.CATALOG_FILE_BACK_REASON });
     if (paths.length) {
       const first = await getDb()('knowledge_base').where('path', paths[0]).first();
       if (first) {

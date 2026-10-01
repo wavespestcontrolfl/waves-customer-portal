@@ -4,7 +4,11 @@ const run = process.env.CALLBACK_LEDGER_POSTGRES === '1' ? describe : describe.s
 jest.setTimeout(30000);
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+// The real done-state helpers (callback-cards closes the reminder as done through them).
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => null),
+  _private: jest.requireActual('../services/notification-service')._private,
+}));
 // audit-log is real: the card's callback_reopen event is the reopen boundary fulfillment reads.
 
 
@@ -157,6 +161,9 @@ run('callback ledger on PostgreSQL', () => {
     await cards.actOnCallback(trx, row.id, { action: 'snooze', actorId: staff.id, expectedAt: row.updated_at, snooze: 'two_hours', now });
     const after = await trx('notifications').where({ id: bell.id }).first();
     expect(after.read_at).not.toBeNull();
+    // Staff acting on the card is the work done, not just a read.
+    expect(after.done_at).not.toBeNull();
+    expect(after.done_by).toBe(`callback:${staff.id}`); // a workflow close: not reopenable
     // The identity itself is re-armed by the versioned watchdog refresh
     // (tests/callback-alerts-postgres.test.js), so the key is left intact.
     expect(after.metadata.dedupeKey).toBe(key);

@@ -57,7 +57,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
-const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, isDateInWindow, resolveOrdinanceJurisdiction } = require('../services/waveguard-plan-engine');
 const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -1273,26 +1273,15 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
     .select('id', 'name', 'analysis_n', 'analysis_p'), []);
   if (!profile) return [];
 
-  // Stamped visit address OUTRANKS the turf-profile municipality (matches
-  // the plan engine): the 1:1 profile describes the primary home, so a visit
-  // stamped at a rental in another city must use the treated property's
-  // ordinances, not the profile's — and when the stamped city diverges, the
-  // profile county is dropped too (the rental's county is unknown; keeping
-  // the primary home's county would OR its blackout onto the rental).
-  const stampedCity = String(svc.service_address_city || '').trim();
-  const profileCity = String(profile.municipality || '').trim();
-  const customerCity = String(svc.city || '').trim();
-  // The county belongs to the PROFILE, so divergence is measured against the
-  // profile's own city context (its municipality, else the customer city as
-  // its implied context): a stamped visit in a different city drops the
-  // profile county even when the CUSTOMER's city happens to match the stamp
-  // (stale-profile case: Charlotte profile, Bradenton customer+visit). No
-  // known reference city -> keep the county (can't prove divergence).
-  const countyReferenceCity = profileCity || customerCity;
-  const stampedDiverges = !!stampedCity && !!countyReferenceCity &&
-    countyReferenceCity.toLowerCase() !== stampedCity.toLowerCase();
-  const county = stampedDiverges ? '' : String(profile.county || '').trim();
-  const city = stampedCity || profileCity || customerCity;
+  // Same jurisdiction resolution as the plan (stamped visit address outranks
+  // the profile; a county-less profile falls back to the treated address's
+  // county via address-county).
+  const { county, city } = resolveOrdinanceJurisdiction(profile, {
+    stampedCity: svc.service_address_city,
+    stampedZip: svc.service_address_zip,
+    customerCity: svc.city,
+    customerZip: svc.customer_zip,
+  });
   if (!county && !city) return [];
 
   const ordinances = await failSoftRead(database, (k) => k('municipality_ordinances')
@@ -2461,6 +2450,17 @@ function shouldAutoInvoiceCompletion({
  * Returns an HTTP-independent { status, body } result; unexpected failures throw.
  * actor comes from authenticated staff middleware, never from the submitted body.
  */
+// An incomplete or customer-declined closeout of a street-level hold settles it exactly like cancel / skip
+// (owner ruling): the review card closes with a note, the address is NOT approved (no field stamp, no
+// office-confirm activation, no inspection credit). No-op (null) for every other visit; false when the
+// settlement FAILED, so the caller keeps the closeout resumable (503) and a retry settles it.
+async function settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome) {
+  if (svc?.source_action !== 'voice_agent' || svc.customer_confirmed === true) return null;
+  return require('./street-level-hold').closeHoldCardForEndedVisit(svc.id, 'completed', undefined, {
+    note: `Visit closed out ${visitOutcome} — address not confirmed`, closedOut: String(visitOutcome),
+  });
+}
+
 async function completeScheduledService(completionInput, packetContext = null) {
   // Internal packet context is supplied separately from the HTTP body. All
   // member writes share its OUTER transaction; no member starts post-commit
@@ -2702,6 +2702,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? typedPhotoSummary.trim().slice(0, 600)
       : '';
     const isIncompleteVisit = visitOutcome === 'incomplete';
+    // A closeout that did not reach the property's work (incomplete, declined) never confirms its address.
+    const addressConfirmingOutcome = visitOutcome !== 'incomplete' && visitOutcome !== 'customer_declined';
     // A visit the tech never performed at all (incomplete, customer
     // declined) discards its station payload entirely — the post-commit
     // sync below skips it, so the pre-commit station preflights (cap,
@@ -2866,7 +2868,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
-        'customers.city', 'customers.property_type',
+        'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
         // Report application-conditions (weather) capture at the TREATED
         // parcel: stamped visit coords first, the primary home only for
         // non-divergent stamps (codex round-10 P2).
@@ -5108,6 +5110,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
         ? resumedStructuredNotes.customerRequestedReview
         : null;
       durableCompletionCommitted = true;
+      // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
+      // its address — released only now that the completion is durably committed (a rejected
+      // completion never approves the address) and before any customer delivery below, so the
+      // recap is no longer a held message. A no-op for every other visit; best-effort.
+      const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);
+      // A hold that could NOT be released leaves the recap a held message: keep the saved completion
+      // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
+      if (holdRelease === false) {
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'));
+        return ({ status: 503, body: {
+          error: 'The visit is saved, but its address hold could not be released yet — the closeout is NOT finalized. Retry the closeout.',
+          code: 'street_level_hold_release_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+        } });
+      }
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
@@ -7335,6 +7352,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // owns status + updated_at; we own the service timing columns
         // on the same row.
         const scheduledServiceUpdate = { ...lifecycleUpdates };
+        // Owner ruling 2026-10-01: completing a street-level hold's visit AT THE PROPERTY confirms its
+        // address. The durable field stamp commits with the 'completed' status (before any post-commit
+        // activator runs), is the evidence the lazy activation requires, and keeps the card funnel off
+        // (the technician collects in person). An incomplete or declined closeout confirms nothing.
+        if (addressConfirmingOutcome && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true
+          && await require('./street-level-hold').isStreetLevelHoldVisit(svc.id, trx)) {
+          scheduledServiceUpdate.field_confirmed_at = svc.field_confirmed_at || new Date();
+        }
         // The closeout stamp follows the same program-attribution predicate
         // as the ledger (Codex #4365 r2 P2): a per_visit / one_time customer
         // keeping a legacy tier is a WaveGuard closeout for the completion
@@ -7387,6 +7412,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           fromStatus,
           toStatus: 'completed',
           transitionedBy: completionInput.actor.technicianId,
+          holdCompletionOutcome: addressConfirmingOutcome ? 'performed' : String(visitOutcome),
           trx,
         });
 
@@ -7467,6 +7493,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return { status: 202, body: { serviceRecordId: record.id } };
         }
         durableCompletionCommitted = true;
+        // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
+        // its address — released only now that the completion is durably committed (a rejected
+        // completion never approves the address) and before any customer delivery below, so the
+        // recap is no longer a held message. A no-op for every other visit; best-effort.
+        const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);
+        // A hold that could NOT be released leaves the recap a held message: keep the saved completion
+        // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
+        if (holdRelease === false) {
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'));
+          return ({ status: 503, body: {
+            error: 'The visit is saved, but its address hold could not be released yet — the closeout is NOT finalized. Retry the closeout.',
+            code: 'street_level_hold_release_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          } });
+        }
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
@@ -9363,6 +9404,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}. The earlier manual-billing instruction for refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} no longer applies; do NOT bill or collect again.`),
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: `Invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}`, keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ liveBesideInvoiceId: liveBesideNow.id, resolvedCovered: true })]),
               });
             }
@@ -9530,7 +9574,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: an annual-prepay term now covers estimate ${feeEstimateRef}; the setup fee is waived by that plan. The earlier manual-billing instruction no longer applies; do NOT bill.`),
-                read_at: trx.fn.now(),
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: 'An annual-prepay term covers the setup fee', keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
               });
             }
@@ -9639,8 +9685,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and ${applicationCoveredBy ? `invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers` : 'an out-of-band prepayment (marked prepaid) covered'} the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`),
-                // No action left — never a false unread badge (Codex PR r9 P2).
-                read_at: trx.fn.now(),
+                // No action left: closed done, never an open card (Codex PR r9 P2).
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: 'Live invoices cover the setup fee and the application charge', keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: feeCoveredBy.id, resolvedCovered: true })]),
               });
             }
@@ -9705,7 +9753,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             await trx('notifications').where({ id: already.id }).update({
               ...require('../services/notification-service').adminBodyColumns('billing', alertBody + crossVisitNote),
               // Newly actionable again — surface in the unread badge.
-              read_at: null,
+              read_at: null, done_at: null, done_by: null, resolution: null,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, expectedSetupFeeCents, expectedApplicationCentsByVisit, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
             });
             return true;
@@ -12482,13 +12530,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
         && (completionTextWouldCarryPayLink || declineNoticeEligibleSansHold);
       if (invoice?.id && (invoiceSenderOwnsPayLink || heldPayLinkWouldHaveGone)) {
         try {
+          // The ownership marker and the queue write land in ONE transaction (handOverHeldInvoiceToSender), and the
+          // exhausted-invoice re-arm rides the FIRST ownership hand-over only (Codex #5459 r4 P2): the transaction that
+          // newly records invoiceSenderOwnsPayLinkFor. A failed queue write rolls the marker back, so the retried
+          // closeout is again "newly owning" and still re-arms; once the marker is committed no re-run resets the
+          // sender's attempt cap.
+          await require('../services/dispatch-completion-deferred').handOverHeldInvoiceToSender({ invoiceId: invoice.id, serviceRecordId: record.id });
           if (!invoiceSenderOwnsPayLink) {
             const ownsDelta = { invoiceSenderOwnsPayLinkFor: String(invoice.id) };
-            await mergeRecordNotesKeys(record.id, ownsDelta);
             Object.assign(recordStructuredNotes, ownsDelta);
             record.structured_notes = { ...parseJsonObject(record.structured_notes), ...ownsDelta };
           }
-          await require('../services/collections/collection-hold').queueHeldInvoiceForSender(invoice.id, db);
         } catch (handOverErr) {
           logger.error(`[dispatch] dispute-hold hand-over of invoice ${invoice.id} to the invoice sender FAILED for ${svc.id} — releasing for resume: ${handOverErr.message}`);
           try {
@@ -13934,6 +13986,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
 module.exports = {
   completeScheduledService,
+  actualProductBlackoutBlocks,
   deliveryUnverifiedProviderOutcome,
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,

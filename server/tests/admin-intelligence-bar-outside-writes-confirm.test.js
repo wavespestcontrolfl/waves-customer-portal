@@ -358,3 +358,24 @@ describe('inbound forged pins never reach an outside-write executor', () => {
     expect(writes[0][0].pathname).not.toContain('forged');
   });
 });
+
+// Preview-only switches (Codex r1 on #5489): the card hides Confirm, and a
+// forged or stale confirm is refused before ANY executor or network call.
+describe.each(['set_railway_gate', 'set_growthbook_feature_environment'])('/confirm-action refuses preview-only %s', (toolName) => {
+  test('409 preview_only, result recorded, nothing dispatched', async () => {
+    const outbound = jest.fn();
+    global.fetch = (url, init) => {
+      if (String(url).startsWith('http://127.0.0.1')) return realFetch(url, init);
+      outbound(url, init);
+      return Promise.resolve(jsonRes({}));
+    };
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: toolName, params: { gate_name: 'GATE_X', value: 'true', feature_id: 'f', enabled: true } },
+    });
+    const { status, body } = await confirm({}, 'admin');
+    expect(status).toBe(409);
+    expect(body.code).toBe('preview_only');
+    expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ code: 'preview_only' }));
+    expect(outbound).not.toHaveBeenCalled();
+  });
+});

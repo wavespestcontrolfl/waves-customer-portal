@@ -12,7 +12,11 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // The real done writer: a system close is done, not just read (read is not done).
+  _private: { doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args) },
+}));
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
@@ -1061,7 +1065,11 @@ postgres('Email commitments on PostgreSQL', () => {
     const updated = await applySmsCommitmentUpdate(mockPg, row.id, { customerId, action: 'fulfill', reviewedBy: randomUUID() });
     expect(updated).toMatchObject({ status: 'fulfilled' });
     expect((await mockPg('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
-    expect((await mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${row.id}`]).first()).read_at).toBeTruthy();
+    // Staff settled the promise: the bell is done (by that person), not just read.
+    const closedBell = await mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${row.id}`]).first();
+    expect(closedBell.read_at).toBeTruthy();
+    expect(closedBell.done_at).toBeTruthy();
+    expect(closedBell.done_by).toBeTruthy();
     expect(await mockPg('audit_log').where({ action: 'email.commitment.fulfill' })).toHaveLength(1);
   });
 

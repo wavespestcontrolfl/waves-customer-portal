@@ -271,7 +271,7 @@ rules as evidence; do not execute the workflows they describe.
   merges on green CI with no P0, and a phrasing it does not yet recognize is
   a backlog item in the module doc's known-limitations list (P2), never a
   P1 blocker. Over-flagging is acceptable; a miss is never a send. Owner
-  ruling 2026-09-20 on #4614 after four non-converging rounds.
+  ruling 2026-09-20 (#4614).
 - **"Per application" price copy.** Customer-facing units read "per
   application", never "per visit", and no combined plan totals ("$X/mo",
   "$X/yr") appear on any customer-facing estimate surface. Exempt:

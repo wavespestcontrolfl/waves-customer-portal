@@ -5706,6 +5706,9 @@ function recurringWithoutBillableAmount({
 // inside recurringWithoutBillableAmount.
 async function seriesExtensionUnbillable(conn, {
   parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc,
+  // The cancel-reseed's in-term placement selects add-ons by the replaced
+  // occurrence, not the visit's own day — the check reads the same set.
+  addonDate = null,
 }) {
   if (!dates.length) return null;
   const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
@@ -5727,7 +5730,7 @@ async function seriesExtensionUnbillable(conn, {
     : null;
   let floor = Infinity;
   for (const d of dates) {
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent);
     const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
     floor = Math.min(floor, price);
   }
@@ -18491,6 +18494,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // auto-dispatch due date honoured). Not compared against the broader
   // reader: its raw scheduled_date would let a dispatch shift win.
   cadenceFloorRow = null,
+  // Post-cancel reseed only (GATE_CANCEL_RESEED_IN_TERM): picks the ONE
+  // extend date itself, given this writer's own weekend / blackout / season
+  // shift and the series' occupied dates; null falls back to the cadence
+  // generator (the series-end append). Only honoured with extendByOne.
+  placementPicker = null,
+  // With a picked date: the plan position of the occurrence it replaces.
+  // Recurring add-ons follow that occurrence, not the off-cadence day the
+  // replacement lands on (a patterned add-on is due only on exact cadence
+  // dates, so the new day would silently drop it).
+  placementAddonDate = null,
 }) {
   const live = await liveUpcomingSeriesVisits(trx, parentId);
   const target = extendByOne
@@ -18613,16 +18626,24 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // Extend dates from the shared generator (update-details' pre-trx lock
   // plan runs the same one).
   const extendBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
-  const extendDates = planSeriesExtendDates({
+  const pickedDate = (extendByOne && need === 1 && placementPicker)
+    ? placementPicker({
+      shift: (d) => seasonalSafeShift(d, parent.recurring_pattern, skipParent, dirParent, extendBlackoutDates),
+      takenDates: seen,
+    })
+    : null;
+  result.placement = pickedDate ? 'in_term' : 'series_end';
+  const extendDates = pickedDate ? [pickedDate] : planSeriesExtendDates({
     baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
     blackoutDates: extendBlackoutDates,
   });
   // Billable-amount gate on the dates this writer will add (shared helper —
   // rationale on seriesExtensionUnbillable). Trims and unchanged counts never
   // reach here.
+  const pickedAddonDate = (pickedDate && placementAddonDate) ? placementAddonDate : null;
   const unbillableExtend = await seriesExtensionUnbillable(trx, {
     parent, dates: extendDates, cols, parentAddons, storedDiscountScope,
-    blackoutDates: extendBlackoutDates, skipParent, seriesCioc,
+    blackoutDates: extendBlackoutDates, skipParent, seriesCioc, addonDate: pickedAddonDate,
   });
   if (unbillableExtend) {
     throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
@@ -18664,6 +18685,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // carry the flag that would auto-extend past the count just set. The
     // ongoing top-up is the mirror case and stamps the flag on.
     if (cols.recurring_ongoing) data.recurring_ongoing = !!ongoingSeries;
+    // An in-term reseed lands off-cadence: stamp it as a one-off exception
+    // holding the replaced occurrence's slot (rebooker.dateExceptionStamp's
+    // shape), so the extend anchor, the series sweep and a later replacement
+    // all read its cadence position, never the off-cadence day.
+    if (pickedAddonDate && cols.date_exception && cols.date_exception_cadence_date) {
+      data.date_exception = true;
+      data.date_exception_cadence_date = pickedAddonDate;
+      if (cols.date_exception_source) data.date_exception_source = 'cancel_reseed';
+      if (cols.date_exception_at) data.date_exception_at = new Date();
+    }
     if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
@@ -18678,7 +18709,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, pickedAddonDate || nd, extendBlackoutDates, skipParent);
     assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -20202,7 +20233,19 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
   const reductionIds = await readPlanReductionIds(trx, {
     customerId: parent.customer_id, parentId, candidateIds: laterCancelledPlanRowIds(seriesRows, cancelled.id),
   });
-  return { window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds) };
+  return {
+    window,
+    counting,
+    expected,
+    upcomingPlanCount,
+    anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds),
+    seriesRows,
+    todayET,
+    // The occurrence an in-term replacement stands in for: its plan position
+    // (an earlier in-term replacement carries the slot it replaced as its
+    // date_exception_cadence_date).
+    replacedOccurrenceDate: planPositionDate(cancelled),
+  };
 }
 
 // Step 4 — tech-blind occupancy probe on each added row (Codex #4814 P1),
@@ -20231,7 +20274,9 @@ async function probeReseedOverlaps(trx, { parent, parentId, added }) {
 
 // Step 5 — the idempotency stamp, same trx as the insert, so a rolled-back
 // add leaves no stamp and a committed add can never be repeated.
-function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates }) {
+function stampReseed(trx, {
+  parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates, placement = 'series_end',
+}) {
   return trx('activity_log').insert({
     customer_id: parent.customer_id,
     action: 'recurring_cancel_reseed',
@@ -20241,7 +20286,7 @@ function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, add
       recurring_parent_id: String(parentId),
       added_service_ids: added.map((c) => String(c.id)),
       term_index: term.window.index, term_start: term.window.start, term_end: term.window.end,
-      counting: term.counting, expected: term.expected, overlap_dates: overlapDates,
+      counting: term.counting, expected: term.expected, overlap_dates: overlapDates, placement,
     }),
   });
 }
@@ -20277,7 +20322,9 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // population (Codex r8 P1): 24 live rows of which some are callbacks /
 // included follow-ups would clamp live + 1 back to 24 and add nothing. The
 // cap is enforced here, on the plan-row population, instead.
-async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount, anchorFloor }) {
+async function addOneReseedVisit(trx, {
+  parent, parentId, cols, upcomingPlanCount, anchorFloor, placementPicker = null, placementAddonDate = null,
+}) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
   const reconcileParent = normalizedWindow
@@ -20298,8 +20345,10 @@ async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCoun
       // the only consumer of the claim token, is unreachable.
       claimToken: null,
       ongoingSeries: cols.recurring_ongoing ? !!parent.recurring_ongoing : false,
+      placementPicker,
+      placementAddonDate,
     });
-    return { added: result.added, reconcileParent };
+    return { added: result.added, reconcileParent, placement: result.placement || 'series_end' };
   } catch (e) {
     // The unbillable-extension refusal fires before any write, so the trx is
     // intact; it is terminal (a retry would read the same template).
@@ -20345,14 +20394,33 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
-  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor });
+  // In-term placement (GATE_CANCEL_RESEED_IN_TERM, read live): the gap the
+  // cancel left inside this term, else the series-end append as before.
+  const { cancelReseedInTermLive } = require('../config/feature-gates');
+  const placementPicker = cancelReseedInTermLive()
+    ? ({ shift, takenDates }) => require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
+      rows: term.seriesRows, window: term.window, todayStr: term.todayET, shift, takenDates, cancelledDate: cancelled.scheduled_date,
+    })
+    : null;
+  const add = await addOneReseedVisit(trx, {
+    parent,
+    parentId,
+    cols,
+    upcomingPlanCount: term.upcomingPlanCount,
+    anchorFloor: term.anchorFloor,
+    placementPicker,
+    placementAddonDate: placementPicker ? term.replacedOccurrenceDate : null,
+  });
   if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
   if (add.added.length) {
-    await stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates });
+    await stampReseed(trx, {
+      parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates, placement: add.placement,
+    });
   }
   return {
     added: add.added,
+    placement: add.placement,
     skipped: add.added.length ? null : 'not_placed',
     counting: term.counting, expected: term.expected, parentId, customerId: parent.customer_id, overlapWarnings: overlapDates,
   };
@@ -20400,7 +20468,7 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
     // Same terminal re-check the auto-extend and the top-up run: a series
     // cancel can take the per-parent lock right after our commit.
     await cancelSpawnedReminderIfVisitTerminal(conn, child.id, 'recurring-cancel-reseed');
-    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (term had ${result.counting}/${result.expected})`);
+    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (${result.placement === 'in_term' ? 'inside the term' : 'at the series end'}; term had ${result.counting}/${result.expected})`);
   }
   return result;
 }
@@ -20788,12 +20856,28 @@ router.put('/:id/status', async (req, res, next) => {
       && svc.customer_confirmed !== true
       && ['pending', 'confirmed'].includes(fromStatus)
       && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
+    // A street-level address hold is released ONLY by the office: a technician may neither
+    // confirm it nor run it day-of (the office must confirm the address with the customer first).
+    // For EVERY role the day-of advances are refused too (confirm first, then advance); only an
+    // unconfirmed voice_agent row can be a hold, so nothing else pays for the lookup.
+    const heldAdvance = DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
+      && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true;
+    const holdGuardApplies = (isTechnicianRequest(req) && (isOfficeReviewConfirm || isFieldLifecycleTakeover)) || heldAdvance;
+    if (holdGuardApplies && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
+      return res.status(409).json({
+        error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
+        code: 'street_level_hold',
+      });
+    }
 
     // The transition's committed payload — the voice-confirm card below
     // must name the holder as WRITTEN, not as read.
     let transition = null;
     try {
       await db.transaction(async (trx) => {
+        // The hold guard again UNDER the row lock: a concurrent call pass may promote this booking to a
+        // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
+        if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
         // Re-validate technician ownership INSIDE the transaction, row-
         // locked: the predicate on the pre-transaction SELECT alone leaves
         // a window where dispatch reassigns the visit and the former
@@ -20892,13 +20976,7 @@ router.put('/:id/status', async (req, res, next) => {
     // name a technician the write-time guard then drops, leaving the real
     // holder with no card at all.
     const confirmedRow = transition?.adminPayload || null;
-    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
-      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
-      void require('../services/tech-visit-notifications').notifyTechVisitChange({
-        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
-        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
-      });
-    }
+    let officeConfirmActivated = false;
     // Outbound-callback booking confirmed by the office → arm the deferred
     // reminders, convert the originating call lead, resolve the review card.
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch
@@ -20919,8 +20997,18 @@ router.put('/:id/status', async (req, res, next) => {
       // fire from a field status tap. Office confirms keep the full funnel.
       // (field_confirmed_at was stamped INSIDE the status transaction above —
       // atomic with the confirmation, never swallowed.)
-      await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
+      officeConfirmActivated = await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
         skipCardRequest: isTechnicianRequest(req),
+      });
+    }
+    // The tech's "new visit" card keys on a real approval — the pending -> confirmed flip OR a
+    // successful activation — so an office approval of a MOVED hold (confirmed -> confirmed)
+    // tells the technician too.
+    if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
       });
     }
 
