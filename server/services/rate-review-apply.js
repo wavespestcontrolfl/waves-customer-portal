@@ -102,7 +102,7 @@ const { MIN_NOTICE_DAYS } = require('./price-change-notices');
 const PlanRateLedger = require('./plan-rate-ledger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
-  PLAN_LINE_SQL, LEDGER_FAMILIES_FOR_LINE, anniversaryInWindow, familyOfCoverage, visitsPerYearFor,
+  PLAN_LINE_SQL, LEDGER_FAMILIES_FOR_LINE, anniversaryInWindow, familyOfCoverage, visitsPerYearFor, lockBatch,
 } = require('./rate-review');
 
 const LANE_PER_APPLICATION = 'per_application';
@@ -154,6 +154,8 @@ const HOLD_COPY = Object.freeze({
   termite_program: 'Termite programs renew under their own agreement and are never repriced here.',
   notice_event_collision: 'A notice with the same amounts and date already exists for this customer.',
   notice_too_recent: 'The notice went out fewer than 30 days before the new rate, so the rate waits.',
+  billing_lane_changed: 'The account moved to a different billing lane since the notice, so the rate was not applied.',
+  row_not_approved: 'The ranking row is no longer approved, so no notice was created.',
   apply_error: 'The nightly apply hit an error on this account and will retry tonight.',
 });
 
@@ -286,6 +288,20 @@ function termRenewalNoticed(term) {
     || (term.renewal_noticed_fee != null && term.renewal_noticed_fee !== ''));
 }
 
+// The lane the account bills on NOW, resolved the way the ranking resolved
+// it (rate-review.js resolveCurrentRate): a live prepaid term covering the
+// line wins over the scalar, then customers.billing_mode. Re-read under the
+// customer row lock before any lane's apply, so a notice priced on one
+// basis never moves the money of another (a per-application line that
+// moved to dues, a line now under a prepaid term, …).
+async function resolveLiveLane(dbh, { customer, familyKey, today }) {
+  const found = await resolvePrepayTerm(dbh, { customerId: customer.id, familyKey, accountLines: null, today });
+  if (found.term || found.reason === 'prepay_term_ambiguous') return LANE_PREPAY;
+  if (customer.billing_mode === LANE_MONTHLY) return LANE_MONTHLY;
+  if (customer.billing_mode === LANE_PER_APPLICATION) return LANE_PER_APPLICATION;
+  return customer.billing_mode || null;
+}
+
 async function activePlanHold(dbh, customerId) {
   return dbh('plan_holds').where({ customer_id: customerId, status: 'active' }).first('id', 'family_key', 'resume_on');
 }
@@ -372,6 +388,13 @@ async function scheduleRow(dbh, row, { batch, customer, lane, accountLines, toda
   // when the caller already holds a transaction): a crash between the two
   // would otherwise leave a draft row the next schedule cannot re-link.
   const noticeId = await dbh.transaction(async (sp) => {
+    // The ranking row is locked and re-read here: the candidate list was
+    // read before this row's lock, and a concurrent schedule (a different
+    // planned send → a different effective date) must find the link, not
+    // race it. The partial UNIQUE index on rate_review_row_id is the belt.
+    const live = await sp('rate_review_snapshots').where({ id: row.id }).forUpdate().first('notice_id', 'status');
+    if (!live || String(live.status) !== 'approved') throw hold('row_not_approved', { status: live ? live.status : null });
+    if (live.notice_id) return { alreadyScheduled: true, noticeId: live.notice_id };
     const inserted = await sp('price_change_notices').insert({
       batch_id: batchId,
       customer_id: row.customer_id,
@@ -392,9 +415,10 @@ async function scheduleRow(dbh, row, { batch, customer, lane, accountLines, toda
     }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning(['id', 'effective_date']);
     if (!inserted.length) throw hold('notice_event_collision', { effectiveDate });
     await sp('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, updated_at: new Date() });
-    return inserted[0].id;
+    return { noticeId: inserted[0].id };
   });
-  return { noticeId, rowId: row.id, customerId: row.customer_id, familyKey: row.family_key, lane, effectiveDate };
+  if (noticeId.alreadyScheduled) return { alreadyScheduled: true, rowId: row.id };
+  return { noticeId: noticeId.noticeId, rowId: row.id, customerId: row.customer_id, familyKey: row.family_key, lane, effectiveDate };
 }
 
 /**
@@ -410,7 +434,15 @@ async function scheduleNoticeRows(batchKey, { plannedSendDate = null, actorId = 
   if (!DATE_RE.test(plannedSend)) throw badInput('plannedSendDate must be YYYY-MM-DD');
   if (plannedSend < today) throw badInput('plannedSendDate must not be in the past');
 
-  const dbh = trx || db;
+  // One transaction under the batch lock (rate-review.js lockBatch), the
+  // lock the rebuild's write takes too: a rebuild cannot delete rows while
+  // their notices are being created, and vice versa.
+  const run = (dbh) => scheduleUnderLock(dbh, { batchKey, plannedSend, today, actorId });
+  return trx ? run(trx) : db.transaction(run);
+}
+
+async function scheduleUnderLock(dbh, { batchKey, plannedSend, today, actorId }) {
+  await lockBatch(dbh, batchKey);
   const batch = await dbh('rate_review_batches').where({ batch_key: batchKey }).first();
   if (!batch) {
     const err = new Error('rate review batch not found');
@@ -442,6 +474,7 @@ async function scheduleNoticeRows(batchKey, { plannedSendDate = null, actorId = 
         batch, customer: customers.get(row.customer_id), lane: laneForRow(row), accountLines: linesPerCustomer.get(row.customer_id),
         today, plannedSend, noticeFloor, batchId: result.batchId, batchKey, actorId,
       });
+      if (notice.alreadyScheduled) { result.alreadyScheduled += 1; continue; }
       result.created += 1;
       result.notices.push(notice);
       if (!result.firstEffectiveDate || notice.effectiveDate < result.firstEffectiveDate) result.firstEffectiveDate = notice.effectiveDate;
@@ -805,6 +838,8 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       if (daysBetweenYmd(sentDay, ymd(notice.effective_date)) < MIN_NOTICE_DAYS) throw hold('notice_too_recent', { sentDay, effectiveDate: ymd(notice.effective_date) });
       const activeHold = await activePlanHold(trx, customer.id);
       if (activeHold) throw hold('plan_on_hold', { holdId: activeHold.id, familyKey: activeHold.family_key, resumeOn: ymd(activeHold.resume_on) });
+      const liveLane = await resolveLiveLane(trx, { customer, familyKey: notice.family_key, today });
+      if (liveLane !== notice.billing_lane) throw hold('billing_lane_changed', { noticed: notice.billing_lane, live: liveLane });
       const ctx = { notice, customer, today, metadata: parseMetadata(notice.metadata) };
       let outcome;
       if (notice.billing_lane === LANE_MONTHLY) outcome = await applyMonthly(trx, ctx);
@@ -889,6 +924,7 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   if (!BATCH_KEY_RE.test(String(batchKey || ''))) throw badInput('batchKey must be YYYY-MM');
   return dbh.transaction(async (trx) => {
+    await lockBatch(trx, batchKey);
     const rows = await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id').select('id', 'notice_id');
     const noticeIds = rows.map((r) => r.notice_id);
     if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0 };
@@ -970,6 +1006,6 @@ module.exports = {
   noticedRenewalAmountConflict,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
-    loadLineOpenVisits, resolvePrepayTerm, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice,
+    loadLineOpenVisits, resolvePrepayTerm, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

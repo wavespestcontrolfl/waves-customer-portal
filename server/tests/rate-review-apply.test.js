@@ -558,6 +558,20 @@ describe('applyDueRateChanges — per_application', () => {
     expect(out.holds.map((h) => h.reason)).toEqual(['series_template_complex']);
     expect(visits()[1].estimated_price).toBe('117.00');
   });
+  test('the live billing lane is re-read under the lock: a per-application line that moved to dues, or under a prepaid term, is never applied on the old basis', async () => {
+    let book = sentBook({ book: { customer: { billing_mode: 'monthly_membership' } } });
+    let out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['billing_lane_changed']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+    expect(customer1().monthly_rate).toBe('39.00');
+    expect(mockDb.store.customer_plan_rates[0].monthly_rate).toBe('39.00');
+    expect(JSON.parse(notices()[0].metadata).last_hold.detail).toEqual({ noticed: 'per_application', live: 'monthly_membership' });
+    book = sentBook();
+    book.annual_prepay_terms = [{ id: TERM(1), customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', term_start: '2026-11-15', term_end: '2027-11-14' }];
+    out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['billing_lane_changed']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+  });
   test('a line running as two series → hold for a hand reprice', async () => {
     const book = sentBook();
     const second = fixture.pestSeries(1, ['2026-12-12']);
@@ -735,6 +749,45 @@ describe('listApplyHolds', () => {
   });
 });
 
+describe('scheduling races', () => {
+  test('the ranking row is locked and re-read before the insert: a link that landed meanwhile is honoured, never overwritten', async () => {
+    mockDb.reset(pestBook());
+    const row = mockDb.store.rate_review_snapshots[0];
+    const stale = { ...row, notice_id: null }; // the candidate as read before the lock
+    mockDb.store.rate_review_snapshots[0].notice_id = 'n-landed-first';
+    const out = await apply._private.scheduleRow(mockDb, stale, {
+      batch: fixture.batchRow(), customer: fixture.customerRow(1), lane: 'per_application', accountLines: 1,
+      today: TODAY, plannedSend: TODAY, noticeFloor: '2026-12-02', batchId: 'b-2', batchKey: BATCH_KEY, actorId: null,
+    });
+    expect(out).toEqual({ alreadyScheduled: true, rowId: ROW(1) });
+    expect(notices()).toHaveLength(0);
+    expect(mockDb.store.rate_review_snapshots[0].notice_id).toBe('n-landed-first');
+    expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'rate_review_snapshots')).toBe(true);
+  });
+  test('a row that lost its approval before the lock creates no notice', async () => {
+    mockDb.reset(pestBook());
+    const stale = { ...mockDb.store.rate_review_snapshots[0] };
+    mockDb.store.rate_review_snapshots[0].status = 'exception';
+    await expect(apply._private.scheduleRow(mockDb, stale, {
+      batch: fixture.batchRow(), customer: fixture.customerRow(1), lane: 'per_application', accountLines: 1,
+      today: TODAY, plannedSend: TODAY, noticeFloor: '2026-12-02', batchId: 'b-2', batchKey: BATCH_KEY, actorId: null,
+    })).rejects.toMatchObject({ holdCode: 'row_not_approved' });
+    expect(notices()).toHaveLength(0);
+  });
+  test('scheduling runs in one transaction under the per-batch lock, and the migration makes one notice per ranking row unique', async () => {
+    mockDb.reset(pestBook());
+    await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
+    expect(mockDb.transaction).toHaveBeenCalled();
+    const lockCall = mockDb.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock/.test(sql));
+    expect(lockCall).toBeTruthy();
+    expect(lockCall[1]).toEqual(['rate-review-batch', BATCH_KEY]);
+    const fs = require('fs');
+    const path = require('path');
+    const migration = fs.readFileSync(path.join(__dirname, '../models/migrations/20260930230000_rate_review_apply.js'), 'utf8');
+    expect(migration).toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS \$\{ROW_IDX\} ON \$\{NOTICES\} \(rate_review_row_id\) WHERE rate_review_row_id IS NOT NULL/);
+  });
+});
+
 describe('retireDraftNotices and the rebuild guard', () => {
   test('retires the batch\'s draft rows and unlinks their ranking rows; a delivered notice is kept', async () => {
     const book = pestBook();
@@ -760,6 +813,23 @@ describe('retireDraftNotices and the rebuild guard', () => {
     await scheduleBook(pestBook());
     expect(await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW })).toEqual({ ok: false, reason: 'batch_has_scheduled_rows', batchKey: BATCH_KEY });
     expect(snapshots()).toHaveLength(1);
+  });
+  test('the rebuild re-checks under the batch lock inside its write: a draft that landed during the ranking refuses the DELETE', async () => {
+    const rateReview = require('../services/rate-review');
+    const book = pestBook();
+    book.rate_review_config = [];
+    mockDb.reset(book);
+    // an empty book: every ranking loader answers nothing, so the only
+    // thing left to the write is the lock + the re-checked guards
+    mockDb.rawHandlers.push([/WITH ov AS|AS first_visit|WITH te AS|WaveGuard Monthly/, () => ({ rows: [] })]);
+    mockDb.rawHandlers.push([/pg_advisory_xact_lock/, () => { mockDb.store.rate_review_snapshots[0].notice_id = 'n-landed-during-ranking'; return { rows: [] }; }]);
+    const out = await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW });
+    expect(out).toEqual({ ok: false, reason: 'batch_has_scheduled_rows', batchKey: BATCH_KEY });
+    // the refusal came from INSIDE the write (after the lock), and nothing was deleted or rewritten
+    expect(mockDb.raw.mock.calls.some(([sql]) => /pg_advisory_xact_lock/.test(sql))).toBe(true);
+    expect(snapshots()).toHaveLength(1);
+    expect(mockDb.store.rate_review_batches).toHaveLength(1);
+    expect(mockDb.log.filter((e) => e[0] === 'insert' && e[1] === 'rate_review_batches')).toHaveLength(0);
   });
 });
 

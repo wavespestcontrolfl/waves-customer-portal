@@ -1366,6 +1366,22 @@ async function batchHasScheduledRows(dbh, batchKey) {
   return Number(row && row.n) > 0;
 }
 
+// Rebuild and scheduling serialize on the batch: a transaction-scoped
+// advisory lock taken by the rebuild's write below and by the apply lane's
+// scheduleNoticeRows / retireDraftNotices (services/rate-review-apply.js),
+// so a draft cannot land between the guards and the DELETE.
+async function lockBatch(conn, batchKey) {
+  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['rate-review-batch', String(batchKey)]);
+}
+
+// The rebuild's refusals, re-checked INSIDE the write transaction under the
+// batch lock (the pre-computation checks above the ranking are only the
+// fast path — a schedule request can commit a draft during the ranking).
+async function assertBatchRebuildable(conn, batchKey) {
+  if (await batchHasSentRows(conn, batchKey)) throw Object.assign(new Error('batch_has_sent_rows'), { rateReviewRefusal: 'batch_has_sent_rows' });
+  if (await batchHasScheduledRows(conn, batchKey)) throw Object.assign(new Error('batch_has_scheduled_rows'), { rateReviewRefusal: 'batch_has_scheduled_rows' });
+}
+
 async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null, now = new Date(), deps = {} } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
@@ -1608,6 +1624,8 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
   const computedAt = now;
   const lineRphJson = Object.fromEntries([...lineRphStats].map(([family, q]) => [family, q]));
   const write = async (conn) => {
+    await lockBatch(conn, batchKey);
+    await assertBatchRebuildable(conn, batchKey);
     await conn(BATCHES).insert({
       batch_key: batchKey, window_from: from, window_to: to,
       allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson),
@@ -1618,7 +1636,14 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       await conn(SNAPSHOTS).insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
     }
   };
-  if (trx) await write(trx); else await db.transaction(write);
+  try {
+    if (trx) await write(trx); else await db.transaction(write);
+  } catch (err) {
+    // Thrown before any write under the lock: the caller's transaction is
+    // untouched (no statement failed at the database).
+    if (err.rateReviewRefusal) return { ok: false, reason: err.rateReviewRefusal, batchKey };
+    throw err;
+  }
 
   const summary = summarizeRows(rows);
   logger.info(`[rate-review] batch ${batchKey} built: ${rows.length} rows (${summary.green} green, ${summary.exception} exceptions, ${summary.no_change} no-change, ${summary.skipped} skipped) from ${book.length} active plan lines`);
@@ -1842,6 +1867,7 @@ module.exports = {
   // (services/rate-review-apply.js) so a notice targets exactly the visits
   // this ranking priced.
   PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, RECURRING_SQL },
+  lockBatch,
   LEDGER_FAMILIES_FOR_LINE,
   anniversaryInWindow,
   familyOfCoverage,

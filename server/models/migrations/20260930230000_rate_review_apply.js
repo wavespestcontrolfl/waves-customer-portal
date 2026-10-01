@@ -12,7 +12,8 @@
  * /price-change/:token page and the activity timeline are byte-identical.
  *
  *   rate_review_row_id     the rate_review_snapshots row this notice carries
- *                          (NULL on a legacy monthly-batch notice)
+ *                          (NULL on a legacy monthly-batch notice; UNIQUE
+ *                          where set — one notice per ranking row)
  *   billing_lane           per_application | monthly_membership | annual_prepay
  *   family_key             the plan line (pest_control, lawn_care, …)
  *   noticed_current_cents  the EXACT numbers shown to the customer — the
@@ -77,7 +78,10 @@ exports.up = async function up(knex) {
     if (addLaneCheck) {
       await knex.raw(`ALTER TABLE ${NOTICES} ADD CONSTRAINT ${LANE_CHECK} CHECK (billing_lane IS NULL OR billing_lane IN (${BILLING_LANES.map((l) => `'${l}'`).join(', ')}))`);
     }
-    await knex.raw(`CREATE INDEX IF NOT EXISTS ${ROW_IDX} ON ${NOTICES} (rate_review_row_id) WHERE rate_review_row_id IS NOT NULL`);
+    // One notice per ranking row, enforced by the database: two schedule
+    // requests racing on the same row cannot both insert (the row lock in
+    // scheduleRow is the first line, this index is the belt).
+    await knex.raw(`CREATE UNIQUE INDEX IF NOT EXISTS ${ROW_IDX} ON ${NOTICES} (rate_review_row_id) WHERE rate_review_row_id IS NOT NULL`);
     // The nightly due scan: rate-review notices not yet applied, by effective date.
     await knex.raw(`CREATE INDEX IF NOT EXISTS ${DUE_IDX} ON ${NOTICES} (effective_date) WHERE rate_review_row_id IS NOT NULL AND applied_at IS NULL`);
   }
