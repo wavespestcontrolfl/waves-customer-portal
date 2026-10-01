@@ -142,3 +142,41 @@ rules it broke, and a warning is logged with the category and rule names only. U
 A why that quotes a customer's own words (a service request, a text) can trip the
 section 3 checks through no fault of the emitter. That is the fallback's job; do not
 rewrite what the customer said to get past it.
+
+## 8. For Claude specifically
+
+Read what is open in one call instead of reading alert text and guessing. Each item comes
+back in the shape of section 2: area, headline, why, severity, link, subject, done-when,
+who. Pick the ones a session may fix alone with `who=claude` (exact: it returns `claude` only,
+never `either`, where a person still approves; `who=either` lists those; section 5 says what each
+may do), and never resolve a `person` item.
+
+- Route: `GET /api/admin/needs-me?who=&area=&limit=` (`server/routes/admin-needs-me.js`),
+  scoped to the caller's role like the bell list.
+- Intelligence Bar tool: `needs_me` (`server/services/intelligence-bar/needs-me-tools.js`).
+- CLI: `railway run --service Postgres node ops/agents/needs-me.js --who claude`
+  (`--json` for the full object).
+- All three are one reader, `listNeedsMe` in `server/services/needs-me.js`. It lists open
+  admin rows that are not done, including Activity-feed rows (the bell never shows those; they
+  carry `activityOnly: true`, and engineering `broken` findings are among them), and the
+  dashboard's standing counts, which are `needs-you`, `person`, done when the count is zero.
+An `ops_digest` row for the `fyi` audience is severity `fyi` and is never listed. An alert
+carries `detail`, the full finding (bounded to 2,000 characters; an engineering digest's
+diagnosis may live only there); when the row has no body, `why` is the first sentence of it.
+Every open row joins one global order (no scan cap: the walk reads only what classifying and ordering need, and body/detail are read for the returned page alone). A digest already marked `resolved` is closed even without `done_at`. A source that partly fails says so in `warnings`: a dashboard queue that threw is named
+(`{ source: 'dashboard_alerts', generator, error }`) instead of reading as empty.
+
+**Unsorted** (owner 2026-10-01): a raw `notifyAdmin` row with no stamped severity that is
+neither an `ops_digest` nor a registry event (`metadata.triggerKey`) carries no signal for work
+versus note. It is listed with `unsorted: true` and `severity: null`, after all known work, and
+is left out of `total` and `counts`; `unsortedTotal` counts it. The bar tool returns these in
+`unsorted`, the CLI under its own heading. A source leaves the pile by raising through
+`raiseAdminAlert` (or the trigger registry).
+
+An item with `derived: true` comes from an older raw `notifyAdmin` call that never stamped
+the eight parts (a dashboard standing condition is not one of these: it is `derived: false`).
+Its area is inferred from the admin page its link opens, else from the category, its severity is `broken` only for a
+`FIX` digest (for a digest with no stamped kind, the legacy title prefix decides: `FIX:` broken,
+`ACT:` / `[Review]` needs-you, `FYI:` / `OK:` fyi and left out), a registry event its trigger marks `informational` (a payment received, a job completed) is `fyi` and left out, its who is `person` (an engineering digest is `claude`), its subject is read
+from the ids in its metadata, and its done-when is unknown. Treat those as best guesses and
+read the record behind the link before acting.
