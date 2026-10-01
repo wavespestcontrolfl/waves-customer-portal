@@ -10,6 +10,7 @@ const { computeDashboardAlerts } = require('./dashboard-alerts');
 const { refsFromRow } = require('./admin-alert-relevance');
 const { AREAS, SEVERITIES, WHO, SUBJECT_TYPES, cutAtWord, firstSentence } = require('./admin-alert-compose');
 const { legacyKindFromTitle } = require('./agent-activity');
+const { TRIGGER_REGISTRY } = require('./notification-triggers');
 
 const DEFAULT_LIMIT = 200;
 const ROW_CAP = 500; // most items one response returns
@@ -45,6 +46,7 @@ const AREA_BY_PATH = [
   [/^\/admin\/(dispatch|schedule)/, 'Schedule'],
   [/^\/admin\/leads/, 'Leads'],
   [/^\/admin\/estimates/, 'Estimates'],
+  [/^\/admin\/(reviews|blog|seo|knowledge|social-media|content|newsletter)(\/|\?|$)/, 'Content'],
 ];
 const areaFrom = (table, text) => (table.find(([re]) => re.test(String(text || ''))) || [])[1] || 'System';
 
@@ -78,7 +80,10 @@ const digestKind = (row, meta) => meta.kind || legacyKindFromTitle(String(row.ti
 
 // A digest for the fyi audience (or kind) is information, never work: severity fyi, left out
 // of the list.
+// A registry event the registry marks informational (a payment received, a job
+// completed) is a fact, not work: fyi, left out.
 function legacySeverity(row, meta) {
+  if (TRIGGER_REGISTRY[meta.triggerKey]?.informational) return 'fyi';
   if (row.category !== 'ops_digest') return 'needs-you';
   if (meta.audience === 'fyi') return 'fyi';
   const kind = digestKind(row, meta);
@@ -134,14 +139,17 @@ function mapAlertRow(row) {
     doneWhen: typeof meta.doneWhen === 'string',
     subject: !!validSubject(meta.subject) && SUBJECT_TYPES.includes(meta.subject.type),
   };
-  const detail = boundedDetail(row.detail);
+  // A pre-brevity digest kept its whole report in body (agent-activity reads it the
+  // same way): that report is the detail, and why is its first sentence.
+  const legacyDigestBody = row.category === 'ops_digest' && !row.detail && row.body;
+  const detail = boundedDetail(legacyDigestBody ? row.body : row.detail);
   return {
     kind: 'alert',
     id: row.id,
     category: row.category,
     area: has.area ? meta.area : inferredArea(row),
     headline: row.title,
-    why: row.body || whyFromDetail(detail),
+    why: (!legacyDigestBody && row.body) || whyFromDetail(detail),
     detail,
     severity: has.severity ? meta.severity : legacySeverity(row, meta),
     ...digestLinks(row),
@@ -166,6 +174,8 @@ function mapStanding(alert) {
     why: null,
     severity: 'needs-you',
     count: alert.count,
+    // Dollar exposure where the queue has one (overdue invoices, expiring estimates, MRR at risk).
+    amount: Number.isFinite(alert.amount) ? alert.amount : null,
     link: alert.href || null,
     doneWhen: 'count_zero',
     who: 'person',

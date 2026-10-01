@@ -324,3 +324,42 @@ test('the bar tool carries a digest\'s bounded detail and report link', async ()
   expect(out.items[0].detail.length).toBeLessThanOrEqual(600);
   expect((await executeNeedsMeTool('needs_me', { who: 'either' })).items).toHaveLength(0);
 });
+
+test('a registry event the registry marks informational is fyi and left out; an actionable one stays', async () => {
+  expect(mapAlertRow(row({ category: 'payment', metadata: { triggerKey: 'payment_succeeded' } })).severity).toBe('fyi');
+  expect(mapAlertRow(row({ category: 'payment', metadata: { triggerKey: 'one_tap_purchase_completed' } })).severity).toBe('fyi');
+  expect(mapAlertRow(row({ category: 'payment', metadata: { triggerKey: 'payment_failed' } })).severity).toBe('needs-you');
+  // A composed row's own severity wins over the registry.
+  expect(mapAlertRow(row({ metadata: { triggerKey: 'payment_succeeded', severity: 'needs-you' } })).severity).toBe('needs-you');
+  mockRows = [row({ id: 'p1', metadata: { triggerKey: 'payment_succeeded' } }), row({ id: 'p2', metadata: { triggerKey: 'payment_failed' } })];
+  const result = await listNeedsMe({});
+  expect(result.items.map((i) => i.id)).toEqual(['p2']);
+});
+
+test('content work pages are Content', () => {
+  const digest = (link) => mapAlertRow(row({ category: 'ops_digest', link, metadata: { kind: 'ACT', audience: 'owner' } }));
+  for (const link of ['/admin/reviews', '/admin/blog?tab=parked', '/admin/seo', '/admin/knowledge', '/admin/social-media']) {
+    expect(digest(link).area).toBe('Content');
+  }
+  expect(digest('/admin/blogger').area).toBe('System');
+});
+
+test('a pre-brevity digest whose report lives in body keeps it as detail; why is its first sentence', () => {
+  const report = `Twelve estimates are past their promised time. ${'Line of the report. '.repeat(30)}`;
+  const item = mapAlertRow(row({ category: 'ops_digest', body: report, detail: null, metadata: { kind: 'ACT', audience: 'owner' } }));
+  expect(item.detail).toBe(report.trim());
+  expect(item.why).toBe('Twelve estimates are past their promised time.');
+  // A current digest keeps body as why and detail as detail.
+  const current = mapAlertRow(row({ category: 'ops_digest', body: 'Short why.', detail: 'Full finding.', metadata: { kind: 'ACT' } }));
+  expect(current).toMatchObject({ why: 'Short why.', detail: 'Full finding.' });
+});
+
+test('a standing condition carries its dollar exposure', async () => {
+  computeDashboardAlerts.mockResolvedValue({ alerts: [
+    { id: 'overdue_60', severity: 'critical', count: 3, label: '3 invoices 60+ days overdue', href: '/admin/invoices', amount: 1250.5 },
+    { id: 'unassigned', severity: 'warn', count: 2, label: '2 visits unassigned', href: '/admin/schedule' },
+  ] });
+  const { items } = await listNeedsMe({});
+  expect(items.find((i) => i.id === 'live:overdue_60').amount).toBe(1250.5);
+  expect(items.find((i) => i.id === 'live:unassigned').amount).toBeNull();
+});

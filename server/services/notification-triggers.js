@@ -218,6 +218,7 @@ const TRIGGER_REGISTRY = {
   // Same no-PII contract as new_job_application: mode + when label only,
   // no name/phone/email cross the requireAdmin boundary.
   job_interview_booked: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Interview booked',
     category: 'job_application',
     priority: 'high',
@@ -235,6 +236,7 @@ const TRIGGER_REGISTRY = {
   },
   // Fired by the public interview link's "I'm no longer interested" action.
   job_application_withdrawn: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Applicant withdrew',
     category: 'job_application',
     priority: 'normal',
@@ -589,6 +591,7 @@ const TRIGGER_REGISTRY = {
     },
   },
   payment_succeeded: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Payment received',
     category: 'payment',
     priority: 'low',
@@ -627,6 +630,7 @@ const TRIGGER_REGISTRY = {
     },
   },
   payment_refunded: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Refund issued',
     category: 'payment',
     priority: 'normal',
@@ -638,6 +642,7 @@ const TRIGGER_REGISTRY = {
     }),
   },
   job_complete: {
+    informational: true, // a fact, not work: needs_me leaves it out
     // Tech-visible: links to a day-to-day surface (schedule) a field tech works in.
     techVisible: true,
     // Owner ruling 2026-09-24: 13% of these bells were ever opened — off
@@ -723,6 +728,7 @@ const TRIGGER_REGISTRY = {
     }),
   },
   one_tap_purchase_completed: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'One-tap purchase completed',
     category: 'estimate',
     priority: 'high',
@@ -801,6 +807,7 @@ const TRIGGER_REGISTRY = {
     },
   },
   newsletter_autopilot_skipped: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Newsletter autopilot skipped (not enough events)',
     category: 'newsletter',
     priority: 'high',
@@ -840,6 +847,7 @@ const TRIGGER_REGISTRY = {
     }),
   },
   newsletter_proof_approved: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Newsletter approved via email reply',
     category: 'newsletter',
     priority: 'high',

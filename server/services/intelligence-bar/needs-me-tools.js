@@ -51,6 +51,7 @@ function toBarItem(item) {
     subject: item.subject || null,
     done_when: item.doneWhen,
     ...(item.count != null ? { count: item.count } : {}),
+    ...(item.amount != null ? { amount: item.amount } : {}),
     derived: item.derived,
     ...(item.activityOnly ? { activity_only: true } : {}),
     created_at: item.createdAt,
