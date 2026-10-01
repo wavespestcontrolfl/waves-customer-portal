@@ -375,6 +375,25 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
   });
 
+  test('through reschedule(): a retried committed carry replays even after the visit froze', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    try {
+      const f = await build();
+      const anchor = f.lawn[0];
+      const target = addDays(dateOnly(anchor.scheduled_date), 1);
+      const opts = { allowLive: true, sourceSurface: 'dispatch_board', notifyRequested: false, overlapAdvisory: true, operationKey: `retry-${randomUUID()}` };
+      const first = await rebooker.reschedule(anchor.id, target, '09:00-10:00', 'admin', 'admin', opts);
+      expect(first.seriesMoveId).toBeTruthy();
+      await db('service_visits').where({ id: f.visits[0].id }).update({ status: 'closing' });
+      const again = await rebooker.reschedule(anchor.id, target, '09:00-10:00', 'admin', 'admin', opts);
+      expect(again.seriesMoveId).toBe(first.seriesMoveId);
+      expect(again.replayed).toBe(true);
+    } finally {
+      delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    }
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

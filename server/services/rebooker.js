@@ -1439,6 +1439,18 @@ class SmartRebooker {
     // (soloVisitRecheck below); a visit that gained a member re-enters
     // through the unit mover.
     let soloVisitRecheck = false;
+    if (options.visitPolicy !== 'single' && service.visit_id
+      && options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
+      // A retry of a series carry that already COMMITTED (the stop keeps its
+      // visit) replays before the unit mover's eligibility checks — a visit
+      // that froze since must not turn a committed move into a refusal and
+      // skip its replay cleanup (same rule as rescheduleSeries' entry).
+      const committed = await findPriorSeriesMove(db, serviceId, seriesOperationKey(serviceId, newDate, newWindow, options), service, newDate, options.expect || null);
+      if (committed) {
+        await replaySeriesMoveCleanup(committed);
+        return replaySeriesMoveWithQuality(committed, newDate, serviceId, options);
+      }
+    }
     if (options.visitPolicy !== 'single' && service.visit_id) {
       const unit = await require('./visit-groups').moveVisitAsUnit({
         rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy,
