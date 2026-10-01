@@ -127,6 +127,8 @@ function normalizeAdsReport(advice) {
 // this list is what changed in the 7-day window, so it carries every row in the
 // window up to this bound (a note says so when the window held more).
 const ADVISOR_MAX_BUDGET_CHANGES = 200;
+// Search-term rows not refreshed within this window fell out of the latest sync.
+const ADVISOR_SEARCH_TERM_FRESH_MS = 48 * 60 * 60 * 1000;
 
 // Secondary lists an SMS summary falls back to when there are no recommendations.
 const SUMMARY_SECONDARY_LISTS = [
@@ -185,9 +187,17 @@ async function loadGbpSummary(d30) {
 
 const numOrNull = (v) => (v == null ? null : Number(v));
 
+// Fallback advice may carry a one-click Apply only for an active Google
+// campaign the route can push to, and never for one changed in the last 7 days.
+function isFallbackControllable(c, adsConfigured, recentlyChanged) {
+  return c.platform === 'google_ads' && c.status === 'active'
+    && !(c.linked && !adsConfigured)
+    && !recentlyChanged.has(String(c.id));
+}
+
 function budgetChangesSection(budgetLog) {
   const rows = budgetLog.slice(0, ADVISOR_MAX_BUDGET_CHANGES).map(b => ({
-    campaign: b.campaign_name, at: b.created_at, from: b.previous_mode, to: b.new_mode,
+    campaign: b.campaign_name, campaign_id: b.campaign_id, at: b.created_at, from: b.previous_mode, to: b.new_mode,
     budget_from: numOrNull(b.previous_budget),
     budget_to: numOrNull(b.new_budget),
     trigger: b.trigger, reason: b.reason,
@@ -311,7 +321,7 @@ class CampaignAdvisor {
 
     // With no provider key at all, return a data-only summary
     if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
-      return this.storeFallbackAdvice(campaignSummaries, inputs.targets);
+      return this.storeFallbackAdvice(campaignSummaries, inputs.targets, inputs.budgetLog);
     }
 
     try {
@@ -328,12 +338,12 @@ class CampaignAdvisor {
       return advice;
     } catch (err) {
       logger.error(`AI Advisor failed: ${err.message}`);
-      return this.storeFallbackAdvice(campaignSummaries, inputs.targets);
+      return this.storeFallbackAdvice(campaignSummaries, inputs.targets, inputs.budgetLog);
     }
   }
 
-  async storeFallbackAdvice(campaignSummaries, targets) {
-    const fallback = this.generateFallbackAdvice(campaignSummaries, targets);
+  async storeFallbackAdvice(campaignSummaries, targets, budgetLog = []) {
+    const fallback = this.generateFallbackAdvice(campaignSummaries, targets, budgetLog);
     await this.storeReport(fallback);
     return fallback;
   }
@@ -345,7 +355,11 @@ class CampaignAdvisor {
     const last7days = await db('ad_performance_daily').where('date', '>=', d7);
     const last30days = await db('ad_performance_daily').where('date', '>=', d30);
 
+    // syncSearchTerms stamps updated_at on every row in Google's rolling
+    // 30-day snapshot and never deletes rows that age out of it, so only rows
+    // refreshed by a recent daily sync carry in-window totals.
     const searchTerms = await db('ad_search_terms')
+      .where('updated_at', '>=', new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS))
       .orderBy('cost', 'desc')
       .limit(ADVISOR_MAX_SEARCH_TERMS);
 
@@ -437,6 +451,10 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
       system,
       text,
     }, {
+      // Split the 10-minute budget across legs: without this an explicit
+      // timeoutMs goes entirely to the Fable leg, so a slow primary miss near
+      // the deadline would leave the OpenAI backup no time to run.
+      reserveFallbackBudget: true,
       // The dispatcher's loose parse accepts any JSON value; the old
       // utils/llm-json parser accepted only a non-array object. Keep that
       // contract: a wrongly shaped answer is a rejected leg, not a stored
@@ -518,8 +536,12 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
     return advice;
   }
 
-  generateFallbackAdvice(summaries, targets) {
+  generateFallbackAdvice(summaries, targets, budgetLog = []) {
     const recommendations = [];
+    // Same no-repeat/no-reversal rule as the model prompt: a campaign whose
+    // budget or mode changed in the last 7 days gets advisory text only, never
+    // a one-click Apply, while the rules below can't see why it changed.
+    const recentlyChanged = new Set(budgetLog.map((b) => String(b.campaign_id)));
     const minRoas = parseFloat(targets?.min_roas || 4.0);
 
     // Only google_ads campaigns get apply_action/apply_value — other platforms
@@ -535,8 +557,7 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
       // Mirrors /advisor/apply: only active Google campaigns take one-click
       // changes (a paused campaign's apply would 422), and a LINKED campaign
       // needs a configured client for its live push.
-      const controllable = c.platform === 'google_ads' && c.status === 'active'
-        && !(c.linked && !adsConfigured);
+      const controllable = isFallbackControllable(c, adsConfigured, recentlyChanged);
       if (c.last7d.roas > 0 && c.last7d.roas < minRoas * 0.5) {
         recommendations.push({
           priority: 'high', campaign: c.name,

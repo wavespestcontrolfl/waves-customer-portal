@@ -32,8 +32,9 @@ const SEARCH_TERMS = [
   { search_term: 'synthetic term free', clicks: 0, cost: '0', conversions: '0', conversion_value: '0', roas: '0' },
 ];
 const mockInsert = jest.fn().mockResolvedValue([1]);
+const mockWhereCalls = [];
 const mockBudgetRow = (i, budgetTo = 8) => ({
-  campaign_name: `Synthetic Search ${i}`, previous_mode: 'base', new_mode: 'base',
+  campaign_id: `synthetic-campaign-${i}`, campaign_name: `Synthetic Search ${i}`, previous_mode: 'base', new_mode: 'base',
   previous_budget: '5.00', new_budget: String(budgetTo), trigger: 'advisor', reason: `synthetic raise ${i}`,
   created_at: '2026-09-30T12:00:00Z',
 });
@@ -46,7 +47,7 @@ jest.mock('../models/db', () => jest.fn((table) => {
     ad_budget_log: mockBudgetLog,
   };
   const b = {
-    where: () => b, orderBy: () => b, select: () => b,
+    where: (...args) => { mockWhereCalls.push({ table, args }); return b; }, orderBy: () => b, select: () => b,
     limit: (n) => { mockLimits.push([table, n]); return b; },
     first: () => Promise.resolve(null),
     insert: (row) => mockInsert(table, row),
@@ -156,6 +157,45 @@ describe('provenance and recent-change context (Codex r1 on #5486)', () => {
     expect(text).toContain('"campaign":"Synthetic Search 200"');
     expect(text).not.toContain('"campaign":"Synthetic Search 201"');
     expect(text).toContain('Only the 200 most recent changes are listed; older changes in the 7-day window are omitted.');
+  });
+});
+
+describe('Codex r4 on #5486', () => {
+  test('search terms are limited to rows refreshed by a recent sync (aged-out rows never reach the prompt)', async () => {
+    mockWhereCalls.length = 0;
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    const fresh = mockWhereCalls.find((c) => c.table === 'ad_search_terms' && c.args[0] === 'updated_at');
+    expect(fresh.args[1]).toBe('>=');
+    const ageMs = Date.now() - fresh.args[2].getTime();
+    expect(ageMs).toBeGreaterThanOrEqual(47 * 3600 * 1000);
+    expect(ageMs).toBeLessThanOrEqual(49 * 3600 * 1000);
+  });
+
+  test('recent budget changes are identified by campaign_id, not just the (non-unique) name', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockDispatch.mock.calls[0][1].text).toContain('"campaign_id":"synthetic-campaign-1"');
+  });
+
+  test('the chain reserves part of the 10-minute budget for the OpenAI fallback', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockDispatch.mock.calls[0][2].reserveFallbackBudget).toBe(true);
+  });
+
+  test('fallback advice never offers Apply on a campaign changed in the last 7 days', () => {
+    const summary = {
+      id: 'c-1', name: 'Synthetic Search', platform: 'google_ads', status: 'active', linked: false,
+      budgetMode: 'base', dailyBudgetBase: 20, dailyBudgetCurrent: 20,
+      last7d: { roas: 1, lostISBudget: 0 },
+    };
+    const fresh = advisor.generateFallbackAdvice([summary], { min_roas: 4 });
+    expect(fresh.recommendations[0].apply_action).toBe('change_mode');
+    const changed = advisor.generateFallbackAdvice([summary], { min_roas: 4 }, [{ campaign_id: 'c-1' }]);
+    expect(changed.recommendations).toHaveLength(1);
+    expect(changed.recommendations[0].apply_action).toBeUndefined();
+    expect(changed.recommendations[0].campaign_id).toBeUndefined();
   });
 });
 
