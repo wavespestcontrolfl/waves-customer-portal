@@ -215,3 +215,23 @@ describe('write-body validation (admin role)', () => {
     expect(res.body.error).toMatch(/status/);
   });
 });
+
+describe('POST /advisor/generate when the AI is unavailable (Codex r10 on #5486)', () => {
+  const advisor = require('../services/ads/campaign-advisor');
+  afterEach(() => jest.restoreAllMocks());
+
+  test("today's existing report was kept: 503 with an error, no replacement report", async () => {
+    jest.spyOn(advisor, 'generateDailyAdvice').mockResolvedValue({ grade: 'N/A', recommendations: [], kept_existing_report: true });
+    const res = await call('post', '/api/admin/ads/advisor/generate', {});
+    expect(res.status).toBe(503);
+    expect(res.body.report).toBeUndefined();
+    expect(res.body.error).toMatch(/existing report was kept/);
+  });
+
+  test('a stored report is returned as before', async () => {
+    jest.spyOn(advisor, 'generateDailyAdvice').mockResolvedValue({ grade: 'B', recommendations: [] });
+    const res = await call('post', '/api/admin/ads/advisor/generate', {});
+    expect(res.status).toBe(200);
+    expect(res.body.report.grade).toBe('B');
+  });
+});

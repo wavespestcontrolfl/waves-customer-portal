@@ -349,3 +349,23 @@ describe('no Apply on campaigns changed in the last 7 days (Codex r9 on #5486)',
     expect(out.recommendations[0].apply_action).toBe('increase_budget');
   });
 });
+
+describe('an outage never overwrites today\'s report (Codex r10 on #5486)', () => {
+  afterEach(() => { mockFirstRows = {}; });
+
+  test('both providers fail and today already has a report: nothing is stored, caller is told it was kept', async () => {
+    mockFirstRows = { ad_advisor_reports: { date: '2026-10-01' } };
+    mockDispatch.mockRejectedValue(new Error('both legs failed'));
+    const out = await advisor.generateDailyAdvice();
+    expect(out.kept_existing_report).toBe(true);
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  test('both providers fail and no report today: the N/A report is stored', async () => {
+    mockDispatch.mockRejectedValue(new Error('both legs failed'));
+    const out = await advisor.generateDailyAdvice();
+    expect(out.kept_existing_report).toBeUndefined();
+    expect(out.grade).toBe('N/A');
+    expect(mockInsert).toHaveBeenCalledWith('ad_advisor_reports', expect.objectContaining({ grade: 'N/A' }));
+  });
+});

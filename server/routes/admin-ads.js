@@ -586,6 +586,11 @@ router.get('/advisor/history', async (req, res, next) => {
 router.post('/advisor/generate', requireAdmin, async (req, res, next) => {
   try {
     const advice = await getCampaignAdvisor().generateDailyAdvice();
+    // The AI was unavailable and today's report was left in place: report the
+    // failure rather than a replacement the client would render.
+    if (advice?.kept_existing_report) {
+      return res.status(503).json({ error: "AI advisor unavailable — today's existing report was kept." });
+    }
     res.json({ report: advice });
   } catch (err) { next(err); }
 });
