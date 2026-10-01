@@ -82,6 +82,9 @@ test('invalid inputs are refused before any lookup', async () => {
   // Too many digits is refused, never truncated to the last ten.
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '941555019912' })).error).toMatch(/not a valid phone/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+1 (941) 555-01' })).error).toMatch(/not a valid phone/);
+  // Extensions / letters are refused, never folded into the number.
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+1 (941) 555-0199 ext 23' })).error).toMatch(/no extension/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '941-555-0199 x4' })).error).toMatch(/no extension/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', email: 'nope' })).error).toMatch(/not a valid email/);
   expect(db).not.toHaveBeenCalled();
 });
@@ -185,6 +188,31 @@ test('unconfirmed ignores a stray pinned diff and recomputes from the live row',
   expect(res.changes).toEqual({ first_name: { from: 'Testc', to: 'Tess' } });
 });
 
+test('a real email change stamps email_confirmed_at in the same guarded update; other fields do not', async () => {
+  const leads = chain({ first: { ...LEAD, email: 'Old@Example.test' }, update: [{ id: 'lead-1' }] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', email: 'new@example.test', confirmed: true });
+  expect(res.success).toBe(true);
+  const written = leads.update.mock.calls[0][0];
+  expect(written.email).toBe('new@example.test');
+  expect(written.email_confirmed_at).toEqual(written.updated_at);
+  // The old value is re-asserted case-insensitively.
+  expect(leads.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ?', ['old@example.test']);
+
+  jest.clearAllMocks();
+  const leads2 = chain({ first: LEAD, update: [{ id: 'lead-1' }] });
+  db.mockImplementation((table) => (table === 'leads' ? leads2 : activities));
+  await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess', confirmed: true });
+  expect(leads2.update.mock.calls[0][0]).not.toHaveProperty('email_confirmed_at');
+});
+
+test('a legacy mixed-case email re-saved unchanged is not a change (no false confirmation stamp)', async () => {
+  db.mockReturnValue(chain({ first: { ...LEAD, email: 'Old@Example.test' } }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', email: 'old@example.test' });
+  expect(res.error).toMatch(/already has those contact details/);
+});
+
 test('a lead linked to a customer says the customer account is untouched', async () => {
   db.mockReturnValue(chain({ first: { ...LEAD, customer_id: 'cust-1' } }));
   const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' });
@@ -210,6 +238,7 @@ test('authorization contract: one before/after effect per changed field, tier ye
     expect.objectContaining({ kind: 'customer', label: 'Lead Testc Beta: first name Testc → Tess', before: 'Testc', after: 'Tess' }),
     expect.objectContaining({ kind: 'customer', label: 'Lead Testc Beta: email (empty) → tess@example.test', before: '(empty)', after: 'tess@example.test' }),
     expect.objectContaining({ kind: 'operational', label: expect.stringMatching(/activity history.*customer account is NOT changed/) }),
+    expect.objectContaining({ kind: 'operational', label: expect.stringMatching(/email-confirmed time.*email-disagreement/) }),
   ]));
   expect(c.preview_fingerprint).toEqual(expect.any(String));
 });

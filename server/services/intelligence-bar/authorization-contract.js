@@ -373,6 +373,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       const to = change?.to == null ? '(cleared)' : String(change.to);
       push('customer', `${who}: ${humanKey(field)} ${from} → ${to}`, { before: from, after: to });
     }
+    if (preview.changes.email) {
+      push('operational', "The email change also stamps the lead's email-confirmed time, which counts as the correction for any open email-disagreement triage card on this lead");
+    }
     push('operational', "A contact-updated entry is appended to the lead's activity history; a linked customer account is NOT changed");
   }
   // Pinned recipient (send_sms, reply_via_sms, trigger_review_request pin a

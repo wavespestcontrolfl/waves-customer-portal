@@ -655,6 +655,9 @@ function normalizeLeadContactField(field, raw) {
     // ten digits of a bare number, so a mistyped 12-digit string would be
     // silently truncated to a different phone. Accept exactly a 10-digit US
     // number, 11 digits with a leading 1, or a full +country number.
+    // Only digits and formatting punctuation (Codex r1 P2): "ext 23" or any
+    // letters would otherwise be folded into the destination number.
+    if (!/^\+?[\d\s().-]+$/.test(text)) return { error: 'phone is not a valid phone number — digits only, no extension.' };
     const digits = text.replace(/\D/g, '');
     const wellFormed = text.startsWith('+')
       ? /^\+\d{8,15}$/.test(`+${digits}`)
@@ -677,7 +680,10 @@ function normalizeLeadContactField(field, raw) {
 function diffLeadContact(lead, requested) {
   const changes = {};
   for (const [field, next] of Object.entries(requested)) {
-    const current = lead[field] === undefined || lead[field] === null || lead[field] === '' ? null : String(lead[field]);
+    let current = lead[field] === undefined || lead[field] === null || lead[field] === '' ? null : String(lead[field]);
+    // Emails compare normalized (the requested value is trimmed + lowercased)
+    // so a legacy mixed-case stored address re-saved unchanged is not a change.
+    if (field === 'email' && current !== null) current = current.trim().toLowerCase() || null;
     if (current !== next) changes[field] = { from: current, to: next };
   }
   return changes;
@@ -752,13 +758,20 @@ async function updateLeadContact(input) {
 
   const updates = { updated_at: new Date() };
   for (const [field, { to }] of Object.entries(changes)) updates[field] = to;
+  // A real email change stamps its confirmation time (Codex r1 P1), as the
+  // lead editor does: admin-triage's emailDisagreementConfirmed reads
+  // email_confirmed_at — not updated_at — as the only proof a customer-less
+  // voicemail lead's email-disagreement card was corrected after it was filed.
+  if (changes.email) updates.email_confirmed_at = updates.updated_at;
 
   const updatedRows = await db.transaction(async (trx) => {
     let q = trx('leads').where('id', lead.id).whereNull('deleted_at');
     // Re-assert every value the card showed as "from" — a concurrent edit
     // matches zero rows instead of being overwritten.
     for (const [field, { from }] of Object.entries(changes)) {
-      q = from === null ? q.where(function () { this.whereNull(field).orWhere(field, ''); }) : q.where(field, from);
+      if (from === null) q = q.where(function () { this.whereNull(field).orWhere(field, ''); });
+      else if (field === 'email') q = q.whereRaw('LOWER(TRIM(email)) = ?', [from]);
+      else q = q.where(field, from);
     }
     const rows = await q.update(updates, ['id']);
     if (!rows || rows.length === 0) return rows;
