@@ -8,6 +8,9 @@ const { getPublishedPosts } = require('../services/newsletter-feed');
 const localNewsStore = require('../services/local-news-store');
 const { getForecast } = require('../services/pest-forecast/forecast');
 const { LOCATIONS, BY_SLUG, resolveZip } = require('../services/pest-forecast/locations');
+const { portalYardCalendarLive } = require('../config/feature-gates');
+const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+const { buildYardCard } = require('../services/portal-yard-card');
 
 router.use(authenticate);
 
@@ -575,6 +578,30 @@ router.get('/weather', async (req, res, next) => {
 
     cache[cacheKey] = { data: result, ts: now };
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// GET /api/feed/yard — "Your yard this month" card (GATE_PORTAL_YARD_CALENDAR)
+// =========================================================================
+// Dark: gate-off answers 200 {available:false} (the property-score contract)
+// and the portal keeps rendering the existing Local Conditions card. The
+// place is resolved exactly as /weather resolves it, so the card's city, its
+// weather box and its household-pest list always name the same location.
+// Not cached here: it is per-customer (plan, grass, last visit).
+router.get('/yard', async (req, res, next) => {
+  try {
+    if (!portalYardCalendarLive()) return res.json({ available: false });
+    const place = resolveWeatherLocation(req.property, req.customer);
+    // A failed scope lookup is an error, never an unscoped read: the client
+    // falls back to the Local Conditions card rather than show another
+    // property's visit or grass under this property's heading.
+    const scope = await resolveSessionScope(req);
+    const card = await buildYardCard({ customerId: req.customerId, place, scope });
+    // Echo the house this read resolved to (fallbacks included), like every
+    // other property-scoped portal read, so the client can withhold the card
+    // when it differs from the house the tab shows (scopeEchoMismatch).
+    res.json({ available: true, ...card, propertyScope: resolvedScopePayload(scope) });
   } catch (err) { next(err); }
 });
 

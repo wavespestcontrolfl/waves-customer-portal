@@ -531,6 +531,15 @@ const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabl
 // never touched by this — only this health-event copy.
 const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
 
+// A search_field_intelligence result with no page, entry or operational
+// match. Open contradictions only ever attach to returned hits.
+const KNOWLEDGE_GAP_MAX = 300;
+function isEmptyKnowledgeSearch(result) {
+  if (!result || typeof result.query !== 'string' || !result.query) return false;
+  const none = (list) => !Array.isArray(list) || list.length === 0;
+  return none(result.fieldIntelligence) && none(result.knowledgeBase) && none(result.operationalKnowledge);
+}
+
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
 }
@@ -2762,6 +2771,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // results. Returned only when the gate is on; off = today's payload.
     const toolActivityOn = gateEnvValue('GATE_IB_TOOL_ACTIVITY');
     const toolActivity = [];
+    // Knowledge searches that found nothing this request. Returned to the
+    // client only, so the operator can choose to add one to the weekly
+    // knowledge-gaps email (POST /knowledge-gap). Never logged here: the
+    // search text can carry a customer's name, address or phone.
+    const knowledgeMisses = new Set();
 
     // Tool-use loop
     let lastToolResponse = null;
@@ -2982,6 +2996,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
+        if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.
         if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
@@ -3149,6 +3164,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // Operator-facing activity lines (GATE_IB_TOOL_ACTIVITY). Absent when
       // the gate is off so the payload stays byte-identical.
       ...(toolActivityOn ? { toolActivity } : {}),
+      // Knowledge searches that came back empty, for the "add to knowledge
+      // gaps" prompt. Absent when there were none.
+      ...(knowledgeMisses.size ? { knowledgeMisses: [...knowledgeMisses] } : {}),
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
       // Pending write proposals for the client confirmation card. This is the
@@ -3200,6 +3218,51 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 }
 
 router.post('/query', runQuery);
+
+// Operator-chosen knowledge gap: the client offers this after a knowledge
+// search came back empty, with the search text in an editable box. Nothing
+// is saved unless the operator taps the button, so the text is what they
+// chose to keep. Feeds the weekly knowledge-gaps email
+// (services/knowledge/knowledge-gaps-weekly.js).
+router.post('/knowledge-gap', async (req, res) => {
+  if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+  // One key per prompt box: a retry after a lost response re-sends it and
+  // the unique index makes the second insert a no-op.
+  const requestKey = typeof req.body?.request_key === 'string' ? req.body.request_key.trim().toLowerCase() : '';
+  if (!UUID_RE.test(requestKey)) return res.status(400).json({ error: 'request_key must be a UUID' });
+  const question = typeof req.body?.question === 'string' ? req.body.question.replace(/\s+/g, ' ').trim() : '';
+  if (question.length < 3 || question.length > KNOWLEDGE_GAP_MAX) {
+    return res.status(400).json({ error: `question must be 3 to ${KNOWLEDGE_GAP_MAX} characters` });
+  }
+  // The weekly email lists a question by its letters and digits; one with
+  // none (e.g. "???") would be saved but never listed.
+  if (!require('../services/knowledge/knowledge-gaps-weekly').questionKey(question)) {
+    return res.status(400).json({ error: 'question needs at least one letter or number' });
+  }
+  try {
+    await db('knowledge_queries').insert({
+      query: question,
+      articles_referenced: JSON.stringify([]),
+      asked_by: 'intelligence_bar',
+      coverage: 'none',
+      request_key: requestKey,
+    }).onConflict('request_key').ignore();
+    // A retry (same key) saved nothing new: answer with the text actually
+    // stored, so the screen shows what the weekly email will list.
+    const stored = await db('knowledge_queries').where({ request_key: requestKey }).first('query');
+    res.json({ success: true, question: stored?.query ?? question });
+  } catch (err) {
+    // Never pass the error on: knex puts the bindings (the operator's text,
+    // which can still hold customer details) in its message. Code +
+    // constraint are enough to diagnose.
+    logger.error(
+      `[intelligence-bar] knowledge gap save failed (code=${err?.code || 'unknown'}`
+      + `${err?.constraint ? `, constraint=${err.constraint}` : ''})`,
+    );
+    res.status(500).json({ error: 'Could not save the knowledge gap. Try again.' });
+  }
+});
 
 router.post('/tasks/:id/select-target', async (req, res, next) => {
   if (!gateEnvValue('GATE_IB_PLATFORM')) return res.status(404).json({ error: 'Not found' });
