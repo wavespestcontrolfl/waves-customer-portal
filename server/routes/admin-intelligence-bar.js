@@ -1039,6 +1039,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // a different row at Confirm (the preview fingerprint also binds it).
       params.lead_id = String(preview.lead_id);
       delete params.lead_name;
+      // Pin the approved before → after values: the confirmed executor
+      // re-asserts THESE in its UPDATE's WHERE, not whatever it re-reads
+      // after the fingerprint check (pre-push P1). `_`-prefixed: never
+      // shown, ignored by the unconfirmed fingerprint re-run.
+      params._approved_changes = preview.changes;
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no

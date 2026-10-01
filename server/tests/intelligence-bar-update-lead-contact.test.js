@@ -138,6 +138,42 @@ test('confirmed: a zero-row guarded update (concurrent edit) refuses with previe
   expect(activities.insert).not.toHaveBeenCalled();
 });
 
+test('confirmed with the pinned diff: the WHERE re-asserts the APPROVED old value, not the re-read one', async () => {
+  // Another writer changed first_name between the card and this commit.
+  const leads = chain({ first: { ...LEAD, first_name: 'Someone' }, update: [] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', first_name: 'Tess', confirmed: true,
+    _approved_changes: { first_name: { from: 'Testc', to: 'Tess' } },
+  });
+  expect(leads.where).toHaveBeenCalledWith('first_name', 'Testc');
+  expect(leads.where).not.toHaveBeenCalledWith('first_name', 'Someone');
+  expect(res.preview_changed).toBe(true);
+  expect(activities.insert).not.toHaveBeenCalled();
+});
+
+test('confirmed: a pinned diff that does not match the request is refused', async () => {
+  const leads = chain({ first: LEAD, update: [{ id: 'lead-1' }] });
+  db.mockReturnValue(leads);
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', first_name: 'Tess', confirmed: true,
+    _approved_changes: { first_name: { from: 'Testc', to: 'Other' } },
+  });
+  expect(res.preview_changed).toBe(true);
+  expect(res.error).toMatch(/do not match this request/);
+  expect(leads.update).not.toHaveBeenCalled();
+});
+
+test('unconfirmed ignores a stray pinned diff and recomputes from the live row', async () => {
+  db.mockReturnValue(chain({ first: LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', first_name: 'Tess', _approved_changes: { first_name: { from: 'Zed', to: 'Tess' } },
+  });
+  expect(res.preview).toBe(true);
+  expect(res.changes).toEqual({ first_name: { from: 'Testc', to: 'Tess' } });
+});
+
 test('a lead linked to a customer says the customer account is untouched', async () => {
   db.mockReturnValue(chain({ first: { ...LEAD, customer_id: 'cust-1' } }));
   const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' });

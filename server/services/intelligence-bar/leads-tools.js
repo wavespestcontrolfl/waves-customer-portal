@@ -675,6 +675,25 @@ function diffLeadContact(lead, requested) {
   return changes;
 }
 
+// The route-pinned diff for a confirmed run: every field must be a contact
+// field whose target equals what this call requests, or the pin is refused.
+function approvedLeadContactChanges(pinned, requested) {
+  if (pinned === undefined || pinned === null) return null;
+  if (typeof pinned !== 'object' || Array.isArray(pinned) || Object.keys(pinned).length === 0) {
+    return { error: 'Approved changes are malformed. Rebuild the confirmation card.', preview_changed: true };
+  }
+  const changes = {};
+  for (const [field, change] of Object.entries(pinned)) {
+    const from = change?.from === undefined || change?.from === null ? null : String(change.from);
+    const to = change?.to === undefined || change?.to === null ? null : String(change.to);
+    if (!LEAD_CONTACT_FIELDS.includes(field) || !(field in requested) || requested[field] !== to) {
+      return { error: 'Approved changes do not match this request. Rebuild the confirmation card.', preview_changed: true };
+    }
+    changes[field] = { from, to };
+  }
+  return changes;
+}
+
 async function updateLeadContact(input) {
   const requested = {};
   for (const field of LEAD_CONTACT_FIELDS) {
@@ -692,7 +711,14 @@ async function updateLeadContact(input) {
   if (lead.error) return lead;
 
   // Only fields whose stored value actually differs are written (and shown).
-  const changes = diffLeadContact(lead, requested);
+  // A confirmed run uses the APPROVED diff the route pinned at proposal
+  // (pre-push P1): the route's fingerprint re-check and this executor's own
+  // read are two reads, so a write landing between them would otherwise be
+  // re-asserted against the newer value and overwritten. The approved
+  // "from" values ride into the UPDATE's WHERE instead.
+  const approved = input.confirmed === true ? approvedLeadContactChanges(input._approved_changes, requested) : null;
+  if (approved?.error) return approved;
+  const changes = approved || diffLeadContact(lead, requested);
   const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim();
   if (Object.keys(changes).length === 0) {
     return { error: `Lead ${leadName} already has those contact details — nothing to change.` };
