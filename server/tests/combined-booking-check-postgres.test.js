@@ -224,29 +224,18 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
-  test('problems past the per-run cap are listed on one rolling bell; a standing problem never counts against the cap', async () => {
+  test('every problem gets its own bell in the same run, with no per-run cap', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
     mockPg = trx;
-    const rollup = () => trx('notifications').where({ recipient_type: 'admin', category: 'alert' })
-      .whereRaw("metadata->>'alertClass' = 'combined-booking-check'").whereRaw("metadata->'subject'->>'type' = 'check'");
     try {
-      const older = [await acceptedEstimate(trx, lines), await acceptedEstimate(trx, lines)];
-      expect(await runCombinedBookingCheck({ conn: trx, maxNew: 1 })).toMatchObject({ problems: 1, overflow: 1 });
-      const [overflowRow] = await rollup();
-      expect(overflowRow.title).toBe('Schedule — fix 1 more combined booking');
-      expect(overflowRow.done_at).toBeNull();
-      expect(overflowRow.metadata.itemKeys).toEqual([older[1].estimateId]);
-      expect(overflowRow.detail).toMatch(older[1].estimateId);
-      // Next run: the overflowed booking gets its own bell and the rolling bell closes as done.
-      expect(await runCombinedBookingCheck({ conn: trx, maxNew: 1 })).toMatchObject({ problems: 2, overflow: 0 });
-      expect((await rollup())[0].done_at).not.toBeNull();
-      const newest = await acceptedEstimate(trx, lines);
-      expect(await alertsOf(trx, newest.estimateId)).toHaveLength(0);
-      // Two older problems are re-checked first and are NOT counted; the newest still posts.
-      expect(await runCombinedBookingCheck({ conn: trx, maxNew: 1 })).toMatchObject({ problems: 3 });
-      expect(await alertsOf(trx, newest.estimateId)).toHaveLength(1);
-      for (const est of older) expect(await alertsOf(trx, est.estimateId)).toHaveLength(1);
+      const all = [];
+      for (let i = 0; i < 3; i += 1) all.push(await acceptedEstimate(trx, lines));
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 3, failed: 0 });
+      for (const est of all) expect(await alertsOf(trx, est.estimateId)).toHaveLength(1);
+      // A standing problem refreshes its own bell, never a second one.
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 3 });
+      for (const est of all) expect(await alertsOf(trx, est.estimateId)).toHaveLength(1);
     } finally {
       mockPg = pool;
       await trx.rollback();
