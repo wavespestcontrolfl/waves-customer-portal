@@ -163,6 +163,16 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['lawn_care']) })).toBeNull();
   });
 
+  test('a combined route row keeps a left-out family\'s share of its price', () => {
+    // Lawn + tree run as one combined route row; tree is held.
+    const combo = lawnRows({ key: 'lawn_tree_shrub_combo', type: 'Lawn + Tree & Shrub', price: 160, invoiceId: null,
+      parentOverrides: { estimated_price: 160 } });
+    const verdict = run([PEST, LAWN, { ...TREE, visitsPerYear: 6, frequency: 'bimonthly', annual: 360, mo: 30 }],
+      [...pestRows({ invoiceId: null, parentOverrides: { estimated_price: 150 } }), ...combo],
+      { scheduleSkippedFamilies: new Set(['tree_shrub']) });
+    expect(verdict.problems).toEqual([]);
+  });
+
   test('individually priced first visits are judged one by one, even when their sum matches', () => {
     const pest = pestRows({ invoiceId: null, parentOverrides: { estimated_price: 200 } });
     const lawn = lawnRows({ invoiceId: null, parentOverrides: { estimated_price: 50 } });

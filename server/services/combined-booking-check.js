@@ -385,8 +385,11 @@ function evaluateCombinedBooking(ctx) {
     && !row.recurring_parent_id && row.first_application_invoice_id && !row.has_own_live_invoice);
   const split = (ctx.rows || []).filter((row) => isPlanRow(row, programs) && !NOT_LIVE.has(row.status)
     && !row.recurring_parent_id && row.has_own_live_invoice);
-  const invoicePrograms = new Map([...accepted.programs]
-    .filter(([family]) => programs.has(family) || stamped.some((row) => rowFamilies(row).includes(family))));
+  // Prices are judged against the WHOLE accepted plan: a combined row (lawn +
+  // tree) still bills a left-out family's share, and so does the shared
+  // invoice. `programs` above scopes only which rows are checked.
+  const priced = accepted.programs;
+  const pricedFamilies = new Set([...rows, ...stamped].flatMap((row) => rowFamilies(row)).filter((family) => priced.has(family)));
   // Rows were created and every one was cancelled: the customer or office
   // cancelled the plan. Nothing left to verify, so nothing to say.
   if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
@@ -402,7 +405,7 @@ function evaluateCombinedBooking(ctx) {
   // shape and never declares the booking OK. Neither does an estimate the
   // classifier did not judge, nor one with no accepted per-visit price to
   // compare against (its problems below are still reported).
-  const pricesUnverifiable = [...invoicePrograms.values()].some((program) => program.perVisit == null);
+  const pricesUnverifiable = [...pricedFamilies].some((family) => priced.get(family).perVisit == null);
   const deferred = !rows.length || (ctx.scheduleGaps || []).length > 0 || ctx.scheduleUnjudged === true
     || pricesUnverifiable;
   if (!rows.length) return { ok: false, deferred, problems: [], facts };
@@ -423,10 +426,10 @@ function evaluateCombinedBooking(ctx) {
   const unstamped = firstDayRows.filter((row) => !row.first_application_invoice_id && !row.has_own_live_invoice && !isPrepaid(row));
   const problems = [
     ...checkTimeAndTech(dated, programs),
-    ...checkLaterPrices(dated, programs, firstDay),
-    ...(stamped.length ? checkStampedFirstDay(stamped, invoicePrograms, invoices, facts) : []),
-    ...(unstamped.length ? checkUnstampedFirstDay(unstamped, programs, facts) : []),
-    ...checkSplitInvoices(split, programs),
+    ...checkLaterPrices(dated, priced, firstDay),
+    ...(stamped.length ? checkStampedFirstDay(stamped, priced, invoices, facts) : []),
+    ...(unstamped.length ? checkUnstampedFirstDay(unstamped, priced, facts) : []),
+    ...checkSplitInvoices(split, priced),
   ];
   return { ok: problems.length === 0 && !deferred, deferred, problems, facts };
 }
