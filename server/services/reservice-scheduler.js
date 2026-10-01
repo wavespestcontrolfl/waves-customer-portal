@@ -645,7 +645,12 @@ const RESERVICE_SUBJECTLESS_PREDICATE_RE = /^\W*(?:(?:and|but|yet|then|now|so)\W
 // nothing after it ("went away", "disappeared", "are gone now", "stopped coming"). "stopped by your office", "gone through two cans",
 // "stopped spraying myself", "stopped using the bait" are first-person / object clauses, not the pests leaving — they neither inherit the
 // subject nor reach back to drop the sighting before them.
-const RESERVICE_SUBJECTLESS_DEPARTURE_RE = /^\W*(?:(?:and|but|yet|then|now|so)\W+)*(?:(?:are|is|were|was|have|has|had)\s+)?(?:(?:all|now|already|finally|completely|totally|just|mostly|really)\s+)*(?:disappeared|vanished|went\s+away|gone(?:\s+away)?|stopped(?:\s+(?:coming|showing\s+up|appearing))?)(?:\s+(?:now|already|completely|entirely|altogether|for\s+good|again|too|since))*\W*$/i;
+const RESERVICE_SUBJECTLESS_DEPARTURE_RE = /^\W*(?:(?:and|but|yet|then|now|so)\W+)*(?:(?:are|is|were|was|have|has|had)\s+)?(?:(?:all|now|already|finally|completely|totally|just|really)\s+)*(?:disappeared|vanished|went\s+away|gone(?:\s+away)?|stopped(?:\s+(?:coming|showing\s+up|appearing))?)(?:\s+(?:now|already|completely|entirely|altogether|for\s+good|again|too|since))*\W*$/i;
+// Round-3: a PARTIAL resolution ("most of the ants are gone but SOME are still in the kitchen", "fewer roaches now but STILL SEEING a few") leaves a
+// residual-presence clause that carries no pest noun of its own — it inherits the previous clause's pest (an active report). Partial qualifiers
+// ("mostly gone", "partly", "almost") are deliberately absent from the departure pattern above.
+const RESERVICE_PARTIAL_RESOLUTION_RE = /\b(?:mostly|partly|partially|almost|nearly|somewhat|mainly|largely|kind\s+of|sort\s+of|pretty\s+much|for\s+the\s+most\s+part|not\s+all|fewer|less)\b/i;
+const RESERVICE_RESIDUAL_CLAUSE_RE = /^\W*(?:(?:and|but|yet|though|although|so|now)\W+)*(?:(?:some|a\s+few|several|a\s+couple|a\s+handful|many|plenty|a\s+lot)(?:\s+of\s+(?:them|those|these))?\s+(?:are|is|were|was|remain\w*|still|keep|kept|have|has|came|come|show\w*|stay\w*)\b(?!\s+(?:gone|disappeared|vanished|dead)\b)|(?:(?:i|we)(?:['’]m|['’]ve|\s+am|\s+have)?\s+)?(?:still|keep|kept)\s+(?:see\w*|find\w*|get\w*|hav\w*|got|notic\w*)\b)/i;
 const RESERVICE_PRONOUN_SUBJECT_RE = /^\W*(?:(?:but|and|yet|now|then|so|because)\W+)*(?:they|it|them|those|these|all\s+of\s+(?:them|it))\b/i;
 // { kept: clauses that still count, survivingText: the original text with dropped clauses blanked }
 function reservicePestReportFacts(text) {
@@ -666,7 +671,7 @@ function reservicePestReportFacts(text) {
   segs.forEach((seg, i) => {
     seg.blank = !seg.clause.trim();
     seg.eff = seg.clause;
-    if (!seg.blank && (RESERVICE_SUBJECTLESS_PREDICATE_RE.test(seg.clause) || RESERVICE_SUBJECTLESS_DEPARTURE_RE.test(seg.clause)) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) {
+    if (!seg.blank && (RESERVICE_SUBJECTLESS_PREDICATE_RE.test(seg.clause) || RESERVICE_SUBJECTLESS_DEPARTURE_RE.test(seg.clause) || RESERVICE_RESIDUAL_CLAUSE_RE.test(seg.clause)) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) {
       const prevSeg = segs.slice(0, i).reverse().find((x) => !x.blank);
       // the PREVIOUS clause's effective text, so a chain of subjectless predicates keeps the one pest subject ("Ants came back, went away, came back again")
       const noun = prevSeg && RESERVICE_PEST_NOUN_UNBOUND_RE.exec(prevSeg.eff);
@@ -688,7 +693,7 @@ function reservicePestReportFacts(text) {
   segs.forEach((seg, i) => {
     const prev = segs.slice(0, i).reverse().find((x) => !x.blank);
     // Round-2: a QUESTIONED departure ("Ants came back; are gone now?", "Did they go away?") is not a resolution and never reaches back.
-    if (!prev || seg.blank || seg.question || prev.dropped || !reserviceClauseResolved(seg.departure ? seg.eff : seg.clause)) return;
+    if (!prev || seg.blank || seg.question || RESERVICE_PARTIAL_RESOLUTION_RE.test(seg.clause) || prev.dropped || !reserviceClauseResolved(seg.departure ? seg.eff : seg.clause)) return;
     // Codex round-44 P2: a SUBJECTLESS resolution inherits the prior clause's pest subject ("Ants came back but are gone now",
     // "Ants came back, then disappeared") exactly like a pronoun one does.
     if ((RESERVICE_PRONOUN_SUBJECT_RE.test(seg.clause) || seg.departure) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) { prev.dropped = true; prev.reachDropped = true; }

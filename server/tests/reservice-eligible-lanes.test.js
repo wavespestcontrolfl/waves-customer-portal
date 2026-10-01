@@ -581,6 +581,15 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['Ants are back. Did they go away after the last spray?', true, 'pest', false],
     ['Ants are back. Did they go away after the last spray, or did they just go away?', true, 'pest', false],
     ['Ants came back. They went away?', true, 'pest', false],
+    // Codex round-3 P2: a PARTIAL resolution keeps the infestation active
+    ['Ants came back but are mostly gone now', true, 'pest', false],
+    ['Ants came back but they are mostly gone now', true, 'pest', false],
+    ['Ants came back, mostly disappeared', true, 'pest', false],
+    ['Most of the ants are gone but some are still in the kitchen', true, 'pest', false],
+    ['The roaches are mostly gone but I still see a few', true, 'pest', false],
+    ['Fewer roaches now but still seeing a few', true, 'pest', false],
+    ['The ants are mostly gone', false, null, false],
+    ['The ants are gone', false, null, false],
     // PR #5465 R2: the sighting a departure drops is still the antecedent of a later pronoun return
     ['The ants came back, then went away, but now they\'re back', true, 'pest', false],
     ['Chinch bugs came back, went away, but now they\'re back', true, 'lawn', false],
