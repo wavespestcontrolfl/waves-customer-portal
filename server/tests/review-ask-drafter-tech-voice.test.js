@@ -69,7 +69,7 @@ beforeEach(() => {
 });
 
 const INPUT = {
-  customer: { id: 'cust-1', first_name: 'Marta' },
+  customer: { id: 'cust-1', first_name: 'Marta', email: 'marta@example.com' },
   recipientFirstName: 'Marta',
   serviceType: 'Cockroach Treatment Service',
   techName: 'Adam Benetti',
@@ -445,6 +445,26 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     );
     expect(v).toBe('satisfaction_condition');
     expect(Drafter.verifyDraftBody('Aaron, if you were happy with the visit. Would you leave a Google review? {review_url}', { firstName: 'Aaron' })).toBe('satisfaction_condition');
+  });
+
+  test('#5524 r2 P1: an email attached by display name from another address is not the customer\'s words', async () => {
+    const auth = (d) => `mx.google.com; dkim=pass header.i=@${d}`;
+    mockTables.emails = [
+      { id: 'e1', subject: null, from_address: 'Marta@Example.com', authentication_results: auth('example.com'), body_text: 'Her own note about the lanai.', received_at: new Date() },
+      { id: 'e2', subject: null, from_address: 'someone@other.org', authentication_results: auth('other.org'), body_text: 'A stranger mentions a new baby.', received_at: new Date() },
+    ];
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    const text = mockDispatch.mock.calls[0][1].text;
+    expect(text).toContain('Her own note about the lanai.');
+    expect(text).not.toContain('new baby');
+  });
+
+  test('#5524 r2 P1: shared stop words (stemmed) never count as quote overlap', () => {
+    const { quoteSharesContent, detailSupportedByQuote } = Drafter.__private;
+    expect(quoteSharesContent('There was a new baby at the house.', 'There were ants in the kitchen', new Set())).toBe(false);
+    expect(detailSupportedByQuote('there was a new baby', 'There were ants in the kitchen')).toBe(false);
+    expect(quoteSharesContent('Ants were busy in the kitchen.', 'There were ants in the kitchen', new Set())).toBe(true);
   });
 
   test('a bare link after a question stays with its sentence', () => {

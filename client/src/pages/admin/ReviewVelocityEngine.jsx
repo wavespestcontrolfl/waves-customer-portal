@@ -247,7 +247,7 @@ const TEMPLATES = [
     id: "recovery_review",
     name: "Recovery → Review",
     sentiment: "issue",
-    body: "Hi {first}! Glad we got it sorted. Would you mind sharing your experience with Waves?\n\n{review_url}\n\nThank you!",
+    body: "Hi {first}! Glad we got it sorted. Would you mind sharing your experience in a Google review?\n\n{review_url}\n\nThank you!",
   },
   {
     id: "winback_checkin",
@@ -265,7 +265,7 @@ const TEMPLATES = [
     id: "qr_followup",
     name: "QR Code Follow-Up",
     sentiment: "happy",
-    body: "Hey {first}, it's Waves - great seeing you today. Here is that review link one more time:\n\n{review_url}",
+    body: "Hey {first}, it's Waves - great seeing you today. Here is that review link one more time, for a Google review:\n\n{review_url}",
   },
   // first_treatment_ask is deliberately NOT offered here (codex #3235 r12
   // P1, superseding the r3 mirror-parity note): it is a cadence-internal,

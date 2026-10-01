@@ -459,7 +459,7 @@ async function serviceReportFacts(serviceRecordId) {
 // words: quoted history and signatures are cut, and a reply's subject counts
 // only when it is new text, not the thread's subject behind "Re:" (a quoted
 // Waves message must never back a claim). Same helpers as intake.
-async function customerOwnEmails(customerId, before = null) {
+async function customerOwnEmails(customerId, before = null, customerEmail = null) {
   try {
     const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require("./email/email-strip");
     const rows = await db("emails")
@@ -475,7 +475,12 @@ async function customerOwnEmails(customerId, before = null) {
     // other inbound-email evidence reader.
     const { hasAlignedAuth } = require("./email/inbox-hygiene");
     const { domainFromAddress } = require("./email/spam-blocker");
-    const authentic = rows.filter((r) => hasAlignedAuth(r.authentication_results, domainFromAddress(r.from_address)));
+    // And only mail FROM the account holder's own address: a row can carry
+    // this customer_id through a display-name match on someone else's mail.
+    const { normalizeAddress } = require("./email/spam-blocker");
+    const own = customerEmail ? normalizeAddress(customerEmail) : null;
+    const authentic = own ? rows.filter((r) => normalizeAddress(r.from_address) === own
+      && hasAlignedAuth(r.authentication_results, domainFromAddress(r.from_address))) : [];
     const ownSubjects = await ownSubjectsInThreads(db, authentic);
     return authentic.map((r) => ({
       date: r.received_at,
@@ -543,7 +548,7 @@ async function gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, s
     serviceReportFacts(serviceRecordId),
     recentSmsThread(customer.id, TECH_VOICE_SMS_HISTORY, before),
     ContextAggregator.getRecentCalls(customer.id, { before }).catch(() => []),
-    customerOwnEmails(customer.id, before),
+    customerOwnEmails(customer.id, before, customer.email),
     priorSequenceTouches(sequenceId, sequenceStep),
   ]);
   return {
@@ -719,7 +724,8 @@ const SENSITIVE_TOPIC_RE = /\b(?:surger(?:y|ies)|hospital\w*|sick|illness|cancer
 const COMMITMENT_RE = /\b(?:i'll|i will|we'll|we will|i'm going to|we're going to|gonna|be back|come back|coming back|stop by|swing by|up next|next (?:visit|time|treatment|service|week|month)|tomorrow|tonight|later this week|scheduled|appointment|second visit|follow[- ]?up visit)\b/i;
 const DETAIL_STOP = new Set(`the and but for from with that this you your yours our its his her him she they them their
   was were are have has had get got just also very really some any all can could would should will about
-  into over then than there here what when where which who how not too out off one two`.split(/\s+/));
+  into over then than there here what when where which who how not too out off one two
+  is be been being do does did at in on of to a an it its as by so if or no yes we us me my i`.split(/\s+/));
 
 // Crude stem shared by both checks: plural, -ing/-ed, trailing e. Short
 // stems are ignored so "we" / "wed" never match anything.
@@ -732,6 +738,10 @@ function termStem(word) {
   return w.length >= 3 ? w : "";
 }
 const GROUNDED_TERMS = new Set(GROUNDED_TERM_WORDS.split(/\s+/).map(termStem).filter(Boolean));
+// Stop words compared the way overlap is compared: stemmed ("there" → "ther"),
+// so a shared filler word never counts as evidence.
+const STOP_STEMS = new Set([...DETAIL_STOP].map(termStem).filter(Boolean));
+const isStop = (stem) => DETAIL_STOP.has(stem) || STOP_STEMS.has(stem);
 
 function stemSet(text) {
   return new Set((String(text || "").match(/[A-Za-z]+/g) || []).map(termStem).filter(Boolean));
@@ -751,7 +761,7 @@ function ungroundedTerm(body, corpus) {
 // A cited source line must actually back its detail: they share at least one
 // content word, and at least a third of the detail's content words.
 function detailSupportedByQuote(text, quote) {
-  const words = [...stemSet(text)].filter((s) => !DETAIL_STOP.has(s));
+  const words = [...stemSet(text)].filter((s) => !isStop(s));
   if (!words.length) return false;
   const quoteWords = stemSet(quote);
   const shared = words.filter((s) => quoteWords.has(s)).length;
@@ -922,7 +932,7 @@ function legCapture() {
 
 function quoteSharesContent(sentence, quote, names) {
   const nameStems = new Set([...names].map(termStem).filter(Boolean));
-  const words = [...stemSet(sentence)].filter((w) => !DETAIL_STOP.has(w) && !nameStems.has(w));
+  const words = [...stemSet(sentence)].filter((w) => !isStop(w) && !nameStems.has(w));
   const quoteWords = stemSet(quote);
   return words.some((w) => quoteWords.has(w));
 }
@@ -1193,7 +1203,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;
