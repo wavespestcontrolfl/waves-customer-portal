@@ -146,6 +146,8 @@ const OUTSIDE_WRITE_NAMES = [
   'purge_cloudflare_cache', 'retry_cloudflare_pages_build',
   'redeploy_railway_service', 'restart_railway_service',
   'rerun_failed_github_checks', 'add_github_pr_label', 'request_codex_review',
+  // Feature switches (owner ruling 2026-09-28, Decision 5).
+  'set_railway_gate', 'set_growthbook_feature_environment',
 ];
 const OUTSIDE_READ_MARKERS = ['get_sentry_top_issues', 'get_cloudflare_zones', 'get_railway_status', 'get_recent_merged_prs'];
 
