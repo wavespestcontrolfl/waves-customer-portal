@@ -2090,8 +2090,15 @@ async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null,
   try {
     email = await sendBatchEmail({ batchKey, dbh, mailer });
   } catch (err) {
-    logger.error(`[rate-review] batch email failed for ${batchKey} (status ${Number.isInteger(err && err.status) ? err.status : 'network'}) — batch persisted, delivery will retry`);
-    throw err;
+    // The provider's message can carry its raw response body (which can hold
+    // email addresses — PII never goes to logs): log and re-throw a status-
+    // only error, so the scheduler's generic catch prints nothing else.
+    const status = Number.isInteger(err && err.status) ? err.status : 'network';
+    logger.error(`[rate-review] batch email failed for ${batchKey} (status ${status}) — batch persisted, delivery will retry`);
+    const sanitized = new Error(`rate review digest delivery failed for ${batchKey} (status ${status})`);
+    sanitized.status = err && err.status;
+    sanitized.code = 'RATE_REVIEW_DIGEST_DELIVERY_FAILED';
+    throw sanitized;
   }
   return { ...built, emailed: !!email.sent, email };
 }

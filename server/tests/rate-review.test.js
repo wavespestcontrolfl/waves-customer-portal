@@ -1437,8 +1437,13 @@ describe('runMonthlyRateReview', () => {
     mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
     mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
     const sendgrid = require('../services/sendgrid-mail');
-    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('sendgrid 503'), { status: 503 }));
-    await expect(rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } })).rejects.toThrow('sendgrid 503');
+    // the provider's message carries its raw response body — an address must never ride the re-thrown error into the scheduler's log line
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('sendgrid 503: {"errors":[{"message":"bounced: someone@example.com"}]}'), { status: 503 }));
+    const failure = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } }).catch((e) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toBe('rate review digest delivery failed for 2026-11 (status 503)');
+    expect(failure.message).not.toMatch(/@|bounced/);
+    expect(failure).toMatchObject({ status: 503, code: 'RATE_REVIEW_DIGEST_DELIVERY_FAILED' });
     expect(scripted.writes.batchUpserts).toHaveLength(1); // the batch itself landed
     expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at)).toBe(false); // nothing stamped → the next tick retries
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
