@@ -362,13 +362,17 @@ function loadSpeciesCatalog() {
   }));
 }
 
+function renderSpeciesTech(e) {
+  return joinParts([`Tech notes: ${e.tech_notes}`, (e.sources || []).length ? `Sources: ${e.sources.join(' ')}` : '']);
+}
+
 function loadSpeciesTechNotes() {
   return approvedSpeciesEntries()
     .filter((e) => clean(e.tech_notes))
     .map((e) => ({
       sourceId: e.slug,
       title: `${speciesTitle(e)} — tech notes`,
-      content: joinParts([`Tech notes: ${e.tech_notes}`, (e.sources || []).length ? `Sources: ${e.sources.join(' ')}` : '']),
+      content: renderSpeciesTech(e),
       metadata: { ...speciesMetadata(e), audience: 'staff' },
       sourceUpdatedAt: null,
     }));
@@ -400,4 +404,4 @@ async function loadCorpus(connector) {
   }
 }
 
-module.exports = { CONNECTORS, loadCorpus };
+module.exports = { CONNECTORS, loadCorpus, speciesTitle, renderSpeciesCustomer, renderSpeciesTech };

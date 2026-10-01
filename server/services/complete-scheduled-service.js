@@ -12482,13 +12482,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
         && (completionTextWouldCarryPayLink || declineNoticeEligibleSansHold);
       if (invoice?.id && (invoiceSenderOwnsPayLink || heldPayLinkWouldHaveGone)) {
         try {
+          // The ownership marker and the queue write land in ONE transaction (handOverHeldInvoiceToSender), and the
+          // exhausted-invoice re-arm rides the FIRST ownership hand-over only (Codex #5459 r4 P2): the transaction that
+          // newly records invoiceSenderOwnsPayLinkFor. A failed queue write rolls the marker back, so the retried
+          // closeout is again "newly owning" and still re-arms; once the marker is committed no re-run resets the
+          // sender's attempt cap.
+          await require('../services/dispatch-completion-deferred').handOverHeldInvoiceToSender({ invoiceId: invoice.id, serviceRecordId: record.id });
           if (!invoiceSenderOwnsPayLink) {
             const ownsDelta = { invoiceSenderOwnsPayLinkFor: String(invoice.id) };
-            await mergeRecordNotesKeys(record.id, ownsDelta);
             Object.assign(recordStructuredNotes, ownsDelta);
             record.structured_notes = { ...parseJsonObject(record.structured_notes), ...ownsDelta };
           }
-          await require('../services/collections/collection-hold').queueHeldInvoiceForSender(invoice.id, db);
         } catch (handOverErr) {
           logger.error(`[dispatch] dispute-hold hand-over of invoice ${invoice.id} to the invoice sender FAILED for ${svc.id} — releasing for resume: ${handOverErr.message}`);
           try {

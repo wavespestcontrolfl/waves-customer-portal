@@ -131,6 +131,19 @@ function jsonbMerge(extra) {
   return db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(extra)]);
 }
 
+// Durable pre-provider phase marker (Codex #5424 r15 P2). dispatchRecoveryMessage stamps
+// metadata.dispatch_started_at on the ledger row at sendgrid.sendOne's provider boundary (after its
+// guards and the caller's authority passed, immediately before the fetch). A stale
+// 'resent' row without it never reached the provider call, so the sweep may safely re-drive it; a row
+// WITH it but no provider_message_id is ambiguous (the provider may have accepted the email before the
+// worker died), so it is settled as uncertain and the office is told - it is never re-sent. A flow that
+// parks again without a provider request (a hold) or starts a fresh attempt clears the marker.
+const DISPATCH_STARTED_KEY = 'dispatch_started_at';
+const RESEND_UNCERTAIN_STATUS = 'resend_uncertain';
+function jsonbMergeClearingDispatchMarker(extra = {}) {
+  return db.raw("(COALESCE(metadata, '{}'::jsonb) - ?::text) || ?::jsonb", [DISPATCH_STARTED_KEY, JSON.stringify(extra)]);
+}
+
 // The recovery ledger id we stamped into the recovery message's payload snapshot.
 // Used as a fallback to resolve the ledger when recovery_message_id has not been
 // linked yet (a fast delivery webhook racing the post-send ledger link).
@@ -532,6 +545,25 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // Set when a collections dispute hold refuses the recovery re-send (up front, or at
     // sendOne's FINAL boundary check): a WAIT, never a settled block - see attemptRecovery.
     let heldRecovery = null;
+    // The pre-provider phase marker is stamped at the ACTUAL provider boundary (Codex #5459 r3 P2): sendOne
+    // runs its annual-offer guard, then this check, then builds the payload and calls fetch. A crash while
+    // the guards run happened before any provider request and must stay retryable, so no marker is written
+    // until the caller's own authority has passed. The write is durable before this resolves (sendOne's
+    // fetch follows synchronously); a failed write throws, so the request never goes out unmarked.
+    const stampDispatchAtProviderBoundary = (callerCheck) => async (args) => {
+      const verdict = callerCheck ? await callerCheck(args) : undefined;
+      if (verdict && verdict.ok === false) return verdict; // refused: no provider request follows, no marker
+      // Written on the dedicated marker connection (models/marker-db), never the root pool: this check runs inside
+      // the authority's held transaction, and a second root-pool acquisition there can wait on itself (the pool
+      // floor / one-slot pool). The same connection every other "a provider request follows" marker uses.
+      const markerDatabase = require('../models/marker-db')();
+      await markerDatabase('email_bounce_recoveries').where({ recovery_message_id: message.id })
+        .update({
+          updated_at: new Date(),
+          metadata: markerDatabase.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [DISPATCH_STARTED_KEY]: new Date().toISOString() })]),
+        });
+      return verdict === undefined ? { ok: true } : verdict;
+    };
     const dispatchToProvider = async (database, providerBoundaryCheck) => {
       // Bounce recovery re-sends the SAME stored html/text to a CORRECTED
       // address, straight through sendgrid.sendOne — its own content
@@ -576,7 +608,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           templateKey: bouncedMessage.template_key,
           suppressErrorLog: true,
           database,
-          providerBoundaryCheck,
+          providerBoundaryCheck: stampDispatchAtProviderBoundary(providerBoundaryCheck),
         }));
       } catch (err) {
         if (err && err.annualOfferWithheld) {
@@ -637,12 +669,20 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           },
         },
       );
-      // Bounce recovery is one-shot and excluded from provider retries. An
-      // unavailable authority must reach its existing manual-failure alert.
-      if (handoff.retryable) throw new Error(handoff.reason);
-      // The replay contract always supplies a reason for a refusal. An allowed
-      // handoff has already populated result, so an absent reason is ignored.
-      authorityRefusal = handoff.reason;
+      if (handoff.retryable && handoff.code === require('./collections/collection-hold').HOLD_DEFER_CODE) {
+        // A collections hold on the stored billing notice (Codex #5424 r15 P2) is the same WAIT the
+        // other gated templates take: park the recovery retryable below (corrected address staged,
+        // recovery row kept) rather than throwing it as a one-shot failure (send_failed would burn the
+        // unique original_message_id and block the delivery after the release).
+        heldRecovery = { held: true, reason: /lookup failed/i.test(String(handoff.reason || '')) ? 'lookup_failed' : 'hold' };
+      } else {
+        // Bounce recovery is one-shot and excluded from provider retries. An
+        // unavailable authority must reach its existing manual-failure alert.
+        if (handoff.retryable) throw new Error(handoff.reason);
+        // The replay contract always supplies a reason for a refusal. An allowed
+        // handoff has already populated result, so an absent reason is ignored.
+        authorityRefusal = handoff.reason;
+      }
     } else if ((await require('./collections/collection-hold').storedLifecycleEmailHeld(bouncedMessage)).held) {
       // Collections DISPUTE hold (owner ruling 2026-09-30): a stored payment.failed /
       // payment.retry_notice / payment.method_expiring copy carries a pay or update-card link, so
@@ -818,6 +858,8 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     ...baseUpdate,
     status: 'resent',
     recovery_message_id: built.message.id,
+    // A fresh attempt: any marker a parked earlier attempt left is stale (it parked with no provider request).
+    metadata: jsonbMergeClearingDispatchMarker(),
   });
 
   const sendResult = await dispatchRecoveryMessage({
@@ -835,7 +877,9 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     await db('email_bounce_recoveries').where({ id: recoveryId }).update({
       status: HELD_RECOVERY_STATUS,
       updated_at: new Date(),
-      metadata: jsonbMerge({
+      // No provider request was made (the boundary check refused it), so the pre-provider marker
+      // stamped for this attempt is cleared with the park.
+      metadata: jsonbMergeClearingDispatchMarker({
         hold_deferred_at: new Date().toISOString(),
         hold_retry_at: new Date(Date.now() + require('./collections/collection-hold').HOLD_DEFER_MS).toISOString(),
         hold_reason: sendResult.holdReason || 'hold',
@@ -891,17 +935,82 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
   // dispatchRecoveryMessage, so a worker lost in that interval leaves the recovery message queued
   // with NO provider id. That reads as unsettled only while the recovery email is still 'queued' with
   // no provider_message_id; an accepted send (provider id published) is settled and never reclaimed.
+  // Codex #5424 r15 P2: and only when the durable pre-provider marker (metadata.dispatch_started_at) is
+  // ABSENT - a row that stamped it may have been accepted by SendGrid before the worker died (null
+  // provider id describes that window too), so it is settled as uncertain below, never re-sent.
+  const unsentRecoveryMessage = function unsentRecoveryMessage() {
+    this.select(1).from('email_messages as m')
+      .whereRaw('m.id = email_bounce_recoveries.recovery_message_id')
+      .whereNull('m.provider_message_id')
+      .where('m.status', 'queued');
+  };
+  // Ambiguous = stale 'resent' row whose provider call started (marker set) more than the claim window
+  // ago and whose recovery email still has no provider id.
+  const ambiguousRows = () => db('email_bounce_recoveries')
+    .where({ status: 'resent' })
+    .whereRaw("(metadata->>'dispatch_started_at') IS NOT NULL AND (metadata->>'dispatch_started_at')::timestamptz <= ?", [staleCutoff])
+    .whereExists(unsentRecoveryMessage);
   const eligible = (q) => q
     .where((held) => held.where({ status: HELD_RECOVERY_STATUS })
       .whereRaw("COALESCE((metadata->>'hold_retry_at')::timestamptz, now()) <= now()"))
     .orWhere((stale) => stale.where({ status: 'pending' }).whereRaw(staleClaimSql, [staleCutoff]))
     .orWhere((unsettled) => unsettled.where({ status: 'resent' }).whereRaw(staleClaimSql, [staleCutoff])
-      .whereExists(function unsentRecoveryMessage() {
-        this.select(1).from('email_messages as m')
-          .whereRaw('m.id = email_bounce_recoveries.recovery_message_id')
-          .whereNull('m.provider_message_id')
-          .where('m.status', 'queued');
-      }));
+      .whereRaw("(metadata->>'dispatch_started_at') IS NULL")
+      .whereExists(unsentRecoveryMessage));
+  // Work off retire obligations first (Codex #5459 r6 P2): a late delivery whose alert retirement failed left
+  // metadata.alert_retire_pending on the recovery; retire the key, then clear the flag. A failure leaves the flag.
+  let retired = 0;
+  const retirePending = await db('email_bounce_recoveries')
+    .whereRaw("(metadata->>'alert_retire_pending') = 'true'")
+    .select('id').limit(limit);
+  for (const row of retirePending) {
+    if (!(await retireResendUncertainAlert(row.id))) continue;
+    await db('email_bounce_recoveries').where({ id: row.id })
+      .update({ updated_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - ?::text", [ALERT_RETIRE_PENDING_KEY]) });
+    retired += 1;
+  }
+  // Settle the ambiguous rows first: compare-and-swap resent -> resend_uncertain (a second worker's
+  // identical swap finds nothing). A late delivery webhook still commits the correction
+  // (commitRecoveryOnDelivery resolves the ledger by recovery_message_id, whatever its status).
+  let uncertain = 0;
+  const ambiguous = await ambiguousRows().select('id').limit(limit);
+  for (const row of ambiguous) {
+    const settled = await ambiguousRows().where({ id: row.id }).update({
+      status: RESEND_UNCERTAIN_STATUS, updated_at: new Date(),
+      metadata: jsonbMerge({ resend_outcome: 'uncertain', resend_uncertain_at: new Date().toISOString() }),
+    });
+    if (!Number(settled)) continue;
+    uncertain += 1;
+    logger.warn(`[bounce-recovery] recovery ${row.id} reached the provider call but no outcome was recorded - settled as uncertain, not re-sent`);
+  }
+  // Then tell the office (Codex #5459 r1 P2): settlement and the alert are separate writes, so the alert is
+  // tracked by its own durable flag (metadata.resend_alerted_at, stamped only AFTER raiseAdminAlert succeeds).
+  // An alert that failed, or a worker that died between the two, is retried by the next sweep; the alert's
+  // dedupeKey keeps a retry that did land from ringing twice.
+  const unalerted = await db('email_bounce_recoveries')
+    .where({ status: RESEND_UNCERTAIN_STATUS })
+    .whereRaw("(metadata->>'resend_alerted_at') IS NULL")
+    .select('id', 'original_message_id', 'customer_id', 'corrected_email').limit(limit);
+  for (const row of unalerted) {
+    try {
+      // Recheck right before alerting (Codex #5459 r5 P2): a late delivery webhook may have committed the recovery
+      // since it was settled uncertain, in which case the customer got the email and there is nothing to tell.
+      const stillUncertain = async () => {
+        const r = await db('email_bounce_recoveries').where({ id: row.id }).first('status', 'metadata');
+        const meta = typeof r?.metadata === 'string' ? JSON.parse(r.metadata || '{}') : (r?.metadata || {});
+        return Boolean(r) && r.status === RESEND_UNCERTAIN_STATUS && !meta.delivery_confirmed_at;
+      };
+      if (!(await stillUncertain())) continue;
+      await alertRecoveryResendUncertain(row);
+      // A delivery can still land between that recheck and the alert (its evidence is written before it retires
+      // anything): retire the keyed alert we just raised.
+      if (!(await stillUncertain())) { await retireResendUncertainAlertOrRecordObligation(row.id); continue; }
+      await db('email_bounce_recoveries').where({ id: row.id, status: RESEND_UNCERTAIN_STATUS })
+        .update({ updated_at: new Date(), metadata: jsonbMerge({ resend_alerted_at: new Date().toISOString() }) });
+    } catch (err) {
+      logger.error(`[bounce-recovery] uncertain-resend alert for ${row.id} failed, will retry next sweep: ${err.message}`);
+    }
+  }
   const due = await db('email_bounce_recoveries')
     .where(eligible)
     .orderBy('updated_at', 'asc')
@@ -935,7 +1044,53 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
       }
     }
   }
-  return { claimed };
+  return { claimed, uncertain, retired };
+}
+
+// Retires the keyed uncertain-resend alert once delivery is confirmed (the emitter owns its key's retirement; see
+// admin-alert-relevance.js): the office must not keep an unread "may not have gone" bell after SendGrid confirms it.
+const resendUncertainAlertKey = (recoveryId) => `bounce-recovery-resend-uncertain:${recoveryId}`;
+const ALERT_RETIRE_PENDING_KEY = 'alert_retire_pending';
+// Returns true when the keyed alert is retired. A failure is NEVER swallowed (Codex #5459 r6 P2): it returns false and
+// the caller records a durable retry obligation (metadata.alert_retire_pending) that the sweep works off.
+async function retireResendUncertainAlert(recoveryId) {
+  try {
+    await require('./admin-alert-episodes').closeAdminAlertKeys(db, [resendUncertainAlertKey(recoveryId)], 'late_delivery_confirmed');
+    return true;
+  } catch (err) {
+    logger.error(`[bounce-recovery] could not retire the uncertain-resend alert for ${recoveryId} (retry obligation recorded): ${err.message}`);
+    return false;
+  }
+}
+// Retire now; if that fails, leave the durable obligation on the recovery row. If the obligation cannot be recorded
+// either, throw: the caller aborts this attempt (nothing is committed) rather than commit with a stale alert standing.
+async function retireResendUncertainAlertOrRecordObligation(recoveryId) {
+  if (await retireResendUncertainAlert(recoveryId)) return;
+  await db('email_bounce_recoveries').where({ id: recoveryId })
+    .update({ updated_at: new Date(), metadata: jsonbMerge({ [ALERT_RETIRE_PENDING_KEY]: true }) });
+}
+
+// A recovery re-send reached the provider call and the worker died before its outcome was recorded:
+// SendGrid may or may not have accepted it. The recovery is settled (never re-sent, which could deliver the
+// same notice twice) and the office confirms with the customer or the SendGrid activity feed.
+async function alertRecoveryResendUncertain(row) {
+  // Throws on failure: the caller stamps resend_alerted_at only after this resolves. notifyAdmin reports a
+  // failed write as a null return rather than a throw, so a null is a failed alert too.
+  const raised = await require('./admin-alert-compose').raiseAdminAlert('alert', {
+    area: 'Comms',
+    action: 'check a re-sent email that may not have gone',
+    why: 'A corrected-address re-send stopped mid-send, so it was not tried again.',
+    severity: 'needs-you',
+    link: row.customer_id ? `/admin/customers?customerId=${row.customer_id}` : '/admin/communications',
+    subject: row.customer_id ? { type: 'customer', id: String(row.customer_id) } : { type: 'check', id: String(row.id) },
+    doneWhen: 'resend_outcome_confirmed',
+    who: 'person',
+  }, {
+    detail: `Bounce recovery ${row.id} (original email ${row.original_message_id}): the worker died after starting the provider send to the corrected address, with no outcome recorded. Check whether the customer received it; the system will not re-send it, so send it by hand if it did not arrive.`,
+    dedupeKey: `bounce-recovery-resend-uncertain:${row.id}`,
+    metadata: { recovery_id: row.id, original_message_id: row.original_message_id, customer_id: row.customer_id || null },
+  });
+  if (!raised) throw new Error('the uncertain-resend alert was not recorded');
 }
 
 /**
@@ -1039,6 +1194,15 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
       }
     }
     if (!rec) return;
+    // The re-send was DELIVERED: any standing "may not have gone" alert (a recovery settled resend_uncertain before
+    // this late webhook arrived) is now wrong, whether or not the record commit below applies (Codex #5459 r5 P2).
+    // The delivery evidence is persisted FIRST (Codex pre-push audit on #5459 r6): this function awaits customer-record
+    // writes before the ledger leaves resend_uncertain, and in that window the sweep could otherwise pass its status
+    // checks and raise a fresh alert that nothing retires. The sweep reads delivery_confirmed_at before and after it
+    // alerts, so whichever order the two interleave, the keyed alert is retired.
+    await db('email_bounce_recoveries').where({ id: rec.id })
+      .update({ updated_at: new Date(), metadata: jsonbMerge({ delivery_confirmed_at: new Date().toISOString() }) });
+    await retireResendUncertainAlertOrRecordObligation(rec.id);
     if (rec.record_updated || rec.status === 'committed') return; // already done
 
     const correctedEmail = String(rec.corrected_email || recoveryMessage.recipient_email_snapshot || '').trim().toLowerCase();
@@ -1472,6 +1636,7 @@ module.exports = {
   handleRecoveryBounce,
   // exported for tests
   dispatchRecoveryMessage,
+  RESEND_UNCERTAIN_STATUS,
   resolveCustomerEmailField,
   correctedAddressSuppressed,
   correctedAddressOwnedByOther,
