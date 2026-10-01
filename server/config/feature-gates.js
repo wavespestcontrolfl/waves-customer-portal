@@ -4458,7 +4458,6 @@ const RETIRED = new Set([
   'GATE_REPORT_GLASS',
   'GATE_PORTAL_GLASS',
 ]);
-const MAX_DESC = 300;
 const INVERTED_GATE_RE = /_(OFF|DISABLE|DISABLED|KILL_SWITCH)$/;
 let gateCatalogCache = null;
 
@@ -4467,12 +4466,16 @@ function knownGateCatalog() {
   const src = require('fs').readFileSync(__filename, 'utf8');
   const tokenRe = /GATE_[A-Z0-9_]*[A-Z0-9]/g;
   const headerEnd = src.indexOf('*/');
+  // A header entry is its ` *   GATE_X=value (…)` line PLUS any indented
+  // ` *     …` continuation lines under it (prerequisites often live there).
+  // The description is kept COMPLETE — never truncated — because the bar's
+  // confirmation card shows it as what the operator approves (Codex r3 on
+  // #5514).
   const headerDocs = new Map();
-  for (const line of src.slice(0, headerEnd).split('\n')) {
-    const m = line.match(/^ \*   (GATE_[A-Z0-9_]*[A-Z0-9])=(\S*)\s*(.*)$/);
-    if (!m) continue;
-    const text = m[3].replace(/^\(/, '').replace(/\)\s*$/, '').trim();
-    headerDocs.set(m[1], { valueIsTrue: m[2] === 'true', description: text ? text.slice(0, MAX_DESC) : null });
+  const entryRe = /^ \*   (GATE_[A-Z0-9_]*[A-Z0-9])=(\S*)[ \t]*(.*(?:\n \*\s{5,}\S.*)*)/gm;
+  for (const [, name, value, body] of src.slice(0, headerEnd).matchAll(entryRe)) {
+    const text = body.replace(/\n \*\s+/g, ' ').replace(/^\(/, '').replace(/\)\s*$/, '').trim();
+    headerDocs.set(name, { valueIsTrue: value === 'true', description: text || null });
   }
   const strictEvidence = new Set();
   const looseEvidence = new Set();
