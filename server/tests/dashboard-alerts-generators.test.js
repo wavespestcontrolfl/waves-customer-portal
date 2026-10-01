@@ -745,6 +745,14 @@ describe('computeDashboardAlerts memo', () => {
 describe('cards_expiring_7d — prepay-covered customers are not "autopay breaks this week"', () => {
   const cardsCalls = (capture) => capture.filter((c) => c.table === 'payment_methods');
 
+  test('a failed expiry query is reported in failures, never read as an empty queue', async () => {
+    getCardExpiryExemptions.mockResolvedValue(exemptions([]));
+    primeDb({ payment_methods: () => { throw new Error('boom'); }, leads: { count: 0 } });
+    const { alerts, failures } = await computeDashboardAlertsUncached();
+    expect(failures.map((f) => f.id)).toContain('cards_expiring_7d');
+    expect(alerts.find((a) => a.id === 'cards_expiring_7d')).toBeUndefined();
+  });
+
   test('asks coverage at the 7-day horizon and excludes covered customers from the count', async () => {
     getCardExpiryExemptions.mockResolvedValue(exemptions(['cust-prepaid']));
     const capture = primeDb({ payment_methods: { count: 1 }, leads: { count: 0 } });

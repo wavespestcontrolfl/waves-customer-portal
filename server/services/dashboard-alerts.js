@@ -280,8 +280,9 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
           + "BETWEEN (NOW() AT TIME ZONE 'America/New_York')::date "
           + "AND ((NOW() AT TIME ZONE 'America/New_York')::date + INTERVAL '7 days')",
       )
-      .count('* as count').first()
-      .catch(() => ({ count: 0 }));
+      // No inner catch: a failed expiry query must reach the outer catch and
+      // land in `failures`, never read as an empty queue.
+      .count('* as count').first();
     const count = parseInt(expiring?.count || 0);
     if (count > 0) {
       alerts.push({

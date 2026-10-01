@@ -8,7 +8,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { computeDashboardAlerts } = require('./dashboard-alerts');
 const { refsFromRow } = require('./admin-alert-relevance');
-const { AREAS, SEVERITIES, WHO, cutAtWord, firstSentence } = require('./admin-alert-compose');
+const { AREAS, SEVERITIES, WHO, SUBJECT_TYPES, cutAtWord, firstSentence } = require('./admin-alert-compose');
 const { legacyKindFromTitle } = require('./agent-activity');
 
 const DEFAULT_LIMIT = 200;
@@ -106,8 +106,11 @@ function digestLinks(row) {
 
 function mapAlertRow(row) {
   const meta = parseMeta(row.metadata);
+  // Composed only with ALL its parts, a valid allowlisted subject included:
+  // raiseAdminAlert keeps the other fields when it drops an invalid subject,
+  // and such a row is still partly inferred (derived).
   const composed = AREAS.includes(meta.area) && SEVERITIES.includes(meta.severity) && WHO.includes(meta.who)
-    && typeof meta.doneWhen === 'string';
+    && typeof meta.doneWhen === 'string' && !!validSubject(meta.subject) && SUBJECT_TYPES.includes(meta.subject.type);
   const detail = boundedDetail(row.detail);
   return {
     kind: 'alert',

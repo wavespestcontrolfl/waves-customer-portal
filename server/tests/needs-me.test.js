@@ -163,11 +163,18 @@ test('a standing condition is a needs-you count that clears at zero, filed by th
   expect(items.find((i) => i.id === 'live:x_unknown')).toMatchObject({ area: 'System', members: ['a'] });
 });
 
+test('a row whose invalid subject raiseAdminAlert dropped keeps its other fields but stays derived', () => {
+  const item = mapAlertRow(row({ metadata: { area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent' } }));
+  expect(item.derived).toBe(true);
+  const badType = mapAlertRow(row({ metadata: { area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent', subject: { type: 'planet', id: 'x' } } }));
+  expect(badType.derived).toBe(true);
+});
+
 test('who is exact: claude excludes either, either returns it; broken sorts first, then newest', async () => {
   mockRows = [
     row({ id: 'old-person', created_at: '2026-09-01T00:00:00Z' }),
     row({ id: 'new-person', created_at: '2026-09-29T00:00:00Z' }),
-    row({ id: 'either', metadata: { area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent' } }),
+    row({ id: 'either', metadata: { area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent', subject: { type: 'invoice', id: UUID } } }),
     row({ id: 'fix', category: 'ops_digest', created_at: '2026-08-01T00:00:00Z', metadata: { kind: 'FIX', audience: 'engineering' } }),
   ];
   expect((await listNeedsMe({ who: 'claude' })).items.map((i) => i.id)).toEqual(['fix']);
