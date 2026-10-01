@@ -9,7 +9,10 @@
 // Source: knowledge_queries rows with coverage 'none' or 'partial'. WikiQA
 // records coverage on every answer (texting assistant, lead agent, tech
 // field Q&A, admin Q&A, content agents). Intelligence Bar searches are not
-// logged: their queries can carry customer names, addresses and phones.
+// logged automatically (their queries can carry customer names, addresses
+// and phones); an empty search offers the operator an "add to knowledge
+// gaps" button, and only rows they tap land here (asked_by
+// 'intelligence_bar', coverage 'none').
 //
 // Cron: Monday 8:43am ET in scheduler.js, inside runExclusive, then hourly
 // at :43 through Tuesday as catch-up ticks — the once-per-week stamp makes
@@ -42,6 +45,7 @@ const SOURCE_LABELS = {
   admin_manual: 'admin Q&A',
   content_agent: 'blog writer',
   brief_driven_agent: 'blog writer',
+  intelligence_bar: 'Intelligence Bar',
 };
 const sourceLabel = (s) => SOURCE_LABELS[s] || String(s || 'unknown').replace(/_/g, ' ');
 

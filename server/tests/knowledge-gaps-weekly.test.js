@@ -30,6 +30,12 @@ describe('composeGapsEmail', () => {
     expect(text).toMatch(/Asked by: lead agent 2, blog writer 1, tech Q&A 1\./);
   });
 
+  test('gaps the operator added from the Intelligence Bar are labeled as such', () => {
+    const { text } = composeGapsEmail({ rows: [row('chinch bugs on zoysia', 'intelligence_bar')] }, NOW);
+    expect(text).toContain('not answered · Intelligence Bar');
+    expect(text).toMatch(/Asked by: Intelligence Bar 1\./);
+  });
+
   test('caps the list at 10 and says how many more', () => {
     const rows = Array.from({ length: 13 }, (_, i) => row(`question ${i}`));
     const { text } = composeGapsEmail({ rows }, NOW);
