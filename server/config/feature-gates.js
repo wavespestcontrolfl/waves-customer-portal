@@ -130,6 +130,7 @@
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *   GATE_LAWN_WATERING_RULE=true (lawn report watering instruction: frozen per-product watering rules drive the aftercare writer, the top-of-report banner payload and the weekly-plan "not before" overlay; sets evidenceSource product_instruction so the existing verdict table finally resolves hold / credit; ships DARK, read at call time via lawnWateringRuleLive(); off = byte-identical report payload)
+ *   GATE_LAWN_REPORT_LEAD=true (lawn report above-the-fold lead: derives reportV2.lead from the final reconciled strings (headline, why, progress, what we applied, your part this week, next visit) and the web report renders it in place of the snapshot hero + follow-up card; lawn only, never T&S; ships DARK, read at call time via lawnReportLeadLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve BOOK notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking of a slot starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule's DESTINATION slot, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
  *   SELF_SERVE_MOVE_NOTICE_HOURS=24 (not a gate — the self-serve MOVE notice window, same module, split out 2026-09-28 so a book-only env change never touches it, no fallback to SELF_SERVE_NOTICE_HOURS: no SELF-SERVE reschedule of a visit that itself currently starts within this many hours of now, on public reschedule (reschedule-public.js) and the promised-reschedule-link worker (reschedule-link-promises.js); the DESTINATION slot of a move still uses the book window above; read at call time, default 24)
@@ -3644,6 +3645,13 @@ const gates = {
   // time via lawnWateringRuleLive().
   lawnWateringRule: gateEnvValue('GATE_LAWN_WATERING_RULE'),
 
+  // Lawn report lead (lawn report rebuild P7): a derived above-the-fold block
+  // (reportV2.lead) the web report renders instead of the snapshot hero and the
+  // follow-up card. Ships DARK. This entry is for logGateStatus only:
+  // report-consistency.js reads GATE_LAWN_REPORT_LEAD at call time via
+  // lawnReportLeadLive().
+  lawnReportLead: gateEnvValue('GATE_LAWN_REPORT_LEAD'),
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -4083,6 +4091,15 @@ function bookPreferredTimeLive() {
 // to before (no banner, no product_instruction aftercare, no afterHold plan).
 function lawnWateringRuleLive() {
   return gateEnvValue('GATE_LAWN_WATERING_RULE');
+}
+
+// GATE_LAWN_REPORT_LEAD read at CALL time (same 1/true/on convention as
+// gateEnvValue). The one canonical reader for the lawn report lead: the tail of
+// applyLawnReportReconciliation derives reportV2.lead from the final reconciled
+// strings. Off = the report payload is byte-identical to before (no lead key),
+// and the client keeps rendering the snapshot hero + follow-up card.
+function lawnReportLeadLive() {
+  return gateEnvValue('GATE_LAWN_REPORT_LEAD');
 }
 
 // GATE_LAWN_WATERING_SMS read at CALL time — strict `=== 'true'`, dark in every
@@ -4525,6 +4542,7 @@ module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
+module.exports.lawnReportLeadLive = lawnReportLeadLive;
 module.exports.lawnWateringSmsLive = lawnWateringSmsLive;
 module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
 module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;

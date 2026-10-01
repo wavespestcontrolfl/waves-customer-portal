@@ -1674,6 +1674,31 @@ separate customer text right after the lawn completion text, rendered from the
 `lawn_watering_instruction` SMS template with the instruction's `lines` joined
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
+`GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
+key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` to
+LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
+(null falls back to the status label), `why` the root cause or score
+explanation, `applied` the treatment summary (never filtered), `yourPart` at most two
+homeowner tasks (may be empty; never the stock "No action is needed" line) and
+`next` the follow-up reason when a follow-up is planned (never replaced by a
+different plan), otherwise the top finding's next-visit plan, else null. It is derived at the tail of
+`applyLawnReportReconciliation` from the final reconciled strings, so it carries
+the same wording as the rest of the report. When `reportV2.banner` carries
+watering lines the banner owns the watering task: `yourPart` is the top
+finding's own step (dropped when it restates the aftercare task), and
+`headline`, `why`, `yourPart` and `next` carry no watering or
+moisture wording (water, irrigation, sprinkler, moisture, dry, drought, damp,
+rain, coverage); such a field falls to its next source or null. That wording
+test is the whole rule: a non-watering string from a water or coverage finding
+(e.g. "Stable — watching thin areas") may lead. The lead region (banner lines, lead fields and the joined next-visit
+date) is held to 250 visible words at derive time: a field over its own word cap
+(headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
+out, then `why` and `applied` are nulled in that order
+until it fits. The web report mounts the lead card right under the watering
+banner (above the plan, nearby and review cards); the lawn section then drops
+the snapshot hero and opens with the photo strip; the follow-up card shows
+(without its "Your part" line) only when a planned follow-up's reason could
+not be carried as `lead.next`. The PDF is unchanged and ignores it.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

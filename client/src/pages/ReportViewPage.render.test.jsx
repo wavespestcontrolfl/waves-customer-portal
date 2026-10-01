@@ -135,6 +135,59 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
   });
 });
 
+describe('ReportViewPage — lawn lead (GATE_LAWN_REPORT_LEAD)', () => {
+  const lead = {
+    headline: 'Stable, with thin areas to watch',
+    why: 'The score is mainly pulled down by turf coverage.',
+    progress: null,
+    applied: 'Today we applied a feeding and a broadleaf herbicide.',
+    yourPart: ['Raise the mower one setting.'],
+    next: 'We will spot-check the driveway strip.',
+  };
+  const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+  const withLead = (extra = {}) => ({ ...lawnReportV2, reportV2: { ...lawnReportV2.reportV2, lead, ...extra } });
+
+  it('renders the lead region exactly once, after the watering banner and before the lawn section', async () => {
+    const { container } = renderReport(withLead({ banner }));
+    await screen.findByText(lead.headline);
+    expect(screen.getAllByTestId('lawn-lead-region')).toHaveLength(1);
+    const region = screen.getByTestId('lawn-lead-region');
+    const bannerEl = screen.getByTestId('lawn-watering-banner');
+    const section = container.querySelector('.report-v2-embed');
+    expect(bannerEl.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(region.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The lawn section no longer carries the hero or the follow-up card.
+    expect(within(section).queryByText('Overall Lawn Status')).toBeNull();
+    expect(screen.queryByText('Follow-up already planned')).toBeNull();
+  });
+
+  it('without a banner the lead follows the status card directly', async () => {
+    const { container } = renderReport(withLead());
+    await screen.findByText(lead.headline);
+    expect(screen.getAllByTestId('lawn-lead-region')).toHaveLength(1);
+    expect(container.querySelector('#service-status').nextElementSibling).toBe(screen.getByTestId('lawn-lead-region'));
+  });
+
+  it('the status card does not repeat the snapshot headline the lead replaces', async () => {
+    const { container } = renderReport(withLead({ snapshot: { ...lawnReportV2.reportV2.snapshot, status: 'watch' }, todaysResult: null }));
+    await screen.findByText(lead.headline);
+    expect(container.querySelector('.smart-status-result').textContent).not.toContain('Stable — watching thin areas');
+  });
+
+  it('without a lead no lead region renders and the legacy hero stays', async () => {
+    renderReport(lawnReportV2);
+    await screen.findByText('Stable — watching thin areas');
+    expect(screen.queryByTestId('lawn-lead-region')).toBeNull();
+    expect(screen.getByText('Overall Lawn Status')).toBeInTheDocument();
+  });
+
+  it('a lead on a non-lawn payload is never rendered', async () => {
+    renderReport({ ...treeShrubReportV2, reportV2: { ...treeShrubReportV2.reportV2, lead } });
+    await waitFor(() => expect(document.body.textContent.length).toBeGreaterThan(100));
+    expect(screen.queryByTestId('lawn-lead-region')).toBeNull();
+  });
+});
+
 describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => {
   it('renders the station dashboard and suppresses the generic summary, hero-owned tiles, products, and standalone map', async () => {
     const { container } = renderReport(termiteReportV2);
