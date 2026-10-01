@@ -247,6 +247,30 @@ describe("SEOPage workspace navigation", () => {
     );
   });
 
+  it("keeps an unsaved citation draft when switching sub-tabs and back", async () => {
+    fetch.mockImplementation((url) => {
+      if (String(url).endsWith("/admin/seo/backlinks")) {
+        return jsonResponse({
+          citations: [{ id: "c1", directory_name: "Sample Directory", status: "unverified", listing_url: "https://dir.example/waves", location_id: "" }],
+          citationStats: { total: 1, unverified: 1 },
+          citationLocations: [{ id: "venice", name: "Venice" }],
+        });
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Citations" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByPlaceholderText(/Public listing URL/), {
+      target: { value: "https://dir.example/draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Gaps" }));
+    expect(screen.queryByPlaceholderText(/Public listing URL/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Citations" }));
+    expect(await screen.findByPlaceholderText(/Public listing URL/)).toHaveValue("https://dir.example/draft");
+  });
+
   it("does not restore a skipped backlink from an older automatic refresh", async () => {
     const staleQueue = deferred();
     let queueReads = 0;

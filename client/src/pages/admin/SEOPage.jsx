@@ -2353,8 +2353,8 @@ function CitationRow({ c, canEdit, editing, onToggle }) {
   );
 }
 
-function CitationsPanel({ data, canRunSeoActions, reload }) {
-  const [edit, setEdit] = useState(null);
+// `edit` lives in BacklinksTab so an unsaved draft survives switching sub-tabs.
+function CitationsPanel({ data, canRunSeoActions, reload, edit, setEdit }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const stats = data.citationStats || {};
@@ -2425,6 +2425,7 @@ function BacklinksTab() {
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [subTab, setSubTab] = useState("overview");
+  const [citationEdit, setCitationEdit] = useState(null);
   const [llmDash, setLlmDash] = useState(null);
   const [llmError, setLlmError] = useState(false);
   const [llmScanning, setLlmScanning] = useState(false);
@@ -2547,6 +2548,8 @@ function BacklinksTab() {
           data={data}
           canRunSeoActions={canRunSeoActions}
           reload={() => adminFetch("/admin/seo/backlinks").then(setData)}
+          edit={citationEdit}
+          setEdit={setCitationEdit}
         />
       )}
       {subTab === "gaps" && <BacklinkGapsPanel data={data} />}

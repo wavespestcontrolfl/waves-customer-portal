@@ -19,7 +19,9 @@ describe('migration shape', () => {
   });
 });
 
-const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
+// The DB-gated CI step selects suites by this exact SKIP line.
+const SKIP = !process.env.DATABASE_URL;
+const describeDb = SKIP ? describe.skip : describe;
 describeDb('flag reconciliation on a real table', () => {
   const knexLib = require('knex');
   const schema = `cit_flag_${process.pid}`;
