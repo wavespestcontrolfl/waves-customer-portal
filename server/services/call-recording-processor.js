@@ -3739,8 +3739,11 @@ function onSiteOptinAskTrigger(contact) {
 // whether the slot was saved (or the phone already filed). The opt-in service
 // still applies its own holds (STOP, past-decline, suppression, the claim
 // dedupe). Returns { ask, reason } with reason the card's not_sent:<reason>.
-function decideOnSiteOptinAsk(contact, { doNotContact = false, optinRailLive = false, persistResult = null } = {}) {
+function decideOnSiteOptinAsk(contact, { doNotContact = false, optinRailLive = false, persistResult = null, phoneFromV2 = true } = {}) {
   if (!onSiteOptinAskTrigger(contact)) return { ask: false, reason: 'not_on_site_contact' };
+  // The ask goes only to a phone the V2 extraction itself captured — never a
+  // number only the legacy extractor read (a misparse would text a stranger).
+  if (!phoneFromV2) return { ask: false, reason: 'phone_not_from_v2' };
   if (doNotContact) return { ask: false, reason: 'do_not_contact' };
   if (!optinRailLive) return { ask: false, reason: 'optin_rail_dark' };
   const slotSaved = persistResult === 'written'
@@ -13712,6 +13715,15 @@ const CallRecordingProcessor = {
     // quoting that visit's address. Filled for a fresh slot write AND for a
     // contact already on record, so a retry of the call still asks.
     const pendingOnSiteAsks = [];
+    // Phones the V2 extraction itself captured for its other parties (the
+    // canonical singleton + every secondary_contacts[] entry): the only
+    // numbers an on-site opt-in ask may go to.
+    const onSiteV2PhoneKeys = (() => {
+      const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+      const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      return new Set([canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]
+        .map((c) => ten(c?.phone)).filter(Boolean));
+    })();
     let onSiteAsksHandled = false;
     // Review-card breadcrumb (secondary_contact_captured payload.optin_ask) for
     // the card's own contact: awaiting_booking | dispatching | sent |
@@ -13744,7 +13756,8 @@ const CallRecordingProcessor = {
       for (const secondaryEntry of callSecondaryContacts) {
       try {
         // Pre-persist: only entries that could be asked need the slot-phone read.
-        const onSitePreAsk = onSiteOptinAskTrigger(secondaryEntry) && !v2DoNotContact && optinRailLive;
+        const onSitePhoneFromV2 = onSiteV2PhoneKeys.has(lastTen(secondaryEntry.phone));
+        const onSitePreAsk = onSiteOptinAskTrigger(secondaryEntry) && !v2DoNotContact && optinRailLive && onSitePhoneFromV2;
         let onSiteBlockedBeforeWrite = false;
         let onSiteAlreadyConfirmed = false;
         if (onSitePreAsk) {
@@ -13786,7 +13799,7 @@ const CallRecordingProcessor = {
         // Re-added phone that already confirmed its own opt-in here: restore
         // the account stamp a contact edit may have cleared (same coverage
         // rule as its YES).
-        if (onSiteAlreadyConfirmed && result === 'written') {
+        if (onSiteAlreadyConfirmed && (result === 'written' || String(result).startsWith('skipped_phone_on_record'))) {
           await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));
         }
         // Recipient double opt-in parity with the portal flow (#2956): a
@@ -13797,7 +13810,7 @@ const CallRecordingProcessor = {
         // stays async. Asked here when the caller gave explicit SMS consent
         // (as always). An on-site contact's ask waits for the booking site
         // (pendingOnSiteAsks) — no booking, no ask.
-        const onSiteDecision = decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result });
+        const onSiteDecision = decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result, phoneFromV2: onSitePhoneFromV2 });
         if (onSiteDecision.ask && secondaryEntry?.phone) {
           pendingOnSiteAsks.push({ entry: secondaryEntry });
           // Queued for the booking site: excluded from the same-call fan-out
@@ -18696,27 +18709,24 @@ const CallRecordingProcessor = {
                   .activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');
               }
               // On-site opt-in asks (owner ruling 2026-09-30, redesigned 10-01:
-              // consent is the recipient's own YES). Sent only HERE, once a visit
-              // has landed — never for an unbooked / held call, a street-level
-              // address hold (office review, #5381, not active yet) or a visit
-              // whose house number is disputed, and only for a CONFIRMED visit
-              // whose canonical arrival is still ahead, read AFTER any reuse
-              // activation above (a skipped / completed idempotency row or a
-              // still-pending legacy row is no appointment to ask about). The
-              // visit id rides the claim, so a send-window-deferred ask is
-              // re-checked against the same visit before it goes out.
-              // 'live' = ask now; 'unknown' = the visit read failed: the ask is
-              // claimed (pending, visit-bound) but not dispatched, so the
-              // undispatched-ask recovery sweep re-checks this same visit and
-              // sends or releases it — an unreadable visit is never read as gone.
-              const onSiteAskVisitState = (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true
-                && !(await isStreetLevelHoldRow(db, svc)))
-                ? await (async () => {
-                  const v = await db('scheduled_services').where({ id: svc.id, status: 'confirmed' })
-                    .where((q) => q.whereNull('customer_confirmed').orWhere('customer_confirmed', true)).first('id');
-                  const at = v ? await require('./appointment-reminders').scheduledServiceApptTime(svc.id, { throwOnError: true }) : null;
-                  return at?.getTime() > Date.now() ? 'live' : 'dead';
-                })().catch(() => 'unknown')
+              // consent is the recipient's own YES). Claimed only HERE, once a
+              // visit has landed and after any reuse activation above — never for
+              // an unbooked / held call or a visit whose house number is disputed.
+              // The shared visit check (recipient-optin visitAskState) decides:
+              //   'live'    — confirmed, canonical arrival ahead: ask now;
+              //   'wait'    — a street-level address hold under office review
+              //               (#5381): claimed (pending, visit-bound) but not
+              //               sent; the undispatched-ask sweep sends it once the
+              //               office confirms the visit, or releases it if the
+              //               visit dies;
+              //   'unknown' — the visit read failed: claimed the same way, so the
+              //               sweep re-checks this visit (never read as gone);
+              //   'dead'    — nothing.
+              // The visit id rides the claim and the row, so every later send
+              // (deferred replay, recovery sweep) re-checks this same visit.
+              const onSiteAskVisitState = (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true)
+                ? await require('./recipient-optin').visitAskState(svc.id, customerId)
+                  .then((r) => r.state).catch(() => 'unknown')
                 : 'dead';
               if (onSiteAskVisitState !== 'dead') {
                 onSiteAsksHandled = true;
@@ -18739,8 +18749,8 @@ const CallRecordingProcessor = {
                       propertyAddress: visitAddress || [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
                       visitId: svc.id,
                     }) : [];
-                    if (claims.length && onSiteAskVisitState === 'unknown') {
-                      await markOptinAsk(entry, 'not_sent:visit_check_retry');
+                    if (claims.length && onSiteAskVisitState !== 'live') {
+                      await markOptinAsk(entry, onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry');
                     } else if (claims.length) {
                       await markOptinAsk(entry, 'dispatching');
                       void dispatchRecipientOptins(claims, custRow)

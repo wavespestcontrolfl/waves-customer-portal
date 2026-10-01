@@ -288,7 +288,10 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     // visit is still askable, else releases it — only after the accepted-send
     // reconcile found nothing went out.
     const sweepSrc = src.slice(src.indexOf('async function sweepUndispatchedOptins'));
-    expect(sweepSrc.indexOf('const visit = row.visit_id ? await askableVisit(row.visit_id, row.customer_id) : null;')).toBeGreaterThan(sweepSrc.indexOf('const priorSend = priorSendRow'));
+    expect(sweepSrc.indexOf('const asked = row.visit_id ? await visitAskState(row.visit_id, row.customer_id)')).toBeGreaterThan(sweepSrc.indexOf('const priorSend = priorSendRow'));
+    // An office-review hold keeps the row pending (touched for rotation); a dead visit releases it.
+    expect(sweepSrc).toContain("if (asked.state === 'wait') {");
+    expect(sweepSrc).toContain("if (asked.state === 'dead') {");
     expect(sweepSrc).toContain('visitId: row.visit_id || null }],');
     // An unreadable reconcile leaves the row pending (never released or re-sent on a guess).
     expect(sweepSrc).toContain('if (priorSendRow && priorSendRow.readFailed) continue;');
@@ -320,3 +323,41 @@ describe('isOptinRailLive: the on-site opt-in ask needs a live rail', () => {
     jest.resetModules();
   });
 });
+
+describe('visitAskState: whether an on-site ask can go out for its visit (#5467)', () => {
+  test('hold → wait; confirmed + ahead → live; cancelled / unconfirmed / past → dead; a read error throws', async () => {
+    jest.resetModules();
+    const dbMock = jest.fn();
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const held = jest.fn(async () => false);
+    jest.doMock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: held }));
+    const arrival = jest.fn(async () => new Date(Date.now() + 3600000));
+    jest.doMock('../services/appointment-reminders', () => ({ scheduledServiceApptTime: arrival }));
+    const { visitAskState } = require('../services/recipient-optin');
+    const visitRow = (row) => dbMock.mockImplementation(() => {
+      const q = { where: () => q, first: async () => row };
+      return q;
+    });
+
+    held.mockResolvedValueOnce(true);
+    expect((await visitAskState('v1', 'c1')).state).toBe('wait');
+
+    visitRow({ id: 'v1', service_address_line1: '1 Main St', service_address_city: 'Bradenton' });
+    expect(await visitAskState('v1', 'c1')).toEqual({ state: 'live', visit: { id: 'v1', service_address_line1: '1 Main St', service_address_city: 'Bradenton' } });
+
+    // A confirmed office-created visit (customer_confirmed false by default) is live: no customer_confirmed read.
+    expect((await visitAskState('v1', 'c1')).state).toBe('live');
+
+    visitRow(undefined);
+    expect((await visitAskState('v1', 'c1')).state).toBe('dead');
+
+    visitRow({ id: 'v1' });
+    arrival.mockResolvedValueOnce(new Date(Date.now() - 60000));
+    expect((await visitAskState('v1', 'c1')).state).toBe('dead');
+
+    arrival.mockRejectedValueOnce(new Error('db down'));
+    await expect(visitAskState('v1', 'c1')).rejects.toThrow('db down');
+  });
+});
+

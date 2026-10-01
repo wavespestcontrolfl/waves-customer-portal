@@ -563,17 +563,21 @@ async function requestRecipientOptins(args) {
 // the fire-and-forget dispatch) get their ask sent now. Renders per row's
 // customer; a dark template or send failure releases the row to ask_failed
 // via the normal dispatch path. Bounded batch; no-op when the gate is off.
-// The visit an on-site ask is about, when it is still confirmed (not
-// customer-unconfirmed) and its canonical arrival is ahead; else null.
-// Throws on a read failure (the caller's catch leaves the row pending).
-async function askableVisit(visitId, customerId) {
+// Whether the visit an on-site ask is about can be asked about now (#5467):
+//   'wait' — a street-level address hold still under office review (the shared,
+//            source-aware hold predicate; a lookup error also reads as held);
+//   'live' — status confirmed and its canonical arrival still ahead;
+//   'dead' — gone, cancelled, under way, past, or never confirmed.
+// Returns { state, visit }. Throws on any other read failure (callers retry).
+async function visitAskState(visitId, customerId) {
+  const { isStreetLevelHoldVisit } = require('./street-level-hold');
+  if (await isStreetLevelHoldVisit(visitId)) return { state: 'wait', visit: null };
   const visit = await db('scheduled_services')
     .where({ id: visitId, customer_id: customerId, status: 'confirmed' })
-    .where((q) => q.whereNull('customer_confirmed').orWhere('customer_confirmed', true))
     .first('id', 'service_address_line1', 'service_address_city');
-  if (!visit) return null;
+  if (!visit) return { state: 'dead', visit: null };
   const at = await require('./appointment-reminders').scheduledServiceApptTime(visitId, { throwOnError: true });
-  return at && at.getTime() > Date.now() ? visit : null;
+  return at && at.getTime() > Date.now() ? { state: 'live', visit } : { state: 'dead', visit: null };
 }
 
 async function sweepUndispatchedOptins({ limit = 25 } = {}) {
@@ -584,6 +588,9 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       .where({ status: 'pending' })
       .whereNull('dispatched_at')
       .where('requested_at', '<', new Date(Date.now() - 10 * 60 * 1000))
+      // Least-recently looked-at first: an on-site ask waiting out an office
+      // review is touched each pass, so it never starves the rest.
+      .orderBy('updated_at', 'asc')
       .limit(limit);
   } catch { return { swept: 0 }; }
   let swept = 0;
@@ -641,17 +648,25 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
           }).catch(() => {});
         continue;
       }
-      // An on-site visit ask (visit_id) whose dispatch died before it went
-      // out: re-sent for that same visit while it is still confirmed and
-      // ahead (quoting its address), else released to ask_failed — never
-      // sent for a visit that is gone.
-      const visit = row.visit_id ? await askableVisit(row.visit_id, row.customer_id) : null;
-      if (row.visit_id && !visit) {
+      // An on-site visit ask (visit_id) not yet sent (its dispatch died, its
+      // visit check was unreadable, or its visit is an office-review hold):
+      // sent for that same visit once it is confirmed and ahead (quoting its
+      // address), kept waiting while the hold is under review, and released
+      // to ask_failed once the visit is gone — never sent for a dead visit.
+      const asked = row.visit_id ? await visitAskState(row.visit_id, row.customer_id) : { state: 'live', visit: null };
+      if (asked.state === 'wait') {
+        await db('recipient_optin')
+          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
+          .update({ updated_at: new Date() }).catch(() => {});
+        continue;
+      }
+      if (asked.state === 'dead') {
         await db('recipient_optin')
           .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
           .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
         continue;
       }
+      const { visit } = asked;
       const { renderSmsTemplate } = require('./sms-template-renderer');
       const visitAddress = visit ? [visit.service_address_line1, visit.service_address_city].filter(Boolean).join(', ') : '';
       const body = await renderSmsTemplate(OPTIN_TEMPLATE_KEY, {
@@ -711,6 +726,7 @@ module.exports = {
   onRecipientConfirmed,
   onRecipientDeclined,
   restoreConfirmedPhone,
+  visitAskState,
   recipientPhoneKey,
   optinBlocksSend,
   getRecipientOptin,

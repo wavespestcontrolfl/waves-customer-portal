@@ -791,6 +791,8 @@ describe('on-site contact opt-in ask', () => {
   test('ask sent / not sent per gate (reasons feed the review card)', () => {
     const live = { optinRailLive: true, persistResult: 'written' };
     expect(decideOnSiteOptinAsk(spouse, live)).toEqual({ ask: true, reason: null });
+    // A phone only the legacy extractor read is never asked.
+    expect(decideOnSiteOptinAsk(spouse, { ...live, phoneFromV2: false })).toEqual({ ask: false, reason: 'phone_not_from_v2' });
     // A phone filed by an earlier pass is asked too (a retry never leaves them unasked).
     expect(decideOnSiteOptinAsk(spouse, { ...live, persistResult: 'skipped_phone_on_record' }).ask).toBe(true);
     expect(decideOnSiteOptinAsk(spouse, { ...live, persistResult: 'skipped_phone_on_record_role_backfilled' }).ask).toBe(true);
@@ -846,7 +848,9 @@ describe('on-site contact opt-in ask', () => {
 
   test('the loop only QUEUES the on-site ask (awaiting_booking); explicit consent keeps its own claim path', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain('decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result })');
+    expect(src).toContain('decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result, phoneFromV2: onSitePhoneFromV2 })');
+    // Only a phone the V2 extraction itself captured may be asked.
+    expect(src).toContain('const onSitePhoneFromV2 = onSiteV2PhoneKeys.has(lastTen(secondaryEntry.phone));');
     expect(src).toContain('pendingOnSiteAsks.push({ entry: secondaryEntry });');
     expect(src).toContain("const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;");
     expect(src).toContain('JSON.stringify({ optin_ask: value })');
@@ -890,23 +894,20 @@ describe('on-site contact opt-in ask', () => {
     expect(activation).toBeGreaterThan(landed);
     const gate = src.slice(src.lastIndexOf('const onSiteAskVisitState', site), site);
     expect(gate).toContain('!disputeHeldReuse && houseNumberDisputed !== true');
-    expect(gate).toContain('!(await isStreetLevelHoldRow(db, svc))');
-    expect(gate).toContain(".where({ id: svc.id, status: 'confirmed' })");
-    expect(gate).toContain("q.whereNull('customer_confirmed').orWhere('customer_confirmed', true)");
-    // The canonical customer-promised arrival, still ahead.
-    expect(gate).toContain("scheduledServiceApptTime(svc.id, { throwOnError: true })");
-    expect(gate).toContain("return at?.getTime() > Date.now() ? 'live' : 'dead';");
-    // An unreadable visit is NOT read as gone: the ask is claimed (visit-bound)
-    // but not dispatched, so the recovery sweep re-checks the same visit.
-    expect(gate).toContain("})().catch(() => 'unknown')");
+    // The shared visit check (recipient-optin visitAskState: hold → wait,
+    // confirmed + ahead → live, else dead; its behavior is tested there). An
+    // unreadable visit is NOT read as gone: 'unknown'.
+    expect(gate).toContain("await require('./recipient-optin').visitAskState(svc.id, customerId)");
+    expect(gate).toContain(".then((r) => r.state).catch(() => 'unknown')");
     const block = src.slice(site, site + 6000);
     // The ask quotes the booked visit's address.
     expect(block).toContain("const visitAddress = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');");
     expect(block).toContain('propertyAddress: visitAddress ||');
     // The visit rides the claim (a send-window-deferred ask is re-checked against it).
     expect(block).toContain('visitId: svc.id,');
-    expect(block).toContain("if (claims.length && onSiteAskVisitState === 'unknown') {");
-    expect(block).toContain("await markOptinAsk(entry, 'not_sent:visit_check_retry');");
+    // 'wait' (office-review hold) and 'unknown' claim the ask without sending it.
+    expect(block).toContain("if (claims.length && onSiteAskVisitState !== 'live') {");
+    expect(block).toContain("onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry'");
     expect(block).toContain("const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);");
     expect(block).toContain("return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');");
     // No caller demotion and no booking marker in this PR (owner split 10-01).
