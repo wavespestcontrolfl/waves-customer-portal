@@ -137,7 +137,10 @@ async function startAwayMode({ customerId, caseId, until = null, holdIds = [] })
       const hold = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
       if (!hold) continue;
       const record = readRecord(hold.moved_visits);
-      if (record.awayPairing && 'previousUntil' in record.awayPairing) previous = record.awayPairing.previousUntil;
+      // A record written before this accept's first write had no prior date
+      // stored its previousUntil as a missing key (no row then): still the
+      // first attempt's value, never the live one.
+      if (record.awayPairing) previous = record.awayPairing.previousUntil ?? null;
       recorded.push({ holdId, record });
     }
     await trx('property_preferences').where({ id: row.id }).update({ away_mode_until: untilYmd, updated_at: new Date() });
@@ -516,6 +519,10 @@ async function applyHoldSkips(holdResults) {
           // Idempotent: a recovery pass re-offers visits a crashed accept
           // may already have skipped.
           if (row && row.status === 'skipped') return 'skipped';
+          // Tracking says the work is done even where its best-effort status
+          // sync has not caught up (status still scheduled, en_route or
+          // on_site): ended, not live — nothing to retry, no office bell.
+          if (row && row.track_state === 'complete') return 'gone';
           // Underway is not ended: the office hears, and the plan stays open.
           if (row && ['en_route', 'on_site'].includes(row.status)) return 'live';
           // A visit that has ended (completed, cancelled, …) or become a
@@ -526,9 +533,6 @@ async function applyHoldSkips(holdResults) {
           // starts on the hold's own start date — a recovery pass a day
           // later still skips a paused visit whose date has gone by.
           if (!date || date < (hold.startsOn || etDateString()) || date >= hold.resumeOn) return 'left_pause';
-          // Tracking says the work is done even where its best-effort status
-          // sync has not caught up: ended, not live (nothing to retry).
-          if (row.track_state === 'complete') return 'gone';
           if (LIVE_TRACK_STATES.includes(row.track_state)) return 'live';
           const covered = await findBillingCoveredVisits(trx, [row]);
           if (covered.has(row.id)) return 'prepaid';
@@ -836,20 +840,23 @@ async function sendDueRestartTexts(holdIds) {
 
 // An accept that died before all its writes stood: undo this hold rather
 // than skip visits for an accept the customer was never told succeeded.
-async function undoInterruptedAccept(hold, record) {
+async function undoInterruptedAccept(hold) {
   // Claim the undo under the row lock markHoldsAccepted takes: an
   // accept that marked the hold since the bulk read wins, and one
   // marking after this claim is refused (and compensates itself).
   const claimed = await db.transaction(async (trx) => {
     const live = await trx('plan_holds').where({ id: hold.id }).forUpdate().first('status', 'moved_visits');
     const liveRecord = readRecord(live?.moved_visits);
-    if (!live || live.status !== 'active' || liveRecord.acceptCommitted !== false) return false;
+    if (!live || live.status !== 'active' || liveRecord.acceptCommitted !== false) return null;
     await trx('plan_holds').where({ id: hold.id }).update({
       moved_visits: JSON.stringify({ ...liveRecord, compensating: true }), updated_at: new Date(),
     });
-    return true;
+    return liveRecord;
   });
   if (!claimed) return;
+  // The Away Mode pairing is read from the locked row: a same-case retry
+  // that recorded it after the bulk read is undone with its Away Mode.
+  const lockedRecord = claimed;
   // The accept died before all its writes stood: undo this hold
   // (rate restored, prepaid moves reverted) rather than skip visits
   // for an accept the customer was never told succeeded.
@@ -857,9 +864,9 @@ async function undoInterruptedAccept(hold, record) {
   // preference still holds the date this accept wrote. Restored
   // BEFORE the hold is cancelled: a run stopped in between finds the
   // hold still active and retries (the restore is a no-op then).
-  if (record.awayPairing?.until) {
-    await db('property_preferences').where({ customer_id: hold.customer_id, away_mode_until: record.awayPairing.until })
-      .update({ away_mode_until: record.awayPairing.previousUntil || null, updated_at: new Date() });
+  if (lockedRecord.awayPairing?.until) {
+    await db('property_preferences').where({ customer_id: hold.customer_id, away_mode_until: lockedRecord.awayPairing.until })
+      .update({ away_mode_until: lockedRecord.awayPairing.previousUntil || null, updated_at: new Date() });
   }
   await cancelHold(hold.id, { compensateVisits: true });
   // Nothing of the accept stands once its last hold is undone: release
@@ -889,7 +896,7 @@ async function recoverUnfinishedSkips(out) {
       if (record.skipsFinal !== false || !Array.isArray(record.toSkip)) continue;
       if (record.acceptCommitted !== true) {
         if (hold.status !== 'active') continue;
-        await undoInterruptedAccept(hold, record);
+        await undoInterruptedAccept(hold);
         continue;
       }
       const done = new Set((record.skipped || []).map(String));
