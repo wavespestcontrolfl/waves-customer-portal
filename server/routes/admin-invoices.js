@@ -3702,7 +3702,13 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     // Authenticated operator click — "now" means now: the SMS leg is exempt
     // from the 8AM-8PM send window (validators/send-window.js). The 10:16 ET
     // cron path passes nothing and stays fenced.
-    await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true });
+    const routed = await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true });
+    // A customer on a customer-level reminder schedule: the click sent the
+    // schedule's current step instead (dunning consolidation §8).
+    if (routed?.routedTo === 'customer_schedule') {
+      const { status, body } = require('../services/customer-dunning/wiring').httpResult(routed);
+      return res.status(status).json(body);
+    }
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
