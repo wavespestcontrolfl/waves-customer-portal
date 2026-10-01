@@ -611,6 +611,9 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<template><template></template><h1>Page not found</h1></template><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<h1>Page <script>x()</script>not found</h1>')).toBe(true);
     expect(notFoundHeading('<template></template><h1>Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<template><!-- </template> --><h1>Not found</h1></template><h1>Waves Pest Control</h1>')).toBe(false);
+    expect(notFoundHeading('<template><script>"</template>"</script><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<template><style>/* </template> */</style></template><h1>Page not found</h1>')).toBe(true);
   });
   test('matches tags case-insensitively and only the exact tag name', () => {
     expect(notFoundHeading('<H1 class="t">Page Not Found</H1>')).toBe(true);

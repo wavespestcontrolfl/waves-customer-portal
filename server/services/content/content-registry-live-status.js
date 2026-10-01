@@ -178,15 +178,24 @@ function forwardFinder(lower) {
 
 // Where an inert region opened at `lt` ends (Infinity = runs to end of document): a comment at
 // "-->", script/style at their raw-text close, a template at its matching close (they nest).
+// Comments and script/style bodies inside a template are skipped whole, so a "</template>"
+// written in one never closes it.
+const TEMPLATE_INNER = [['<template', 9], ['</template', 10], ['<!--', 4], ['<script', 7], ['<style', 6]];
 function inertEnd(find, name, lt, gt) {
   if (name === '!--') return find('-->', lt + 4) + 3;
   if (name !== 'template') return find(`</${name}`, gt + 1);
   let depth = 1;
   let at = gt + 1;
   while (depth > 0 && at !== Infinity) {
-    const close = find('</template', at);
-    const nested = find('<template', at);
-    if (nested < close) { depth += 1; at = nested + 9; } else { depth -= 1; at = close + 10; }
+    let [needle, len] = TEMPLATE_INNER[0];
+    let hit = Infinity;
+    for (const [n, l] of TEMPLATE_INNER) {
+      const h = find(n, at);
+      if (h < hit) { hit = h; needle = n; len = l; }
+    }
+    if (hit === Infinity) return Infinity;
+    if (needle === '<template') { depth += 1; at = hit + len; } else if (needle === '</template') { depth -= 1; at = hit + len; } else if (needle === '<!--') at = find('-->', hit + 4) + 3;
+    else at = find(`</${needle.slice(1)}`, hit + len) + 1;
   }
   return at;
 }
