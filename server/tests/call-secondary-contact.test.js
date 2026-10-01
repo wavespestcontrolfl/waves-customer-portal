@@ -827,7 +827,8 @@ describe('on-site contact opt-in ask', () => {
     const marker = src.indexOf("\\'{demote_primary_on_optin}\\'", landed);
     expect(marker).toBeGreaterThan(landed);
     const block = src.slice(landed, marker + 600);
-    expect(block).toContain('if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKeys.size)');
+    // A street-level address hold (office review) is not an active booking: no marker.
+    expect(block).toContain('if (deferPrimaryOptOutCustomerId && deferPrimaryOptOutPhoneKeys.size && !(await isStreetLevelHoldRow(db, svc)))');
     // One entry per phone AND visit.
     expect(block).toContain('const visitEntry = { [svc.id]: { demote, set_at: new Date().toISOString() } };');
     // The booking site writes no pref at all any more.
