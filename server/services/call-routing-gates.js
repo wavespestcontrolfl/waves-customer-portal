@@ -445,6 +445,13 @@ async function updateUnreviewedRouteDecisions(trx, scope, patch) {
 // the reviewer named) and `mode`.
 async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mode = null }, fn) {
   return conn.transaction(async (trx) => {
+    // Lock the CALL row first (codex #5446 r1 P1): FOR UPDATE on the decision rows
+    // that exist now cannot stop a reprocess from INSERTING a new decision row (a
+    // new version or recording key) after this snapshot, and a displayed-decision
+    // check against a stale snapshot would pass. The fenced upsertRouteDecision
+    // takes call_log FOR UPDATE before it touches route_decisions, so every writer
+    // serializes on the call, in the same order: call_log -> route_decisions.
+    await trx('call_log').where({ id: callLogId }).forUpdate().first('id');
     const q = trx('route_decisions').where({ call_log_id: callLogId }).forUpdate();
     if (decisionId) q.where({ id: decisionId });
     if (mode) q.where({ mode });

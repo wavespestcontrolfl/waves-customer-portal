@@ -57,13 +57,22 @@ describe('resolveDisplayedRouteDecision', () => {
 
 // A fake transaction over an in-memory set of route_decisions rows.
 function fakeDb({ rows = decisionRows() } = {}) {
-  const state = { locked: 0, feedback: [] };
+  const state = { locked: 0, feedback: [], order: [] };
   const trx = (table) => {
+    if (table === 'call_log') {
+      // the call row lock (codex #5446 r1 P1): where({ id }).forUpdate().first('id')
+      const chain = {
+        where() { return chain; },
+        forUpdate() { state.order.push('call_log'); return chain; },
+        first() { return Promise.resolve({ id: CALL }); },
+      };
+      return chain;
+    }
     if (table === 'route_decisions') {
       const conds = {};
       const chain = {
         where(c) { Object.assign(conds, c); return chain; },
-        forUpdate() { state.locked += 1; return chain; },
+        forUpdate() { state.locked += 1; state.order.push('route_decisions'); return chain; },
         select() { return Promise.resolve(rows.filter((r) => Object.entries(conds).every(([k, v]) => r[k] === v))); },
       };
       return chain;
@@ -113,6 +122,12 @@ describe('POST /api/admin/triage/auto-routed/:callLogId/verdict', () => {
     expect(state.locked).toBe(1);
     expect(state.feedback).toHaveLength(1);
     expect(state.feedback[0]).toMatchObject({ call_log_id: CALL, route_decision_id: NEW, decision_kind: 'auto_routed', verdict: 'accept' });
+  });
+
+  test('the CALL row is locked before the decision rows, the same order as the fenced upsertRouteDecision (codex #5446 r1 P1)', async () => {
+    const state = fakeDb();
+    await post({ route_decision_id: NEW });
+    expect(state.order).toEqual(['call_log', 'route_decisions']);
   });
 
   test('a STALE view (a reprocess wrote a newer decision since it loaded): 409, nothing written', async () => {
@@ -187,6 +202,12 @@ describe('POST /api/ai/admin/calls/:id/route-feedback', () => {
     expect(res.statusCode).toBe(200);
     expect(state.locked).toBe(1);
     expect(state.feedback[0].route_decision_id).toBe(NEW);
+  });
+
+  test('the CALL row is locked before the decision rows here too (codex #5446 r1 P1)', async () => {
+    const state = fakeDb({ rows: rowsFor() });
+    await post({ routeDecisionId: NEW });
+    expect(state.order).toEqual(['call_log', 'route_decisions']);
   });
 
   test('a stale displayed decision: 409 STALE_ROUTE_DECISION, nothing written', async () => {

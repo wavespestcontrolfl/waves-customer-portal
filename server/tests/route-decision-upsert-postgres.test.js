@@ -157,6 +157,35 @@ jest.setTimeout(30000);
     expect(fb.route_decision_id).toBe(row.id);
   });
 
+  // codex #5446 r1 P1: FOR UPDATE on the decision rows that exist when the verdict
+  // reads cannot stop a reprocess INSERTING a new decision row (a new recording key)
+  // after that snapshot. The verdict writer therefore locks the CALL row first, the
+  // same order the fenced upsertRouteDecision takes, so such an insert waits for the
+  // verdict to finish.
+  test('a verdict holding its locks BLOCKS a reprocess that would INSERT a new decision row (new recording key); the verdict saw one consistent snapshot', async () => {
+    await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let locked;
+    const lockedP = new Promise((r) => { locked = r; });
+    let seen;
+    const verdict = withLockedRouteDecisions(db, { callLogId: callId, mode: 'enforce' }, async (trx, decisionRows) => {
+      seen = decisionRows.map((r) => r.recording_sid);
+      locked();
+      await gate;
+      await trx('route_feedback').insert({ call_log_id: callId, route_decision_id: decisionRows[0].id, verdict: 'accept' });
+    });
+    await lockedP;
+    let inserted = false;
+    const reprocess = upsertRouteDecision(db, { ...decision(true, 'auto_route'), recording_sid: 'RE2' }, { callLogId: callId, processingToken: 'tok-new' }).then((n) => { inserted = true; return n; });
+    await sleep(400);
+    expect(inserted).toBe(false); // the new row cannot appear mid-verdict
+    release();
+    await Promise.all([verdict, reprocess]);
+    expect(seen).toEqual(['RE1']);
+    expect(await rows()).toHaveLength(2);
+  });
+
   test('a refresh holding the row lock BLOCKS a concurrent verdict, which then attaches to the REFRESHED row it reads', async () => {
     await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' });
     let release;

@@ -845,6 +845,8 @@ describe('every route_feedback writer takes the route_decisions row lock (codex 
     conn.transaction = async (fn) => fn(conn);
     const seen = await withLockedRouteDecisions(conn, { callLogId: 'c1', decisionId: 'rd-1', mode: 'enforce' }, async (trx, rows) => rows);
     expect(seen).toEqual([{ id: 'rd-1' }]);
-    expect(sqls[0].sql).toMatch(/^select \* from "route_decisions" where "call_log_id" = \? and "id" = \? and "mode" = \? for update$/i);
+    // the call row first (codex #5446 r1 P1), then the decision rows
+    expect(sqls[0].sql).toMatch(/^select "id" from "call_log" where "id" = \? limit \? for update$/i);
+    expect(sqls[1].sql).toMatch(/^select \* from "route_decisions" where "call_log_id" = \? and "id" = \? and "mode" = \? for update$/i);
   });
 });
