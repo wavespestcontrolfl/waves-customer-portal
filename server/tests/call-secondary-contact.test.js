@@ -1151,6 +1151,27 @@ describe('consent upgrade for a phone already on record (#5467)', () => {
   };
   const onSite = { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' };
 
+  test('upgrade is refused when the slot phone is another customer\'s primary number (pre-push codex P1)', async () => {
+    const state = statefulDb({ id: 'cust-1', phone: '+15550100999', email: null,
+      service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123', service_contact_email: null, service_contact_role: 'spouse_partner',
+      service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+      service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null });
+    // The cross-customer lookup (whereRaw + first) finds another owner.
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = base(table);
+      if (table === 'customers') {
+        const origFirst = b.first;
+        b.first = jest.fn(async (...a) => (b.whereRaw.mock.calls.length ? { id: 'cust-2' } : origFirst(...a)));
+      }
+      return b;
+    });
+    const res = await persistCallSecondaryContact('cust-1', { first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true },
+      { smsConsentExplicit: true, smsConsentSource: 'call_pipeline_onsite_contact' });
+    expect(res).toBe('skipped_phone_belongs_to_other_customer');
+    expect(state.updates.some((u) => u.service_contacts_consent_at)).toBe(false);
+  });
+
   test('single-phone unstamped row: stamps the artifact (and backfills the role) -> consent_upgraded_phone_on_record', async () => {
     const state = statefulDb(spouseRow);
     expect(await persistCallSecondaryContact('cust-1', spouse, onSite)).toBe('consent_upgraded_phone_on_record');

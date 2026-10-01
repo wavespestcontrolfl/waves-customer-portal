@@ -2969,6 +2969,16 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     const slotPhones = SERVICE_CONTACT_SLOTS.map((s) => last10(customer[s.phone])).filter(Boolean);
     if (!slotPhones.length) return null;
     if (slotPhones.some((p) => p !== phone10)) return slotPhones.includes(phone10) ? 'withheld' : null;
+    // Same cross-customer guard as the fresh write (pre-push codex P1): a
+    // slot phone that is ANOTHER customer's primary number must never be
+    // upgraded into a texting target here — the office adjudicates the
+    // collision via its own review flag instead.
+    const otherOwner = await db('customers')
+      .whereNull('deleted_at')
+      .whereNot('id', customerId)
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone10])
+      .first('id');
+    if (otherOwner) return 'other_customer';
     let upgrade = db('customers').where({ id: customerId }).whereNull('service_contacts_consent_at');
     for (const s of SERVICE_CONTACT_SLOTS) {
       upgrade = upgrade.whereRaw('?? IS NOT DISTINCT FROM ?', [s.phone, customer[s.phone] ?? null]);
@@ -2997,6 +3007,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     const upgraded = await upgradeConsentOnRecord();
     const backfilled = await backfillSlotRole();
     if (upgraded === 'upgraded') return 'consent_upgraded_phone_on_record';
+    if (upgraded === 'other_customer') return 'skipped_phone_belongs_to_other_customer';
     if (upgraded === 'withheld') return 'skipped_phone_on_record_consent_withheld';
     if (backfilled) return 'skipped_phone_on_record_role_backfilled';
     return 'skipped_phone_on_record';
