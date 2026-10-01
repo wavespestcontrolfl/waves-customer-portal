@@ -25,6 +25,8 @@
  * lead records), and call↔lead linkage is call-SID based. Pure / unit-testable.
  */
 
+const { SPOKE_SITE_KEYS } = require('./content-astro/spoke-sites');
+const { publicPortalUrl } = require('../utils/portal-url');
 const { formatSourceName } = require('./source-names');
 
 const pctOf = (part, whole) => (whole > 0 ? Math.round((part / whole) * 100) : 0);
@@ -149,12 +151,12 @@ const BREAKDOWN_LABELS = {
 // self_booked_appointments).
 // Landing page: the lead's own captured page (lead webhook attribution.landingUrl
 // / pageUrl, lawn assessment attribution.landing_url, quote wizard landing_url, a
-// self-booking's attribution.landing_url),
-// else (web leads only) the customer's first landing page; host + path, lower-cased, no
-// scheme / www / query / fragment / trailing slash. Calls and tools that record
-// no page stay '(unknown)'. heard: the visitor's self-reported answer, kept
-// apart from observed attribution. chr(63) is '?', kept out of the SQL text
-// because knex reads a bare ? as a binding.
+// self-booking's attribution.landing_url), else (web leads only) the customer's
+// first landing page; host + path, lower-cased, no scheme / www / query /
+// fragment / trailing slash. Calls and tools that record no page stay
+// '(unknown)'. heard: the visitor's self-reported answer, kept apart from
+// observed attribution. chr(63) is '?', kept out of the SQL text because knex
+// reads a bare ? as a binding.
 // The customer's first landing page only stands in for a lead that itself came
 // in on the web; a call, email or manual lead (or a row with no lead) keeps no
 // page rather than inheriting one from an earlier, unrelated visit.
@@ -163,14 +165,28 @@ const WEB_FIRST_CONTACT_CHANNELS = [
   'pest_identifier_funnel', 'lawn_diagnostic', 'lawn_diagnostic_report',
 ];
 const WEB_CHANNELS_SQL = WEB_FIRST_CONTACT_CHANNELS.map((ch) => `'${ch}'`).join(', ');
-const FUNNEL_URL_SQL = `NULLIF(regexp_replace(regexp_replace(regexp_replace(split_part(split_part(lower(trim(COALESCE(
-  NULLIF(l.extracted_data->'attribution'->>'landingUrl', ''),
-  NULLIF(l.extracted_data->'attribution'->>'pageUrl', ''),
-  NULLIF(l.extracted_data->'attribution'->>'landing_url', ''),
-  NULLIF(l.extracted_data->>'landing_url', ''),
-  NULLIF(sba.attribution->>'landing_url', ''),
-  CASE WHEN l.first_contact_channel IN (${WEB_CHANNELS_SQL}) THEN NULLIF(c.landing_page_url, '') END,
-  ''))), chr(63), 1), '#', 1), '^[a-z][a-z0-9+.-]*://', ''), '^www\\.', ''), '(.)/$', '\\1'), '')`;
+// Only a page on a Waves site is a landing page. The webhook stores the
+// visitor's referrer as pageUrl when the form sent no page (and the customer
+// row copies it), so an off-site host (chatgpt.com, google.com) is a
+// referrer, never a landing page. Hosts are the spoke registry (hub
+// included) and the portal, the same fleet cors-origins.js derives.
+const OWNED_HOSTS = [...new Set([
+  ...SPOKE_SITE_KEYS,
+  (() => { try { return new URL(publicPortalUrl()).hostname; } catch { return null; } })(),
+].filter((h) => typeof h === 'string' && /^[a-z0-9.-]+$/.test(h)).map((h) => h.replace(/^www\./, '')))];
+const OWNED_HOSTS_SQL = OWNED_HOSTS.map((h) => `'${h}'`).join(', ');
+const normalizeUrlSql = (expr) => `NULLIF(regexp_replace(regexp_replace(regexp_replace(split_part(split_part(lower(trim(${expr})), chr(63), 1), '#', 1), '^[a-z][a-z0-9+.-]*://', ''), '^www\\.', ''), '(.)/$', '\\1'), '')`;
+const ownedPageSql = (expr) => {
+  const url = normalizeUrlSql(expr);
+  return `CASE WHEN split_part(${url}, '/', 1) IN (${OWNED_HOSTS_SQL}) THEN ${url} END`;
+};
+const FUNNEL_URL_SQL = `COALESCE(
+  ${ownedPageSql("l.extracted_data->'attribution'->>'landingUrl'")},
+  ${ownedPageSql("l.extracted_data->'attribution'->>'pageUrl'")},
+  ${ownedPageSql("l.extracted_data->'attribution'->>'landing_url'")},
+  ${ownedPageSql("l.extracted_data->>'landing_url'")},
+  ${ownedPageSql("sba.attribution->>'landing_url'")},
+  CASE WHEN l.first_contact_channel IN (${WEB_CHANNELS_SQL}) THEN ${ownedPageSql('c.landing_page_url')} END)`;
 const FUNNEL_BREAKDOWN_SQL = {
   page: `COALESCE(${FUNNEL_URL_SQL}, '${UNKNOWN}')`,
   service: `COALESCE(NULLIF(asa.service_line, ''), '${UNKNOWN}')`,

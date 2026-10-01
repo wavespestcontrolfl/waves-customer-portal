@@ -44,6 +44,12 @@ describeDb('lead funnel breakdown keys', () => {
       .toBe('wavespestcontrol.com/quote');
     expect((await keysFor({ extracted: { attribution: { landing_url: 'https://www.wavespestcontrol.com/lawn-assessment/' } } })).page)
       .toBe('wavespestcontrol.com/lawn-assessment');
+    // a referrer stored as pageUrl (no page captured) is never a landing page;
+    // the next candidate on a Waves site still counts
+    expect((await keysFor({ extracted: { attribution: { pageUrl: 'https://chatgpt.com/' } } })).page).toBe('(unknown)');
+    expect((await keysFor({ extracted: { attribution: { pageUrl: 'https://www.google.com/search' } }, landing: 'https://chatgpt.com/' })).page).toBe('(unknown)');
+    expect((await keysFor({ extracted: { attribution: { pageUrl: 'https://chatgpt.com/' } }, landing: 'https://www.sarasotaflpestcontrol.com/ants/' })).page)
+      .toBe('sarasotaflpestcontrol.com/ants');
     // a call (or a row with no lead) never inherits the customer's earlier page
     expect((await keysFor({ channel: 'call', landing: 'https://wavespestcontrol.com/pest-control/ants' })).page).toBe('(unknown)');
     expect((await keysFor({ channel: null, landing: 'https://wavespestcontrol.com/pest-control/ants' })).page).toBe('(unknown)');
