@@ -2131,6 +2131,49 @@ describe('tracker-mapping generation at send time (A->B->A)', () => {
   });
 });
 
+// Codex #5334 P2: a technician assigned AFTER the draft (name absent from the frozen techNames) is still a status subject at send time.
+describe('status claims naming a technician assigned after the snapshot', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) drafter[name].mockReset().mockImplementation(real[name]);
+  });
+  const { deviceFingerprint } = require('../services/live-eta-destination');
+  const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', technicianId: 'tech-1', technicianNames: ['Sam'] }] };
+  const visit = (extra) => ({ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, technician_id: 'tech-1', ...extra });
+  const dbFor = ({ visits, techNames = {}, lookups = jest.fn() }) => (table) => {
+    lookups(table);
+    if (table === 'technicians') return { whereIn: (_c, ids) => ({ select: async () => ids.map((id) => ({ name: techNames[id] })) }), where: () => ({ first: async () => ({ bouncie_imei: null, bouncie_imei_changed_at: null }) }) };
+    return { whereIn: () => ({ select: async () => dated(visits) }) };
+  };
+  const run = (body, db, techNames = ['Sam']) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, techNames, outgoingBody: body, now: NOW, dbh: db });
+
+  test('"Alex is on the way." after the visit was reassigned to Alex is rechecked and held (technician changed)', async () => {
+    const out = await run('Alex is on the way.', dbFor({ visits: [visit({ technician_id: 'tech-2' })], techNames: { 'tech-2': 'Alex Rivera' } }));
+    expect(out).toBe('eta_claim_tech_changed');
+  });
+  test('a name-subject arrival edit is rechecked against the visit state (the new tech arrived / the visit left en route)', async () => {
+    const out = await run('Alex is on the way.', dbFor({ visits: [visit({ technician_id: 'tech-2', status: 'completed', track_state: 'completed' })], techNames: { 'tech-2': 'Alex' } }));
+    expect(out).not.toBeNull();
+  });
+  test('a body with no status wording is not held, even after the widened classification', async () => {
+    expect(await run('Thanks, 5 stars!', dbFor({ visits: [visit({ technician_id: 'tech-2' })], techNames: { 'tech-2': 'Alex' } }))).toBeNull();
+  });
+  test('"Dana\'s order is on the way." stays a non-claim: a capitalized word is a subject only when it is an assigned technician', async () => {
+    expect(await run("Dana's order is on the way.", dbFor({ visits: [visit({ technician_id: 'tech-2' })], techNames: { 'tech-2': 'Alex' } }))).toBeNull();
+  });
+  test('an unreadable name lookup falls back to the draft\'s names (earlier behavior), never throws', async () => {
+    const broken = (table) => (table === 'technicians' ? { whereIn: () => { throw new Error('db down'); } } : { whereIn: () => ({ select: async () => dated([visit({ technician_id: 'tech-2' })]) }) });
+    expect(await run('Alex is on the way.', broken)).toBeNull();
+  });
+  test('names the draft already recorded keep their path (no extra reads)', async () => {
+    const lookups = jest.fn();
+    const out = await run('Sam is on the way.', dbFor({ visits: [visit()], techNames: {}, lookups }));
+    expect(out).toBeNull();
+    expect(lookups).not.toHaveBeenCalledWith('technicians'); // device check only when the entry recorded a device/generation; no name lookup
+  });
+});
+
 // Codex round-41 P2 (PR #5334): recognizable CURRENT status wording with no snapshot to bind
 // it is an ungrounded assertion — gate-on only; the approved SLA wording keeps its exemption.
 describe('status wording with no snapshot (GATE_SMS_REAL_ANSWERS on)', () => {

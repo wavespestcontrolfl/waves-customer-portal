@@ -416,6 +416,22 @@ function mergeTechNames(persistedTechNames, liveEtaSnapshot) {
     ...(liveEtaSnapshot?.entries || []).flatMap((e) => (Array.isArray(e?.technicianNames) ? e.technicianNames : [])),
   ]);
 }
+// First names of the technicians CURRENTLY assigned to the snapshot's visits (two small reads: visits -> technicians). A lookup
+// failure is not fatal here — it only widens classification, so on error the persisted names alone apply (the earlier behavior);
+// every recheck that follows a classified claim fails closed on its own reads.
+async function currentAssignedTechNames(entries, dbh) {
+  try {
+    const visitIds = [...new Set(entries.flatMap((e) => e.scheduledServiceIds || []))];
+    const visits = await dbh('scheduled_services').whereIn('id', visitIds).select('technician_id');
+    const techIds = [...new Set((visits || []).map((v) => v?.technician_id).filter((id) => id != null))];
+    if (!techIds.length) return [];
+    const techs = await dbh('technicians').whereIn('id', techIds).select('name');
+    return (techs || []).map((t) => String(t?.name || '').trim().split(/\s+/)[0]).filter(Boolean);
+  } catch (err) {
+    logger.warn(`[sms-eta-freshness] current technician names unreadable: ${err.message}; classifying with the draft's names only`);
+    return [];
+  }
+}
 // No claim and no link. Round-20 structural rule: wording classification decides WHICH claim to verify,
 // never WHETHER to recheck. A draft that carries a live-ETA/on-site snapshot and whose body touches
 // visit status in ANY form (the broad bodyMentionsVisitStatus vocabulary gate, not a phrase list of
@@ -466,8 +482,17 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // outright, claim or not.
   if (scanTrackLinks(outgoingBody).violation) return 'eta_claim_link_untrusted';
   const techNames = mergeTechNames(persistedTechNames, liveEtaSnapshot);
-  const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0, techNames, promptVersion });
+  const snapshotHasEntries = Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0;
   const entries = usableSnapshotEntries(liveEtaSnapshot);
+  let claim = classifyEtaBody({ outgoingBody, snapshotHasEntries, techNames, promptVersion });
+  // Codex #5334 P2: the names frozen at draft time miss a technician assigned AFTER the snapshot — a reviewer edit "Alex is on the way"
+  // matches no status predicate, so nothing would be rechecked. When the body classified as nothing against a live snapshot, widen the
+  // subjects with the CURRENTLY assigned technicians of the snapshot's visits and classify once more; a hit then goes through the
+  // normal visit/technician/state recheck (which refuses a reassigned visit). Capitalized words are still never subjects on their own.
+  if (entries.length && !claim.hasClaim && !claim.hasTrackLink && !claim.visitStatusMention && !claim.ungroundedStatus) {
+    const merged = sanitizeTechNames([...techNames, ...await currentAssignedTechNames(entries, dbh)]);
+    if (merged.length > techNames.length) claim = classifyEtaBody({ outgoingBody, snapshotHasEntries, techNames: merged, promptVersion });
+  }
   if (!claim.hasClaim && !claim.hasTrackLink) return recheckWithoutClaim(claim, entries, dbh);
   if (!entries.length) return 'eta_claim_no_snapshot';
   if (!claim.hasClaim) return recheckLinkOnly(claim, entries, dbh);

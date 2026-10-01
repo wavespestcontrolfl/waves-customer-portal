@@ -71,6 +71,20 @@ test('the remap stamp is clock_timestamp(), NOT NOW() (Codex #5334 P2): NOW() is
   expect(sql).not.toMatch(/\bNOW\(\)/i);
 });
 
+test('an IMEI is stored AND stamped in its canonical trimmed form (Codex #5334 P2): whitespace never reaches the column or the CASE binding', async () => {
+  installDb();
+  await put({ bouncie_imei: '  222222222222222 \n' });
+  expect(updates[0].bouncie_imei).toBe('222222222222222');
+  expect(updates[0].bouncie_imei_changed_at.bindings).toEqual(['222222222222222']);
+});
+
+test('a whitespace-only IMEI clears the mapping like an empty one (NULL, not a blank string)', async () => {
+  installDb();
+  await put({ bouncie_imei: '   ' });
+  expect(updates[0].bouncie_imei).toBeNull();
+  expect(updates[0].bouncie_imei_changed_at.bindings).toEqual([null]);
+});
+
 test('clearing the IMEI compares against NULL in the same statement', async () => {
   installDb();
   await put({ bouncie_imei: '' });

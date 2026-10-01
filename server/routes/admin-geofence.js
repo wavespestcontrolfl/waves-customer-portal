@@ -95,7 +95,9 @@ router.put('/vehicles/:technicianId', async (req, res, next) => {
     const { bouncie_imei, bouncie_vin, vehicle_name } = req.body;
     const updates = { updated_at: new Date() };
     if (bouncie_imei !== undefined) {
-      const nextImei = bouncie_imei || null;
+      // The CANONICAL form the readers use (resolveFreshTechPosition trims before fetching/guarding): trimmed, empty -> NULL. Stored and
+      // stamped trimmed, so whitespace never breaks the guarded write / webhook lookup nor fires a spurious remap stamp (Codex #5334 P2).
+      const nextImei = String(bouncie_imei ?? '').trim() || null;
       updates.bouncie_imei = nextImei;
       // Stamp the tracker-remap instant ONLY when the IMEI actually changes (round-35
       // P2) and do it ATOMICALLY with the IMEI write (round-38 P2): one UPDATE whose
