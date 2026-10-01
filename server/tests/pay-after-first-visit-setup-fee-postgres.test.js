@@ -492,6 +492,23 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  test('adopted child: refunding the child\'s invoice does not re-arm the fee stamped on the other-series parent', async () => {
+    const f = await seed();
+    try {
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ source_estimate_id: null, status: 'completed' });
+      await makeDue(f.childIds[0]);
+      expect(await complete(f, f.childIds[0])).toMatchObject({ status: 200 });
+      const inv = (await mockPg('invoices').where({ customer_id: f.customerId })).find((row) => setupLines(row).length);
+      expect(inv).toBeTruthy();
+      const claim = await mockPg('setup_fee_claims').where({ invoice_id: inv.id }).first();
+      expect(String(claim.estimate_id)).toBe(String(f.estimateId));
+      await mockPg('invoices').where({ id: inv.id }).update({ status: 'refunded' });
+      const refunded = await mockPg('invoices').where({ id: inv.id }).first();
+      expect(await require('../services/invoice').restoreRodentSetupObligationForReversedInvoice(mockPg, refunded)).toBeNull();
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
   // Codex #5485 r3 P1: an accept that adopted an existing appointment leaves
   // source_estimate_id on the CHILD and stamps the fee on its series parent
   // (an older / unlinked series). The detector must find that stamp, or the

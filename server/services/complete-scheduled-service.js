@@ -10742,6 +10742,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   invoice_id: invoice.id,
                   scheduled_service_id: secureSetupFee.parentId,
                   amount: secureSetupFee.amount,
+                  // Provenance for the refund path: which accept owns this fee
+                  // (an adopted child's parent may belong to another series).
+                  ...(svc.source_estimate_id ? { estimate_id: svc.source_estimate_id } : {}),
                 })
                 .onConflict('invoice_id')
                 .ignore();

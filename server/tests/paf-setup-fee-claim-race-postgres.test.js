@@ -210,6 +210,15 @@ postgres('PAF setup fee — claim consumption is atomic across concurrent visits
         // Alternate which visit is dispatched first so neither ordering is favored.
         const order = i % 2 === 0 ? [f.parentId, f.childIds[0]] : [f.childIds[0], f.parentId];
         const results = await Promise.all(order.map((id) => complete(f, id)));
+        // A completion that met the other one's FRESH in-flight fee marker
+        // refuses retryably (503 setup_fee_claim_in_flight) instead of minting
+        // without the fee; its retry, after the owner committed, finalizes.
+        for (let k = 0; k < results.length; k += 1) {
+          for (let attempt = 0; results[k].status === 503 && attempt < 3; attempt += 1) {
+            expect(results[k].body).toMatchObject({ code: 'setup_fee_claim_in_flight' });
+            results[k] = await complete(f, order[k]);
+          }
+        }
         results.forEach((r) => expect(r).toMatchObject({ status: 200 }));
 
         const invoices = await mockPg('invoices').where({ customer_id: f.customerId });
@@ -231,21 +240,28 @@ postgres('PAF setup fee — claim consumption is atomic across concurrent visits
     }
   }, 300000);
 
-  test('a FRESH negative marker (a completion mid-mint) is never adopted by another visit of the series', async () => {
+  test('a FRESH negative marker (a completion mid-mint) is never adopted, and the visit is not finalized without it (retryable 503, then adopted once the lease lapses)', async () => {
     const f = await seed({ stamp: -SETUP_FEE });
     try {
       // The in-progress marker was written just now by another completion that
-      // has not minted yet: this visit must mint the plain visit invoice and
-      // leave the claim alone.
+      // has not minted yet (or by a crashed attempt this retry replaced): this
+      // visit must neither adopt it nor mint and finalize WITHOUT the fee — it
+      // releases for resume (503) and leaves the claim alone.
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ updated_at: new Date() });
       await makeDue(f.childIds[0]);
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: -SETUP_FEE, updated_at: new Date() });
       const out = await complete(f, f.childIds[0]);
-      expect(out).toMatchObject({ status: 200 });
-      const invoices = await mockPg('invoices').where({ customer_id: f.customerId });
-      expect(invoices.flatMap(setupLines)).toHaveLength(0);
+      expect(out).toMatchObject({ status: 503, body: { code: 'setup_fee_claim_in_flight' } });
+      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(0);
       const parent = await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee');
       expect(Number(parent.pending_setup_fee)).toBe(-SETUP_FEE);
+      // Once the lease lapses (its owner died), the retry adopts the claim and
+      // bills the fee exactly once.
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ updated_at: new Date(Date.now() - 6 * 60 * 60 * 1000) });
+      const retried = await complete(f, f.childIds[0]);
+      expect(retried).toMatchObject({ status: 200 });
+      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(1);
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
     } finally { await cleanup(f); }
   });
 

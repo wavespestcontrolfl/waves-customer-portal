@@ -10562,7 +10562,7 @@ const InvoiceService = {
     // from its own reversal. The editable description only decides for
     // claim-less invoices (unsent accept drafts).
     let completionClaimToConsume = null;
-    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount", "scheduled_service_id");
+    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount", "scheduled_service_id", "estimate_id");
     let lines = invoiceRow.line_items;
     if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
@@ -10591,14 +10591,24 @@ const InvoiceService = {
     // deferredSetupFeeCovers; the public contract bills it once). Its anchor
     // series comes from the accept that deferred it, which persisted
     // setupFeeDeferredToFirstVisit on the estimate — never re-armed here.
-    if (claimRecord?.scheduled_service_id) {
-      const claimAnchor = await conn("scheduled_services").where({ id: claimRecord.scheduled_service_id }).first("source_estimate_id");
-      if (claimAnchor?.source_estimate_id) {
-        const deferringEstimate = await conn("estimates").where({ id: claimAnchor.source_estimate_id }).first("estimate_data");
+    if (claimRecord) {
+      // Provenance from every place it can live: the claim itself, the anchor
+      // series, and the visit the invoice billed (an accept that adopted an
+      // existing appointment stamps the fee on a parent from ANOTHER series,
+      // while the billed child carries the deferring estimate).
+      const candidateEstimateIds = new Set();
+      if (claimRecord.estimate_id) candidateEstimateIds.add(String(claimRecord.estimate_id));
+      for (const visitId of [claimRecord.scheduled_service_id, invoiceRow.scheduled_service_id]) {
+        if (!visitId) continue;
+        const visit = await conn("scheduled_services").where({ id: visitId }).first("source_estimate_id");
+        if (visit?.source_estimate_id) candidateEstimateIds.add(String(visit.source_estimate_id));
+      }
+      for (const estimateId of candidateEstimateIds) {
+        const deferringEstimate = await conn("estimates").where({ id: estimateId }).first("estimate_data");
         let deferringData = deferringEstimate?.estimate_data;
         if (typeof deferringData === "string") { try { deferringData = JSON.parse(deferringData); } catch { deferringData = null; } }
         if (deferringData?.setupFeeDeferredToFirstVisit === true) {
-          logger.info(`[invoice] reversed invoice ${invoiceRow.id}: pay-after-first-visit setup fee on series ${claimRecord.scheduled_service_id} stays resolved (not a rodent obligation; never re-armed)`);
+          logger.info(`[invoice] reversed invoice ${invoiceRow.id}: pay-after-first-visit setup fee (estimate ${estimateId}) stays resolved (not a rodent obligation; never re-armed)`);
           return null;
         }
       }
