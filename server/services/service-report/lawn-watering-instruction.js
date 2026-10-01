@@ -39,6 +39,13 @@
 // Generic copy prints minutes only, never "about a quarter inch": at the UF
 // rates the runtime uses those minutes are really 0.33-0.38 inch.
 //
+// Mowing is a SEPARATE result (instruction.mowHold, never part of `lines`: the
+// watering text sends `lines` verbatim). It exists only when an applied product
+// carries a LABEL-SOURCED mow_hold_days (integer 1..14); the longest hold wins.
+// It never depends on the watering state (a visit whose watering is unknown can
+// still carry its mow line), and nothing about mowing is ever defaulted or
+// derived.
+//
 // Copy rules: no rain probability, no county/ordinance, no re-entry or drying
 // figures, and never "keep ... off", "stay off", "wait" or "dry" beside an
 // hours or minutes figure (the banned re-entry pattern). Water-in copy is
@@ -121,6 +128,58 @@ function formatWhen(date, anchor) {
   const days = Math.round((Date.parse(`${atDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000);
   if (days >= 6) return `${WEEKDAYS[at.dayOfWeek]}, ${MONTHS[at.month - 1]} ${at.day} at ${clock}`;
   return `${WEEKDAYS[at.dayOfWeek]} ${clock}`;
+}
+
+// ── Mow hold ─────────────────────────────────────────────────────────────
+const MOW_HOLD_MIN_DAYS = 1;
+const MOW_HOLD_MAX_DAYS = 14;
+
+// A label mow hold is a whole number of days, 1..14. Anything else (null,
+// strings, fractions, out of range) is "the label says nothing": no claim.
+function normalizeMowHoldDays(value) {
+  return typeof value === 'number' && Number.isInteger(value)
+    && value >= MOW_HOLD_MIN_DAYS && value <= MOW_HOLD_MAX_DAYS ? value : null;
+}
+
+function mowHoldLine(untilLabel, days) {
+  return `Mowing: hold off until ${untilLabel}, ${days} ${days === 1 ? 'day' : 'days'} after today's treatment.`;
+}
+
+// The longest valid label hold across the applied products. A label day is 24
+// elapsed hours from the visit ("postpone mowing for 24 hours"), so the end is
+// completion + days * 24 h, rounded UP to the hour (rounding down would let the
+// customer mow before the label interval ends), and the line names that clock
+// time ("Fri 4 PM"), never a bare weekday that reads as "any time Friday".
+function buildMowHold(entries, completedAt) {
+  const at = toDate(completedAt);
+  if (!at) return null;
+  const days = (Array.isArray(entries) ? entries : [])
+    .map((entry) => normalizeMowHoldDays(entry && typeof entry === 'object' ? entry.mowHoldDays : null))
+    .filter((d) => d != null);
+  if (!days.length) return null;
+  const longest = Math.max(...days);
+  const until = ceilToHour(new Date(at.getTime() + longest * 24 * HOUR_MS));
+  const untilLabel = formatWhen(until, at);
+  return {
+    days: longest,
+    untilAt: until.toISOString(),
+    untilDate: etDateString(until),
+    untilLabel,
+    line: mowHoldLine(untilLabel, longest),
+  };
+}
+
+// Shape check for a frozen mowHold read back from structured_notes: anything
+// else is ignored (no claim), never repaired.
+function isValidMowHold(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && normalizeMowHoldDays(value.days) != null
+    && typeof value.untilDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.untilDate)
+    // untilAt arrived after the first shape: a record frozen without it replays
+    // as written (record, not clock); when present it must parse.
+    && (value.untilAt === undefined || (typeof value.untilAt === 'string' && Number.isFinite(Date.parse(value.untilAt))))
+    && typeof value.untilLabel === 'string' && value.untilLabel.length > 0
+    && typeof value.line === 'string' && value.line.length > 0;
 }
 
 // ── Rule aggregation ─────────────────────────────────────────────────────
@@ -211,13 +270,14 @@ function emptyInstruction() {
     lines: [],
     ruleSource: null,
     products: [],
+    mowHold: null,
   };
 }
 
 /**
  * @param {object} input
  * @param {Array}  input.rules        per applied product: a rule object, null,
- *                                    or { name, rule }
+ *                                    or { name, rule, mowHoldDays }
  * @param {Date|string|null} input.completedAt
  * (Times are always America/New_York; see utils/datetime-et.js.)
  * @param {object|null} [input.runtime] { runMinutes, wateringDays, headTypes,
@@ -238,6 +298,9 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
     const rule = resolved[index];
     return { name: nameOf(entry), mode: rule ? rule.mode : null, source: rule ? (rule.source || null) : null };
   });
+
+  // The mow hold is decided before any watering early return below.
+  out.mowHold = buildMowHold(list, at);
 
   // A. Any applied product with no rule: no claim, the legacy fail-closed path.
   // No other product may force a direction over a product we know nothing about.
@@ -366,6 +429,8 @@ function composeBannerLines(instruction, { hasWeekPlan = false, planRunInches = 
 module.exports = {
   buildWateringInstruction,
   composeBannerLines,
+  normalizeMowHoldDays,
+  isValidMowHold,
   GENERIC_MINUTES_PER_QUARTER_INCH,
-  _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter },
+  _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter, buildMowHold },
 };

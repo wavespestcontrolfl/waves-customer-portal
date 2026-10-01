@@ -39,6 +39,16 @@ describe('lawnWateringSmsPlan', () => {
     expect(plan).toEqual({ send: true, vars: { watering_lines: 'One.' } });
   });
 
+  test('a label mow hold on the frozen instruction never reaches the text body', () => {
+    const mowHold = { days: 2, untilAt: '2026-10-02T19:00:00.000Z', untilDate: '2026-10-02', untilLabel: 'Fri 3 PM', line: 'Mowing: hold off until Fri 3 PM, 2 days after today\'s treatment.' };
+    const plain = lawnWateringSmsPlan(planArgs({ instruction: HOLD }));
+    const withMow = lawnWateringSmsPlan(planArgs({ instruction: { ...HOLD, mowHold } }));
+    expect(withMow).toEqual(plain);
+    expect(withMow.vars.watering_lines).not.toMatch(/mow/i);
+    // A mow hold with no watering claim sends nothing.
+    expect(lawnWateringSmsPlan(planArgs({ instruction: { state: null, lines: [], mowHold } }))).toEqual({ send: false, reason: 'no_instruction' });
+  });
+
   test('joins the lines with a single space, verbatim', () => {
     const plan = lawnWateringSmsPlan(planArgs({ instruction: { state: 'hold_then_water_in', lines: ['A b.', 'C: 8:15 PM.', 'D "q".'] } }));
     expect(plan.vars.watering_lines).toBe('A b. C: 8:15 PM. D "q".');

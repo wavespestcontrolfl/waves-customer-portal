@@ -326,7 +326,7 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
   test('the sender due query holds back a confirmed-held Bill-To row with a fresh stamp, and the loop stamps it only after the fence ran', () => {
     const inv = read('services/invoice.js');
     expect(inv).toMatch(/hold_bill_to_checked_at", "<", new Date\(Date\.now\(\) - require\("\.\/collections\/collection-hold"\)\.HOLD_BILL_TO_RECHECK_MS\)/);
-    expect(inv).toMatch(/const billToConfirmed = renewalFenceRan;[\s\S]{0,400}hold_bill_to_checked_at: new Date\(\)/);
+    expect(inv).toMatch(/const billToConfirmed = renewalFenceRan \|\| packetFenceConfirmed;[\s\S]{0,400}hold_bill_to_checked_at: new Date\(\)/);
     expect(inv).toMatch(/\.orderBy\(db\.raw\(\s*`CASE WHEN invoices\.payer_id IS NULL[\s\S]{0,600}hold_bill_to_checked_at/);
   });
 

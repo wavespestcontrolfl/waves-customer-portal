@@ -559,6 +559,41 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['The roaches returns', true, 'pest', false],
     ['The ants are returning', true, 'pest', false],
     ['The ants returned', true, 'pest', false],
+    // Codex round-44 P2: a SUBJECTLESS resolution inherits the prior clause's pest subject and resolves that sighting
+    ['Ants came back but are gone now', false, null, false],
+    ['Ants came back, then disappeared', false, null, false],
+    ['Ants came back but stopped', false, null, false],
+    ['Ants came back and are still here', true, 'pest', false],
+    ['The ants came back and left droppings', true, 'pest', false],
+    ['Ants came back because the treatment stopped', true, 'pest', false],
+    // a chain of subjectless predicates keeps the one pest subject: the LAST return still counts
+    ['Ants came back, went away, came back again', true, 'pest', false],
+    ['Ants came back, went away, and came back again', true, 'pest', false],
+    // PR #5465 R1/C2: a subjectless clause resolves the sighting ONLY as an unambiguous departure; a first-person / object clause is not the pests leaving
+    ['Ants are back, stopped by your office but nobody answered', true, 'pest', false],
+    ['The ants are back, gone through two cans of Raid already', true, 'pest', false],
+    ['Ants came back. Stopped using the bait you left.', true, 'pest', false],
+    ['Ants came back, so stopped spraying myself', true, 'pest', false],
+    ['Ants came back but stopped coming', false, null, false],
+    // Codex round-2 P2: a QUESTIONED departure is not a resolution and never reaches back
+    ['Ants came back; are gone now?', true, 'pest', false],
+    ['Ants came back; stopped now?', true, 'pest', false],
+    ['Ants are back. Did they go away after the last spray?', true, 'pest', false],
+    ['Ants are back. Did they go away after the last spray, or did they just go away?', true, 'pest', false],
+    ['Ants came back. They went away?', true, 'pest', false],
+    // Codex round-3 P2: a PARTIAL resolution keeps the infestation active
+    ['Ants came back but are mostly gone now', true, 'pest', false],
+    ['Ants came back but they are mostly gone now', true, 'pest', false],
+    ['Ants came back, mostly disappeared', true, 'pest', false],
+    ['Most of the ants are gone but some are still in the kitchen', true, 'pest', false],
+    ['The roaches are mostly gone but I still see a few', true, 'pest', false],
+    ['Fewer roaches now but still seeing a few', true, 'pest', false],
+    ['The ants are mostly gone', false, null, false],
+    ['The ants are gone', false, null, false],
+    // PR #5465 R2: the sighting a departure drops is still the antecedent of a later pronoun return
+    ['The ants came back, then went away, but now they\'re back', true, 'pest', false],
+    ['Chinch bugs came back, went away, but now they\'re back', true, 'lawn', false],
+    ['Chinch bugs came back, went away for a while, but now they\'re back', true, 'lawn', false],
     // several reported lanes: active, but the single-lane view is null (see reportedReserviceLanes below)
     ['Ants and chinch bugs are back', true, null, false],
   ];

@@ -41,6 +41,7 @@ const PhotoService = require('../services/photos');
 const {
   calculateBoundedTrackingEta,
   finiteNumber,
+  techMappingCutoff,
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
@@ -48,6 +49,7 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-add
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 const { computeStopsAhead, isServiceDateToday } = require('../services/stops-ahead');
 const { gateEnvValue } = require('../config/feature-gates');
+const { customerTrackState } = require('../services/track-transitions');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -151,6 +153,8 @@ async function buildApproxVehicle(row) {
     const pos = await resolveFreshTechPosition({
       techId: row.technician_id,
       allowBouncieFallback: false,
+      // Same remap cutoff as the precise feed (round-37 P2).
+      cachedNotBefore: techMappingCutoff(row.tech_mapping_changed_at),
       logPrefix: 'track-public-approx',
     });
     if (!pos) return null;
@@ -175,7 +179,10 @@ async function buildVehicle(service) {
 
   const position = await resolveFreshTechPosition({
     techId: service.technician_id,
-    bouncieImei: service.tech_bouncie_imei,
+    // Same remap floor as the SMS ETA path (round-34 P2): a cached tech_status fix
+    // reported before the technician's tracker mapping was last edited may be the
+    // OLD vehicle's, so the text and the tracking page never show different vehicles.
+    cachedNotBefore: techMappingCutoff(service.tech_mapping_changed_at),
     logPrefix: 'track-public',
   });
   if (!position) return null;
@@ -439,7 +446,7 @@ router.get('/:token', async (req, res, next) => {
         db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
         db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
         't.name as tech_name',
-        't.bouncie_imei as tech_bouncie_imei',
+        't.bouncie_imei_changed_at as tech_mapping_changed_at',
         't.photo_url as tech_photo_url',
         't.photo_s3_key as tech_photo_s3_key',
         // Customer-friendly description from the service library. Used
@@ -473,10 +480,7 @@ router.get('/:token', async (req, res, next) => {
     // stale track_state='en_route' kept streaming live tech GPS until
     // token expiry for a visit that was already cancelled. Everything
     // non-terminal maps 1:1 from the canonical track_state machine.
-    let customerState = row.track_state;
-    if (row.status === 'no_show') customerState = 'no_show';
-    else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
-    else if (row.status === 'completed') customerState = 'complete';
+    const customerState = customerTrackState(row);
 
     // "N stops before yours" (GATE_STOPS_AWAY): bare counts only — never
     // other customers' info. Scheduled state only (the en-route card's
@@ -624,10 +628,7 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
     }
     // Same terminal-status precedence as the GET: only the scheduled
     // customer state carries a planned count.
-    let customerState = row.track_state;
-    if (row.status === 'no_show') customerState = 'no_show';
-    else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
-    else if (row.status === 'completed') customerState = 'complete';
+    const customerState = customerTrackState(row);
     const stops = customerState === 'scheduled'
       ? await computeStopsAhead(db, row.id)
       : null;
@@ -679,6 +680,8 @@ router._test = {
   isFreshVehicleTimestamp,
   ensureEnRouteDestinationGeocoded,
   buildSummary,
+  buildVehicle,
+  buildApproxVehicle,
 };
 
 module.exports = router;

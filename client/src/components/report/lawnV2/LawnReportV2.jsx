@@ -623,15 +623,20 @@ export function LawnWateringBanner({ banner, style = null }) {
     const timer = setTimeout(() => setTick((n) => n + 1), wait);
     return () => clearTimeout(timer);
   }, [expiresMs]);
-  if (!banner || !Array.isArray(banner.lines) || !banner.lines.length) return null;
-  const [heading, ...rest] = banner.lines;
-  const ended = !(print || printing) && Number.isFinite(expiresMs) && Date.now() > expiresMs;
-  const hold = BANNER_HOLD_STATES.includes(banner.state);
+  const watering = !!banner && Array.isArray(banner.lines) && banner.lines.length > 0;
+  // A label mow hold (banner.mowHold.line) is its own last line. It is part of
+  // the visit record, so it stays after the watering note has ended.
+  const mowLine = typeof banner?.mowHold?.line === 'string' && banner.mowHold.line ? banner.mowHold.line : null;
+  if (!watering && !mowLine) return null;
+  const [heading, ...rest] = watering ? banner.lines : [mowLine];
+  const ended = watering && !(print || printing) && Number.isFinite(expiresMs) && Date.now() > expiresMs;
+  const hold = watering && BANNER_HOLD_STATES.includes(banner.state);
+  const mowAsBody = watering && mowLine;
   return (
     <Card style={{ ...(hold ? { background: COLORS.sand } : {}), ...(style || {}) }}>
-      <div data-testid="lawn-watering-banner" data-state={banner.state} data-ended={ended ? 'true' : 'false'}>
+      <div data-testid="lawn-watering-banner" data-state={banner.state ?? 'mow'} data-ended={ended ? 'true' : 'false'}>
         <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
-          Watering after today’s visit
+          {watering ? 'Watering after today’s visit' : 'Mowing after today’s visit'}
         </div>
         {ended ? (
           <div data-testid="lawn-watering-banner-ended" style={{ fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
@@ -644,6 +649,9 @@ export function LawnWateringBanner({ banner, style = null }) {
               <p key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{line}</p>
             ))}
           </>
+        )}
+        {mowAsBody && (
+          <p data-testid="lawn-watering-banner-mow" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{mowLine}</p>
         )}
       </div>
     </Card>

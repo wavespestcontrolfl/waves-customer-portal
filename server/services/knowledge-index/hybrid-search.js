@@ -19,6 +19,16 @@
  * (protocols, labels, KB, wiki) never decay — they are maintained, not
  * observed.
  *
+ * Catalog first: when the query names one approved species-catalog entry
+ * ("ghost ants in the kitchen", "large patch in October"), that entry's
+ * species/species_tech docs move to the top — the catalog wins every
+ * species disagreement (owner ruling 2026-09-28). A name that resolves only
+ * to a group ("chinch bugs" → true bugs) pins nothing.
+ *
+ * Audience: `sources` allowlists corpora. A customer-facing reader passes
+ * customer-safe sources only (e.g. ['species', 'kb']) — the default (all
+ * sources) includes tech notes, ops rules, label language and call notes.
+ *
  * Trust gates: the wiki corpus is trusted-only at INGEST (connectors) and the
  * A1 lists enforce trustedOnly at query time, so unreviewed pages can't
  * surface through any list.
@@ -42,6 +52,8 @@ const CHUNK_FETCH_LIMIT = 100;
 // text-embedding-3-small — on-topic pairs typically score well above it.
 const MIN_VECTOR_SIMILARITY = 0.30;
 const MAX_PER_SOURCE = 6;
+// Per-source cap on each chunk list's candidates (see cappedCandidates).
+const PER_SOURCE_FETCH_LIMIT = 30;
 // Observational sources halve in fused score every ~8 months. Only
 // 'resolution' and 'call_research' decay (see module doc) — curated
 // corpora don't expire.
@@ -83,61 +95,138 @@ function rrfFuse(lists, { k = RRF_K } = {}) {
     .map((e) => ({ key: e.key, score: e.score, hits: e.hits, ...e.payload }));
 }
 
-async function vectorList(query) {
-  const embedded = await embedQuery(query);
-  if (!embedded.ok) return { list: [], usedVector: false, reason: embedded.reason };
-  const literal = toVectorLiteral(embedded.vector);
-  const rows = await db('knowledge_embeddings')
-    .whereNotNull('embedding')
-    .whereRaw('1 - (embedding <=> ?::vector) >= ?', [literal, MIN_VECTOR_SIMILARITY])
-    .select('source', 'source_id', 'title', 'content', 'metadata',
-      db.raw('1 - (embedding <=> ?::vector) as similarity', [literal]))
-    .orderByRaw('embedding <=> ?::vector', [literal])
-    .limit(CHUNK_FETCH_LIMIT);
-  return {
-    usedVector: true,
-    list: rows.map((r) => ({ key: docKey(r.source, r.source_id), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata })),
-  };
+// Keys of the species docs for the ONE catalog entry the query names, or
+// none. Group/subgroup matches don't pin: they name many entries.
+function catalogPinKeys(query) {
+  try {
+    const catalog = require('../species-catalog');
+    const { isApproved } = require('../species-catalog-approval');
+    const resolved = catalog.resolveName(query);
+    const slug = resolved && resolved.node && resolved.node.slug;
+    const entry = slug && catalog.getEntry(slug);
+    // Approval is re-checked live: an entry edited after approval must not
+    // pin its stale indexed docs before the nightly sync removes them.
+    if (!entry || !isApproved(entry)) return [];
+    return [docKey('species', slug), docKey('species_tech', slug)];
+  } catch (err) {
+    logger.warn(`[knowledge-index] catalog pin skipped: ${err.message}`);
+    return [];
+  }
 }
 
-async function chunkFtsList(query) {
-  const rows = await db('knowledge_embeddings')
-    .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [query])
-    .select('source', 'source_id', 'title', 'content', 'metadata',
-      db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [query]))
-    .orderBy('rank', 'desc')
+// Stable: pinned docs first in their fused order, everything else after.
+function pinFirst(docs, pinKeys) {
+  if (!pinKeys.length) return docs;
+  const pins = new Set(pinKeys);
+  return [...docs.filter((d) => pins.has(d.key)), ...docs.filter((d) => !pins.has(d.key))];
+}
+
+const applySources = (qb, sources) => (sources ? qb.whereIn('source', sources) : qb);
+const toListItem = (r) => ({ key: docKey(r.source, r.source_id), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata });
+
+// Candidate chunks, best first, at most PER_SOURCE_FETCH_LIMIT per source
+// BEFORE the global CHUNK_FETCH_LIMIT: a large corpus whose chunks share a
+// phrase (75 species docs name "General Pest Control") must not fill the
+// whole window and starve services, protocols or labels out of fusion.
+function cappedCandidates(inner, scoreSql, bindings) {
+  return db.select('source', 'source_id', 'title', 'content', 'metadata')
+    .from(inner
+      .select('source', 'source_id', 'title', 'content', 'metadata',
+        db.raw(`${scoreSql} as score`, bindings),
+        db.raw(`row_number() over (partition by source order by ${scoreSql} desc) as source_rank`, bindings))
+      .as('candidates'))
+    .where('source_rank', '<=', PER_SOURCE_FETCH_LIMIT)
+    .orderBy('score', 'desc')
     .limit(CHUNK_FETCH_LIMIT);
-  return rows.map((r) => ({ key: docKey(r.source, r.source_id), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata }));
+}
+
+function vectorRows(literal, sources) {
+  return cappedCandidates(
+    applySources(db('knowledge_embeddings'), sources)
+      .whereNotNull('embedding')
+      .whereRaw('1 - (embedding <=> ?::vector) >= ?', [literal, MIN_VECTOR_SIMILARITY]),
+    '(1 - (embedding <=> ?::vector))', [literal],
+  );
+}
+
+function chunkFtsRows(query, sources) {
+  return cappedCandidates(
+    applySources(db('knowledge_embeddings'), sources)
+      .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [query]),
+    "ts_rank(search_vector, websearch_to_tsquery('english', ?))", [query],
+  );
+}
+
+async function vectorList(query, sources) {
+  const embedded = await embedQuery(query);
+  if (!embedded.ok) return { list: [], usedVector: false, reason: embedded.reason };
+  const rows = await vectorRows(toVectorLiteral(embedded.vector), sources);
+  return { usedVector: true, list: rows.map(toListItem) };
+}
+
+async function chunkFtsList(query, sources) {
+  return (await chunkFtsRows(query, sources)).map(toListItem);
+}
+
+// The pinned catalog docs the fused lists did not surface (a query whose
+// other words match nothing in the entry, or no embedding): read them by
+// key so the catalog-first guarantee holds whatever the lists found.
+async function missingPinnedDocs(pinKeys, fused, allowed) {
+  const present = new Set(fused.map((d) => d.key));
+  const wanted = pinKeys
+    .filter((key) => !present.has(key))
+    .map((key) => { const i = key.indexOf(':'); return { source: key.slice(0, i), sourceId: key.slice(i + 1) }; })
+    .filter((k) => allowed(k.source));
+  if (!wanted.length) return [];
+  const rows = await db('knowledge_embeddings')
+    .where('chunk_index', 0)
+    .where((qb) => { for (const k of wanted) qb.orWhere({ source: k.source, source_id: k.sourceId }); })
+    .select('source', 'source_id', 'title', 'content', 'metadata');
+  return rows.map((r) => ({ ...toListItem(r), score: 0, hits: 0 }));
 }
 
 /**
- * hybridKnowledgeSearch(query, { limit }) →
+ * hybridKnowledgeSearch(query, { limit, sources }) →
  *   { results: [{ source, sourceId, title, snippet, score, lists }], usedVector }
  * or null when the search cannot run at all (caller falls back to lane A1).
  */
-async function hybridKnowledgeSearch(query, { limit = 15 } = {}) {
+async function hybridKnowledgeSearch(query, { limit = 15, sources = null } = {}) {
   const q = String(query || '').trim();
   if (!q) return null;
+  // null = every source. An empty or all-blank list is a caller bug — treat it
+  // as "nothing allowed" rather than silently widening to everything.
+  const allow = Array.isArray(sources) ? [...new Set(sources.map((s) => String(s || '').trim()).filter(Boolean))] : null;
+  if (allow && !allow.length) return { results: [], usedVector: false };
+  const wants = (source) => !allow || allow.includes(source);
 
   try {
     const [vector, chunkFts, unified] = await Promise.all([
-      vectorList(q).catch((err) => { logger.warn(`[knowledge-index] vector list failed: ${err.message}`); return { list: [], usedVector: false }; }),
-      chunkFtsList(q).catch((err) => { logger.warn(`[knowledge-index] chunk FTS list failed: ${err.message}`); return []; }),
-      KnowledgeBridge.unifiedSearch(q, { limit: LIST_LIMIT, trustedOnly: true })
+      vectorList(q, allow).catch((err) => { logger.warn(`[knowledge-index] vector list failed: ${err.message}`); return { list: [], usedVector: false }; }),
+      chunkFtsList(q, allow).catch((err) => { logger.warn(`[knowledge-index] chunk FTS list failed: ${err.message}`); return []; }),
+      (wants('kb') || wants('wiki')
+        ? KnowledgeBridge.unifiedSearch(q, { limit: LIST_LIMIT, trustedOnly: true })
+        : Promise.resolve({ claudeopedia: [], wiki: [] }))
         .catch((err) => { logger.warn(`[knowledge-index] unified list failed: ${err.message}`); return { claudeopedia: [], wiki: [] }; }),
     ]);
 
-    const kbList = (unified.claudeopedia || []).map((r) => ({ key: docKey('kb', r.slug), source: 'kb', sourceId: r.slug, title: r.title, snippet: null, metadata: { category: r.category, confidence: r.confidence } }));
-    const wikiList = (unified.wiki || []).map((r) => ({ key: docKey('wiki', r.slug), source: 'wiki', sourceId: r.slug, title: r.title, snippet: null, metadata: { category: r.category, confidence: r.confidence } }));
+    const kbList = (wants('kb') ? unified.claudeopedia || [] : []).map((r) => ({ key: docKey('kb', r.slug), source: 'kb', sourceId: r.slug, title: r.title, snippet: null, metadata: { category: r.category, confidence: r.confidence } }));
+    const wikiList = (wants('wiki') ? unified.wiki || [] : []).map((r) => ({ key: docKey('wiki', r.slug), source: 'wiki', sourceId: r.slug, title: r.title, snippet: null, metadata: { category: r.category, confidence: r.confidence } }));
 
     const fused = rrfFuse([vector.list, chunkFts, kbList, wikiList]);
-    if (!fused.length) return { results: [], usedVector: vector.usedVector };
+    const pinKeys = catalogPinKeys(q);
+    const pinned = pinKeys.length
+      ? await missingPinnedDocs(pinKeys, fused, wants).catch((err) => { logger.warn(`[knowledge-index] pinned catalog read failed: ${err.message}`); return []; })
+      : [];
+    if (!fused.length && !pinned.length) return { results: [], usedVector: vector.usedVector };
 
     // Decay observational hits, then re-rank — a decayed resolution can drop
     // below a curated doc it out-fused.
-    const decayed = fused
-      .map((doc) => ({ ...doc, score: applyRecencyDecay(doc) }))
-      .sort((a, b) => b.score - a.score);
+    const decayed = pinFirst(
+      [...fused, ...pinned]
+        .map((doc) => ({ ...doc, score: applyRecencyDecay(doc) }))
+        .sort((a, b) => b.score - a.score),
+      pinKeys,
+    );
 
     const perSource = new Map();
     const results = [];
@@ -162,4 +251,4 @@ async function hybridKnowledgeSearch(query, { limit = 15 } = {}) {
   }
 }
 
-module.exports = { hybridKnowledgeSearch, rrfFuse, applyRecencyDecay, RRF_K, RESOLUTION_HALF_LIFE_DAYS };
+module.exports = { hybridKnowledgeSearch, rrfFuse, applyRecencyDecay, catalogPinKeys, pinFirst, vectorRows, chunkFtsRows, RRF_K, RESOLUTION_HALF_LIFE_DAYS };

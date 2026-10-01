@@ -6,8 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
 const {
-  OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned,
+  OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned, bookedReasonBlock,
 } = require('../services/service-report/report-writer-rules');
+const { scrubCustomerText } = require('../services/completion-comms-context');
 const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
 
 // The real v4 hard constraints, sliced from the route source. Only template
@@ -249,6 +250,27 @@ describe('writerRulesRejection', () => {
     ['We found zero signs of pest activity across the property.', 'unscoped_absence'],
     ['Not a single ant was seen today.', 'unscoped_absence'],
     ['We will be back next month.', 'timeframe'],
+    ['We treated 120 LF of foundation.', 'footage'],
+    ['We treated 1,200 SF of beds.', 'footage'],
+    ['You said, “ants are everywhere in the kitchen”.', 'quote'],
+    ["You texted 'roaches again by the sink' last week.", 'quote'],
+    ['Your follow-up is complimentary.', 'price'],
+    ['The recheck is on the house.', 'price'],
+    ['We treated a 120-LF section of foundation.', 'footage'],
+    ["You told the technician, 'roaches again by the sink'.", 'quote'],
+    ['‘Roaches again by the sink,’ you said.', 'quote'],
+    ["'It's back by the sink,' you texted.", 'quote'],
+    [`'${'roaches again by the sink and behind the fridge '.repeat(6)}' you said.`, 'quote'],
+    ["It's on the house.", 'price'],
+    ["The follow-up's on the house.", 'price'],
+    ['We treated twelve square yards around the building.', 'footage'],
+    ['Another treatment is on the house.', 'price'],
+    ['We treated twelve LF along the fence.', 'footage'],
+    ["According to you, 'ants are back by the sink'.", 'quote'],
+    ["Per the customer, 'roaches in the pantry again'.", 'quote'],
+    ['Both follow-ups are on the house.', 'price'],
+    ['The next two treatments are on the house.', 'price'],
+    ['We treated thirteen LF along the fence.', 'footage'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -287,6 +309,13 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('Activity was light at 3 stations.')).toBeNull();
     expect(writerRulesRejection('Zero captures were recorded in the attic traps.')).toBeNull();
     expect(writerRulesRejection('The ants were back the next day, you said.')).toBeNull();
+    expect(writerRulesRejection("The customer's kitchen had ghost ants along the counter.")).toBeNull();
+    expect(writerRulesRejection('You told us about the ants by the sink.')).toBeNull();
+    expect(writerRulesRejection('We found a mud tube on the house foundation.')).toBeNull();
+    expect(writerRulesRejection("The customer's kitchen and the tech's truck were checked.")).toBeNull();
+    expect(writerRulesRejection('We treated the two yards.')).toBeNull();
+    expect(writerRulesRejection("We placed the 'no-see-um' trap.")).toBeNull();
+    expect(writerRulesRejection('Mud tubes were on the house siding.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
@@ -335,6 +364,17 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('We applied fipronil at the slab.', { activeIngredients: ['Fipronil 9.1%, Pyriproxyfen'] })).toBe('active_ingredient');
   });
 
+  test('a long unclosed quote is screened in linear time (no backtracking stall)', () => {
+    const started = Date.now();
+    expect(writerRulesRejection(`"${'ants are back '.repeat(6000)}`)).toBeNull();
+    // Many unclosed curly quotes: each span ends at the next opener.
+    writerRulesRejection('“ants '.repeat(20000));
+    writerRulesRejection(`'${'ants are back '.repeat(6000)}`);
+    // Many apostrophes inside words never open a quote.
+    writerRulesRejection("a'a".repeat(16000));
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   test("the catalog's taxonomic Bti name still screens the Bti alias", () => {
     expect(writerRulesRejection('We placed Bti larvicide in the pond.', { activeIngredients: ['Bacillus thuringiensis subsp. israelensis solids'] })).toBe('active_ingredient');
   });
@@ -354,5 +394,65 @@ describe('writerRulesRejection', () => {
     ['mosquito', 'WHAT WE DID\n\nWe treated the shrub leaves along your back fence and the beds around the pool cage and lanai, where adult mosquitoes rest, keeping spray off the blooming hibiscus. We emptied two plant saucers on the lanai and flipped a bucket by the shed.\n\nWHAT WE FOUND\n\nMosquito activity was light along the back fence; we saw none at the front. The saucers and bucket were holding water, the kind of spot mosquitoes can breed in, and about 1.4 inches of rain fell in the seven days before the visit. You mentioned evening bites on the lanai, so we focused there.'],
   ])('passes the approved %s example', (_family, copy) => {
     expect(writerRulesRejection(copy)).toBeNull();
+  });
+});
+
+describe('pest re-service callback guidance', () => {
+  const CALLBACK = 'CROSS-SERVICE MODIFIER — CALLBACK / RESERVICE';
+
+  test('pest re-service gets the callback modifier only under the rules', () => {
+    const context = { serviceKey: 'pest_re_service', findingsType: null };
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true })).toContain(CALLBACK);
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', context)).not.toContain(CALLBACK);
+  });
+
+  test('a recurring pest visit flagged as a callback gets it too; an ordinary one does not', () => {
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_general_quarterly', findingsType: null, isCallback: true, writerRules: true })).toContain(CALLBACK);
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_general_quarterly', findingsType: null, writerRules: true })).not.toContain(CALLBACK);
+  });
+
+  test('lawn re-service stays byte-identical', () => {
+    const context = { serviceKey: 'lawn_re_service', findingsType: 'one_time_lawn_treatment', isCallback: true };
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true }))
+      .toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', context));
+  });
+});
+
+describe('bookedReasonBlock', () => {
+  test('labels the source, attributes the words, drops access details and lists the picked pests', () => {
+    const block = bookedReasonBlock({
+      customer_request: 'Ants by the sink again. Gate code is blue. Roaches in unit A12B too. Please come after lunch.',
+      customer_request_source: 'picker',
+      customer_request_pests: ['ants', 'german_roaches'],
+    }, scrubCustomerText);
+    expect(block).toContain('typed on the re-service page');
+    expect(block).toContain('never a finding');
+    expect(block).toContain('Reason: Ants by the sink again. Roaches in unit [redacted] too.');
+    expect(block).not.toMatch(/gate code|blue|A12B|after lunch/i);
+    expect(block).toContain('Pests picked: ants, german roaches');
+    expect(block).not.toContain('4821');
+  });
+
+  test('a call booking is marked as an AI summary, and JSON-text pests still read', () => {
+    const block = bookedReasonBlock({
+      customer_request: 'Customer says roaches in the kitchen at night.',
+      customer_request_source: 'call',
+      customer_request_pests: '["roaches"]',
+    }, scrubCustomerText);
+    expect(block).toContain('an AI summary of what they said');
+    expect(block).toContain('Pests picked: roaches');
+  });
+
+  test('keeps the whole reason and adds nothing when there is nothing recorded', () => {
+    // The re-service page and call bookings store up to 400 characters.
+    const long = bookedReasonBlock({ customer_request: `${'Ants on the counter. '.repeat(19)}Ants in the garage too.`, customer_request_source: 'text' }, scrubCustomerText);
+    expect(long).toContain('Ants in the garage too.');
+    expect(bookedReasonBlock({ customer_request: 'Please come after lunch.', customer_request_pests: [] }, scrubCustomerText)).toBe('');
+    expect(bookedReasonBlock(null, scrubCustomerText)).toBe('');
+    expect(bookedReasonBlock({ customer_request: '  ', customer_request_pests: [] }, scrubCustomerText)).toBe('');
+  });
+
+  test('without a scrub the reason is left out, never passed on raw', () => {
+    expect(bookedReasonBlock({ customer_request: 'Gate code 4821. Ants again.', customer_request_pests: ['ants'] })).toBe('');
   });
 });

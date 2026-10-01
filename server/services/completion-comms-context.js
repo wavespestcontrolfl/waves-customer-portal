@@ -315,12 +315,15 @@ function shoutedSentence(sentence) {
 // Access details never reach the writer: a sentence about getting in (a
 // code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
 // lowercase code ("blue", "open sesame") looks like any other word.
-const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in)\b/i;
+const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|into|inside|through|past)\s+(?:[\w-]+\s+){0,3}?(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?|house|home|unit|apartment|condo|building))\b/i;
 // So is a sentence about working a gate, door or lock ("blue works at the
 // side gate where the ants are", "use the side gate", "punch it in at the
 // door"), pest talk or not; "ants come in under the back door" stays.
 const ACCESS_POINT_RE = /\b(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?)\b/i;
-const ACCESS_USE_RE = /\b(?:works?|worked|opens|opened|unlocks?|unlocked|use|using|enter|entering|type|typing|punch(?:ing)?|press(?:ing)?|dial|key\s+in)\b/i;
+const ACCESS_USE_RE = /\b(?:works?|worked|opens|opened|unlocks?|unlocked|use|using|enter|entering|type|typing|punch(?:ing)?|press(?:ing)?|dial|key\s+in|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+)?access)\b/i;
+// Judged on the whole sentence, never per clause: a fronted or pronoun-linked
+// access point ("For the side gate, use blue…", "The side gate is on the left
+// and blue opens it") must still drop it.
 const accessSentence = (sentence) => ACCESS_SENTENCE_RE.test(sentence)
   || (ACCESS_POINT_RE.test(sentence) && ACCESS_USE_RE.test(sentence));
 // And a sentence reaches the writer only when it talks about pests or the
@@ -495,6 +498,9 @@ async function buildCustomerWordsContext({
 module.exports = {
   buildCompletionCommsContext,
   buildCustomerWordsContext,
+  // The same scrub for other customer-typed text the writer reads (why the
+  // customer booked).
+  scrubCustomerText: scrub,
   resolveContextWindow,
   RECURRING_CAP_DAYS,
   ONE_TIME_CAP_DAYS,
