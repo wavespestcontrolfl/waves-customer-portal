@@ -26,7 +26,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { embedQuery } = require('../services/llm/embed');
-const { rrfFuse, applyRecencyDecay } = require('../services/knowledge-index/hybrid-search');
+const { rrfFuse, applyRecencyDecay, vectorRows, chunkFtsRows } = require('../services/knowledge-index/hybrid-search');
 const { toVectorLiteral } = require('../services/knowledge-index/ingest');
 
 const router = express.Router();
@@ -41,9 +41,7 @@ const MAX_BATCH_TOOL_CALLS = 5;
 // timeout, so a slow embeddings API degrades to FTS-only instead of the
 // bridge aborting the whole search.
 const EMBED_TIMEOUT_MS = 8000;
-const CHUNK_FETCH_LIMIT = 100;
-const MIN_VECTOR_SIMILARITY = 0.30;
-const KNOWN_SOURCES = ['wiki', 'kb', 'service', 'protocol', 'lawn_module', 'jurisdiction', 'product_label', 'prep_guide', 'ops_rule', 'resolution'];
+const KNOWN_SOURCES = ['wiki', 'kb', 'service', 'protocol', 'lawn_module', 'jurisdiction', 'product_label', 'prep_guide', 'ops_rule', 'resolution', 'species', 'species_tech'];
 
 function mcpAuth(req, res, next) {
   if (!isEnabled('mcpReadTools')) return res.status(403).json({ error: 'mcp read tools disabled' });
@@ -65,34 +63,18 @@ async function searchIndex(query, { sources = null, limit = 10 } = {}) {
     ? sources.filter((s) => KNOWN_SOURCES.includes(s))
     : null;
 
-  const applySources = (qb) => (sourceFilter ? qb.whereIn('source', sourceFilter) : qb);
   const key = (r) => `${r.source}:${r.source_id}`;
+  const toItem = (r) => ({ key: key(r), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata });
 
-  const ftsRows = await applySources(
-    db('knowledge_embeddings')
-      .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q]),
-  )
-    .select('source', 'source_id', 'title', 'content', 'metadata',
-      db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]))
-    .orderBy('rank', 'desc')
-    .limit(CHUNK_FETCH_LIMIT);
-  const ftsList = ftsRows.map((r) => ({ key: key(r), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata }));
+  // Same candidate queries as hybridKnowledgeSearch (per-source capped).
+  const ftsList = (await chunkFtsRows(q, sourceFilter)).map(toItem);
 
   let vectorList = [];
   let usedVector = false;
   const embedded = await embedQuery(q, { timeoutMs: EMBED_TIMEOUT_MS });
   if (embedded.ok) {
     usedVector = true;
-    const literal = toVectorLiteral(embedded.vector);
-    const rows = await applySources(
-      db('knowledge_embeddings')
-        .whereNotNull('embedding')
-        .whereRaw('1 - (embedding <=> ?::vector) >= ?', [literal, MIN_VECTOR_SIMILARITY]),
-    )
-      .select('source', 'source_id', 'title', 'content', 'metadata')
-      .orderByRaw('embedding <=> ?::vector', [literal])
-      .limit(CHUNK_FETCH_LIMIT);
-    vectorList = rows.map((r) => ({ key: key(r), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata }));
+    vectorList = (await vectorRows(toVectorLiteral(embedded.vector), sourceFilter)).map(toItem);
   }
 
   // Decay observational hits, then re-rank — mirrors hybridKnowledgeSearch:
