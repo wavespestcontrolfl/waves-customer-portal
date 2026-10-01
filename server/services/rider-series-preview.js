@@ -661,14 +661,12 @@ async function hostReschedulePending(conn, hostParent, cols) {
   return rows.some(isPlanSeriesRow);
 }
 
-// The host series' live plan rows from today on (the property filter lives in
-// loadHostDates; the extension path trusts the stored rides_parent_id link).
-async function liveHostRows(conn, hostParent, cols, todayStr) {
+async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
   const addressCols = [
     'service_address_line1', 'service_address_line2', 'service_address_city',
     'service_address_state', 'service_address_zip',
   ].filter((c) => cols[c]);
-  return conn('scheduled_services')
+  const hostRowsRaw = await conn('scheduled_services')
     .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
     .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
     .modify((q) => {
@@ -682,10 +680,6 @@ async function liveHostRows(conn, hostParent, cols, todayStr) {
       ...(cols.property_id ? ['property_id'] : []), ...addressCols,
     )
     .then((rows) => rows.filter(isPlanSeriesRow));
-}
-
-async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
-  const hostRowsRaw = await liveHostRows(conn, hostParent, cols, todayStr);
   let filtered = hostRowsRaw;
   if (cols.property_id && hostScope?.resolved) {
     // One batched key lookup for the whole host series (withComparableKeys):
@@ -944,8 +938,6 @@ module.exports = {
   computeRiderHorizon,
   riderHostKind,
   riderPairingEnabled,
-  RIDER_PAIRINGS,
-  liveHostRows,
   previewRiderPair,
   resolveSeriesPropertyScope,
   seriesPropertyVerdict,
