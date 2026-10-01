@@ -1051,11 +1051,13 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(replaySrc).toMatch(/if \(!callbackVisit\) \{[\s\S]*?await closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing, convertedLeadIds: replayConvertedLeadIds \}\);/);
     // codex #5477 r5: a request staff worked into the booking's VERIFIED estimate converts as won through the
     // estimate tier, on both paths, BEFORE the close (so the close finds it no longer open).
-    expect(replaySrc).toMatch(/verifyPreferredHandoff\(pricing_estimate_id, estimate_token\)\s*\?\s*await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id, \{ customerId: custId \}\)/);
+    // the replay binds the estimate to the EXISTING booking (its visit's source_estimate_id) before resolving it
+    expect(replaySrc).toMatch(/verifyPreferredHandoff\(pricing_estimate_id, estimate_token\)\s*&& !!\(await db\('scheduled_services'\)\s*\.where\(\{ self_booking_id: txResult\.existing\.id, source_estimate_id: String\(pricing_estimate_id\) \}\)/);
+    expect(replaySrc).toMatch(/replayPreferredEstimateId = replayBookedFromEstimate\s*\?\s*await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id, \{ customerId: custId \}\)/);
     expect(replaySrc).toMatch(/estimateId: replayPreferredEstimateId,/);
     // codex #5477 r6: resolved ONCE before any replay conversion; the series conversion carries it, and the
     // standalone estimate conversion runs only when the series conversion did not.
-    expect(replaySrc.indexOf('replayPreferredEstimateId = verifyPreferredHandoff(')).toBeLessThan(replaySrc.indexOf("source: 'recurring_service_booked'"));
+    expect(replaySrc.indexOf('replayPreferredEstimateId = replayBookedFromEstimate')).toBeLessThan(replaySrc.indexOf("source: 'recurring_service_booked'"));
     expect(replaySrc).toMatch(/source: 'recurring_service_booked',[\s\S]*?\.\.\.\(replayPreferredEstimateId \? \{ estimateId: replayPreferredEstimateId \} : \{\}\),/);
     expect(replaySrc).toMatch(/if \(replaySeriesActivated\) \{\s*replayConversionRan = true;/);
     expect(replaySrc).toMatch(/if \(replayPreferredEstimateId && !replayConversionRan\) \{/);

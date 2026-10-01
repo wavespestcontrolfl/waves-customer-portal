@@ -5844,13 +5844,21 @@ async function createSelfBooking(payload = {}) {
       // booking's verified, customer-owned estimate converts through that
       // estimate's tier. Every replay conversion carries it, and only one
       // conversion runs per replay (as on the primary path), so one booking
-      // never wins both a generic lead and the request.
+      // never wins both a generic lead and the request. A replay matches the
+      // existing booking only by customer, date and start, so the estimate must
+      // also be the one that booking was made from (its visit's
+      // source_estimate_id, the binding the series replay checks too): a handoff
+      // for another estimate never wins its request against this booking.
       let replayPreferredEstimateId = null;
       let replayConversionRan = false;
       if (pricing_estimate_id && !callbackVisit) {
         try {
           const { verifyEstimateHandoffToken: verifyPreferredHandoff } = require('../utils/estimate-handoff-token');
-          replayPreferredEstimateId = verifyPreferredHandoff(pricing_estimate_id, estimate_token)
+          const replayBookedFromEstimate = verifyPreferredHandoff(pricing_estimate_id, estimate_token)
+            && !!(await db('scheduled_services')
+              .where({ self_booking_id: txResult.existing.id, source_estimate_id: String(pricing_estimate_id) })
+              .first('id'));
+          replayPreferredEstimateId = replayBookedFromEstimate
             ? await estimateIdWithOpenPreferredLead(db, pricing_estimate_id, { customerId: custId })
             : null;
         } catch (err) {

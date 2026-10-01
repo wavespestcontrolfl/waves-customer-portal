@@ -955,7 +955,9 @@ to (`leads.estimate_id` set) is never closed: when the booking came from that
 estimate's verified handoff and the estimate belongs to the booking customer's
 account, the booking's conversion passes the estimate id so the request
 converts as won through the estimate tier (one conversion call per attempt,
-on the primary and replay paths alike); otherwise, or if that conversion
+on the primary and replay paths alike; a replay converts only when the
+existing booking's visit carries that estimate as its `source_estimate_id`);
+otherwise, or if that conversion
 fails, the request stays open for the office. `handled` means closed, neither
 won nor lost, and is set through
 `closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel row
