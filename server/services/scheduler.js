@@ -4541,8 +4541,17 @@ function initScheduledJobs() {
             // window on its own facts. Same shared check the immediate
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
+            // Open-loop revalidation (PR #5499 r1): a promise the reply was grounded on
+            // can be fulfilled or dismissed before this fires. Fail-closed.
+            let openLoopsStale = false;
+            let openLoopsReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale && !reserviceStale) {
+              const { scheduledOpenLoopsBlockReason } = require('./agent-decision-send-checks');
+              openLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, dbh: db });
+              openLoopsStale = openLoopsReason != null;
+            }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale;
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale || openLoopsStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4563,7 +4572,9 @@ function initScheduledJobs() {
                       ? 'stale_sla_agent_decision'
                       : reserviceStale
                         ? 'stale_reservice_agent_decision'
-                        : 'stale_eta_agent_decision';
+                        : openLoopsStale
+                          ? 'stale_open_loops_agent_decision'
+                          : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4597,7 +4608,9 @@ function initScheduledJobs() {
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
                           : reserviceStale
                             ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
-                            : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                            : openLoopsStale
+                              ? `A promise this scheduled reply was written around is no longer open (${openLoopsReason}) — review the thread.`
+                              : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });

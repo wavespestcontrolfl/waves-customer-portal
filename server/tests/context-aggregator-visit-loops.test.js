@@ -2,13 +2,13 @@
  * getContextForCustomer attaches context.visitLoops: always present, never
  * throws, fed the aggregator's own upcoming rows + deriveWindow, and
  * non-enumerable so it never rides into other LLM-visible serializations of
- * the context (raw tech notes / open promise text).
+ * the context (open promise text). Loaded only while GATE_SMS_REAL_ANSWERS is on.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/visit-loops-facts', () => ({
   loadVisitLoops: jest.fn(),
-  emptyVisitLoops: () => ({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, liveNote: null, weOwe: [], customerWaiting: [] }),
+  emptyVisitLoops: () => ({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] }),
 }));
 
 const db = require('../models/db');
@@ -42,16 +42,26 @@ const today = (() => {
   return etDateString();
 })();
 
+afterEach(() => { delete process.env.GATE_SMS_REAL_ANSWERS; });
+
 beforeEach(() => {
   jest.clearAllMocks();
+  process.env.GATE_SMS_REAL_ANSWERS = 'true';
   db.mockImplementation((table) => (String(table).startsWith('scheduled_services')
     ? genericQuery([{ id: 'visit-1', service_type: 'Pest Control', scheduled_date: today, window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', technician_name: 'Jamie Rivera', track_state: null }])
     : genericQuery([])));
 });
 
 describe('getContextForCustomer visitLoops', () => {
+  test('gate off: the loader is never called and visitLoops is the empty shape', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const context = await ContextAggregator.getContextForCustomer(customer);
+    expect(loadVisitLoops).not.toHaveBeenCalled();
+    expect(context.visitLoops).toEqual({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] });
+  });
+
   test('attaches the loader result, passing customer id, the mapped upcoming rows and the aggregator deriveWindow', async () => {
-    const loops = { techPosition: { techName: 'Jamie', status: 'stale', minutesSinceUpdate: null, stopsAhead: 1, atThisVisit: false }, lateAlert: null, pastWindow: null, missedVisit: null, liveNote: null, weOwe: [], customerWaiting: [] };
+    const loops = { techPosition: { techName: 'Jamie', status: 'stale', minutesSinceUpdate: null, stopsAhead: 1, atThisVisit: false }, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] };
     loadVisitLoops.mockResolvedValue(loops);
     const context = await ContextAggregator.getContextForCustomer(customer);
     expect(context.visitLoops).toBe(loops);
@@ -67,15 +77,15 @@ describe('getContextForCustomer visitLoops', () => {
     loadVisitLoops.mockRejectedValue(new Error('boom'));
     const context = await ContextAggregator.getContextForCustomer(customer);
     expect(context.known).toBe(true);
-    expect(context.visitLoops).toEqual({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, liveNote: null, weOwe: [], customerWaiting: [] });
+    expect(context.visitLoops).toEqual({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] });
   });
 
   test('visitLoops is non-enumerable: serialization and spreads of the context never carry it', async () => {
-    loadVisitLoops.mockResolvedValue({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, liveNote: { text: 'raw tech text', updatedAt: null }, weOwe: [], customerWaiting: [] });
+    loadVisitLoops.mockResolvedValue({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'raw promise text' }], customerWaiting: [] });
     const context = await ContextAggregator.getContextForCustomer(customer);
-    expect(context.visitLoops.liveNote.text).toBe('raw tech text');
+    expect(context.visitLoops.weOwe[0].description).toBe('raw promise text');
     expect(Object.keys(context)).not.toContain('visitLoops');
-    expect(JSON.stringify(context)).not.toContain('raw tech text');
+    expect(JSON.stringify(context)).not.toContain('raw promise text');
     expect({ ...context }.visitLoops).toBeUndefined();
   });
 });

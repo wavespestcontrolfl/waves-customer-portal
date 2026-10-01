@@ -4217,7 +4217,6 @@ VISIT STATUS & OPEN LOOPS:
 - When the VISIT STATUS & OPEN LOOPS section lists anything, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when that section is "- none".
 - Never promise an arrival time, or say the tech is "on time", unless Tech position or a LIVE ETA fact supports it. With RUNNING LATE or WINDOW PASSED, say so plainly in one sentence — those lines authorize saying we are running behind, not that the tech is "on the way" or any arrival time. When Tech position says the location is stale, do not promise an arrival time.
 - With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say we'll text times today.
-- The tech's live note is internal — paraphrase it, never quote it, and never name a chemical or product from it.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
@@ -4398,7 +4397,7 @@ const VISIT_LOOPS_HEADER = 'VISIT STATUS & OPEN LOOPS:';
 // One internal field → a single capped, injection-screened line fragment ('' when
 // absent or when it reads as a prompt-control attempt). Descriptions of
 // commitments are model-extracted from call/SMS text — untrusted like exemplars.
-// Internal free text (tech notes, commitment descriptions) can hold gate codes or
+// Internal free text (commitment descriptions) can hold gate codes or
 // card/SSN digits: the aggregator's shared redactor runs first (lazy require, as
 // elsewhere in this file; fail closed to '' if it cannot load).
 function visitLoopRedact(value) {
@@ -4418,12 +4417,19 @@ function visitLoopMinutes(value) {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
 }
+// " (today's Lawn Care visit, 9-11 AM)" — which of today's visits a line is about.
+function visitLoopWhich(item) {
+  const type = visitLoopText(item && item.visitType, 60);
+  const win = visitLoopText(item && item.windowDisplay, 40);
+  if (!type && !win) return '';
+  return ` (today's ${type ? `${type} ` : ''}visit${win ? `, ${win}` : ''})`;
+}
 function visitLoopTechLine(tp) {
   if (!tp || typeof tp !== 'object') return null;
   const mins = visitLoopMinutes(tp.minutesSinceUpdate);
   const ago = mins == null ? '' : `${mins} min ago`;
   if (tp.status === 'stale') {
-    return `- Tech position: location stale${ago ? ` (last update ${ago})` : ''} — do not promise an arrival time`;
+    return `- Tech position${visitLoopWhich(tp)}: location stale${ago ? ` (last update ${ago})` : ''} — do not promise an arrival time`;
   }
   const name = visitLoopText(tp.techName, 60) || 'The tech';
   const status = visitLoopText(String(tp.status || '').replace(/_/g, ' '), 30);
@@ -4432,23 +4438,28 @@ function visitLoopTechLine(tp) {
   if (tp.atThisVisit === true) where = 'at this visit now';
   else if (tp.stopsAhead != null && Number.isFinite(stops) && stops >= 0) where = `${Math.round(stops)} stop(s) ahead of this visit`;
   if (!status && !where) return null;
-  return `- Tech position: ${name}${status ? ` is ${status}` : ''}${ago ? ` (updated ${ago})` : ''}${where ? `, ${where}` : ''}`;
+  return `- Tech position${visitLoopWhich(tp)}: ${name}${status ? ` is ${status}` : ''}${ago ? ` (updated ${ago})` : ''}${where ? `, ${where}` : ''}`;
 }
 function visitLoopLateLine(late) {
   if (!late || typeof late !== 'object') return null;
   if (late.missingTracking === true) {
-    return '- Tracking gap: no departure or arrival is recorded yet for today\'s visit — this is not confirmed lateness; do not say the tech is late or on time, and do not promise an arrival time';
+    return `- Tracking gap${visitLoopWhich(late)}: no departure or arrival is recorded yet for this visit — this is not confirmed lateness; do not say the tech is late or on time, and do not promise an arrival time`;
   }
   const mins = visitLoopMinutes(late.minutesLate);
   return mins != null
-    ? `- RUNNING LATE: dispatch flagged this visit ${mins} min past its window — acknowledge the delay plainly, apologize once, never say "on time"`
-    : '- RUNNING LATE: dispatch flagged this visit as running past its window — acknowledge the delay plainly, apologize once, never say "on time"';
+    ? `- RUNNING LATE${visitLoopWhich(late)}: dispatch flagged this visit ${mins} min past its window — acknowledge the delay plainly, apologize once, never say "on time"`
+    : `- RUNNING LATE${visitLoopWhich(late)}: dispatch flagged this visit as running past its window — acknowledge the delay plainly, apologize once, never say "on time"`;
 }
-function visitLoopPastWindowLine(past) {
+function visitLoopPastWindowLine(past, techPosition) {
   if (!past || typeof past !== 'object') return null;
   const type = visitLoopText(past.type, 60) || 'scheduled';
   const win = visitLoopText(past.windowDisplay, 40);
-  return `- WINDOW PASSED: today's ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete, no tech location — say you're checking with the tech and quote FOLLOW-UP SLA RIGHT NOW`;
+  const head = `- WINDOW PASSED: today's ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete`;
+  // A fresh Tech position line is the real answer; only without one is it a hand-off.
+  const located = techPosition && typeof techPosition === 'object' && techPosition.status && techPosition.status !== 'stale';
+  return located
+    ? `${head} — say plainly we're running behind and use Tech position for where the tech is; no arrival time unless a LIVE ETA fact gives one`
+    : `${head}, no tech location — say you're checking with the tech and quote FOLLOW-UP SLA RIGHT NOW`;
 }
 function visitLoopMissedLine(missed) {
   if (!missed || typeof missed !== 'object') return null;
@@ -4456,16 +4467,6 @@ function visitLoopMissedLine(missed) {
   const date = visitLoopText(formatEtDate(missed.date), 40);
   const win = visitLoopText(missed.windowDisplay, 40);
   return `- MISSED VISIT: ${type}${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was not completed — apologize once, offer the earliest OPEN TIMES slot (or say we'll text times today if OPEN TIMES is absent); never point them to a visit weeks out without an apology`;
-}
-function visitLoopNoteLine(liveNote) {
-  const note = liveNote && typeof liveNote === 'object' ? sanitizeSingleLine(visitLoopRedact(liveNote.text), 240) : '';
-  if (!note) return null;
-  // The tech's raw text may name chemicals/products or make compliance claims:
-  // the shared customer-copy guard decides (fail closed — an unloadable guard
-  // reads banned), and a prompt-control attempt is withheld the same way.
-  return hasBannedCustomerCopy(note) || EXEMPLAR_INJECTION_RE.test(note)
-    ? "- Tech's live note: withheld (contains restricted copy)"
-    : `- Tech's live note (internal, paraphrase, never quote chemicals or product names): "${note.replace(/"/g, "'")}"`;
 }
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
 function visitLoopItemLines(items, label, trailing) {
@@ -4479,6 +4480,16 @@ function visitLoopItemLines(items, label, trailing) {
   }
   return lines;
 }
+// The call_commitments ids renderVisitLoopsSection can show (the same five-per-list
+// cap) — persisted on a suggestion so the send boundary rechecks they are still
+// open. [] gate-off: the section is not rendered then.
+function visitLoopCommitmentIds(context) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return [];
+  const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
+  const ids = [...(Array.isArray(v.weOwe) ? v.weOwe.slice(0, 5) : []), ...(Array.isArray(v.customerWaiting) ? v.customerWaiting.slice(0, 5) : [])]
+    .map((i) => (i && i.id != null ? String(i.id) : '')).filter(Boolean);
+  return [...new Set(ids)];
+}
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
 // header, then one line per present field, or the single line "- none". Pure.
@@ -4487,9 +4498,8 @@ function renderVisitLoopsSection(visitLoops) {
   const lines = [
     visitLoopTechLine(v.techPosition),
     visitLoopLateLine(v.lateAlert),
-    visitLoopPastWindowLine(v.pastWindow),
+    visitLoopPastWindowLine(v.pastWindow, v.techPosition),
     visitLoopMissedLine(v.missedVisit),
-    visitLoopNoteLine(v.liveNote),
     ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
       const due = visitLoopText(i.dueText, 60);
       return due ? ` (due ${due})` : '';
@@ -5881,6 +5891,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
               liveEtaSnapshot,
               techNames,
+              visitLoopCommitmentIds: visitLoopCommitmentIds(context),
               // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
               reserviceLanesSnapshot,
               reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -5938,6 +5949,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
             liveEtaSnapshot,
             techNames,
+            visitLoopCommitmentIds: visitLoopCommitmentIds(context),
             // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
             reserviceLanesSnapshot,
             reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -5987,6 +5999,7 @@ module.exports = {
   buildUserPromptFromFacts,
   buildFactsBlock,
   renderVisitLoopsSection,
+  visitLoopCommitmentIds,
   VISIT_LOOPS_HEADER,
   formatExemplarBlock,
   exemplarLooksClean,

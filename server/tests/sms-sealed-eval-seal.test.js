@@ -72,13 +72,14 @@ const EXACT = exactSuffix_();
 // FREE RE-SERVICE is matched at its rendered position too (round-24 P2): delimiter + company suffix + pattern.
 const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
 const RS_BINDINGS = [D_, D_, EXACT.length, EXACT, D_, D_, EXACT.length, D_, RESERVICE_SECTION_RE.source];
-// 'vl' (VISIT STATUS & OPEN LOOPS, SMS facts-gap PR 1) is a plain LIKE marker. Contract order is
-// SLA, COMPANY FACTS, VL, FREE RE-SERVICE: required markers bind first, then forbidden ones.
-const VL_BINDING = '%VISIT STATUS & OPEN LOOPS:%';
+// 'vl' (VISIT STATUS & OPEN LOOPS, SMS facts-gap PR 1) is matched at its rendered position
+// (PR #5499 r1): the header line between UPCOMING SERVICES and the first BILLING: line. Contract
+// order is SLA, COMPANY FACTS, VL, FREE RE-SERVICE: required markers bind first, then forbidden ones.
+const VL_BINDINGS = ['\nVISIT STATUS & OPEN LOOPS:\n', D_, '\nUPCOMING SERVICES:\n'];
 const CONTRACT_BINDINGS = [
   '%FOLLOW-UP SLA RIGHT NOW:%',
   D_, D_, EXACT.length, EXACT,
-  VL_BINDING,
+  ...VL_BINDINGS,
   ...RS_BINDINGS,
 ];
 // _cf+c (company facts + complaints, no 'vl'): SLA, CF, RS required, then VL forbidden.
@@ -86,7 +87,7 @@ const CF_C_BINDINGS = [
   '%FOLLOW-UP SLA RIGHT NOW:%',
   D_, D_, EXACT.length, EXACT,
   ...RS_BINDINGS,
-  VL_BINDING,
+  ...VL_BINDINGS,
 ];
 
 describe('sealEvalItems — selection contract', () => {
@@ -262,7 +263,9 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
     for (const [, args] of likeRaws) {
       expect(args[1]).toEqual(CF_C_BINDINGS);
-      expect(String(args[0]).match(/NOT LIKE/g) || []).toHaveLength(1); // _cf+c: every fact the version carries is required; only 'vl' (VISIT STATUS & OPEN LOOPS) is forbidden
+      // _cf+c: every fact the version carries is required; only 'vl' (VISIT STATUS & OPEN LOOPS) is forbidden, at its position
+      expect(String(args[0]).match(/NOT LIKE/g) || []).toHaveLength(0);
+      expect(String(args[0]).match(/NOT \(position\(\?::text in split_part\(split_part\(/g) || []).toHaveLength(1);
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
@@ -374,7 +377,7 @@ test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND for
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     // the pre-_cf identity also forbids COMPANY FACTS (Codex #5392 r1)
-    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND COALESCE\(facts_block, ''\) NOT LIKE \? AND NOT \(position\(\?::text in .*CASE WHEN right\(split_part\(.*~ \?::text\)$/);
+    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in split_part\(split_part\(.*\) AND NOT \(position\(\?::text in .*CASE WHEN right\(split_part\(.*~ \?::text\)$/);
     expect(compat[1][1]).toEqual(CONTRACT_BINDINGS);
   } finally {
     spy.mockRestore();

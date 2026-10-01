@@ -158,10 +158,11 @@ const CATEGORY_FACT_MARKERS = Object.freeze({ c: RESERVICE_FACTS_MARKER });
 // more row here plus its suffix in the drafter's REAL_ANSWERS_PROMPT_VERSION.
 // 'vl' = the VISIT STATUS & OPEN LOOPS section (SMS facts-gap PR 1; the drafter renders it,
 // with its fixed header, in EVERY gate-on block right after UPCOMING SERVICES — never in the
-// COMPANY FACTS / FREE RE-SERVICE tail, whose positions factPresent trusts — so it is a
-// plain substring marker like the SLA line).
+// COMPANY FACTS / FREE RE-SERVICE tail, whose positions factPresent trusts). Position-aware
+// like those two: see hasRenderedVisitLoops.
 const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
-const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER, vl: 'VISIT STATUS & OPEN LOOPS:' });
+const VISIT_LOOPS_MARKER = 'VISIT STATUS & OPEN LOOPS:';
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER, vl: VISIT_LOOPS_MARKER });
 function suffixTokenMarker(token) {
   if (/^\d+$/.test(token)) return Number(token) >= 2 ? RESERVICE_FACTS_MARKER : null;
   return VERSION_SUFFIX_FACT_MARKERS[token] || null;
@@ -214,7 +215,19 @@ function hasRenderedReserviceFact(factsBlock) {
   const exact = exactSectionSuffix();
   return RESERVICE_SECTION_RE.test(before.endsWith(exact) ? before.slice(0, -exact.length) : before);
 }
+// The rendered VISIT STATUS & OPEN LOOPS header (PR #5499 r1): on its own line,
+// after UPCOMING SERVICES and before the first BILLING: line. A thread or call
+// text quoting the header sits after BILLING (RECENT PHONE CALLS / RECENT SMS
+// THREAD) and never counts.
+const UPCOMING_DELIMITER = '\nUPCOMING SERVICES:\n';
+const VISIT_LOOPS_LINE = `\n${VISIT_LOOPS_MARKER}\n`;
+function hasRenderedVisitLoops(facts) {
+  const head = String(facts).split(BILLING_DELIMITER)[0];
+  const upcoming = head.split(UPCOMING_DELIMITER)[1];
+  return typeof upcoming === 'string' && upcoming.includes(VISIT_LOOPS_LINE);
+}
 function factPresent(facts, marker) {
+  if (marker === VISIT_LOOPS_MARKER) return hasRenderedVisitLoops(facts);
   if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
   if (marker === RESERVICE_FACTS_MARKER) return hasRenderedReserviceFact(facts);
   return facts.includes(marker);
@@ -234,7 +247,12 @@ function compatibleWhereRaw(markers, forbidden = []) {
   const clauses = [];
   const bindings = [];
   const add = (marker, negate) => {
-    if (marker === COMPANY_FACTS_HEADER) {
+    if (marker === VISIT_LOOPS_MARKER) {
+      // the twin of hasRenderedVisitLoops: the header line inside the text between the first
+      // UPCOMING SERVICES line and the first BILLING: line
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in split_part(split_part(${col}, ?::text, 1), ?::text, 2)) > 0)`);
+      bindings.push(VISIT_LOOPS_LINE, BILLING_DELIMITER, UPCOMING_DELIMITER);
+    } else if (marker === COMPANY_FACTS_HEADER) {
       const exact = exactSectionSuffix();
       clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND right(split_part(${col}, ?::text, 1), ?::int) = ?::text)`);
       bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact);

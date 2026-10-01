@@ -1446,12 +1446,16 @@ class ContextAggregator {
     // promise text must only reach the one prompt that renders them (the SMS
     // drafter reads the property directly). Never throws; a failed field is
     // null/[].
-    let visitLoops;
-    try {
-      visitLoops = await loadVisitLoops({ customerId: customer.id, upcomingServices: context.upcomingServices, deriveWindow: (row) => this.deriveWindow(row) });
-    } catch (err) {
-      logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
-      visitLoops = emptyVisitLoops();
+    // Read only while GATE_SMS_REAL_ANSWERS is on: the SMS drafter is the one
+    // renderer, and a dark feature must not add queries to every context build.
+    let visitLoops = emptyVisitLoops();
+    if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+      try {
+        visitLoops = await loadVisitLoops({ customerId: customer.id, upcomingServices: context.upcomingServices, deriveWindow: (row) => this.deriveWindow(row) });
+      } catch (err) {
+        logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
+        visitLoops = emptyVisitLoops();
+      }
     }
     Object.defineProperty(context, 'visitLoops', { value: visitLoops, enumerable: false, writable: true, configurable: true });
     return context;

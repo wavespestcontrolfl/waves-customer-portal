@@ -102,7 +102,10 @@ describe('techPosition', () => {
   test('fresh position: status, minutes, stops ahead (terminal/rescheduled excluded in SQL), first name only', async () => {
     const conn = fakeConn(handlers());
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn, deriveWindow });
-    expect(out.techPosition).toEqual({ techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false });
+    expect(out.techPosition).toEqual({
+      techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false,
+      visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
+    });
     const count = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'count'));
     expect(hasOp(count.ops, 'whereNotIn', (a) => a[0] === 'status' && ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'].every((s) => a[1].includes(s)))).toBe(true);
     expect(hasOp(count.ops, 'where', (a) => a[0] === 'route_order' && a[1] === '<' && a[2] === 3)).toBe(true);
@@ -118,6 +121,14 @@ describe('techPosition', () => {
     const conn = fakeConn(handlers({ status: { status: 'en_route', current_job_id: null, location_updated_at: minutesAgo(9) } }));
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
     expect(out.techPosition).toMatchObject({ status: 'stale', minutesSinceUpdate: 9, atThisVisit: false });
+  });
+
+  test('a fix slightly in the future (within the tracker\'s tolerance) is fresh, not stale', async () => {
+    const conn = fakeConn(handlers({ status: { status: 'en_route', current_job_id: null, location_updated_at: minutesAgo(-0.5) } }));
+    const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
+    expect(out.techPosition).toMatchObject({ status: 'en_route', minutesSinceUpdate: 0 });
+    const far = fakeConn(handlers({ status: { status: 'en_route', current_job_id: null, location_updated_at: minutesAgo(-10) } }));
+    expect((await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn: far })).techPosition.status).toBe('stale');
   });
 
   test('no tech_status row: stale with unknown age', async () => {
@@ -150,7 +161,7 @@ describe('techPosition', () => {
 
 describe('lateAlert', () => {
   const run = (alert) => loadVisitLoops({
-    customerId: 'c1', upcomingServices: [todayEntry()], now: NOW,
+    customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, deriveWindow,
     conn: fakeConn({
       scheduled_services: (ops, kind) => (hasOp(ops, 'whereIn') ? [todayRow({ status: 'en_route' })] : (kind === 'first' ? null : [])),
       dispatch_alerts: () => alert,
@@ -158,16 +169,31 @@ describe('lateAlert', () => {
   });
 
   test('an open alert carries type, severity and minutes from the payload (string or object)', async () => {
-    expect((await run({ type: 'tech_late', severity: 'warn', payload: JSON.stringify({ delay_minutes: 35 }) })).lateAlert)
-      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: 35, missingTracking: false });
-    expect((await run({ type: 'unassigned_overdue', severity: 'critical', payload: { delay_minutes: '12' } })).lateAlert)
-      .toEqual({ type: 'unassigned_overdue', severity: 'critical', minutesLate: 12, missingTracking: false });
+    const which = { visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
+    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: JSON.stringify({ delay_minutes: 35 }) })).lateAlert)
+      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: 35, missingTracking: false, ...which });
+    expect((await run({ type: 'unassigned_overdue', severity: 'critical', job_id: 'visit-1', payload: { delay_minutes: '12' } })).lateAlert)
+      .toEqual({ type: 'unassigned_overdue', severity: 'critical', minutesLate: 12, missingTracking: false, ...which });
   });
 
   test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
     const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, delay_minutes: 50 };
-    expect((await run({ type: 'tech_late', severity: 'warn', payload })).lateAlert)
-      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true });
+    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload })).lateAlert)
+      .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true, visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
+  });
+
+  test('with two visits today the alert names the visit it was raised on', async () => {
+    const out = await loadVisitLoops({
+      customerId: 'c1', now: NOW, deriveWindow,
+      upcomingServices: [todayEntry(), todayEntry({ scheduledServiceId: 'visit-2', type: 'Lawn Care' })],
+      conn: fakeConn({
+        scheduled_services: (ops, kind) => (hasOp(ops, 'whereIn')
+          ? [todayRow(), todayRow({ id: 'visit-2', service_type: 'Lawn Care', window_start: '14:00:00' })]
+          : (kind === 'first' ? null : [])),
+        dispatch_alerts: () => ({ type: 'tech_late', severity: 'warn', job_id: 'visit-2', payload: { delay_minutes: 20 } }),
+      }),
+    });
+    expect(out.lateAlert).toMatchObject({ visitType: 'Lawn Care', minutesLate: 20 });
   });
 
   test('no minutes in the payload: minutesLate null; no open alert: null', async () => {
@@ -188,7 +214,7 @@ describe('lateAlert', () => {
   });
 });
 
-describe('pastWindow and liveNote', () => {
+describe('pastWindow', () => {
   const run = (row, now = NOW) => loadVisitLoops({
     customerId: 'c1', upcomingServices: [todayEntry()], now, deriveWindow,
     conn: fakeConn({ scheduled_services: (ops, kind) => (hasOp(ops, 'whereIn') ? [todayRow(row)] : (kind === 'first' ? null : [])) }),
@@ -215,19 +241,10 @@ describe('pastWindow and liveNote', () => {
     expect(out.pastWindow).toMatchObject({ minutesPast: 30 });
   });
 
-  test('liveNote: raw text trimmed to 240 chars for an en-route visit, with its timestamp', async () => {
-    const out = await run({ status: 'en_route', notes: `  ${'x'.repeat(300)}  `, updated_at: minutesAgo(5) });
-    expect(out.liveNote.text).toHaveLength(240);
-    expect(out.liveNote.updatedAt).toBe(minutesAgo(5).toISOString());
-  });
-
-  test('liveNote also rides a passed-window visit; a pending future visit\'s booking note is not a live note', async () => {
-    expect((await run({ status: 'pending', notes: 'running behind, parts run' })).liveNote.text).toBe('running behind, parts run');
-    expect((await run({ status: 'confirmed', notes: 'gate side door' }, new Date('2026-10-01T12:00:00Z'))).liveNote).toBeNull();
-  });
-
-  test('empty note: null', async () => {
-    expect((await run({ status: 'en_route', notes: '   ' })).liveNote).toBeNull();
+  test('no visit note is ever read into the facts', async () => {
+    const out = await run({ status: 'en_route', notes: 'landlord pays, gate code 1234' });
+    expect(out).not.toHaveProperty('liveNote');
+    expect(JSON.stringify(out)).not.toContain('landlord');
   });
 });
 
@@ -252,6 +269,28 @@ describe('missedVisit', () => {
     expect(hasOp(q.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '<' && a[2] === '2026-10-01')).toBe(true);
     expect(hasOp(q.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-09-24')).toBe(true);
     expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'status' && a[1].join() === 'pending,confirmed')).toBe(true);
+    // performed-but-not-closed rows are excluded: a tracker 'complete' or a written service record
+    expect(hasOp(q.ops, 'where', (a) => typeof a[0] === 'function')).toBe(true);
+    expect(hasOp(q.ops, 'whereNotExists')).toBe(true);
+  });
+
+  test('a soft no-show moved later the SAME day (new_date set, row still live) is not a miss', async () => {
+    const noshow = { scheduled_service_id: 'v9', original_date: '2026-10-01', original_window: '9-11 AM', new_date: '2026-10-01', service_type: 'Pest Control', window_start: '15:00:00', status: 'confirmed' };
+    expect((await run({ noshow })).missedVisit).toBeNull();
+  });
+
+  test('a same-day replacement visit counts as the follow-up; the logged row itself never does', async () => {
+    const noshow = { scheduled_service_id: 'v9', original_date: '2026-10-01', original_window: '9-11 AM', new_date: null, service_type: 'Pest Control', status: 'no_show' };
+    const conn = fakeConn({ scheduled_services: (ops, kind) => (kind === 'first' ? null : [{ service_type: 'Pest Control' }]), reschedule_log: () => noshow });
+    const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [], now: NOW, deriveWindow, conn });
+    expect(out.missedVisit).toBeNull();
+    const probe = conn.calls.find((c) => c.table === 'scheduled_services' && c.terminal === 'all');
+    expect(hasOp(probe.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-10-01')).toBe(true);
+  });
+
+  test('the missed window is the logged original, not the moved row\'s current window', async () => {
+    const noshow = { original_date: '2026-09-30', original_window: '9-11 AM', service_type: 'Mosquito Control', window_start: '13:00:00', status: 'no_show' };
+    expect((await run({ noshow })).missedVisit).toMatchObject({ windowDisplay: '9-11 AM' });
   });
 
   test('a customer no-show not followed by a later visit of the same service counts', async () => {
@@ -287,23 +326,23 @@ describe('weOwe and customerWaiting', () => {
   const run = (conn) => loadVisitLoops({ customerId: 'c1', upcomingServices: [], now: NOW, conn });
   const ctxConn = (contexts) => fakeConn({ call_commitments: () => Object.entries(contexts).map(([id, sms_context]) => ({ id, sms_context })) });
 
-  test('both gates off: neither reader is called', async () => {
+  test('sms/email gates off: their reader is not called; call promises are still read (write gate only)', async () => {
     const out = await run(ctxConn({}));
     expect(out.weOwe).toEqual([]);
     expect(out.customerWaiting).toEqual([]);
-    expect(listOpenCommitments).not.toHaveBeenCalled();
+    expect(listOpenCommitments).toHaveBeenCalled();
     expect(listSmsCommitments).not.toHaveBeenCalled();
   });
 
-  test('call gate on: waves-party call promises become weOwe; customer-party call rows appear nowhere', async () => {
-    featureGates.gates.callCommitments = true;
+  test('call gate OFF: waves-party call promises become weOwe; customer-party call rows appear nowhere', async () => {
+    featureGates.gates.callCommitments = false;
     listOpenCommitments.mockResolvedValue([
       callRow({}),
       callRow({ id: 'c-2', party: 'customer', kind: 'send_photos', description: 'Send photos of the fence', call_started_at: '2026-09-29T14:00:00Z' }),
     ]);
     const out = await run(ctxConn({}));
     expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', limit: 50 }));
-    expect(out.weOwe).toEqual([{ kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow', source: 'call' }]);
+    expect(out.weOwe).toEqual([{ id: 'c-1', kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow', source: 'call' }]);
     expect(out.customerWaiting).toEqual([]);
     expect(out.weOwe).toHaveLength(1);
   });
@@ -315,11 +354,17 @@ describe('weOwe and customerWaiting', () => {
       smsRow({ id: 's-2', kind: 'send_report', description: 'Report requested', due_at: null, sms_started_at: '2026-09-30T10:00:00Z' }),
     ]);
     const out = await run(ctxConn({ 's-1': { basis: 'promise', due_text: 'later today' }, 's-2': { basis: 'request' } }));
-    expect(out.weOwe).toEqual([{ kind: 'callback', description: 'Call back about ants', dueText: 'later today', source: 'sms' }]);
-    expect(out.customerWaiting).toEqual([{ kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
+    expect(out.weOwe).toEqual([{ id: 's-1', kind: 'callback', description: 'Call back about ants', dueText: 'later today', source: 'sms' }]);
+    expect(out.customerWaiting).toEqual([{ id: 's-2', kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
     // no spoken due text: the due instant, formatted in ET
     const noText = await run(ctxConn({ 's-1': { basis: 'promise' } }));
     expect(noText.weOwe[0].dueText).toBe('Thu, Oct 1, 5:00 PM');
+  });
+
+  test('a passed deadline reads as overdue, never as a future time', async () => {
+    listOpenCommitments.mockResolvedValue([callRow({ due_text: 'by Monday', effective_due_at: '2026-09-28T21:00:00Z' })]);
+    const out = await run(ctxConn({}));
+    expect(out.weOwe[0].dueText).toBe('overdue since Mon, Sep 28, 5:00 PM');
   });
 
   test('email rows need their own gate; sms off + email on keeps only email rows', async () => {

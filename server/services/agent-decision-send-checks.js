@@ -243,6 +243,44 @@ async function reserviceBlock({ decision, outgoingBody }) {
   return reason ? `re-service promise unsendable (${reason})` : null;
 }
 
+// OPEN LOOPS (PR #5499 Codex r1 P2): a draft grounded on "WE OWE THEM" /
+// "THEY ARE WAITING ON US FOR" lines can sit in review while that promise is
+// fulfilled or dismissed elsewhere (a call, an email, an internal action). The
+// draft persisted the call_commitments ids it rendered; every one must still be
+// open at send time. Fails closed on a read error. No ids = nothing to check.
+async function openLoopsBlockReason({ decision, dbh }) {
+  const snapshot = parseInputSnapshot(decision && decision.input_snapshot);
+  const ids = Array.isArray(snapshot?.visit_loop_commitment_ids)
+    ? [...new Set(snapshot.visit_loop_commitment_ids.filter((id) => typeof id === 'string' && id))]
+    : [];
+  if (!ids.length) return null;
+  try {
+    const conn = dbh || require('../models/db');
+    const rows = await conn('call_commitments').whereIn('id', ids).select('id', 'status');
+    const open = new Set((rows || []).filter((r) => r.status === 'open').map((r) => String(r.id)));
+    return ids.every((id) => open.has(id)) ? null : 'commitment_closed';
+  } catch (err) {
+    require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed: ${err.message}; blocking send`);
+    return 'open_loops_recheck_failed';
+  }
+}
+async function openLoopsBlock({ decision }) {
+  const reason = await openLoopsBlockReason({ decision });
+  return reason ? `open-loop facts stale (${reason})` : null;
+}
+// The scheduler's queued-send form: reads the decision row itself; fails closed.
+async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
+  try {
+    const conn = dbh || require('../models/db');
+    const row = await conn('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot');
+    if (!row) throw new Error('agent decision row not found');
+    return await openLoopsBlockReason({ decision: row, dbh: conn });
+  } catch (err) {
+    require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed for decision ${agentDecisionId}: ${err.message}; blocking send`);
+    return 'open_loops_recheck_failed';
+  }
+}
+
 /**
  * Returns null when the body may go out, else a short reason string the
  * caller logs before superseding the decision.
@@ -252,6 +290,7 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || followupBlock({ decision, outgoingBody })
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
+    || (await openLoopsBlock({ decision }))
     || (await etaBlock({ decision, outgoingBody }));
 }
 
@@ -284,4 +323,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };

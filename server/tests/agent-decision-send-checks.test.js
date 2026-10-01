@@ -425,3 +425,43 @@ describe('provider-boundary ETA predicates use the handoff connection (dbi)', ()
     expect(lane).toHaveBeenCalledWith({ dbi: trx });
   });
 });
+
+// PR #5499 r1: a reviewed reply grounded on an open promise is refused once that
+// promise was fulfilled or dismissed elsewhere; a read error fails closed.
+describe('open-loop commitments recheck', () => {
+  const { openLoopsBlockReason, scheduledOpenLoopsBlockReason } = require('../services/agent-decision-send-checks');
+  const withIds = (ids) => decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_commitment_ids: ids }) });
+  const commitmentsDb = (rows) => (table) => {
+    const q = { whereIn: () => q, select: async () => rows, where: () => q, first: async () => ({ input_snapshot: JSON.stringify({ visit_loop_commitment_ids: ['cc-1'] }) }) };
+    return table === 'call_commitments' || table === 'agent_decisions' ? q : null;
+  };
+
+  test('no ids on the snapshot: no read, no block', async () => {
+    db.mockReset();
+    await expect(openLoopsBlockReason({ decision: decision() })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('every id still open passes; a closed or missing one blocks', async () => {
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']), dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }, { id: 'cc-2', status: 'open' }]) })).resolves.toBeNull();
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']), dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }, { id: 'cc-2', status: 'fulfilled' }]) })).resolves.toBe('commitment_closed');
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1']), dbh: commitmentsDb([]) })).resolves.toBe('commitment_closed');
+  });
+
+  test('a read error fails closed', async () => {
+    const broken = () => { throw new Error('db down'); };
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1']), dbh: broken })).resolves.toBe('open_loops_recheck_failed');
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: broken })).resolves.toBe('open_loops_recheck_failed');
+  });
+
+  test('the immediate send path refuses with the open-loop reason', async () => {
+    db.mockReset().mockImplementation(commitmentsDb([{ id: 'cc-1', status: 'dismissed' }]));
+    await expect(agentDecisionSendBlockReason({ decision: withIds(['cc-1']), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' }))
+      .resolves.toBe('open-loop facts stale (commitment_closed)');
+  });
+
+  test('the scheduler form reads the decision row, then the commitments', async () => {
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: commitmentsDb([{ id: 'cc-1', status: 'open' }]) })).resolves.toBeNull();
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: commitmentsDb([{ id: 'cc-1', status: 'fulfilled' }]) })).resolves.toBe('commitment_closed');
+  });
+});

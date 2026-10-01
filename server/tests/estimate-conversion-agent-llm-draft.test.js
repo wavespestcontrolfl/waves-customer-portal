@@ -20,6 +20,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   buildLiveEtaSnapshot: jest.fn(() => null),
   // Round-42: the lane also persists the draft's technician first names (none in these fixtures).
   techNamesFromContext: jest.fn(() => []),
+  visitLoopCommitmentIds: jest.fn(() => []),
   PROMPT_VERSION: 'house_voice_v8',
   // Real behavior mirrored for the gate-on tests below (Codex r3): true
   // when the reply carries an amount not present in context.billing's

@@ -686,6 +686,8 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       liveEtaSnapshot: drafter.buildLiveEtaSnapshot(context),
       // Technician first name(s) independent of live entries (round-42 P2).
       techNames: drafter.techNamesFromContext(context),
+      // PR #5499 r1: open call_commitments ids its VISIT STATUS & OPEN LOOPS lines named.
+      visitLoopCommitmentIds: drafter.visitLoopCommitmentIds(context),
       reserviceLanesSnapshot,
       reserviceBookedSnapshot: drafter.reserviceBookedSnapshot(reserviceBooked),
     };
@@ -817,6 +819,8 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // Independent review finding (PR #5334) — see generateLlmReviewDraft's comment above.
         ...(llmDraft?.liveEtaSnapshot ? { live_eta_snapshot: llmDraft.liveEtaSnapshot } : {}),
         ...(Array.isArray(llmDraft?.techNames) && llmDraft.techNames.length ? { tech_names: llmDraft.techNames } : {}),
+        ...(Array.isArray(llmDraft?.visitLoopCommitmentIds) && llmDraft.visitLoopCommitmentIds.length
+          ? { visit_loop_commitment_ids: llmDraft.visitLoopCommitmentIds } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
