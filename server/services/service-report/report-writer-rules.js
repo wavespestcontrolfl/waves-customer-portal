@@ -523,6 +523,27 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // visit itself (Codex #5500).
 const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
 
+// The four report titles, alone on a line or written inline with text.
+const REPORT_TITLE_LINE_RE = /^\s*(WHAT WE FOUND|WHAT WE DID AND WHY|WHAT TO EXPECT|WHAT['’]S NEXT)(?::(.*))?\s*$/;
+const ALLOWANCE_SECTIONS = new Set(['WHAT TO EXPECT', 'WHAT\'S NEXT']);
+// Applies `fn` only to the text of the sections where supplied timeframes
+// and dates belong (rule 11): WHAT TO EXPECT and WHAT'S NEXT. Copy with no
+// report titles at all (a single sentence) is one such section.
+function withinAllowanceSections(copy, fn) {
+  const lines = copy.split('\n');
+  if (!lines.some((line) => REPORT_TITLE_LINE_RE.test(line))) return fn(copy);
+  let current = null;
+  return lines.map((line) => {
+    const title = REPORT_TITLE_LINE_RE.exec(line);
+    if (title) {
+      current = title[1].replace(/[’]/g, "'");
+      const rest = title[2];
+      return rest !== undefined && ALLOWANCE_SECTIONS.has(current) ? line.replace(rest, fn(rest)) : line;
+    }
+    return current && ALLOWANCE_SECTIONS.has(current) ? fn(line) : line;
+  }).join('\n');
+}
+
 function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [], allowedDates = [] } = {}) {
   // Supplied timeframes (an EXPECTATIONS line's own words) pass exactly as
   // supplied, and a supplied date (the reach-out date) passes only in a
@@ -536,13 +557,17 @@ function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [
       return 'date';
     }
   }
+  // An allowed phrase passes only where it belongs: inside WHAT TO EXPECT
+  // and WHAT'S NEXT; the same words elsewhere (a residual period in WHAT WE
+  // DID AND WHY) still trip the screen (Codex #5500).
   // Longest first, so a whole phrase is matched before any part of it.
   const phrases = [...(Array.isArray(allowedPhrases) ? allowedPhrases : []), ...dates]
     .sort((a, b) => String(b || '').length - String(a || '').length);
   for (const phrase of phrases) {
     const pattern = allowedPhrasePattern(phrase);
     if (String(phrase || '').trim().length < 3 || !pattern) continue;
-    copy = copy.replace(new RegExp(`(?<![\\w-])${pattern}(?![\\w-])`, 'gi'), 'X');
+    const phraseRe = new RegExp(`(?<![\\w-])${pattern}(?![\\w-])`, 'gi');
+    copy = withinAllowanceSections(copy, (part) => part.replace(phraseRe, 'X'));
   }
   const hit = WRITER_RULE_SCREENS.find(([check]) => (typeof check === 'function' ? check(copy) : check.test(copy)));
   if (hit) return hit[1];

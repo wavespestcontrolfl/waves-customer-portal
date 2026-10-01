@@ -1809,6 +1809,16 @@ describe('ServiceReportDocument: the four-section report', () => {
     expect(screen.queryByText(body)).toBeNull();
   });
 
+  it('drops the separate "What to expect" block when the sections carry their own', () => {
+    const whatToExpect = { lines: ['Ants that find the bait carry it back to the colony.'] };
+    const withSections = { ...BASE_DATA, typedReport: { ...BASE_DATA.typedReport, todaysResult: { ...BASE_DATA.typedReport.todaysResult, body } }, reportSections: sections, pestReportV2: { expectations: { whatToExpect } } };
+    const { unmount } = render(<ServiceReportDocument data={withSections} token="tok123" />);
+    expect(screen.queryByText('Ants that find the bait carry it back to the colony.')).toBeNull();
+    unmount();
+    render(<ServiceReportDocument data={{ ...BASE_DATA, pestReportV2: { expectations: { whatToExpect } } }} token="tok123" />);
+    expect(screen.getByText('Ants that find the bait carry it back to the colony.')).toBeInTheDocument();
+  });
+
   it('prints the summary as before without sections', () => {
     render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(screen.queryByText('What we did and why')).toBeNull();

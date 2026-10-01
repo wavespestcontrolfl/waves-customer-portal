@@ -5334,6 +5334,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // copy with a log line — the deterministic template remains the
         // guaranteed body and the completion is never blocked on it.
         let technicianReportBody = null;
+        // The body came from the four-section report (writer rules): the
+        // frozen cards carrying it are stamped so a later kill switch hides
+        // them (report-data).
+        let technicianReportFourSection = false;
         // Request-context rejections (trade names from THIS visit's
         // products, companion contradictions) must survive to the RENDER
         // path: untyped completions have no governing snapshot, so
@@ -5347,6 +5351,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             logger.warn(`[completion] technician AI report copy dropped (banned: ${technicianReport.violations.join(', ')})`);
           }
           technicianReportBody = technicianReport?.body || null;
+          technicianReportFourSection = Boolean(technicianReport?.sections);
           // The generate endpoint screens trade names per-request, but a
           // post-generation inline edit reaches completion with only the
           // static banned-word checks — rerun the visit-specific product
@@ -6471,6 +6476,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
               if (companionActivity) companionActivityInserts.push(companionActivity);
             }
             if (companionSnapshots.length) serviceData.companionReportSnapshots = companionSnapshots;
+          }
+          if (technicianReportFourSection) {
+            for (const snapshot of [serviceData.typedReportSnapshot, ...(serviceData.companionReportSnapshots || [])]) {
+              if (snapshot?.todaysResult?.bodySource === 'technician_report') snapshot.todaysResult.bodyFormat = 'four_section';
+            }
           }
           const [priorVisitCountRow] = serviceRecordCols.visit_number
             ? await trx('service_records')

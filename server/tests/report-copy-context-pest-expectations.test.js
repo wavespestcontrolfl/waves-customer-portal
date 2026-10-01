@@ -293,3 +293,22 @@ describe('buildReportCopyContext — writer rules', () => {
     expect(contextText).toContain('EXPECTATIONS (honest, deterministic facts');
   });
 });
+
+describe('buildReportCopyContext — writer rules: name-only products', () => {
+  test('a name-only product beside an id-backed one still grounds the writer', async () => {
+    const knex = makeKnexStub({ customers: [CUSTOMER], catalogProducts: [NON_REPELLENT_PRODUCT, ROACH_GEL_PRODUCT] });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c1',
+      serviceType: 'Pest Control Service',
+      serviceLine: 'pest',
+      serviceDate: '2026-07-15',
+      products: [
+        { productId: 'p1', name: 'Taurus SC', applicationMethod: 'perimeter_spray', applicationArea: 'Exterior perimeter' },
+        { productId: null, name: 'Advion Cockroach Gel Bait', applicationMethod: 'bait_placement', applicationArea: 'Kitchen' },
+      ],
+      writerRules: true,
+      knex,
+    });
+    expect(contextText).toContain('With gel bait, dead roaches may show up');
+  });
+});

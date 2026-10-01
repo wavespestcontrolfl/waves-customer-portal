@@ -114,6 +114,38 @@ describe('four-section report in the report payload', () => {
     expect(data).not.toHaveProperty('nextSameServiceAppointment');
   });
 
+  test('a PDF render never looks up the next visit (live view only)', async () => {
+    const firsts = [];
+    const knex = stubKnex({ scheduled_services: [REPORT_VISIT] });
+    const spying = (table) => {
+      const query = knex(table);
+      const first = query.first;
+      query.first = (...cols) => { firsts.push([table, cols]); return first(...cols); };
+      return query;
+    };
+    await buildReportV1Data(serviceRow(FOUR_SECTIONS), 'token-four-section-pdf', spying, { mode: 'pdf' });
+    expect(firsts.some(([table, cols]) => table === 'scheduled_services' && cols.includes('service_address_line1'))).toBe(false);
+  });
+
+  test('a frozen four-section card body shows with the switch on and hides with it off', async () => {
+    const row = {
+      ...serviceRow('WHAT WE DID\nWe treated.\nWHAT WE FOUND\nAnts.'),
+      service_data: JSON.stringify({
+        typedReportSnapshot: {
+          type: 'one_time_pest', typeLabel: 'One-Time Pest', serviceLabel: 'One-Time Pest', schemaVersion: 2, visitSequence: 1,
+          values: { target_pest: 'Ants' }, findings: [], nextStepChips: [],
+          todaysResult: { headline: 'Service completed.', body: 'Ghost ants were trailing. We placed bait.', bodySource: 'technician_report', bodyFormat: 'four_section' },
+        },
+      }),
+    };
+    const on = await buildReportV1Data(row, 'token-frozen-on', stubKnex(), { mode: 'live' });
+    expect(on.typedReport.todaysResult.body).toBe('Ghost ants were trailing. We placed bait.');
+    delete process.env.GATE_REPORT_WRITER_RULES;
+    const off = await buildReportV1Data(row, 'token-frozen-off', stubKnex(), { mode: 'live' });
+    expect(off.typedReport.todaysResult.headline).toBe('Service completed.');
+    expect(off.typedReport.todaysResult).not.toHaveProperty('body');
+  });
+
   test('every non-live render drops the next visit, like nextAppointment', () => {
     const data = { nextAppointment: { scheduledDate: '2099-01-05' }, nextSameServiceAppointment: { scheduledDate: '2099-01-05' }, reportSections: [] };
     stripLiveOnlyScheduleFields(data);

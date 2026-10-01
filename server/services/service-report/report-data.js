@@ -2087,6 +2087,17 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
   return pest ? { city: nearYouCity, pest } : null;
 }
 
+// A frozen card's four-section body (stamped bodyFormat 'four_section' at
+// completion) shows only while GATE_REPORT_WRITER_RULES is on: with it off
+// (the kill switch) the card keeps its headline and drops that body
+// (Codex #5500).
+function withoutDarkFourSectionBody(snapshot) {
+  const result = snapshot?.todaysResult;
+  if (!result || result.bodyFormat !== 'four_section' || featureGates.reportWriterRulesLive()) return snapshot;
+  const { body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, ...rest } = result;
+  return { ...snapshot, todaysResult: rest };
+}
+
 // The report's next-appointment shape for a scheduled_services row.
 function nextAppointmentFields(row) {
   if (!row || !row.scheduled_date) return null;
@@ -3943,7 +3954,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const typedSnapshot = serviceData.typedReportSnapshot
     && typeof serviceData.typedReportSnapshot === 'object'
     && serviceData.typedReportSnapshot.type
-    ? serviceData.typedReportSnapshot
+    ? withoutDarkFourSectionBody(serviceData.typedReportSnapshot)
     : null;
 
   const scheduledServicePromise = service.scheduled_service_id
@@ -4343,7 +4354,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // bad history must not take down the report.
   const staffViewer = opts.staffViewer === true;
   const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
-    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type)
+    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(withoutDarkFourSectionBody)
     : [];
   const companionReports = await Promise.all(
     companionSnapshots
@@ -6472,7 +6483,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // booking at another of the customer's properties never counts, and an
   // unresolvable property shows nothing). Only for that report.
   let nextSameServiceAppointment = null;
-  if (reportSections && visitSummarySource === 'technician_report' && upcomingVisitRows && service.scheduled_service_id) {
+  if (opts.mode === 'live' && reportSections && visitSummarySource === 'technician_report'
+    && upcomingVisitRows && service.scheduled_service_id) {
     try {
       const reportVisit = await knex('scheduled_services')
         .where({ id: service.scheduled_service_id })

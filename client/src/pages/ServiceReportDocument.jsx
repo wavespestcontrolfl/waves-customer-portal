@@ -610,6 +610,10 @@ export default function ServiceReportDocument({ data, token }) {
   const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
+  // The four-section report carries its own "What to expect": the separate
+  // block below would print the same thing twice (as the live pest
+  // dashboard already suppresses it).
+  const summarySectionsShown = summaryParagraphs.some((paragraph) => reportSectionsForText(data.reportSections, paragraph));
   if (reservice) {
     // Same precedence as the web hero (smartStatusSummary): an honest
     // warning — cockroach/termite V2 status, a Pest V2 "recommended"/
@@ -1076,7 +1080,7 @@ export default function ServiceReportDocument({ data, token }) {
             )}
           </div>
         )}
-        {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && (
+        {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && !summarySectionsShown && (
           <div className="doc-keep">
             <SectionHeader>What to expect</SectionHeader>
             {pestV2.expectations.whatToExpect.lines.map((line) => (

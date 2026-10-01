@@ -440,6 +440,21 @@ async function loadProductSafety(products, knex) {
     }));
     const rowsById = new Map(approvedRows.map((row) => [String(row.id), row]));
     const rowsByName = new Map(approvedRows.map((row) => [cleanText(row.name).toLowerCase(), row]));
+    // Name-only selections beside id-backed ones: the query above read ids
+    // only (so a stale name can't pull facts for an id-backed product); the
+    // writer's applications still need each name-only selection's own
+    // catalog row (Codex #5500). Safety facts are unchanged.
+    const idlessNames = [...new Set(list.filter((p) => p && !p.productId).map((p) => cleanText(p.name)).filter(Boolean))];
+    const writerRowsByName = new Map(rowsByName);
+    if (ids.length && idlessNames.length) {
+      const nameRows = await knex('products_catalog')
+        .whereIn('name', idlessNames)
+        .select('id', 'name', 'category', 'product_type', 'active_ingredient', 'epa_reg_number', 'approved_for_service_report');
+      for (const row of (Array.isArray(nameRows) ? nameRows : []).filter(catalogApprovedForReport)) {
+        const key = cleanText(row.name).toLowerCase();
+        if (!writerRowsByName.has(key)) writerRowsByName.set(key, row);
+      }
+    }
     const deterministicApplications = list.flatMap((selected) => {
       const catalog = selected?.productId
         ? rowsById.get(String(selected.productId))
@@ -469,7 +484,7 @@ async function loadProductSafety(products, knex) {
     const writerApplications = list.flatMap((selected) => {
       const catalog = selected?.productId
         ? rowsById.get(String(selected.productId))
-        : rowsByName.get(cleanText(selected?.name).toLowerCase());
+        : writerRowsByName.get(cleanText(selected?.name).toLowerCase());
       if (!catalog) return [];
       const method = cleanText(redactAccessCodes(selected?.applicationMethod));
       const role = [catalog.category, catalog.product_type]

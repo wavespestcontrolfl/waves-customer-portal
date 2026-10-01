@@ -499,3 +499,17 @@ describe('four-section report: supplied timeframes and dates', () => {
     expect(writerRulesRejection('You may see more ants for a few days; it is safe once dry.', { allowedPhrases })).toBe('safe_word');
   });
 });
+
+describe('four-section report: allowances stay in their sections', () => {
+  const allowedPhrases = ['about 1–2 weeks'];
+  const report = (did, expect) => `WHAT WE FOUND\nAnts.\nWHAT WE DID AND WHY\n${did}\nWHAT TO EXPECT\n${expect}\nWHAT'S NEXT\nCall us.`;
+
+  test('an approved timeframe passes in WHAT TO EXPECT, alone or inline', () => {
+    expect(writerRulesRejection(report('We placed bait.', 'Activity should drop off over about 1–2 weeks.'), { allowedPhrases })).toBeNull();
+    expect(writerRulesRejection('WHAT TO EXPECT: Activity should drop off over about 1–2 weeks.', { allowedPhrases })).toBeNull();
+  });
+
+  test('the same words in WHAT WE DID AND WHY are refused', () => {
+    expect(writerRulesRejection(report('The treatment keeps working for about 1–2 weeks.', 'Fewer ants.'), { allowedPhrases })).toBe('timeframe');
+  });
+});
