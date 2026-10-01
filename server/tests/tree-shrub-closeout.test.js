@@ -255,3 +255,38 @@ describe('injection label band', () => {
     }
   });
 });
+
+describe('injection record against the product label', () => {
+  const IMA_JET_10 = { id: 'ij-1', name: 'Arborjet Ima-Jet 10', category: 'insecticide', default_rate: '1-6', default_unit: 'ml/inch dbh', application_method: 'trunk_injection' };
+  const PHOSPHO = { id: 'pj-1', name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', category: 'fungicide', default_rate: '3.5-7', default_unit: 'ml/inch dbh', application_method: 'trunk_injection' };
+  const injectionCodes = (row, record) => validate({
+    products: [{ productId: row.id, name: row.name, totalAmount: 2, amountUnit: 'tsp' }],
+    productRows: [row],
+    completion: {
+      injectionRecord: {
+        plantSpecies: 'Live oak', product: row.name, dose: '3 tsp', numberOfPorts: 4,
+        targetIssue: 'Scale', followUpDate: '2026-10-15', sizeClassOrDbh: '10 in DBH', ...record,
+      },
+    },
+  }).blocks.map((block) => block.code).filter((code) => code.startsWith('tree_shrub_injection'));
+
+  test('a label split by the tech pick needs the band, picked for this product', () => {
+    expect(injectionCodes(IMA_JET_10, {})).toEqual(['tree_shrub_injection_band_required']);
+    expect(injectionCodes(IMA_JET_10, { labelBand: { product: 'Other', key: 'low' } })).toEqual(['tree_shrub_injection_band_required']);
+    expect(injectionCodes(IMA_JET_10, { labelBand: { product: IMA_JET_10.name, key: 'borers' } })).toEqual(['tree_shrub_injection_band_required']);
+    expect(injectionCodes(IMA_JET_10, { labelBand: { product: IMA_JET_10.name, key: 'low' } })).toEqual([]);
+    // Trunk size settles PHOSPHO-jet's band: nothing to pick.
+    expect(injectionCodes(PHOSPHO, {})).toEqual([]);
+  });
+
+  test('a per-inch label needs the trunk in inches above zero', () => {
+    for (const sizeClassOrDbh of ['0 in DBH', '. in DBH', '30 cm DBH', 'Large']) {
+      expect(injectionCodes(PHOSPHO, { sizeClassOrDbh })).toEqual(['tree_shrub_injection_dbh_inches']);
+    }
+    for (const sizeClassOrDbh of ['10 in DBH', '10', '12.5 inches']) {
+      expect(injectionCodes(PHOSPHO, { sizeClassOrDbh })).toEqual([]);
+    }
+    // A product typed by name, not on the visit, has no label to check against.
+    expect(injectionCodes(PHOSPHO, { product: 'Tree-age', sizeClassOrDbh: 'Large' })).toEqual([]);
+  });
+});

@@ -10931,6 +10931,7 @@ function isNoneLikeTreeShrubValue(value = "") {
 export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
+  injectionProducts = [],
   servicePhotos,
   service,
   customerRecap,
@@ -10992,7 +10993,17 @@ export function treeShrubCloseoutBlocksClient({
   if (closeout.injectionPerformed || productFlags.hasInjectionProduct) {
     const injection = closeout.injectionRecord || {};
     if (!String(injection.plantSpecies || "").trim()) push("Injection record requires plant species.", "injectionRecord.plantSpecies");
+    // The record's product, when it is one of this visit's injection products,
+    // brings its label: a per-inch label needs the trunk in inches, and a label
+    // split by the tech's pick needs that band (the server checks the same).
+    const labelRate = injectionProducts.find((product) => product.name === injection.product)?.rate || null;
+    const inches = trunkInchesText(injection.sizeClassOrDbh);
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
+    else if (labelRate?.basis === "inch" && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
+    const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand.key : "";
+    if (labelRate?.pick && !injectionBand(labelRate, inches, bandKey)) {
+      push(`Pick the ${labelRate.pick.toLowerCase()} for the injection dose.`, "injectionRecord.labelBand");
+    }
     if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
     if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
     // Nothing a tech records is in mL (owner ruling 2026-09-29); the server
@@ -11080,15 +11091,15 @@ export function TreeShrubCloseoutBlock({
   // product the form named itself follows the visit: when that product leaves
   // the visit, the record names the new only one, or none.
   const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
+  // The record marks a product the form named (productAuto), so a restored
+  // draft still knows it may follow the visit.
   const productTouched = useRef(false);
-  const autoProduct = useRef("");
   useEffect(() => {
     if (!injectionVisible || productTouched.current) return;
-    const autoNamed = record.product && record.product === autoProduct.current;
-    const stale = autoNamed && !injectionProducts.some((product) => product.name === record.product);
-    if ((!record.product || stale) && (onlyInjection || stale)) {
-      autoProduct.current = onlyInjection;
-      setInjectionField("product", onlyInjection);
+    const stale = Boolean(record.product) && record.productAuto === true &&
+      !injectionProducts.some((product) => product.name === record.product);
+    if ((!record.product && onlyInjection) || stale) {
+      onChange({ ...value, injectionRecord: { ...record, product: onlyInjection, productAuto: Boolean(onlyInjection) } });
     }
   }, [injectionVisible, onlyInjection, record.product, injectionProducts]);
   const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
@@ -11245,7 +11256,7 @@ export function TreeShrubCloseoutBlock({
                 const picked = e.target.value;
                 productTouched.current = true;
                 setOtherProduct(picked === "__other__");
-                setInjectionField("product", picked === "__other__" ? "" : picked);
+                onChange({ ...value, injectionRecord: { ...record, product: picked === "__other__" ? "" : picked, productAuto: false } });
               }}
               style={select}
             >
@@ -11261,7 +11272,7 @@ export function TreeShrubCloseoutBlock({
               value={record.product || ""}
               onChange={(e) => {
                 productTouched.current = true;
-                setInjectionField("product", e.target.value);
+                onChange({ ...value, injectionRecord: { ...record, product: e.target.value, productAuto: false } });
               }}
               placeholder="Injection product"
               style={input}
@@ -14773,6 +14784,7 @@ export function CompletionPanel({
     ? treeShrubCloseoutBlocksClient({
         closeout: treeShrubCloseout,
         productFlags: treeShrubProductFlags,
+        injectionProducts,
         servicePhotos,
         service,
         customerRecap,

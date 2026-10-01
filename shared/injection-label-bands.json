@@ -1,0 +1,128 @@
+[
+  {
+    "product": "IMA-jet 10",
+    "label": "EPA 74578-6",
+    "match": "\\bima[\\s-]*jet[\\s-]*10\\b",
+    "basis": "inch",
+    "pick": "Label rate",
+    "bands": [
+      {
+        "key": "low",
+        "label": "Low rate",
+        "low": 1,
+        "high": 2
+      },
+      {
+        "key": "high",
+        "label": "Larger tree or heavier pressure",
+        "low": 3,
+        "high": 6
+      }
+    ]
+  },
+  {
+    "product": "IMA-jet",
+    "label": "EPA 74578-1",
+    "match": "\\bima[\\s-]*jet\\b(?![\\s-]*10\\b)",
+    "basis": "inch",
+    "pick": "Target pest",
+    "bands": [
+      {
+        "key": "aphids_scales",
+        "label": "Aphids or scales",
+        "low": 2,
+        "high": 4
+      },
+      {
+        "key": "borers",
+        "label": "Borers (EAB)",
+        "low": 4,
+        "high": 8
+      }
+    ]
+  },
+  {
+    "product": "PHOSPHO-jet",
+    "label": "EPA 74578-3: 3.5 under 12 in, up to 7 for larger trees",
+    "match": "\\bphospho[\\s-]*jet\\b",
+    "basis": "inch",
+    "bands": [
+      {
+        "key": "under_12",
+        "label": "Under 12 in",
+        "maxInches": 12,
+        "low": 3.5,
+        "high": 3.5
+      },
+      {
+        "key": "12_up",
+        "label": "12 in and up",
+        "minInches": 12,
+        "low": 3.5,
+        "high": 7
+      }
+    ]
+  },
+  {
+    "product": "Propizol",
+    "label": "micro-injection use rate table, EPA 74578-8",
+    "match": "\\bpropizol\\b",
+    "basis": "inch",
+    "bands": [
+      {
+        "key": "label",
+        "label": "Label rate",
+        "low": 10,
+        "high": 20
+      }
+    ]
+  },
+  {
+    "product": "Mn-jet Fe",
+    "label": "label insert",
+    "match": "\\bmn[\\s-]*jet\\b",
+    "basis": "inch",
+    "pick": "Season",
+    "bands": [
+      {
+        "key": "low",
+        "label": "Low rate",
+        "low": 5,
+        "high": 5
+      },
+      {
+        "key": "late_season",
+        "label": "Late summer or fall",
+        "low": 10,
+        "high": 15
+      }
+    ]
+  },
+  {
+    "product": "PALM-jet Mg",
+    "label": "palm rates table",
+    "match": "\\bpalm[\\s-]*jet\\b",
+    "basis": "palm",
+    "pick": "Palm size",
+    "bands": [
+      {
+        "key": "small",
+        "label": "Small palm",
+        "low": 5,
+        "high": 10
+      },
+      {
+        "key": "medium",
+        "label": "Medium palm",
+        "low": 10,
+        "high": 20
+      },
+      {
+        "key": "large",
+        "label": "Large palm",
+        "low": 20,
+        "high": 30
+      }
+    ]
+  }
+]

@@ -9,6 +9,7 @@
 // label; the dose itself is entered as a number of tsp or fl oz.
 import { formatMeasuredAmount, formatMeasuredRange } from "./mix-amount";
 import { TSP_PER_FL_OZ, isMlUnit } from "./measure-units";
+import LABEL_BANDS from "../../../shared/injection-label-bands.json";
 
 const ML_PER_FL_OZ = 29.5735;
 
@@ -20,78 +21,15 @@ export const DOSE_UNITS = [
 
 // The label's own bands (owner ruling 2026-10-01, #5361): the catalog keeps
 // one display range per injectable, but each label splits it by trunk size,
-// palm size, target pest or season. Figures are mL per inch of trunk (or per
-// palm), cited from the catalog rows' label notes in
+// palm size, target pest or season. The table is shared with the server's
+// closeout check (shared/injection-label-bands.json): figures are mL per inch
+// of trunk (or per palm), cited from the catalog rows' label notes in
 // server/models/migrations/20260816000010_catalog_per_basis_rate_render.js.
 // A band picked by trunk size has minInches/maxInches (max exclusive); the
 // other bands are the tech's pick. An injectable with no row here gets no
 // worked-out dose: the record shows the label line only.
-export const INJECTION_LABEL_BANDS = [
-  {
-    // IMA-jet 10, EPA 74578-6.
-    match: /\bima[\s-]*jet[\s-]*10\b/i,
-    basis: "inch",
-    pick: "Label rate",
-    bands: [
-      { key: "low", label: "Low rate", low: 1, high: 2 },
-      { key: "high", label: "Larger tree or heavier pressure", low: 3, high: 6 },
-    ],
-  },
-  {
-    // IMA-jet, EPA 74578-1.
-    match: /\bima[\s-]*jet\b(?![\s-]*10\b)/i,
-    basis: "inch",
-    pick: "Target pest",
-    bands: [
-      { key: "aphids_scales", label: "Aphids or scales", low: 2, high: 4 },
-      { key: "borers", label: "Borers (EAB)", low: 4, high: 8 },
-    ],
-  },
-  {
-    // PHOSPHO-jet, EPA 74578-3: 3.5 under 12 in, up to 7 for larger trees.
-    match: /\bphospho[\s-]*jet\b/i,
-    basis: "inch",
-    bands: [
-      { key: "under_12", label: "Under 12 in", maxInches: 12, low: 3.5, high: 3.5 },
-      { key: "12_up", label: "12 in and up", minInches: 12, low: 3.5, high: 7 },
-    ],
-  },
-  {
-    // Propizol micro-injection use rate table, EPA 74578-8.
-    match: /\bpropizol\b/i,
-    basis: "inch",
-    bands: [{ key: "label", label: "Label rate", low: 10, high: 20 }],
-  },
-  {
-    // Mn-jet Fe label insert.
-    match: /\bmn[\s-]*jet\b/i,
-    basis: "inch",
-    pick: "Season",
-    bands: [
-      { key: "low", label: "Low rate", low: 5, high: 5 },
-      { key: "late_season", label: "Late summer or fall", low: 10, high: 15 },
-    ],
-  },
-  {
-    // PALM-jet Mg palm rates table.
-    match: /\bpalm[\s-]*jet\b/i,
-    basis: "palm",
-    pick: "Palm size",
-    bands: [
-      { key: "small", label: "Small palm", low: 5, high: 10 },
-      { key: "medium", label: "Medium palm", low: 10, high: 20 },
-      { key: "large", label: "Large palm", low: 20, high: 30 },
-    ],
-  },
-];
+export const INJECTION_LABEL_BANDS = LABEL_BANDS.map((row) => ({ ...row, match: new RegExp(row.match, "i") }));
 
-/**
- * A catalog label's injection rate: { low, high, basis, bands, pick } in mL
- * per inch of trunk (basis "inch") or per palm (basis "palm"); null for any
- * other label. `bands` is the label's band table (null when the product has
- * none, or when its catalog unit does not match the table's basis); `pick`
- * names the choice the tech makes between bands (null when trunk size picks).
- */
 function labelBasis(unit) {
   if (!isMlUnit(unit)) return null;
   const per = unit.split("/").slice(1).join("/").trim().toLowerCase();

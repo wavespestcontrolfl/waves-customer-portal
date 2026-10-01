@@ -55,6 +55,32 @@ function normalizeLabelBand(value) {
   return { product: compactText(value.product, 180), key };
 }
 
+// The injection label a catalog row carries (mirrors injectionLabelRate in
+// client/src/lib/injection-dose.js): its basis, mL per inch of trunk or per
+// palm, and the label's band table (shared/injection-label-bands.json; owner
+// ruling 2026-10-01, #5361) when the product has one for that basis.
+const INJECTION_LABEL_BANDS = require('../../shared/injection-label-bands.json')
+  .map((row) => ({ ...row, match: new RegExp(row.match, 'i') }));
+
+function injectionLabelOf(catalog = {}) {
+  const unit = String(catalog.default_unit ?? catalog.defaultUnit ?? '');
+  const [base, ...rest] = unit.split('/');
+  const normalizedBase = base.trim().toLowerCase();
+  if (!(normalizedBase === 'ml' || normalizedBase === 'cc' || /^millilit(er|re)s?$/.test(normalizedBase))) return null;
+  const per = rest.join('/').trim().toLowerCase();
+  const basis = /^(inch|in\b)/.test(per) ? 'inch' : /^palm/.test(per) ? 'palm' : null;
+  if (!basis) return null;
+  const name = String(catalog.name || '');
+  return { basis, table: INJECTION_LABEL_BANDS.find((row) => row.match.test(name) && row.basis === basis) || null };
+}
+
+// A trunk size in inches ("10 in DBH", "10", "10\""); anything else is NaN.
+// Mirrors trunkInchesText in client/src/lib/injection-dose.js.
+function trunkInches(value) {
+  const match = /^\s*(\d+\.?\d*|\.\d+)\s*(?:(?:in\.?|inch(?:es)?|")\s*(?:dbh)?|dbh)?\s*$/i.exec(String(value || ''));
+  return match ? Number(match[1]) : NaN;
+}
+
 function text(value) {
   return String(value || '').trim();
 }
@@ -468,7 +494,21 @@ function validateTreeShrubCloseout({
   if (injectionRequired) {
     const injection = normalized.injectionRecord || {};
     if (!injection.plantSpecies) pushBlock(blocks, 'tree_shrub_injection_species_required', 'Injection record requires plant species.', 'injectionRecord.plantSpecies');
+    // The record's product, when it is one of this visit's catalog products,
+    // brings its injection label: a per-inch label needs the trunk in inches,
+    // and a label the tech splits by pick needs that band.
+    const labelRef = productRefs.find((ref) => [ref.catalog?.name, ref.input?.name].map(text).includes(injection.product));
+    const label = labelRef ? injectionLabelOf(labelRef.catalog) : null;
     if (!injection.sizeClassOrDbh) pushBlock(blocks, 'tree_shrub_injection_size_required', 'Injection record requires DBH or palm size class.', 'injectionRecord.sizeClassOrDbh');
+    else if (label?.basis === 'inch' && !(trunkInches(injection.sizeClassOrDbh) > 0)) {
+      pushBlock(blocks, 'tree_shrub_injection_dbh_inches', 'Enter the trunk in inches.', 'injectionRecord.sizeClassOrDbh');
+    }
+    if (label?.table?.pick) {
+      const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand.key : '';
+      if (!label.table.bands.some((band) => band.key === bandKey)) {
+        pushBlock(blocks, 'tree_shrub_injection_band_required', `Pick the ${label.table.pick.toLowerCase()} for the injection dose.`, 'injectionRecord.labelBand');
+      }
+    }
     if (!injection.product) pushBlock(blocks, 'tree_shrub_injection_product_required', 'Injection record requires product.', 'injectionRecord.product');
     if (!injection.dose) pushBlock(blocks, 'tree_shrub_injection_dose_required', 'Injection record requires dose.', 'injectionRecord.dose');
     else if (ML_AMOUNT_TEXT.test(injection.dose)) pushBlock(blocks, 'tree_shrub_injection_dose_ml', 'Injection dose must be in tsp or fl oz, not mL.', 'injectionRecord.dose');

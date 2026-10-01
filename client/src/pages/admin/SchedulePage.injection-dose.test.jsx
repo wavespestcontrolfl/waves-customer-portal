@@ -7,7 +7,7 @@
 import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CompletionPanel, TreeShrubCloseoutBlock } from './SchedulePage';
+import { CompletionPanel, TreeShrubCloseoutBlock, treeShrubCloseoutBlocksClient } from './SchedulePage';
 import { injectionDoseText, injectionLabelRate, injectionLabelText } from '../../lib/injection-dose';
 
 vi.mock('../../hooks/useFeatureFlag', () => ({
@@ -185,6 +185,27 @@ describe('the injection record', () => {
     expect(screen.getByLabelText('Injection product').value).toBe(PHOSPHO_JET.name);
   });
 
+  it('follows the visit from a restored draft whose product the form named', async () => {
+    render(
+      <Block
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: IMA_JET.name, productAuto: true } }}
+      />,
+    );
+    await waitFor(() => expect(record().product).toBe(PHOSPHO_JET.name));
+  });
+
+  it('keeps a restored product the tech chose, even off the visit', async () => {
+    render(
+      <Block
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: IMA_JET.name, productAuto: false } }}
+      />,
+    );
+    await act(async () => {});
+    expect(record().product).toBe(IMA_JET.name);
+  });
+
   it('never reads a saved trunk size in another unit as inches', () => {
     render(
       <Block
@@ -310,5 +331,33 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     fireEvent.change(search, { target: { value: PHOSPHO_JET.name } });
     fireEvent.click(await screen.findByText(PHOSPHO_JET.name));
     await waitFor(() => expect(screen.getByLabelText('Injection product').value).toBe(PHOSPHO_JET.name));
+  });
+});
+
+describe('the closeout check against the product label', () => {
+  const blocksFor = (product, rate, record) => treeShrubCloseoutBlocksClient({
+    closeout: {
+      injectionPerformed: true,
+      injectionRecord: {
+        plantSpecies: 'Live oak', product, dose: '3 tsp', numberOfPorts: 4,
+        targetIssue: 'Scale', followUpDate: '2099-02-01', sizeClassOrDbh: '10 in DBH', ...record,
+      },
+    },
+    productFlags: { missingActuals: [] },
+    injectionProducts: [{ name: product, rate }],
+    servicePhotos: [], service: {}, customerRecap: '', notes: '', isIncompleteVisit: false,
+  }).filter((block) => block.field?.startsWith('injectionRecord')).map((block) => block.message);
+
+  it('needs the band a label is split by, picked for this product', () => {
+    expect(blocksFor(IMA_JET.name, IMA_RATE, {})).toEqual(['Pick the label rate for the injection dose.']);
+    expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: 'Other', key: 'low' } })).toEqual(['Pick the label rate for the injection dose.']);
+    expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: IMA_JET.name, key: 'low' } })).toEqual([]);
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, {})).toEqual([]);
+  });
+
+  it('needs a per-inch trunk in inches above zero', () => {
+    for (const sizeClassOrDbh of ['0 in DBH', '30 cm DBH']) {
+      expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { sizeClassOrDbh })).toEqual(['Enter the trunk in inches.']);
+    }
   });
 });
