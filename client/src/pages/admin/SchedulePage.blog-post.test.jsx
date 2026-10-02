@@ -96,6 +96,27 @@ describe('the blog post on the completion form', () => {
     expect(onSubmit.mock.calls[0][1].blogPostId).toBe(POST.id);
   });
 
+  it('a restored pick stays, shows and is sent while the search has not answered, for /complete to check (codex local r2 on #5547)', async () => {
+    blogResponse = () => { throw new Error('offline'); };
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({
+      serviceId: service.id,
+      savedAt: Date.now(),
+      notes: 'Ghost ants on the kitchen counter.',
+      blogPost: POST,
+    }));
+    const onSubmit = vi.fn().mockResolvedValue({});
+    await renderPanel({ onSubmit });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    expect(await screen.findByText(POST.title)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
+
+    const submit = await screen.findByRole('button', { name: /^Complete & Send Recap/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => fireEvent.click(submit));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][1].blogPostId).toBe(POST.id);
+  });
+
   it('no picker and no pick sent while the server answers unavailable (a visit whose line is not pest)', async () => {
     blogResponse = () => ({ available: false, posts: [] });
     localStorage.setItem(DRAFT_KEY, JSON.stringify({

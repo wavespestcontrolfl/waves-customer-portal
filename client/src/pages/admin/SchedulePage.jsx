@@ -13515,7 +13515,11 @@ export function CompletionPanel({
   const [customTip, setCustomTip] = useState("");
   // A Waves blog post for the customer (GATE_REPORT_BLOG_POST): pest visits
   // only; the search answers available:false while the switch is off.
-  const [blogPostAvailable, setBlogPostAvailable] = useState(false);
+  // Whether the server offers the blog search for this visit: "checking"
+  // until it answers, then "yes" or "no"; "unknown" when it could not be
+  // asked. A pick (a restored draft's) stays and is sent unless the answer
+  // is a firm "no": /complete checks it either way.
+  const [blogPostOffer, setBlogPostOffer] = useState("no");
   const [blogPost, setBlogPost] = useState(null);
   // Free-typed [Found]/[Next] note lines parked when an AI draft replaces
   // the notes (parkTaggedNoteLines). Their own state, NOT the textarea
@@ -14885,14 +14889,21 @@ export function CompletionPanel({
   // another lane owns those completions.
   useEffect(() => {
     let cancelled = false;
-    setBlogPostAvailable(false);
     setBlogPost(null);
-    if (!service.id || serviceCategory !== "pest") return () => { cancelled = true; };
+    if (!service.id || serviceCategory !== "pest") {
+      setBlogPostOffer("no");
+      return () => { cancelled = true; };
+    }
+    setBlogPostOffer("checking");
     adminFetch(`/admin/dispatch/${service.id}/blog-posts`)
-      .then((data) => { if (!cancelled) setBlogPostAvailable(data?.available === true); })
-      .catch(() => { if (!cancelled) setBlogPostAvailable(false); });
+      .then((data) => { if (!cancelled) setBlogPostOffer(data?.available === true ? "yes" : "no"); })
+      .catch(() => { if (!cancelled) setBlogPostOffer("unknown"); });
     return () => { cancelled = true; };
   }, [service.id, serviceCategory]);
+  const blogPostKept = !!blogPost && blogPostOffer !== "no";
+  // A kept pick shows while the answer is pending or failed, so it can be
+  // removed (a post /complete finds gone answers BLOG_POST_UNAVAILABLE).
+  const blogPostShown = blogPostOffer === "yes" || blogPostKept;
   const searchBlogPosts = useCallback(
     (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
     [service.id],
@@ -18186,7 +18197,7 @@ export function CompletionPanel({
           : null,
         // The Waves blog post picked for the customer: the id only; the server
         // checks it is live on the site and freezes its title and URL.
-        ...(blogPostAvailable && blogPost ? { blogPostId: blogPost.id } : {}),
+        ...(blogPostKept ? { blogPostId: blogPost.id } : {}),
         internalRecommendations,
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
@@ -20141,7 +20152,7 @@ export function CompletionPanel({
                 />
               </Field>
             )}
-            {blogPostAvailable && (
+            {blogPostShown && (
               <Field label="Blog post for the customer">
                 <BlogPostPicker
                   search={searchBlogPosts}
@@ -22601,7 +22612,7 @@ export function CompletionPanel({
                 />
               </div>
             )}
-            {blogPostAvailable && (
+            {blogPostShown && (
               <div style={{ marginBottom: 12 }}>
                 <label style={labelStyle}>Blog post for the customer</label>{" "}
                 <BlogPostPicker
