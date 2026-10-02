@@ -320,5 +320,10 @@ postgres('admin neighborhood gate-code routes', () => {
     expect(toGuard.status).toBe(200);
     expect(await trx('neighborhood_access').where({ id: a }).first()).toMatchObject({ access_type: 'guard', code: null, instructions: 'Check in at the booth' });
     expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/2468|1357|booth/);
+
+    // Back to keypad: the guard instructions are cleared, never kept beside the code.
+    const toKeypad = await call('PATCH', `/entries/${a}`, { access_type: 'keypad', code: '8642' });
+    expect(toKeypad.status).toBe(200);
+    expect(await trx('neighborhood_access').where({ id: a }).first()).toMatchObject({ access_type: 'keypad', code: '8642', instructions: null });
   });
 });

@@ -122,7 +122,17 @@ function validateEntry(body, current) {
     if (codeSupplied && rawCode) return { error: 'Only keypad entries take a code; put other access details in instructions' };
     if (!instructions) return { error: 'This entry type needs instructions' };
   }
-  return { value: { gate_label: label, access_type: merged.access_type, code, instructions: instructions || null } };
+  // A keypad entry is its code alone (as the filer stores it): instructions
+  // left over from an entry switched to keypad are cleared, never kept
+  // beside the code where the keypad form cannot show or edit them.
+  return {
+    value: {
+      gate_label: label,
+      access_type: merged.access_type,
+      code,
+      instructions: merged.access_type === 'keypad' ? null : (instructions || null),
+    },
+  };
 }
 
 async function liveCodeTaken(trx, neighborhoodId, code, exceptId) {
