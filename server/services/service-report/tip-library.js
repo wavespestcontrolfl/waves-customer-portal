@@ -386,7 +386,7 @@ const TIPS = Object.freeze([
     // Every general-pest identity: prod's one-time visit is the admin-created
     // one_time_pest_control row, migration-built databases its twin
     // pest_initial_cleanout (sms-book-funnel-map.js).
-    services: ["pest_initial_palmetto_knockdown", "pest_control", "pest_recurring", "pest_general_quarterly", "pest_general_bimonthly", "pest_general_monthly", "pest_general_semiannual", "pest_onetime", "one_time_pest_control", "pest_initial_cleanout"],
+    services: ["pest_initial_palmetto_knockdown", "pest_control", "pest_recurring", "pest_general_quarterly", "pest_general_bimonthly", "pest_general_monthly", "pest_general_semiannual", "waveguard_membership", "pest_onetime", "one_time_pest_control", "pest_initial_cleanout"],
     copy: "A drain nobody uses (a guest tub, a laundry sink, a floor drain in the garage) dries out its trap, and palmetto bugs come up through it from the line. Run water in each one once a week so the trap stays full.",
   },
 
@@ -504,25 +504,25 @@ const TIPS = Object.freeze([
   {
     id: 'rt_leave_traps', group: 'rodent', label: "Leave the traps where they are",
     keywords: ["traps", "move", "check", "attic", "garage"], lines: ["rodent"], season: 'all',
-    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "rodent_general_one_time"],
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion", "rodent_general_one_time"],
     copy: "Rats are wary of anything new, so traps work best once they've sat in place a few nights. Moving them or checking them yourself starts that over; I check them at every visit.",
   },
   {
     id: 'rt_note_noises', group: 'rodent', label: "Note when and where you hear them",
     keywords: ["noise", "scratching", "night", "ceiling", "attic"], lines: ["rodent"], season: 'all',
-    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "rodent_general_one_time"],
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion", "rodent_general_one_time"],
     copy: "The time of night and the room you hear scratching above show me where they're running. A quick note on your phone, like \"2 a.m., over the kitchen,\" helps me put the next traps right on that path.",
   },
   {
     id: 'rt_no_store_bait', group: 'rodent', label: "No store-bought rat bait inside",
     keywords: ["poison", "bait", "smell", "wall", "store"], lines: ["rodent"], season: 'all',
-    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "rodent_general_one_time"],
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion", "rodent_general_one_time"],
     copy: "A rat that eats store-bought bait usually dies wherever it is, often inside a wall or the attic, where the smell lasts for weeks. Leave the attic to the traps, and let me know before adding anything of your own.",
   },
   {
     id: 'rt_doors_closed', group: 'rodent', label: "Attic and garage doors closed",
     keywords: ["pets", "kids", "dog", "attic door", "garage"], lines: ["rodent"], season: 'all',
-    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "rodent_general_one_time"],
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion", "rodent_general_one_time"],
     copy: "The traps go where rodents run, not where people go, but a curious dog or child can still reach one in the garage. Keep the garage and attic doors closed while the traps are out.",
   },
 

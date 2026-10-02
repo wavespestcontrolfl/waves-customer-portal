@@ -261,11 +261,23 @@ describe('tipsForVisit', () => {
     }
   });
 
-  test('every trapping visit leads with the trapping tips, the additional trap checks too (codex local r2 on #5582)', () => {
-    const idsFor = (serviceKey) => tipsForVisit({ serviceLine: 'rodent', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id).sort();
+  // The keys come from the visit facts registry's own form lines, so a
+  // service added to the trapping or recurring pest form fails here until its
+  // tips reach it (codex local r2, r3 on #5582).
+  test('every visit on the trapping form, and the combined exclusion & trapping service, leads with the trapping tips', () => {
+    const { VISIT_FACTS_CONTRACT } = require('../config/visit-facts-contract');
     const trapping = ['rt_doors_closed', 'rt_leave_traps', 'rt_no_store_bait', 'rt_note_noises'];
-    for (const serviceKey of ['rodent_trapping', 'rodent_trapping_followup', 'rodent_trap_check_additional']) {
-      expect(idsFor(serviceKey)).toEqual(trapping);
+    for (const serviceKey of [...VISIT_FACTS_CONTRACT.rodent_trapping.catalogKeys, 'rodent_exclusion']) {
+      const lead = tipsForVisit({ serviceLine: 'rodent', serviceKey, date: '2026-10-02' }).groups[0];
+      expect(lead.id).toBe('for_service');
+      expect(lead.tips.map((tip) => tip.id)).toEqual(expect.arrayContaining(trapping));
+    }
+  });
+
+  test('every recurring pest visit leads with the drains tip', () => {
+    const { VISIT_FACTS_CONTRACT } = require('../config/visit-facts-contract');
+    for (const serviceKey of VISIT_FACTS_CONTRACT.recurring_pest.catalogKeys) {
+      expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toContain('pal_dry_drains');
     }
   });
 
