@@ -18,6 +18,7 @@ const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, c
 const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
+const { loadVisitLoops, emptyVisitLoops } = require('./visit-loops-facts');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -1064,7 +1065,7 @@ class ContextAggregator {
   // generateLlmReviewDraft) opt in explicitly with { includeLiveEta: true }.
   // false leaves upcomingServices[].liveEta and liveEtaGroups at their
   // empty/null defaults; every other field is unaffected.
-  async getContextForCustomer(customer, { includeLiveEta = false } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false } = {}) {
     // Parallel data fetch
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
@@ -1332,7 +1333,7 @@ class ContextAggregator {
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
 
-    return {
+    const context = {
       known: true,
       // LIVE ETA send-time freshness snapshot input (see the comment above
       // where this is built) — [{ minutes, scheduledServiceIds }], never
@@ -1479,6 +1480,29 @@ class ContextAggregator {
       sourceHealth: { recentCalls: recentCalls === null ? 'unavailable' : 'ok' },
       summary,
     };
+    // Visit status + open loops (live tech position, lateness, missed visit,
+    // promises we owe, asks still waiting): read-only facts the drafter needs.
+    // Non-enumerable, like scheduledServiceId above: this context is serialized
+    // whole into other LLM-visible payloads (managed assistant snapshot, email
+    // reply facts, lead-response tool results), and raw tech notes / open
+    // promise text must only reach the one prompt that renders them (the SMS
+    // drafter reads the property directly). Never throws; a failed field is
+    // null/[].
+    // Read only while GATE_SMS_REAL_ANSWERS is on: the SMS drafter is the one
+    // renderer, and a dark feature must not add queries to every context build.
+    let visitLoops = emptyVisitLoops();
+    // ...and only for the SMS drafting call sites that opt in (includeVisitLoops):
+    // email replies, briefs and assistant snapshots never read it.
+    if (includeVisitLoops && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+      try {
+        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row) });
+      } catch (err) {
+        logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
+        visitLoops = emptyVisitLoops();
+      }
+    }
+    Object.defineProperty(context, 'visitLoops', { value: visitLoops, enumerable: false, writable: true, configurable: true });
+    return context;
   }
 
   // Last few phone calls that produced an AI summary (call-recording-processor

@@ -4658,8 +4658,25 @@ function initScheduledJobs() {
             // window on its own facts. Same shared check the immediate
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
+            // Open-loop revalidation (PR #5499 r1): a promise the reply was grounded on
+            // can be fulfilled or dismissed before this fires. Fail-closed.
+            let openLoopsStale = false;
+            let openLoopsReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale && !labelStale && !reserviceStale) {
+              const { scheduledOpenLoopsBlockReason } = require('./agent-decision-send-checks');
+              const rawOpenLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, dbh: db });
+              // An unreadable recheck says nothing about the message (same as the LIVE ETA
+              // leg below): never retire on it — the provider-boundary open-loop check re-reads
+              // and, if still unreadable, refuses retryably onto the bounded retry rail.
+              if (rawOpenLoopsReason === 'open_loops_recheck_failed') {
+                logger.warn(`[scheduled-sms] ${msg.id} open-loop recheck unreadable; deferring to the provider-boundary check`);
+              } else if (rawOpenLoopsReason != null) {
+                openLoopsReason = rawOpenLoopsReason;
+                openLoopsStale = true;
+              }
+            }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale;
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4682,7 +4699,9 @@ function initScheduledJobs() {
                         ? 'stale_label_facts_agent_decision'
                         : reserviceStale
                           ? 'stale_reservice_agent_decision'
-                          : 'stale_eta_agent_decision';
+                          : openLoopsStale
+                            ? 'stale_open_loops_agent_decision'
+                            : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4718,7 +4737,9 @@ function initScheduledJobs() {
                             ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
                             : reserviceStale
                               ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
-                              : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                              : openLoopsStale
+                                ? `A promise this scheduled reply was written around is no longer open (${openLoopsReason}) — review the thread.`
+                                : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4987,12 +5008,14 @@ function initScheduledJobs() {
           // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
           // its request), composed AFTER any predicate the entry point registered.
           if (claimMeta.agent_decision_id) {
-            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
               // LABEL FACTS (Codex #5416 P1): same window, same boundary re-read of the latest visit.
               labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // open-loop facts (PR #5499) at the same boundary
+              openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),
             );
           }
           return require('./messaging/deferred-replay-registry')
