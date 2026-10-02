@@ -240,6 +240,15 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
 // So a pest only seen stays out: "treated for ants outside and saw roaches
 // inside" (codex local r19 on #5538).
 const SENTENCE_BREAK_RE = /[.!?;\n]/g;
+// "No sign of roaches", "no evidence of any ants": the pest is denied too.
+const PEST_DENIED_BEFORE_RE = /\b(?:no|not|never|without|zero)\s+(?:signs?|evidence|traces?|activity)\s+(?:of\s+)?(?:any\s+)?$/;
+// The ways a mention's own words deny the pest, read from the words before
+// and after it: "no roaches", "no sign of roaches", "roaches: none".
+const MENTION_DENIALS = [
+  (before) => DENIAL_RIGHT_BEFORE_RE.test(before),
+  (before) => PEST_DENIED_BEFORE_RE.test(before),
+  (before, after) => TRAILING_DENIAL.pest.test(after),
+];
 // Between two treatment words of one phrase ("applied bait", "placed bait
 // stations"): nothing, or only an article.
 const PHRASE_GAP_RE = /^\s*(?:(?:the|a|an|some|more)\s+)*$/;
@@ -296,11 +305,15 @@ function treatedInSentence(name, note, others) {
     // A mention whose own words deny the pest ties nothing: "no roaches",
     // "roaches weren't an issue" (codex local r24 on #5538); "ants, no
     // roaches" denies the roaches, not the ants (codex local r25).
-    if (DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at)) || TRAILING_DENIAL.pest.test(note.slice(end))) return false;
+    if (MENTION_DENIALS.some((denies) => denies(note.slice(0, at), note.slice(end)))) return false;
     const start = Math.max(0, ...sentenceBreaks.filter((i) => i < at).map((i) => i + 1));
     const stop = Math.min(note.length, ...sentenceBreaks.filter((i) => i >= end));
     const clauseStart = Math.max(start, ...clauseBreaks.filter((i) => i < at));
     const words = governingWords(note, start, stop);
+    // Nor does one whose own sighting is denied: "did not see roaches
+    // inside" never saw them (codex local r29 on #5538).
+    const seenBy = words.filter((w) => w.end <= at && w.at >= Math.max(start, ...clauseBreaks.filter((i) => i < at))).pop();
+    if (seenBy?.kind === 'observation' && DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, seenBy.at))) return false;
     if (!words.some((w) => w.kind === 'treatment')) {
       // A sentence that does nothing to the pests takes the next treatment in
       // the note, unless the note denies it or it names another pest heard:

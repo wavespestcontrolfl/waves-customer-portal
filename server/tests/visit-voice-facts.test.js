@@ -560,6 +560,16 @@ describe('validateVoiceFacts', () => {
       'Treated inside same as last time.'), 'Inside')).toBe('heard');
   });
 
+  test('a pest whose sighting is denied is never one the reading left out (codex local r29 on #5538)', () => {
+    const read = (note) => validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Sprayed outside' }],
+      pests: [{ name: 'ants', quote: 'Found ants outside' }],
+      spray: { method: 'not_said', quote: '' },
+    }, note);
+    expect(read('Found ants outside but did not see roaches inside. Sprayed outside.')).toMatchObject({ unclearPests: [], pests: [{ name: 'ants' }] });
+    expect(read('Found ants outside. No sign of roaches. Sprayed outside.').unclearPests).toEqual([]);
+  });
+
   test('a spray reading needs its own grounded quote that says it sprayed (pre-push P1 on #5538)', () => {
     const note = 'Did not spray today; placed bait inside for ants.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
