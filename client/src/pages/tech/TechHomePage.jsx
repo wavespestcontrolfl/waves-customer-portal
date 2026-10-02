@@ -266,7 +266,12 @@ const QUICK_ACTIONS = [
 
 export default function TechHomePage({ section = 'today' }) {
   const navigate = useNavigate();
-  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy } = useOutletContext() || {};
+  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null } = useOutletContext() || {};
+  // Identity comes from the profile the shell verified; the stored copy is
+  // only a fallback (a failed cache write can leave it missing or stale).
+  const staff = staffProfile?.id ? staffProfile : getAdminUser();
+  const staffRef = useRef(staff);
+  staffRef.current = staff;
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
@@ -276,7 +281,7 @@ export default function TechHomePage({ section = 'today' }) {
   // Last good route this device saw for this tech today (routeSnapshot.js).
   // Hydrated before the first fetch so a reopen in a dead zone shows the
   // saved stops at once instead of a spinner that ends in a red banner.
-  const [initialSnapshot] = useState(() => loadRouteSnapshot({ techId: getAdminUser()?.id, date: etDateString() }));
+  const [initialSnapshot] = useState(() => loadRouteSnapshot({ techId: staff?.id, date: etDateString() }));
   const [schedule, setSchedule] = useState(() => (initialSnapshot ? scheduleStateFromResponse(initialSnapshot.data).rows : []));
   // '' while the route on screen is live; otherwise the sentence that tells
   // the tech they are looking at a saved copy (refreshing, or offline).
@@ -352,11 +357,11 @@ export default function TechHomePage({ section = 'today' }) {
   // returns the whole route board (not tech-filtered), so without this
   // guard nextStop could land on another tech's job and the En Route
   // POST would 403 server-side (tech-track.js ownership guard).
-  const currentTechId = getAdminUser()?.id || null;
+  const currentTechId = staff?.id || null;
   // TechLayout refreshes this from /admin/auth/me on every load, so the
   // stored role tracks the server; hiding is UX only — the estimate APIs
   // enforce owner-only server-side regardless.
-  const currentRole = getAdminUser()?.role || null;
+  const currentRole = staff?.role || null;
 
   const scheduleSeq = useRef(0);
   const fetchSchedule = useCallback(async () => {
@@ -369,7 +374,7 @@ export default function TechHomePage({ section = 'today' }) {
     // every contact link until the lookup succeeds (r4 / r5 P2s).
     fetchTechLine();
     const today = etDateString();
-    const techId = getAdminUser()?.id || null;
+    const techId = staffRef.current?.id || null;
     // A request that hangs in a dead zone must not hold the page: cut it
     // off and fall back to the saved route (below) instead.
     const abort = typeof AbortController === 'function' ? new AbortController() : null;
@@ -1233,7 +1238,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onDirtyChange={setProjectEditorDirty}
                 onClose={closeProjectEditor}
                 onChanged={() => fetchSchedule()}
-                canAdminActions={getAdminUser()?.role === 'admin'}
+                canAdminActions={staff?.role === 'admin'}
               />
             </Suspense>
           </div>

@@ -35,11 +35,11 @@ function seedSnapshot(overrides = {}) {
   }));
 }
 
-function mount({ enabled = false, id = 'tech-fixture', path = '/tech' } = {}) {
+function mount({ enabled = false, id = 'tech-fixture', path = '/tech', staffProfile, storedProfile = true } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
-  localStorage.setItem('waves_admin_user', JSON.stringify({ id, name: 'Fixture Technician', role: 'technician' }));
+  if (storedProfile) localStorage.setItem('waves_admin_user', JSON.stringify({ id, name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/tech" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy, staffProfile }} />}>
       <Route index element={<TechHomePage />} />
     </Route>
   </Routes></MemoryRouter>);
@@ -183,6 +183,15 @@ it('never saves a route reply that lands after the page unmounted', async () => 
     deferredSchedule({ ok: true, status: 200, json: async () => ({ services: [row('late-one')], rainChance: 0 }) });
   });
   expect(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).toBeNull();
+});
+
+it('uses the profile the shell verified when no stored profile could be written', async () => {
+  // TechLayout verified the login but the profile cache write failed: the
+  // device has no stored profile, and identity comes from the shell.
+  mount({ storedProfile: false, staffProfile: { id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' } });
+  expect((await screen.findAllByText(/Fixture live-one/)).length).toBeGreaterThan(0);
+  expect(screen.queryByText(/Fixture foreign/)).not.toBeInTheDocument();
+  expect(JSON.parse(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).techId).toBe('tech-fixture');
 });
 
 it('falls back to the saved route when the live request times out', async () => {

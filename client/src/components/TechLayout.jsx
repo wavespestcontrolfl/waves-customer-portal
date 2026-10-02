@@ -41,6 +41,10 @@ export default function TechLayout() {
   const location = useLocation();
   const [techName, setTechName] = useState('Tech');
   const [techRole, setTechRole] = useState(null);
+  // The profile this shell verified (or, offline, the stored one it trusted).
+  // Pages read identity from here, so a failed profile cache write cannot
+  // leave them without the signed-in tech's id.
+  const [staffProfile, setStaffProfile] = useState(null);
   const [authStatus, setAuthStatus] = useState(() => (
     getAdminAuthToken() ? 'checking' : 'unauthenticated'
   ));
@@ -119,6 +123,7 @@ export default function TechLayout() {
         }
         setTechName(profile.name || getAdminDisplayName('Tech'));
         setTechRole(profile.role);
+        setStaffProfile(profile);
         if (profile.mustChangePassword) {
           navigate('/admin/change-password', { replace: true });
           return;
@@ -149,6 +154,7 @@ export default function TechLayout() {
         if (stored?.id && ['admin', 'technician'].includes(stored.role) && !stored.mustChangePassword) {
           setTechName(stored.name || getAdminDisplayName('Tech'));
           setTechRole(stored.role);
+          setStaffProfile(stored);
           setAuthStatus('ready');
           return;
         }
@@ -309,7 +315,7 @@ export default function TechLayout() {
   };
 
   return (
-    <TechFieldShell techName={techName} techRole={techRole} documentsAvailable={controlledDocumentsAvailable} payGrowthAvailable={payGrowthAvailable}>
+    <TechFieldShell techName={techName} techRole={techRole} staffProfile={staffProfile} documentsAvailable={controlledDocumentsAvailable} payGrowthAvailable={payGrowthAvailable}>
     <div style={{
       minHeight: '100dvh',
       background: DARK.bg,
@@ -355,7 +361,7 @@ export default function TechLayout() {
         <AddToHomeScreenHint />
         {pathname === '/tech/documents' && !controlledDocumentsAvailable
           ? <p style={{ fontSize: 14, color: DARK.text }}>Staff documents are unavailable.</p>
-          : <Outlet />}
+          : <Outlet context={{ staffProfile }} />}
       </main>
 
       {/* Bottom nav */}
