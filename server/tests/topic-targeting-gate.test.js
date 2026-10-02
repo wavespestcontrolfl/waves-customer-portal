@@ -1286,8 +1286,38 @@ describe('retired topics', () => {
     }
   });
 
-  test('registry size is deliberate (46: 51 proposed minus 5 kept live)', () => {
-    expect(gate._internals.RETIRED_POSTS).toHaveLength(46);
+  test('a live topic owner: its topic is refused for NEW blogs, its own URL and its refreshes are not', async () => {
+    const f = gate.evaluate(blog({ query: 'dollar spot treatment', category: 'lawn-care' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC);
+    expect(f).toMatchObject({ url: '/lawn-care/venice-dollar-spot-fungus-lawn-treatment/' });
+    expect(f.message).toMatch(/live post/);
+    for (const query of ['dollar spot management', 'dollar spot on st augustine', 'what causes dollar spot in lawns']) {
+      expect(gate.evaluate(blog({ query, category: 'lawn-care' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url: '/lawn-care/venice-dollar-spot-fungus-lawn-treatment/' });
+    }
+    expect(gate.evaluate(blog({ query: 'dollar weed control', category: 'lawn-care' }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    // Words from different fields never combine into the phrase (codex r5).
+    expect(gate.evaluate(blog({ query: 'lawn fungus guide', category: 'lawn-care', targeting: 'dollar weed control\u001eGray leaf spot treatment' }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    // Nor in a primary field (codex r6).
+    expect(gate.evaluate(blog({ query: 'dollar weed vs gray leaf spot', category: 'lawn-care' }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    // A field that itself spans lines still matches (codex r6).
+    expect(gate.evaluate(blog({ query: 'lawn fungus guide', category: 'lawn-care', targeting: 'What is\nDollar\nspot?' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC)).toBeTruthy();
+    // Through the real extractor: frontmatter meta + headings.
+    const { extraTargetingOf } = gate._internals;
+    if (extraTargetingOf) {
+      const targeting = extraTargetingOf({ frontmatter: { meta_description: 'Dollar weed guide', secondary_keywords: ['gray leaf spot'] } });
+      expect(gate.evaluate(blog({ query: 'lawn fungus guide', category: 'lawn-care', targeting }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    }
+    // Only in the other targeting fields (codex r4).
+    expect(gate.evaluate(blog({ query: 'lawn fungus guide', title: 'Lawn Fungus in Venice', category: 'lawn-care', targeting: 'Dollar spot on St. Augustine: what to do' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url: '/lawn-care/venice-dollar-spot-fungus-lawn-treatment/' });
+    const row = await gate.evaluateBlogPostRow({ slug: 'venice-dollar-spot-fungus-lawn-treatment', status: 'published' });
+    expect(row.skipped).toBe('already_live');
+    expect(gate.evaluate({ actionType: 'refresh_existing_page', query: 'dollar spot' }, { requireCorpus: false }).ok).toBe(true);
+    const { resolveRetiredLinks } = require('../services/content/retired-blog-links');
+    expect(resolveRetiredLinks(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/'])).toEqual(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/']);
+  });
+
+  test('registry size is deliberate (45 retired of 51 proposed, plus 1 live topic owner)', () => {
+    expect(gate._internals.RETIRED_POSTS.filter((p) => !p.live)).toHaveLength(45);
+    expect(gate._internals.RETIRED_POSTS.filter((p) => p.live).map((p) => p.url)).toEqual(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/']);
   });
 
   test('a different topic in the same family still passes', () => {
@@ -1310,7 +1340,7 @@ describe('retired topics', () => {
     const { RETIRED_POSTS } = gate._internals;
     const urls = RETIRED_POSTS.map((p) => p.url);
     expect(new Set(urls).size).toBe(urls.length);
-    for (const p of RETIRED_POSTS) {
+    for (const p of RETIRED_POSTS.filter((r) => !r.live)) {
       expect(p.url).toMatch(/^\/[a-z-]+\/[a-z0-9-]+\/$/);
       expect(p.merged_into).toMatch(/^\/[a-z0-9-]+\/(?:[a-z0-9-]+\/)?$/);
       expect(urls).not.toContain(p.merged_into);

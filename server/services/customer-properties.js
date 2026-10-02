@@ -12,6 +12,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { sameStreetLine } = require('./neighborhood-access');
 
 // 'family_occupied' (owner ruling 2026-09-08): a home the customer owns or
 // pays for that a FAMILY MEMBER lives in — neither owner-occupied nor a
@@ -62,6 +63,16 @@ const STREET_SUFFIX_CANON = {
   blvd: 'boulevard', boulevard: 'boulevard', cir: 'circle', circle: 'circle',
   pl: 'place', place: 'place', ter: 'terrace', terrace: 'terrace', way: 'way',
   trl: 'trail', trail: 'trail', pkwy: 'parkway', parkway: 'parkway', hwy: 'highway', highway: 'highway',
+  // USPS forms added 2026-10-01: a call re-recorded a "... Gln" signup address
+  // as "... Glen" and minted a second property for one house. Changing this
+  // map changes stored keys: migration 20261002090000 recomputes them.
+  gln: 'glen', glen: 'glen', cv: 'cove', cove: 'cove', trce: 'trace', trace: 'trace',
+  xing: 'crossing', crossing: 'crossing', lndg: 'landing', landing: 'landing',
+  rdg: 'ridge', ridge: 'ridge', crk: 'creek', creek: 'creek', holw: 'hollow', hollow: 'hollow',
+  sq: 'square', square: 'square', bnd: 'bend', bend: 'bend', aly: 'alley', alley: 'alley',
+  vw: 'view', view: 'view', vis: 'vista', vista: 'vista', cswy: 'causeway', causeway: 'causeway',
+  plz: 'plaza', plaza: 'plaza', pt: 'point', point: 'point', mdw: 'meadow', meadow: 'meadow',
+  mdws: 'meadows', meadows: 'meadows', hts: 'heights', heights: 'heights', psge: 'passage', passage: 'passage',
 };
 const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
   .split(/\s+/).map((w) => STREET_SUFFIX_CANON[w] || w).join(' ');
@@ -89,18 +100,40 @@ const stripUnitDesignators = (s) => String(s || '')
   .trim();
 
 /**
- * Normalized key for the FULL service address — street + unit + city + ZIP — so
- * "100 Main St, Bradenton" and "100 Main St, Sarasota" are DISTINCT, and so are
- * two units at one street ("100 Main Unit A" vs "Unit B"). Suffix-canonical
- * ("123 Main St" == "123 Main Street") and ZIP+4-insensitive. Stored in the
- * customer_properties.address_key column and uniquely indexed, so the DB
- * uniqueness uses the SAME normalization as this helper (no JS/SQL drift).
+ * Normalized key for the FULL service address — street + unit + locality — so
+ * two units at one street ("100 Main Unit A" vs "Unit B") stay DISTINCT.
+ * Suffix-canonical ("123 Main St" == "123 Main Street", "Gln" == "Glen") and
+ * ZIP+4-insensitive. Only the STREET words are suffix-mapped; the unit keeps
+ * unitKey's normalization, so a unit "PT" is never rewritten.
+ *
+ * Locality is the 5-digit ZIP when there is one, else the city: one ZIP
+ * carries several mailing names (Parrish / Duette 34219, Bradenton /
+ * Lakewood Ranch 34211), so the same house arrives under either, while
+ * "100 Main St, Bradenton" vs "100 Main St, Sarasota" with no ZIP stay
+ * distinct. Stored in customer_properties.address_key and uniquely indexed,
+ * so the DB uniqueness uses this same normalization (no JS/SQL drift); any
+ * change here needs a migration that recomputes the stored keys.
  */
+const INLINE_UNIT_TAIL_RE = /\s(?:(?:apt|apartment|unit|ste|suite)\b|#)\s*(\S.*)$/i;
+
 function addressKey({ address_line1, address_line2, city, zip } = {}) {
-  // Strip unit designators across the COMBINED street + unit so an embedded unit
-  // ("100 Main St Apt 4") keys the same as the split form ("100 Main St" + "Apt 4").
-  const streetUnit = stripUnitDesignators([address_line1, address_line2].filter(Boolean).join(' '));
-  return canonicalizeAddress([streetUnit, city, normalizeZip(zip)].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
+  // Punctuation first, so the unit is found the same way however it was
+  // typed: "Apt 4." / "St#4" / "St, #4" all read as "St #4".
+  const line1 = String(address_line1 || '').replace(/[.,]/g, ' ').replace(/#/g, ' #').replace(/\s+/g, ' ').trim();
+  // The unit typed in line 1 is everything from its first designator on
+  // ("Apt 4 Building A" / "Unit PT Building A" key like the same text in
+  // line 2), so no unit is ever dropped or suffix-mapped. A street that is
+  // itself named "Unit ..." reads as a unit too; both spellings of it then
+  // still key alike, and the worst case is a second property, never a merge.
+  const inline = line1.match(INLINE_UNIT_TAIL_RE);
+  const street = streetKey(inline ? line1.slice(0, inline.index) : line1);
+  // Both unit sources count ("100 Main St Apt 4" + "Building A" is not Apt
+  // 5 in Building A); the same unit given twice counts once.
+  const embedded = inline ? unitKey(inline[1]) : '';
+  const line2 = unitKey(address_line2);
+  const unit = embedded && line2 && embedded !== line2 ? `${embedded}${line2}` : (embedded || line2);
+  const locality = normalizeZip(zip) || normStreet(city);
+  return `${street}${unit}${locality}`;
 }
 
 /**
@@ -520,6 +553,25 @@ async function completePrimaryCore(customerId, call, conn) {
  * occupancy_type, label, or the property-grained attributes. No-op when the
  * primary already matches.
  */
+// The neighborhood columns to clear when the address moves to a different
+// street, city, state or ZIP — compared canonically (the neighborhood
+// directory's own street normalizer: USPS suffix and directional spellings,
+// unit tails; city/state case and ZIP+4 ignored), so a unit-only or
+// format-only edit ("100 Bay Cove" → "100 Bay Cv") clears nothing.
+function neighborhoodResetOnMove(from, to) {
+  const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  // sameStreetLine compares the street only, so the house number is its own test.
+  const houseNumber = (line) => (String(line || '').match(/^\s*(\d+)/) || [])[1] || '';
+  const moved = houseNumber(from.address_line1) !== houseNumber(to.address_line1)
+    || !sameStreetLine(stripTrailingUnit(from.address_line1), stripTrailingUnit(to.address_line1))
+    || !same(from.city, to.city)
+    || !same(from.state, to.state)
+    || normalizeZip(from.zip) !== normalizeZip(to.zip);
+  return moved
+    ? { neighborhood_id: null, neighborhood_source: null, county_subdivision: null, neighborhood_checked_at: null }
+    : {};
+}
+
 async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = false, preserveCoords = false } = {}) {
   const customer = typeof customerOrId === 'string'
     ? await conn('customers').where({ id: customerOrId }).first()
@@ -562,6 +614,10 @@ async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = fal
     next.latitude = null;
     next.longitude = null;
   }
+  // A street/locality move takes the property out of its neighborhood (and
+  // the shared gate code) — an office pick included — so clear it for a later
+  // relink, whatever the caller does with coords.
+  Object.assign(next, neighborhoodResetOnMove(primary, next));
   next.updated_at = new Date();
   // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
   // mirror edit + surface a 409 on a unique address-index collision rather than

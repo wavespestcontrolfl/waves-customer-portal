@@ -65,3 +65,25 @@ test('an application scope reads that application\'s applicant replies up to the
   expect(result.notificationsCleared).toBeGreaterThanOrEqual(2);
   bellSpy.mockRestore(); sidSpy.mockRestore();
 });
+
+// A hidden recruiting reply never rings the customer's thread bell, so it must
+// not hold that bell open: the customer-wide "nothing unread left" check behind
+// markInboundSmsRead leaves job_* rows out of both its unified and legacy reads.
+test('markInboundSmsRead\'s thread cross-clear ignores unread recruiting messages when judging whether the thread is fully read', async () => {
+  const { markInboundSmsRead } = require('../services/inbound-sms-read');
+  const NotificationService = require('../services/notification-service');
+  const bellSpy = jest.spyOn(NotificationService, 'markInboundSmsReadAdmin').mockResolvedValue(1);
+  const chains = [];
+  db.mockImplementation(() => {
+    const q = chain([]);
+    ['from', 'whereNotExists', 'distinct', 'whereRaw'].forEach((m) => { q[m] = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q, q); return q; }); });
+    q.then = (res) => Promise.resolve([{ customer_id: 'cust-1' }]).then(res);
+    chains.push(q);
+    return q;
+  });
+  await markInboundSmsRead({ conversationIds: ['conv-1'], readBefore: new Date(), adminUserId: 'tech-1', role: 'technician' }).catch(() => {});
+  const orWhereNotLike = (q, col) => q.orWhere.mock.calls.some((c) => c[0] === col && c[1] === 'not like' && c[2] === 'job\\_%');
+  expect(chains.some((q) => orWhereNotLike(q, 'm.message_type'))).toBe(true);
+  expect(chains.some((q) => orWhereNotLike(q, 'l.message_type'))).toBe(true);
+  bellSpy.mockRestore();
+});
