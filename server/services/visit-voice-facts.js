@@ -33,7 +33,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
 
 // Bump on any prompt or schema change.
-const VOICE_FACTS_VERSION = 'visit-voice-facts-v5';
+const VOICE_FACTS_VERSION = 'visit-voice-facts-v6';
 // A dictated visit note runs a few hundred characters. A longer one is never
 // cut short (a fact said past the cut would go unread while the report
 // writer read the note whole): it is refused as too long, and the sheet asks
@@ -105,10 +105,15 @@ const VOICE_FACTS_SCHEMA = {
 // own name for a pest; a quote without one is read whole. A negative anywhere
 // else is about something else ("customer was not home and I sprayed around
 // the house", "sprayed around the house with no issues"), so it never holds
-// the visit.
-const DENIAL_WORDS = String.raw`no|not|none|never|nothing|zero|without|nowhere|didn'?t|doesn'?t|don'?t|wasn'?t|weren'?t|isn'?t|aren'?t|hadn'?t|haven'?t|couldn'?t|cannot|can'?t`;
+// the visit. A word that says the treatment was left out reads as a denial
+// in the same place ("skipped treating the garage", "avoided spraying
+// inside", "held off on baiting"), and a quote that calls its own treatment
+// undone ("left the garage untreated") never counts.
+const DENIAL_WORDS = String.raw`no|not|none|never|nothing|zero|without|nowhere|didn'?t|doesn'?t|don'?t|wasn'?t|weren'?t|isn'?t|aren'?t|hadn'?t|haven'?t|couldn'?t|cannot|can'?t`
+  + String.raw`|skip(?:s|ped|ping)?|avoid(?:s|ed|ing)?|(?:held|hold|holding)\s+off(?:\s+on)?|forgot|refused|declined|omitted|passed\s+on`;
 const DENIAL_RIGHT_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS})\s+$`);
 const DENIAL_IN_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS})\b`);
+const UNDONE_RE = /\b(?:untreated|unsprayed|unbaited)\b/;
 const TREATMENT_WORD_RE = /\b(?:spray|treat|bait|dust|spread|granul|plac|appli|apply|station|glue board)[a-z]*/;
 // A short denial right after the assertion, comma or not, in the words of the
 // fact it denies: a pest looked for and not there ("checked for spiders,
@@ -157,6 +162,16 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
 
 const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DENIAL.treatment };
 
+// An area whose own word the quote denies ("sprayed outside but not the
+// garage", "treated everything except inside") is not heard there: the
+// place's plain words, after a denial, "except", "but not", "other than" or
+// "instead of".
+const AREA_WORDS = { inside: 'inside|interior|indoors', outside: 'outside|exterior|outdoors|perimeter', garage: 'garage' };
+const AREA_DENIED_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area, words]) => [
+  area,
+  new RegExp(String.raw`\b(?:${DENIAL_WORDS}|except|but\s+not|other\s+than|instead\s+of)\s+(?:(?:in|on|at|to)\s+)?(?:the\s+|a\s+|any\s+)?(?:${words})\b`),
+]));
+
 // Rules only; the note rides the user channel as labeled data.
 const VOICE_FACTS_SYSTEM_PROMPT = `You read a Waves Pest Control technician's own note about the visit they just finished and pick out three facts, using ONLY the note.
 
@@ -164,7 +179,7 @@ areas: where the technician put product down (sprayed, baited, dusted, spread gr
 - "inside": anywhere inside the home (kitchen, bathrooms, baseboards, cabinets, under sinks, inside door tracks, attic, any room).
 - "outside": anywhere outside the home (around the house, perimeter, foundation, eaves, lanai, patio, yard, mulch beds, outside door frames).
 - "garage": the garage.
-List an area only when the note says product went down there. A place the technician only looked at or inspected, where pests were seen but nothing was applied, or that the note says was not treated ("did not treat inside", "skipped the garage"), is NOT an area. For each area give a quote: the exact words from the note that say product went down there, including the word that says so (sprayed, baited, treated, dusted, placed…), copied character for character.
+List an area only when the note says product went down there. A place the technician only looked at or inspected, where pests were seen but nothing was applied, or that the note says was not treated ("did not treat inside", "skipped the garage", "avoided spraying inside", "left the garage untreated"), is NOT an area. For each area give a quote: the exact words from the note that say product went down there, including the word that says so (sprayed, baited, treated, dusted, placed…), copied character for character.
 
 pests: the pests the treatment was for, in the technician's OWN words (for example "ghost ants", "roaches", "palmetto bugs"). Keep the technician's word exactly: never change it to another name or to a species they did not say ("roaches" stays "roaches", never "German roaches"). A pest the note says was not found ("no roaches") is not listed. For each pest give name (the technician's own words, at most ${MAX_PEST_WORDS} words) and a quote: the exact words from the note that contain that name.
 
@@ -212,7 +227,7 @@ function pestName(name, quote) {
 // the quote, else the quote and whether the note denies it there.
 function readQuote(quote, note, fact) {
   const grounded = groundedQuote(quote, note);
-  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note, fact) } : null;
+  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note, fact) || UNDONE_RE.test(grounded) } : null;
 }
 const listOf = (value) => (Array.isArray(value) ? value : []);
 
@@ -229,7 +244,7 @@ function validateVoiceFacts(json, note) {
     // treated inside): never recorded, and never silently dropped either,
     // since a missed indoor treatment loses the customer's indoor wait. The
     // sheet holds until the note is read again or the tech says it plainly.
-    if (!read || read.denied || !treatmentAssertion(read.quote)) unresolvedAreas.add(entry.area);
+    if (!read || read.denied || !treatmentAssertion(read.quote) || AREA_DENIED_RE[entry.area].test(read.quote)) unresolvedAreas.add(entry.area);
     else if (!heardAreas.has(entry.area)) heardAreas.set(entry.area, read.quote);
   }
   const pests = new Map();

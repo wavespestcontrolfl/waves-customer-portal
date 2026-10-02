@@ -278,6 +278,52 @@ describe('validateVoiceFacts', () => {
     expect(facts.spray).toMatchObject({ method: 'perimeter' });
   });
 
+  test('words that say a treatment was left out deny it (GitHub Codex P1 on #5538)', () => {
+    const note = 'Skipped treating the garage; sprayed outside for ants. Avoided spraying inside because of the baby.';
+    const facts = validateVoiceFacts({
+      areas: [
+        { area: 'garage', quote: 'Skipped treating the garage' },
+        { area: 'outside', quote: 'sprayed outside for ants' },
+        { area: 'inside', quote: 'spraying inside' },
+      ],
+      pests: [],
+      spray: { method: 'not_said', quote: '' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside']);
+    expect(facts.unclearAreas).toEqual(['Inside', 'Garage']);
+  });
+
+  test('a quote that calls its treatment undone, or denies its own place, is unclear (GitHub Codex P1 on #5538)', () => {
+    const note = 'Left the garage untreated, sprayed outside. Sprayed outside but not the garage. Treated everything except inside.';
+    const read = (area, quote) => validateVoiceFacts({ areas: [{ area, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
+    expect(read('garage', 'Left the garage untreated, sprayed outside')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
+    expect(read('garage', 'Sprayed outside but not the garage')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
+    expect(read('inside', 'Treated everything except inside')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
+    expect(read('outside', 'Sprayed outside but not the garage').areas.map((entry) => entry.area)).toEqual(['Outside']);
+  });
+
+  test('a spray its own words leave out is unclear, never a perimeter (GitHub Codex P1 on #5538)', () => {
+    const note = 'Held off on spraying around the house because of rain. The perimeter was left untreated. Baited the kitchen.';
+    const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
+    expect(read({ method: 'perimeter', quote: 'spraying around the house' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'perimeter', quote: 'The perimeter was left untreated' })).toMatchObject({ spray: null, unclearSpray: true });
+  });
+
+  test('a refusal, an omission or a placement about something else never holds a place', () => {
+    const note = 'Customer refused interior service, sprayed around the outside of the house. Left out a glue board in the garage and left it alone. Sprayed around the house except the lanai.';
+    const facts = validateVoiceFacts({
+      areas: [
+        { area: 'outside', quote: 'sprayed around the outside of the house' },
+        { area: 'garage', quote: 'Left out a glue board in the garage and left it alone' },
+      ],
+      pests: [],
+      spray: { method: 'perimeter', quote: 'Sprayed around the house except the lanai' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside', 'Garage']);
+    expect(facts.unclearAreas).toEqual([]);
+    expect(facts.spray).toMatchObject({ method: 'perimeter' });
+  });
+
   test('a fact said twice stands when one saying is not denied', () => {
     const note = 'Did not treat inside yesterday. Today we treat inside the kitchen.';
     const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'treat inside' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
