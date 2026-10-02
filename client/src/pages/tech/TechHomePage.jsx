@@ -167,6 +167,29 @@ function openTypedCompletion(service) {
 // /api/* that returns parsed JSON and throws on non-2xx. Lets the shared
 // ServiceRecapModal use the same `request(path, options)` contract as the
 // admin surface (which passes adminFetch).
+// One outcome per route read, so the page decides once:
+//   live     — a usable route payload;
+//   offline  — no usable answer reached the phone: fetch rejected (dead
+//              zone, timeout abort), or a 2xx whose body stalled, dropped or
+//              is not a route (captive portal HTML) — never an empty route;
+//   refused  — the server said no to this login (401/403);
+//   failed   — any other server answer (5xx...), with its message.
+async function readRoute(date, token, signal) {
+  let res;
+  try {
+    res = await fetch(`${API}/api/admin/schedule?date=${date}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      ...(signal ? { signal } : {}),
+    });
+  } catch {
+    return { kind: 'offline' };
+  }
+  const data = await res.json().catch(() => null);
+  if (res.ok) return isSchedulePayload(data) ? { kind: 'live', data } : { kind: 'offline' };
+  const message = data?.error || `Route failed to load (${res.status})`;
+  return { kind: res.status === 401 || res.status === 403 ? 'refused' : 'failed', message };
+}
+
 async function techRequest(path, options = {}) {
   const token = getAdminAuthToken();
   const res = await fetch(`${API}/api${path}`, {
@@ -350,7 +373,9 @@ export default function TechHomePage({ section = 'today' }) {
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
-  const techName = getAdminDisplayName('Tech');
+  // The verified profile's name first: the greeting and the timecard
+  // signature pre-fill must not fall back to a stale or missing stored copy.
+  const techName = staff?.name || getAdminDisplayName('Tech');
   const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
   // Use it to scope `schedule` to this tech's own jobs — /api/admin/schedule
@@ -385,63 +410,34 @@ export default function TechHomePage({ section = 'today' }) {
     // device or onto the screen.
     const sessionEnded = () => getAdminAuthToken() !== token;
     try {
-      const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        ...(abort ? { signal: abort.signal } : {}),
-      });
-      // A body that fails after the headers arrive (timeout abort, the
-      // connection dropping mid-body, a captive portal's HTML on a 200) is
-      // still a dead zone: hand it to the offline handler instead of reading
-      // it as an empty route. A non-JSON body on an error status just keeps
-      // the status message.
-      let data;
-      try {
-        data = await res.json();
-      } catch (bodyErr) {
-        if (res.ok) throw Object.assign(bodyErr instanceof Error ? bodyErr : new Error('Route body unreadable'), { bodyRead: true });
-        data = {};
-      }
+      const result = await readRoute(today, token, abort?.signal);
+      // The server refused this login's route: the saved copy and offline
+      // pass go now (the session guard ends a 401'd session). Skipped when
+      // another login has taken over since the request left.
+      if (result.kind === 'refused' && !sessionEnded()) clearStaffDeviceData();
       if (seq !== scheduleSeq.current || sessionEnded()) return;
-      if (!res.ok) throw Object.assign(new Error(data.error || `Route failed to load (${res.status})`), { status: res.status });
-      if (!isSchedulePayload(data)) throw Object.assign(new Error('Route payload unreadable'), { bodyRead: true });
-      const next = scheduleStateFromResponse(data);
-      setScheduleError('');
-      setRouteNotice('');
-      setSchedule(next.rows);
-      setRainChance(next.rainChance);
-      // Keep only this tech's own stops on the device: the board payload
-      // carries every tech's route, and the saved copy needs just the rows
-      // this page would render for this login.
-      saveRouteSnapshot({ techId, date: today, data: {
-        visitCloseout: data?.visitCloseout === true,
-        rainChance: next.rainChance,
-        services: scheduleRowsFromResponse(data).filter((s) => String(serviceTechnicianId(s)) === String(techId)),
-      } });
-    } catch (err) {
-      // The server refused this login's route: the saved copy goes now, and
-      // a 401 ends the session so an offline reopen cannot unlock the shell
-      // from the stored profile either. Skipped when another login has taken
-      // over since the request left.
-      const ended = sessionEnded();
-      if ((err?.status === 401 || err?.status === 403) && !ended) {
-        clearStaffDeviceData();
-        if (err.status === 401) {
-          localStorage.removeItem('waves_admin_token');
-          localStorage.removeItem('adminToken');
-          localStorage.removeItem('waves_admin_user');
-        }
+      if (result.kind === 'live') {
+        const next = scheduleStateFromResponse(result.data);
+        setScheduleError('');
+        setRouteNotice('');
+        setSchedule(next.rows);
+        setRainChance(next.rainChance);
+        // Keep only this tech's own stops on the device: the board payload
+        // carries every tech's route, and the saved copy needs just the rows
+        // this page would render for this login.
+        saveRouteSnapshot({ techId, date: today, data: {
+          visitCloseout: result.data?.visitCloseout === true,
+          rainChance: next.rainChance,
+          services: scheduleRowsFromResponse(result.data).filter((s) => String(serviceTechnicianId(s)) === String(techId)),
+        } });
+        return;
       }
-      if (seq !== scheduleSeq.current || ended) return;
-      console.error('Failed to fetch schedule:', err);
+      console.error('Failed to fetch schedule:', result.kind, result.message || '');
       // Offline fallback: the last good route this tech loaded today, read
-      // fresh each time (another tab or a later login may have replaced
-      // it). A 401/403 is not a connectivity failure — the server answered
-      // and said no — so the saved copy stays hidden behind the real error.
-      // fetch() rejects with a TypeError when the network is unreachable
-      // ("Failed to fetch" / "Load failed"); our own non-ok throw above is a
-      // plain Error and the timeout aborts with AbortError.
-      const offline = err?.name === 'AbortError' || err instanceof TypeError || err?.bodyRead === true;
-      const snapshot = offline ? loadRouteSnapshot({ techId, date: today }) : null;
+      // fresh each time (another tab or a later login may have replaced it).
+      // A server answer of any kind keeps the saved copy hidden behind the
+      // real error.
+      const snapshot = result.kind === 'offline' ? loadRouteSnapshot({ techId, date: today }) : null;
       if (snapshot) {
         const saved = scheduleStateFromResponse(snapshot.data);
         setSchedule(saved.rows);
@@ -454,7 +450,7 @@ export default function TechHomePage({ section = 'today' }) {
         setSchedule([]);
         setRainChance(null);
         setRouteNotice('');
-        setScheduleError(offline ? 'Your route could not be loaded (no connection).' : (err.message || 'Your route could not be loaded.'));
+        setScheduleError(result.kind === 'offline' ? 'Your route could not be loaded (no connection).' : result.message);
       }
     } finally {
       if (timer) clearTimeout(timer);

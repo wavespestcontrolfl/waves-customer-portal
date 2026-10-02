@@ -1,11 +1,13 @@
-// One place that notices a rejected staff session on the tech shell.
+// One place that notices a rejected staff session.
 //
 // Tech screens call fetch() directly from dozens of handlers (route read,
 // en-route, on-site, timesheet, rain-out, ...). Most turn a 401 into an
 // inline error and keep the token, the stored profile and the saved route on
 // the device — and the offline fallback in TechLayout would later unlock the
-// shell from that profile. TechLayout installs this guard while it is
-// mounted: any API response (/api/*) that answers 401 to a request carrying
+// shell from that profile. main.jsx installs it once for the whole app
+// (admin pages included, since a tech can leave /tech for /admin/*) to
+// delete the offline data; TechLayout adds one while it is mounted that
+// also ends the session and goes to login. Any API response (/api/*) that answers 401 to a request carrying
 // the CURRENT staff token calls onRejected once. Staff routes are not only
 // /admin and /tech (visual moments, dispatch, knowledge and more sit behind
 // the same admin-auth middleware), so the token, not the path, decides.
@@ -35,15 +37,16 @@ function requestParts(input, init) {
 export function installStaffSessionGuard({ getToken, onRejected, target = globalThis }) {
   const original = target.fetch;
   if (typeof original !== 'function') return () => {};
-  let fired = false;
+  // Once per token: a later login gets a fresh guard.
+  let firedFor = null;
   const guarded = async function guardedFetch(input, init) {
     const response = await original.call(this, input, init);
     try {
       const token = getToken();
-      if (!fired && response?.status === 401 && token) {
+      if (firedFor !== token && response?.status === 401 && token) {
         const { url, auth } = requestParts(input, init);
         if (API_PATH.test(url) && !NOT_SESSION_401.some((re) => re.test(url)) && auth === `Bearer ${token}`) {
-          fired = true;
+          firedFor = token;
           onRejected();
         }
       }

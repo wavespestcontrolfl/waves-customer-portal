@@ -149,14 +149,15 @@ it('keeps the real error when the server answered or the snapshot belongs to som
 });
 
 it.each([
-  ['401', 'rejected-401', null],
+  ['401', 'rejected-401', 'fixture-only'],
   ['403', 'rejected-403', 'fixture-only'],
 ])('deletes the saved route when the server rejects the route read with %s', async (_label, mode, tokenAfter) => {
   seedSnapshot();
   scheduleMode = mode;
   mount();
   await waitFor(() => expect(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).toBeNull());
-  // A 401 also ends the session; a 403 keeps the login but not the route.
+  // The page drops the route either way; ending a 401'd session is the
+  // shell's session guard (TechLayout.test.jsx), not mounted here.
   expect(localStorage.getItem('waves_admin_token')).toBe(tokenAfter);
   expect(screen.queryByText(/Fixture saved-one/)).not.toBeInTheDocument();
 });
