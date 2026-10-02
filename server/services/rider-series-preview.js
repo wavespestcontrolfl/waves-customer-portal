@@ -13,9 +13,10 @@
  *
  * `scheduled_services.rides_parent_id` is written in ONE place: estimate
  * accept, behind GATE_PEST_RIDES_LAWN_AT_ACCEPT (rider-accept-seeding.js
- * links a quarterly rider series to the lawn series it was seeded on). No
- * hook, cron or extension reads it yet, and nothing calls `previewRiderPair`
- * from any hook, cron, or writer. It is reached ONLY from
+ * links a quarterly rider series to the lawn series it was seeded on), and is
+ * read by the series extension (admin-schedule.js#extendSeriesOnceLocked, same
+ * gate) so a rider's next visit keeps riding the lawn. Nothing calls
+ * `previewRiderPair` from any hook, cron, or writer. It is reached ONLY from
  * scripts/rider-series-preview-report.js, a read-only ops report the owner
  * runs by hand.
  *
