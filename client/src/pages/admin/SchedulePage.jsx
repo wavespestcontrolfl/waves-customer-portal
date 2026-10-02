@@ -41,9 +41,9 @@ import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import {
-  TREATMENT_AREA_FIELD_KEYS, completionAreasForTypedFindings, parseApplicationAreas, trapSetupConflicts,
-  typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow, typedFormTakesPlaces, typedTreatmentAreaField,
-  typedZeroStateRefusesBody,
+  STATION_TYPE_PROGRAM, TREATMENT_AREA_FIELD_KEYS, completionAreasForTypedFindings, parseApplicationAreas,
+  trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow, typedFormTakesPlaces,
+  typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from "../../lib/typed-findings-rules";
 // Typed findings rules live in lib/typed-findings-rules.js (shared with the
 // tech Fast Complete sheet, which never imports this module); re-exported
@@ -12831,11 +12831,7 @@ export function CompletionPanel({
   // COMPANIONS the tie breaks termite-first. Any divergence makes the panel
   // load/submit one program's station ids while the sync targets the other,
   // silently skipping the visit's checks.
-  const stationTypeProgram = {
-    termite_bait_station: "termite",
-    rodent_bait_station: "rodent",
-    rodent_trapping: "trapping",
-  };
+  const stationTypeProgram = STATION_TYPE_PROGRAM;
   const companionStationTypes = stationTypeSet.slice(1);
   const stationProgram = stationTypeProgram[stationTypeSet[0]]
     || (companionStationTypes.includes("termite_bait_station") ? "termite"

@@ -6,16 +6,20 @@
 // Dispatch typed form; the sheet's Full form opens that typed form. A visit
 // closed out as a whole visit, one that completes through a project, a row
 // whose profile or form could not be read, or a closed visit keeps the old
-// path.
+// path, and so does a station visit while the tech's station map is on or
+// not yet known (the sheet carries no map).
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn() }));
+const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), stationMap: { enabled: false, ready: true } }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
+vi.mock('../../hooks/useFeatureFlag', () => ({
+  useFeatureFlag: () => false,
+  useFeatureFlagReady: (key) => (key === 'station-map-v1' ? mocks.stationMap : { enabled: false, ready: true }),
+}));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
@@ -77,6 +81,7 @@ function mount(path = '/tech/tools', { fieldWorkspace = true } = {}) {
 
 beforeEach(() => {
   mocks.navigationBusy.mockClear();
+  mocks.stationMap = { enabled: false, ready: true };
   assign = vi.fn();
   vi.stubGlobal('location', { ...window.location, assign });
   vi.stubGlobal('fetch', vi.fn(async (path) => {
@@ -144,4 +149,42 @@ it('a completed typed visit never opens the sheet', async () => {
   mount('/tech/tools', { fieldWorkspace: false });
   await openFromTools();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+const STATION_VISITS = [
+  ['a termite bait station check', { serviceType: 'Termite Monitoring', serviceTypeRaw: 'Termite Monitoring', completionProfile: { category: 'termite', serviceKey: 'termite_monitoring', findingsType: 'termite_bait_station' }, findingsSchema: { ...ROACH_SCHEMA, type: 'termite_bait_station' } }],
+  ['a rodent bait station visit', { serviceType: 'Rodent Bait Stations', serviceTypeRaw: 'Rodent Bait Stations', completionProfile: { category: 'rodent', serviceKey: 'rodent_bait_quarterly', findingsType: 'rodent_bait_station' }, findingsSchema: { ...ROACH_SCHEMA, type: 'rodent_bait_station' } }],
+  ['a trap check', { serviceType: 'Rodent Trapping Follow-up', serviceTypeRaw: 'Rodent Trapping Follow-up', completionProfile: { category: 'rodent', serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping' }, findingsSchema: { ...ROACH_SCHEMA, type: 'rodent_trapping' } }],
+];
+
+it.each(STATION_VISITS)('%s opens the sheet, reading its own form, while the tech\'s station map is off', async (_label, overrides) => {
+  rows = [row('svc-station', overrides)];
+  mount();
+  await openFromTools();
+  expect(await sheetService()).toMatchObject({ id: 'svc-station', reportFlow: true, typedFlow: true, typedType: overrides.completionProfile.findingsType });
+  expect(assign).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['on', { enabled: true, ready: true }],
+  ['not yet loaded', { enabled: false, ready: false }],
+])('with the tech\'s station map %s, a station visit keeps the typed form, which records every station (Codex P1 on #5638)', async (_label, stationMap) => {
+  mocks.stationMap = stationMap;
+  for (const [, overrides] of STATION_VISITS) {
+    rows = [row('svc-station', overrides)];
+    assign.mockClear();
+    const view = mount();
+    await openFromTools();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledWith(TYPED_FORM('svc-station')));
+    expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+    view.unmount();
+  }
+});
+
+it('a visit without stations opens the sheet with the station map on', async () => {
+  mocks.stationMap = { enabled: true, ready: true };
+  rows = [row('svc-roach')];
+  mount();
+  await openFromTools();
+  expect(await sheetService()).toMatchObject({ id: 'svc-roach', typedFlow: true, typedType: 'cockroach' });
 });

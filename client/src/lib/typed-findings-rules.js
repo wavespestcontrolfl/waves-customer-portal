@@ -113,6 +113,18 @@ export const TYPED_TYPES_WITHOUT_PLACES = [
   "rodent_inspection", "rodent_bait_station", "bed_bug",
 ];
 
+// The typed forms the bait station map (station-map-v1) records stations for,
+// each with its program's registry: the full form's station step posts a
+// check for every active station of the program (an untouched map records
+// each one "ok"). Must match the server's stationProgramForProfile, which
+// /complete syncs against. The Fast Complete sheet carries no map, so the tech
+// page keeps these visits on the full form while the tech's map is on.
+export const STATION_TYPE_PROGRAM = Object.freeze({
+  termite_bait_station: "termite",
+  rodent_bait_station: "rodent",
+  rodent_trapping: "trapping",
+});
+
 // Whether a typed form's visit records treated places on the full form's own
 // picker: never one whose places are its own work fields (above), and a
 // termite bait station visit only when something went down other than bait
