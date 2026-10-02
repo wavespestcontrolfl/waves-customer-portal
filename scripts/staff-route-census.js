@@ -62,7 +62,10 @@ function parseRouter(fileSpec) {
   //       Static reading cannot evaluate the condition, so these routes are
   //       kept in the census flagged "exemption gate" instead of being
   //       wrongly listed as either fully open or fully admin-only.
-  let adminWide = false;
+  // adminWideFrom: the source offset of the first pathless requireAdmin guard.
+  // Express applies router.use in registration order, so routes declared
+  // BEFORE it are not covered (admin-reviews' /send-time-preview).
+  let adminWideFrom = Infinity;
   let exemptionGate = false;
   const adminPrefixes = [];
   // Guards hang off the exported router variable (router, or serviceRouter /
@@ -79,7 +82,7 @@ function parseRouter(fileSpec) {
     } else if (firstArg === '(' || /^(async\s+)?function\b/.test(trimmed) || /=>/.test(trimmed)) {
       exemptionGate = true;
     } else {
-      adminWide = true;
+      adminWideFrom = Math.min(adminWideFrom, m.index);
     }
   }
   const routerStaffAuth = new RegExp(`\\b${guardVar}\\.use\\([^)]*\\badminAuthenticate\\b[^)]*\\)`).test(src);
@@ -100,10 +103,11 @@ function parseRouter(fileSpec) {
     const staffAuth = routerStaffAuth || /\b(adminAuthenticate|authStack)\b/.test(guards);
     for (const routePath of routePaths) {
       const prefixAdmin = adminPrefixes.some((pre) => routePath === pre || routePath.startsWith(`${pre}/`));
-      routes.push({ method: method === 'ALL' ? 'GET' : method, routePath, perRouteAdmin: perRouteAdmin || prefixAdmin, staffAuth });
+      const guardedByOrder = m.index > adminWideFrom;
+      routes.push({ method: method === 'ALL' ? 'GET' : method, routePath, perRouteAdmin: perRouteAdmin || prefixAdmin || guardedByOrder, staffAuth });
     }
   }
-  return { routes, adminWide, exemptionGate, missing: false };
+  return { routes, adminWide: false, exemptionGate, missing: false };
 }
 
 function joinPath(mount, routePath) {

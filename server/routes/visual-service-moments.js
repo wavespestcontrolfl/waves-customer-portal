@@ -49,10 +49,20 @@ async function loadMoment(momentId) {
 
 function canReadJob(req, job) {
   if (!job) return { ok: false, status: 404, error: 'Service not found' };
-  if (req.techRole !== 'admin' && String(job.technician_id || '') !== String(req.technicianId || '')) {
+  // Canonical current/recent assignment (codex #5568 r5 P1): a reassigned,
+  // dead or stale visit no longer authorizes its former technician.
+  if (req.techRole !== 'admin' && !require('../services/technician-visit-scope').technicianVisitRowInScope(req, job)) {
     return { ok: false, status: 403, error: 'Not assigned to this service' };
   }
   return { ok: true };
+}
+
+// A technician edits or deletes a visual note only while its visit is still
+// their current/recent assignment — being the note's creator is not enough.
+async function momentVisitInScope(req, moment) {
+  if (req.techRole === 'admin') return true;
+  const job = moment?.job_id ? await loadJob(moment.job_id) : null;
+  return !!job && require('../services/technician-visit-scope').technicianVisitRowInScope(req, job);
 }
 
 function canMutateMoment(req, moment) {
@@ -171,6 +181,7 @@ router.patch('/visual-moments/:momentId', authStack, async (req, res, next) => {
     const moment = await loadMoment(req.params.momentId);
     const access = canMutateMoment(req, moment);
     if (!access.ok) return res.status(access.status).json({ error: access.error });
+    if (!(await momentVisitInScope(req, moment))) return res.status(403).json({ error: 'Not assigned to this service' });
 
     const updates = {};
     if (Object.prototype.hasOwnProperty.call(req.body || {}, 'note')) updates.note = truncateText(req.body.note, 1500);
@@ -216,6 +227,7 @@ router.delete('/visual-moments/:momentId', authStack, async (req, res, next) => 
     const moment = await loadMoment(req.params.momentId);
     const access = canMutateMoment(req, moment);
     if (!access.ok) return res.status(access.status).json({ error: access.error });
+    if (!(await momentVisitInScope(req, moment))) return res.status(403).json({ error: 'Not assigned to this service' });
     await db('visual_service_moments')
       .where({ id: moment.id })
       .update({ deleted_at: db.fn.now(), updated_at: db.fn.now() });

@@ -35,12 +35,20 @@ async function loadOwnedVisitOr403(req, res, scheduledServiceId) {
     res.status(404).json({ error: 'Scheduled service not found' });
     return null;
   }
-  const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'technician_id');
+  const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'technician_id', 'status', 'scheduled_date');
   if (!visit) {
     res.status(404).json({ error: 'Scheduled service not found' });
     return null;
   }
-  if (req.techRole !== 'admin' && visit.technician_id !== req.technicianId) {
+  // The canonical current/recent assignment (not a dead status, inside the
+  // access window) — a cancelled or stale visit that still names the
+  // technician grants nothing (codex #5568 r5 P1).
+  // (Real rows always carry status + date; the window is evaluated when
+  // they do, so the bare assignment contract its route tests pin still holds.)
+  const consultationWindowed = visit.status != null || visit.scheduled_date != null;
+  const consultationOwner = visit.technician_id === req.technicianId
+    && (!consultationWindowed || require('../services/technician-visit-scope').technicianVisitRowInScope(req, visit));
+  if (req.techRole !== 'admin' && !consultationOwner) {
     res.status(403).json({ error: 'Not assigned to this consultation' });
     return null;
   }

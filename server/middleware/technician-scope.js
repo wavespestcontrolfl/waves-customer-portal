@@ -111,6 +111,10 @@ const TECHNICIAN_ALLOW_LIST = [
   // The field app's review-request trigger after a visit (the router already
   // scopes a technician to those two POSTs; everything else there is admin).
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/review-requests\/(trigger|tech-trigger)$/ },
+  // The completion panel's "when will the review ask go out" preview (a
+  // service-type lookup, no customer data; registered before admin-reviews'
+  // admin-only guard).
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/reviews\/send-time-preview$/ },
 
   // Documents, pay and growth.
   { bucket: 'documents', methods: ANY, pattern: /^\/api\/tech\/staff-documents(\/.*)?$/ },
