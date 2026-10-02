@@ -1,6 +1,10 @@
 // Calibration replay for the lawn progress engine (P13). Synthetic fixture and
 // a fake knex; no database, never run against production.
 
+// The DB loader pairs through the report's canonical history; here it is a fake.
+jest.mock('../services/lawn-assessment-history', () => ({ historyForAssessment: jest.fn() }));
+const { historyForAssessment } = require('../services/lawn-assessment-history');
+
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -221,7 +225,10 @@ describe('loadReplayRows', () => {
       }),
     };
     const db = { transaction: jest.fn(async (fn, opts) => fn(trx, opts)) };
+    historyForAssessment.mockReset();
+    historyForAssessment.mockResolvedValue({ current: { id: 'a1', visit_date: '2026-05-01' }, previous: null, isBaseline: false });
     const rows = await loadReplayRows(db);
+    expect(historyForAssessment).toHaveBeenCalledWith({ id: 'a1', customer_id: 'c1' }, { knex: trx });
     expect(db.transaction.mock.calls[0][1]).toEqual({ readOnly: true });
     expect(calls[0].sql).toMatch(/SET TRANSACTION READ ONLY/);
     expect(calls.slice(1).every((c) => /^\s*SELECT/.test(c.sql))).toBe(true);
@@ -238,7 +245,32 @@ describe('loadReplayRows', () => {
       divergenceFlags: [{ metric: 'color_health', gap: 30 }],
       applied: [{ name: 'Celsius WG', targets: ['Clover'] }],
       order: '2026-05-01T12:00:00.000000',
+      priorId: null,
+      superseded: false,
     }]);
+  });
+
+  it('takes the prior, visit date and baseline from canonical history, and marks re-done attempts superseded', async () => {
+    const row = (id, date) => ({
+      id, customer_id: 'c1', property_id: 'p1', date, season: 'peak', is_baseline: false, service_record_id: null, divergence_flags: null,
+      turf_density: 70, weed_suppression: 70, color_health: 70, fungus_control: 70, thatch_level: 70, stress_damage: 70, overall_score: 70, confirmed_order: '',
+    });
+    const trx = { raw: jest.fn(async (sql) => (/FROM lawn_assessments/.test(sql) ? { rows: [row('v1', '2026-05-01'), row('v2a', '2026-06-01'), row('v2b', '2026-06-02')] } : { rows: [] })) };
+    const db = { transaction: jest.fn(async (fn, opts) => fn(trx, opts)) };
+    historyForAssessment.mockReset();
+    // v2a and v2b are two attempts of one visit (appointment 2026-06-01); v2b is installed.
+    historyForAssessment.mockImplementation(async ({ id }) => ({
+      v1: { current: { id: 'v1', visit_date: '2026-05-01' }, previous: null, isBaseline: true },
+      v2a: { current: { id: 'v2b', visit_date: '2026-06-01' }, previous: { id: 'v1' }, isBaseline: false },
+      v2b: { current: { id: 'v2b', visit_date: '2026-06-01' }, previous: { id: 'v1' }, isBaseline: false },
+    }[id]));
+    const rows = await loadReplayRows(db);
+    const by = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(by.v1).toMatchObject({ isBaseline: true, priorId: null, superseded: false });
+    expect(by.v2a).toMatchObject({ superseded: true, priorId: null });
+    expect(by.v2b).toMatchObject({ superseded: false, priorId: 'v1', date: '2026-06-01' });
+    const pairs = pairAssessments(rows);
+    expect(pairs.map((p) => [p.current.id, p.prior?.id || null])).toEqual([['v1', null], ['v2b', 'v1']]);
   });
 });
 

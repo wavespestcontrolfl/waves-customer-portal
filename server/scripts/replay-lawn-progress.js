@@ -62,10 +62,26 @@ const bump = (map, key, by = 1) => { map[key] = (map[key] || 0) + by; };
  * @property {Array<{metric:string}>} [divergenceFlags]
  * @property {Array<{name:string,targets?:string[]}>} [applied]
  * @property {string} [order]  tie-break within one day (confirmation time)
+ * @property {string|null} [priorId]  canonical prior (lawn-assessment-history), set by the DB loader
+ * @property {boolean} [superseded]  a re-done attempt of a visit whose installed row is another assessment
  */
 
-/** Each row's prior: the latest EARLIER-dated row of the same customer and property. */
+/**
+ * Each row's prior. The DB loader resolves it through the report's canonical
+ * history (lawn-assessment-history: appointment dates, one installed attempt
+ * per visit, baseline resets) and sets priorId / superseded on every row; then
+ * superseded attempts are not judged and the prior is exactly that row.
+ * Rows with no priorId key (hand-written fixtures) fall back to the latest
+ * EARLIER-dated row of the same customer and property.
+ */
 function pairAssessments(rows) {
+  if (rows.some((row) => Object.prototype.hasOwnProperty.call(row, 'priorId'))) {
+    const byId = new Map(rows.map((row) => [String(row.id), row]));
+    return rows
+      .filter((row) => !row.superseded)
+      .map((row) => ({ current: row, prior: row.priorId != null ? byId.get(String(row.priorId)) || null : null }))
+      .sort((a, b) => String(a.current.date).localeCompare(String(b.current.date)) || String(a.current.id).localeCompare(String(b.current.id)));
+  }
   const groups = new Map();
   for (const row of rows) {
     const key = `${row.customerId}|${row.propertyId || ''}`;
@@ -317,17 +333,37 @@ async function loadReplayRows(db) {
       productsBy.set(p.service_record_id, list);
     }
 
+    // Canonical history, the same resolver the report uses, through THIS
+    // read-only transaction (required lazily so loading the script never
+    // loads models/db.js; every call passes knex: trx, so it is never queried).
+     
+    const { historyForAssessment } = require('../services/lawn-assessment-history');
+    const canonicalBy = new Map();
+    for (const a of assessments) {
+      const h = await historyForAssessment({ id: a.id, customer_id: a.customer_id }, { knex: trx });
+      const installed = h.current && String(h.current.id) === String(a.id);
+      canonicalBy.set(a.id, {
+        superseded: !installed,
+        priorId: installed && h.previous ? String(h.previous.id) : null,
+        isBaseline: installed ? h.isBaseline : false,
+        date: installed && h.current.visit_date ? h.current.visit_date : a.date,
+      });
+    }
+
     return assessments
       .map((a) => {
+        const canonical = canonicalBy.get(a.id);
         let flags = a.divergence_flags;
         if (typeof flags === 'string') { try { flags = JSON.parse(flags); } catch { flags = []; } }
         return {
           id: a.id,
           customerId: a.customer_id,
           propertyId: a.property_id || null,
-          date: a.date,
+          date: canonical.date,
           season: a.season || null,
-          isBaseline: Boolean(a.is_baseline),
+          isBaseline: canonical.isBaseline,
+          priorId: canonical.priorId,
+          superseded: canonical.superseded,
           scores: scoresFromAssessmentRow(a),
           photos: photosBy.get(a.id) || [],
           divergenceFlags: Array.isArray(flags) ? flags : [],
