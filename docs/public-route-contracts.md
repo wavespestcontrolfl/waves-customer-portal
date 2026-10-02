@@ -649,7 +649,54 @@ message (no plan, parent or reason detail rides the payload), and `/finalize`
 additionally runs its charge UNDER the renewal gate with the same check
 repeated inside it, so a prior-plan change either waits for the charge or is
 seen by it. `/confirm`, receipts and `invoice.pdf` are unchanged — recording a
-payment Stripe already collected always remains available),
+payment Stripe already collected always remains available). RENDERED CONSENT
+VERSION (2026-09-30, codex #5434 r1 P1 — every surface that captures a
+saved-payment-method consent): the client bundles its own copy of the consent
+text (`client/src/lib/paymentMethodConsentText.js`), so a tab left open across
+a copy change keeps rendering the older text. (The v12 copy family — base
+card/ACH, the immediate-charge prepay variants and the after-visit variants of
+GATE_PAY_AFTER_FIRST_VISIT — all carry the rate-review sentence; the base and prepay
+variants are `v12_2026-09-30`, the revised after-visit variants
+`v13_2026-10-01` (#5481's v12 after-visit rows carry the text without it); a one-time card HOLD snapshots its own disclosure
+under `hold_v1_2026-10-01`, which never qualifies for enrollment.) Every save-the-method capture
+therefore carries `consentTextVersion`, the `CONSENT_VERSION` the tab
+rendered beside its checkbox. `/setup`, `/update-amount` and `/finalize`
+refuse a save (requested, or forced by a required-save invoice) whose
+attestation is not the server's current version — or is absent — with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` BEFORE any Stripe work (on the
+estimate accept, a tab that attests its saved-card capture per #5481 —
+`recurringCardConsentVersion` / `Variant` / `Tender` — is judged by that
+verification inside the accept transaction instead, whose stale or
+mismatched attestation answers `CONSENT_VARIANT_STALE`), and
+thread the version into the mint, which stamps it on the PaymentIntent
+(`metadata.consent_text_version`, beside `save_card_opt_in`; carried across a
+tender replacement). A `/setup` that would REUSE an open PaymentIntent — or
+an `/update-amount` on one — whose stamp differs from the one it would write
+(an older version, or none — the rollout) cancels and replaces it instead of
+updating in place (the `replaced` response re-mounts Elements): the stale tab
+that minted it can confirm straight with Stripe (Express Checkout), and an
+in-place re-stamp would let the webhook record the newer version against
+text that tab never rendered. A replacement carries a SUPERSET of the old
+intent's metadata (`waves_customer_id`, `save_card_opt_in`, the consent
+stamp, …) with the new values winning, so the webhook mirrors keyed on
+those stamps keep working across the swap, and the `replaced` response carries
+`methodCategory` (the tender the fresh intent is locked to) so the page
+re-mounts its form on that tender instead of defaulting to card. `/finalize`
+never re-stamps in
+place either: under the invoice lock it reads the PaymentIntent's live stamp
+and refuses with `409 { error, staleBalance: true }` (the page reloads and
+re-syncs through `/setup`) when it differs from the one it would write. `/capture-setup` does the same and stamps the
+SetupIntent. `/consent` and `/setup-complete` record ONLY under the intent's
+own current stamp — never the posting bundle's constant, since a redirect
+return posts from a freshly loaded, possibly newer bundle — answering the
+same 409 otherwise (the payment itself already settled; only the saved-method
+authorization is withheld), and the `payment_intent.succeeded` save mirror and
+the `covered_capture` webhook apply the identical rule: a stale or absent
+stamp keeps the method saved but unconsented and unenrolled and parks one
+Billing bell per intent for the office to re-collect the authorization. A
+plain one-off payment (no save) attests nothing and is unchanged. Existing
+rows are untouched — the enrollment floor (v8+) does not move, so no existing
+customer is re-asked),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -3439,6 +3486,97 @@ their guarantee wording when it is set; per-service CTA lines follow their
 own services (`glassCtaMicroForKeys`: termite work or an unclassifiable
 service makes no guarantee). Derived read-only; no write. The legacy
 server-rendered page applies the same rule to its plan-terms card.
+The annual rate review disclosure (owner ruling 2026-09-30; shared
+`RATE_REVIEW_TERMS_LINE`, "Rate reviewed yearly after 12 months, 30 days’
+notice") follows the plan-terms scope the same way: the proposal document's
+terms line (browser and pdfkit renderers) and the legacy plan-terms card
+("Rate reviewed once a year") print it only when every row carries the
+recurring residential plan terms ('all') and at least one line recurs —
+never on a termite-only, rodent, commercial, authored-terms, programs or
+one-time-only estimate. The document's decision is the server's alone:
+`/data` projects the explicit boolean `proposal.rateReviewTermsEligible`
+(`proposalRateReviewTermsEligible`, the pdfkit fallback's own decision)
+beside `proposal.noGuaranteeClaims`, and the browser document prints by it
+rather than re-classifying row descriptions with its own narrower service
+taxonomy (a row the server classifies as lawn or tree & shrub work may carry
+no "lawn"/"tree" word). Frozen documents keep their original terms: on an
+accepted or declined estimate (`estimateIsPriceLocked`) the disclosure prints
+only on persisted evidence that the customer saw it — the recorded
+acceptance's verbatim snapshot carried the sentence (the 'plan' drawer
+below), or the accept stamped `estimate_data.rateReviewDisclosedAtAccept` —
+written atomically with a recurring-residential-plan acceptance — the public
+accept and the admin's manual mark-accepted alike — ONLY on
+persisted evidence that the customer was served the line while the estimate
+was open: that same recorded 'plan' drawer snapshot, or
+`estimate_data.rateReviewTermsServed` at the current shared
+`RATE_REVIEW_TERMS_VERSION`, which the `/pdf` download (either renderer) and
+the legacy page's plan-terms card write when they print the disclosure to the
+CUSTOMER — only a request the view counter treats as the customer's own
+(`shouldCountView`: never a bot or link unfurler, an admin-marked or admin-IP
+request, a staff or draft preview, an internal refresh or the pinned headless
+pass) records it; any other request gets the page or document as it stands,
+unrecorded
+(idempotent; never on a frozen estimate; never fatal to the download or the
+page; made durable BEFORE either renderer runs, and before the legacy page
+is sent). The marker never moves `updated_at`, so an accept racing from
+another tab merges the row's current marker through its own `estimate_data`
+write and decides the stamp from the row under its lock, not from its
+pre-transaction snapshot — evidence persisted after that read is still
+honored. The other order — the accept lands first — turns the marker write
+into a zero-row no-op (the row is frozen): the `/pdf` download then renders
+the row as it is now (frozen, no line unless that accept stamped it) and the
+legacy page answers one `303` to its own URL (query preserved; cache headers
+set) and re-renders from the current row instead of sending HTML that shows
+a term the accept never recorded — bounded to one hop, because a frozen row
+never enters that branch: an accepted page has no plan-terms card and a
+declined page prints no rate review item at all (it keeps its cancel/refund
+card; "declined never acquires it" holds on the legacy page too). Persistence
+unproven — a write that FAILS, an eligibility check that errors, or a
+zero-row write that cannot be shown to have hit a frozen row (re-read failed,
+row missing or still open) — withholds the line rather than showing it
+without evidence: the `/pdf` download serves the pdfkit document without the
+line (the browser renderer reads the row itself and cannot be told), the
+legacy page re-renders without the item, and a `/data?mode=pdf` document pass
+(the headless capture, or a customer's bare `?mode=pdf` view) runs the same
+pre-render step and projects `rateReviewTermsEligible: false`. That pass
+records evidence only while GATE_ESTIMATE_DOC_PDF is on — the condition under
+which the document is actually rendered; with the gate off, `?mode=pdf` falls
+through to the normal page, shows no document, and records nothing. Plan eligibility alone never stamps: an accept from a tab that rendered
+no rate copy (a bundle that predates the line with the gate off, the
+terms-neutral annual prepay lane with nothing downloaded) leaves the frozen
+document without the line rather than claiming a disclosure that was never
+shown. A document accepted before this disclosure existed, accepted under the
+'base' drawer, or declined never acquires it; an open estimate is sold under
+the current terms and prints it.
+The acceptance terms (`acceptanceTerms`, GATE_ESTIMATE_ACCEPTANCE_TERMS)
+carry the same rule as a SCOPE on one version: `scope: 'plan'` — the
+Services drawer line ends with the rate review sentence ("Rates are reviewed
+once a year after your first 12 months, with at least 30 days’ written
+notice before any change.") — is served only when the estimate is a
+recurring residential plan (every service carries the plan terms, the
+`noEstimateWideGuarantee` decision above, and the estimate is not
+one-time-only); every other cancel-anytime estimate (rodent, one-time-only)
+is served `scope: 'base'`, whose drawer is byte-identical to v2026-09. A
+'plan' payload also carries `oneTimeTerms` (the 'base' lines) for the
+customer's one-time toggle, which has no rate to review. The page attests
+the scope it rendered (`termsScope` beside `termsVersion`) and the accept
+route re-derives the scope from the estimate and the accept's own one-time
+mode, recording the verbatim snapshot for that scope or refusing a
+mismatch — or a current version with no scope — with the same reloadable
+409 `TERMS_VERSION_STALE` as a stale version, so no acceptance is ever
+recorded under a Services line the tab did not render.
+The accept's saved-payment-method consent is attested the same way
+(codex #5434 r1 P1): an accept that carries a verified Auto Pay capture
+(`recurringCardSetupIntentId` under a required recurring-card policy — the
+inline capture / capture modal rendered the card, ACH or prepay variant of
+the bundle's consent text) or acknowledges the prepay exact-total quote
+(`prepayChargeConsentAccepted`, whose checkbox rendered the prepay variant)
+sends `consentTextVersion`, the client's `CONSENT_VERSION`; the route
+refuses any other value, or none, with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` before any mutation, so the
+post-commit consent snapshot (recorded from the server's current text) is
+never written for a tab that rendered older copy. An accept that captures no
+consent ignores the field.
 When `/data` includes a `proposal` for document rendering or an enabled
 public proposal, its explicit boolean `proposal.noGuaranteeClaims` classifies
 the normalized rows that the document actually prints. React document mode
@@ -4729,7 +4867,27 @@ payer-billed, or Auto Pay is already active (the pending row is RETIRED to
 and chargeable; the POST runs the same
 live-verify (purpose `autopay_setup_link` + request id) and the same
 save → consent → enroll tail under the same claim/lease; `select-plan`
-is not applicable to these rows. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
+is not applicable to these rows. RENDERED CONSENT VERSION (2026-09-30, codex
+#5434 r1 P1, both kinds): the GET mints the SetupIntent for the page it
+serves, so the GET carries `?consentTextVersion=` — the `CONSENT_VERSION`
+the bundle renders beside the capture checkbox — and is refused with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` before any mint when that is
+not the server's current version or is absent (an older bundle refetching
+after a copy change); the mint stamps that attested value into the intent
+(`metadata.consent_text_version`) and salts the deterministic idempotency
+key with it, so a page load after a copy change mints a fresh intent under
+the new text instead of replaying one stamped with the old, and a stored
+intent stamped with an older version is never replayed. `/replace-intent`
+("use a different payment method", a fresh mint) carries the same
+attestation in its body under the same refusal. `/complete` carries
+`consentTextVersion` too and is refused the same way before the capture
+service runs; and the shared completion tail — page POST and the
+`setup_intent.succeeded` backstop alike — re-reads the intent under its
+claim and refuses an intent whose stamp is stale or absent
+(`consent_version_stale`: nothing saved, recorded or enrolled, the claim
+reverts so the row stays pending, one Billing bell per intent for the office
+to re-collect; the route answers the same 409, the webhook acks). The page
+prompts a refresh, which re-mints under the current text. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
 AND the `secure_appointment_card` SMS template are both enabled, and
 unreachable until the funnel mints links. Bearer token
 (`appointment_card_requests.token` — 22-char base64url / 128-bit since

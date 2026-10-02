@@ -4582,6 +4582,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('setup is refundable');
     expect(html).toContain('Annual prepay is prorated');
     expect(html).not.toContain('our guarantee');
+    expect(html).not.toContain('Rate reviewed once a year');
     expect(html).not.toContain('Money-back guarantee');
   });
 
@@ -4683,6 +4684,7 @@ describe('public estimate one-time breakdown', () => {
     // Rodent is terms-neutral: no generic contract or cancellation promise either.
     expect(html).not.toContain('No contracts and no lock-in');
     expect(html).not.toContain('Cancel anytime &mdash; no contract');
+    expect(html).not.toContain('Rate reviewed once a year');
   });
 
   test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {
@@ -4706,6 +4708,10 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('class="card plan-terms-card"');
     expect(html).toContain('Cancel, refunds &amp; our guarantee');
     expect(html).toContain('Cancel anytime &mdash; no contract');
+    // Annual rate review disclosure (owner ruling 2026-09-30) rides the
+    // same plan-terms gate as the no-contract item.
+    expect(html).toContain('Rate reviewed once a year');
+    expect(html).toContain('Rates are reviewed once a year after your first 12 months, with at least 30 days&rsquo; written notice before any change.');
     expect(html).toContain('setup is refundable');
     expect(html).toContain('Annual prepay is prorated');
     expect(html).toContain('we refund your most recent service payment');
@@ -4734,6 +4740,37 @@ describe('public estimate one-time breakdown', () => {
     // element and its body copy are gated out, not the stylesheet rule.
     expect(html).not.toContain('class="card plan-terms-card"');
     expect(html).not.toContain('Cancel anytime &mdash; no contract');
+  });
+
+  test('renderPage reports the rate review item to its caller only when the card prints it (served-disclosure evidence)', () => {
+    const recurring = { status: 'sent', customerName: 'Pat Customer', address: '123 Main St', monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0, tier: 'Bronze' };
+    const data = { result: { recurring: { services: [{ name: 'Pest Control', mo: 50 }] }, oneTime: { items: [], specItems: [] }, specItems: [], results: { pest: { apps: 4 } } } };
+    const printed = jest.fn();
+    expect(renderPage('terms-cb-token', recurring, data, undefined, { onRateReviewTermsRendered: printed })).toContain('Rate reviewed once a year');
+    expect(printed).toHaveBeenCalledTimes(1);
+    // Terms-neutral card (rodent/commercial work anywhere): no item, no report.
+    const neutral = jest.fn();
+    expect(renderPage('terms-cb-neutral', { ...recurring, noEstimateWideGuarantee: true }, data, undefined, { onRateReviewTermsRendered: neutral })).not.toContain('Rate reviewed once a year');
+    expect(neutral).not.toHaveBeenCalled();
+    // A DECLINED page keeps the card but never prints (or reports) the rate
+    // item — the legacy GET's one-hop 303 depends on it (frozen rows never
+    // enter the re-render branch).
+    const declined = jest.fn();
+    const declinedHtml = renderPage('terms-cb-declined', { ...recurring, status: 'declined' }, data, undefined, { onRateReviewTermsRendered: declined });
+    expect(declinedHtml).toContain('Cancel anytime &mdash; no contract');
+    expect(declinedHtml).not.toContain('Rate reviewed once a year');
+    expect(declined).not.toHaveBeenCalled();
+    // The handler could not prove the evidence durable: re-rendered without
+    // the item (card kept), no report.
+    const withheld = jest.fn();
+    const withheldHtml = renderPage('terms-cb-withheld', recurring, data, undefined, { onRateReviewTermsRendered: withheld, withholdRateReviewTerms: true });
+    expect(withheldHtml).toContain('Cancel anytime &mdash; no contract');
+    expect(withheldHtml).not.toContain('Rate reviewed once a year');
+    expect(withheld).not.toHaveBeenCalled();
+    // No billing card at all (quote required): no report.
+    const quote = jest.fn();
+    renderPage('terms-cb-quote', { ...recurring, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0 }, { result: { recurring: { services: [] }, oneTime: { items: [], specItems: [] }, specItems: [], results: {} } }, undefined, { onRateReviewTermsRendered: quote });
+    expect(quote).not.toHaveBeenCalled();
   });
 
   test('one-time pest choice excludes WaveGuard setup from the choice price and add-on table', async () => {

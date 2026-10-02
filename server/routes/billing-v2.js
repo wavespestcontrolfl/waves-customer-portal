@@ -12,6 +12,9 @@ const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod, isPaused, getAutopaySelectedMethodIds } = require('../services/autopay-eligibility');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { isEnabled } = require('../config/feature-gates');
+const {
+  CONSENT_VERSION_METADATA_KEY, consentVersionStaleResponse, renderedConsentVersionIsCurrent,
+} = require('../services/payment-method-consent-text');
 
 router.use(authenticate);
 
@@ -476,9 +479,24 @@ router.post('/cards/setup-intent', async (req, res, next) => {
   try {
     const schema = Joi.object({
       paymentMethodType: Joi.string().valid('card', 'us_bank_account', 'card_or_bank').default('card'),
+      // The saved-payment-method consent version the modal renders beside
+      // its (locked) checkbox — see the stale check below.
+      consentTextVersion: Joi.string().max(40).optional(),
     });
 
-    const { paymentMethodType } = await schema.validateAsync(req.body);
+    const { paymentMethodType, consentTextVersion } = await schema.validateAsync(req.body);
+    // Rendered-version attestation (codex #5434 r1 P1): the portal bundles
+    // its own copy of the consent text, so the mint refuses a tab whose
+    // text is not this server's current version (or that attests none — a
+    // bundle from before the attestation existed, left open across a copy
+    // change) with a 409 the modal surfaces as "refresh the page". The
+    // version is stamped into the SetupIntent so POST /cards and the
+    // portal_add_method webhook record the consent only under a current
+    // stamp — never the posting bundle's constant, which a redirect return
+    // re-sends from a freshly loaded, possibly newer bundle.
+    if (!renderedConsentVersionIsCurrent(consentTextVersion)) {
+      return res.status(409).json(consentVersionStaleResponse());
+    }
     // Portal bank saves are gated (GATE_PORTAL_ACH_AUTOPAY): with the gate
     // off, a bank-inclusive request downgrades to card-only rather than
     // erroring — the Payment Element simply doesn't offer the bank tab.
@@ -496,7 +514,7 @@ router.post('/cards/setup-intent', async (req, res, next) => {
       // deferred save (see POST /cards + the stripe-webhook
       // portal_add_method branch). Card intents carry it too — the webhook
       // branch is idempotent alongside the synchronous save below.
-      metadata: { purpose: 'portal_add_method' },
+      metadata: { purpose: 'portal_add_method', [CONSENT_VERSION_METADATA_KEY]: consentTextVersion },
     });
 
     res.json({
@@ -519,6 +537,9 @@ router.post('/cards', async (req, res, next) => {
       // Stripe: paymentMethodId from confirmed SetupIntent
       paymentMethodId: Joi.string().allow(null, '').optional(),
       setupIntentId: Joi.string().required(),
+      // Accepted for symmetry with the mint; the SetupIntent's own stamp
+      // (made by the tab that rendered the text) is the version of record.
+      consentTextVersion: Joi.string().max(40).allow(null, '').optional(),
     });
 
     const { paymentMethodId, setupIntentId } = await schema.validateAsync(req.body);
@@ -544,6 +565,15 @@ router.post('/cards', async (req, res, next) => {
       return res.status(409).json({
         error: 'Bank accounts aren’t available right now. Add a card instead.',
       });
+    }
+    // The consent text the customer read is the version the tab that MINTED
+    // this SetupIntent attested (stamped by /cards/setup-intent). A stale or
+    // absent stamp is refused BEFORE any mirror/consent/enrollment — the
+    // customer refreshes and re-adds under the current text (codex #5434
+    // r1 P1). The portal_add_method webhook applies the same rule.
+    if (!renderedConsentVersionIsCurrent(setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY])) {
+      logger.warn(`[billing-v2] add-method refused — SI ${setupIntentId} stamped consent text version ${setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY] || 'absent'}, not the current one (customer ${req.customerId})`);
+      return res.status(409).json(consentVersionStaleResponse());
     }
 
     // Micro-deposit deferred save (portal ACH lane): a bank SetupIntent
@@ -1272,6 +1302,12 @@ router.put('/cards/:id/default', async (req, res, next) => {
             code: 'consent_required',
             method_type: card.method_type || 'card',
           });
+        }
+        // The prompt's retry attests the consent version it rendered; a
+        // stale or absent one is refused before the row is written (codex
+        // #5434 r1 P1).
+        if (!renderedConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+          return res.status(409).json(consentVersionStaleResponse());
         }
         await ConsentService.recordConsent({
           customerId: req.customerId,
