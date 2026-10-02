@@ -112,6 +112,17 @@ const RECENT_PAYMENTS_SHOWN = 3;
 // Payment statuses the card knows how to label. Anything else is left off
 // the card and reported to the model as "other" so it hands off.
 const PAYMENT_STATUS_LABELS = { paid: 'Paid', processing: 'Processing', failed: 'Failed', refunded: 'Refunded' };
+// A refund the card may call refunded: the webhook's settled stamps, or a
+// Stripe refund object that succeeded. A pending or failed refund has no
+// label, so the card is withheld.
+const SETTLED_REFUND_STATUSES = new Set(['full', 'partial', 'succeeded']);
+function paymentStatusLabel(p) {
+  const base = PAYMENT_STATUS_LABELS[String(p.status || '').toLowerCase()];
+  if (!base) return null;
+  if (!(p.refundAmount > 0)) return base;
+  if (!SETTLED_REFUND_STATUSES.has(String(p.refundStatus || '').toLowerCase())) return null;
+  return base === 'Paid' ? `Paid, ${moneyLabel(p.refundAmount)} refunded` : base;
+}
 const PORTAL_FACTS_TOOLS = [
   ...PORTAL_TOOLS.slice(0, 4),
   {
@@ -302,15 +313,15 @@ async function showRecentPayments(customerId, actions, cards) {
   // Any payment the card cannot label means no card at all: a card that
   // skipped the newest (say, disputed) payment would present an older one
   // as the latest, and the model would confirm a payment that did not land.
-  const unlabeled = page.payments.some((p) => !PAYMENT_STATUS_LABELS[String(p.status || '').toLowerCase()]);
+  const unlabeled = page.payments.some((p) => !paymentStatusLabel(p));
   const rows = unlabeled ? [] : page.payments.map((p) => {
-    const statusLabel = PAYMENT_STATUS_LABELS[String(p.status || '').toLowerCase()];
+    const statusLabel = paymentStatusLabel(p);
     return {
       id: String(p.id),
       description: String(p.description || 'Payment').replace(/\s+[—-]\s+per (application|visit)\s*$/i, ''),
       dateLabel: longDateLabel(p.date),
       amountLabel: moneyLabel(p.amount),
-      statusLabel: p.refundAmount > 0 && statusLabel === 'Paid' ? `Paid, ${moneyLabel(p.refundAmount)} refunded` : statusLabel,
+      statusLabel,
       methodLabel: methodLabel(p),
       receiptUrl: p.receiptUrl || null,
     };

@@ -152,6 +152,10 @@ describe('hold-deferral placeholders (armed or collected) stay out of the custom
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/stripe.js'), 'utf8');
     const body = src.slice(src.indexOf('async getPaymentHistory('), src.indexOf('// REFUND'));
     expect(body).toContain("excludeHoldDeferralPlaceholders(q, 'payments')");
+    // Same-day rows (a failed attempt and its retry) order by creation, newest
+    // first, so the first row is the latest outcome.
+    expect(body).toContain(".orderBy('payments.created_at', 'desc')");
+    expect(body).toContain(".orderBy('payments.id', 'desc')");
   });
 });
 

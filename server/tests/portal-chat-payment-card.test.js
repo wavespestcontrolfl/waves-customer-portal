@@ -14,7 +14,7 @@ const { PORTAL_TOOLS, PORTAL_FACTS_TOOLS, executeToolCall } = require('../servic
 const PAYMENTS = [
   { id: 'p1', date: '2026-09-28', amount: 129, status: 'paid', description: 'Invoice WV-1042 — Quarterly Pest Control — per application', cardBrand: 'visa', lastFour: '4242', methodType: 'card', refundAmount: null, receiptUrl: '/receipt/tok_abc', receiptPdfUrl: '/api/receipt/tok_abc/pdf' },
   { id: 'p2', date: new Date('2026-08-28T00:00:00Z'), amount: 1250.5, status: 'failed', description: 'Silver WaveGuard Monthly', cardBrand: null, lastFour: '9876', methodType: 'us_bank_account', bankName: 'Example Bank', refundAmount: null, receiptUrl: null },
-  { id: 'p3', date: '2026-07-28', amount: 129, status: 'paid', description: 'Invoice WV-0990', cardBrand: 'visa', lastFour: '4242', methodType: 'card', refundAmount: 29, receiptUrl: null, stripeReceiptUrl: 'https://pay.stripe.com/receipts/x' },
+  { id: 'p3', date: '2026-07-28', amount: 129, status: 'paid', description: 'Invoice WV-0990', cardBrand: 'visa', lastFour: '4242', methodType: 'card', refundAmount: 29, refundStatus: 'partial', receiptUrl: null, stripeReceiptUrl: 'https://pay.stripe.com/receipts/x' },
 ];
 
 beforeEach(() => jest.clearAllMocks());
@@ -63,6 +63,15 @@ test('any payment the card cannot label means no card: a disputed newest payment
   expect(result.shown).toBe(false);
   expect(result.instruction).toMatch(/pass the question to the team/);
   expect(actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
+});
+
+test('a refund that has not settled withholds the card', async () => {
+  listPortalPayments.mockResolvedValue({ payments: [{ ...PAYMENTS[2], refundStatus: 'pending' }] });
+  const cards = [];
+  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
+  expect(cards).toEqual([]);
+  expect(result.shown).toBe(false);
+  expect(result.instruction).toMatch(/pass the question to the team/);
 });
 
 test('no payments on record says so', async () => {

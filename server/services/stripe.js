@@ -3184,6 +3184,10 @@ const StripeService = {
         db.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')
       )
       .orderBy('payments.payment_date', 'desc')
+      // payment_date is a DATE: a failed attempt and its same-day retry need
+      // a deterministic order so the newest row is the latest outcome.
+      .orderBy('payments.created_at', 'desc')
+      .orderBy('payments.id', 'desc')
       .limit(limit);
     // The collections-hold deferral placeholder (B10), armed or collected by the retry
     // sweep, is never a payment: a customer-facing history would show it as FAILED with
