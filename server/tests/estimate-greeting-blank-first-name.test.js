@@ -81,6 +81,15 @@ describe('greeting sites route through the shared helper', () => {
     expect(block).toContain("last_name: (greetingToken ? parts.slice(1) : parts).join(' ') || '',");
   });
 
+  test('the expired-estimate nurture email and the click-followup SMS draft use the shared rule (codex #5612 r2)', () => {
+    const nurture = read('services/email-division/payload-builders.js');
+    expect(nurture).toContain("first_name: firstToken(greetingFirstToken({ customerName: estimate.customer_name, customer })) || clean(customer.first_name) || 'there',");
+    expect(nurture).toContain(".first('id', 'first_name', 'last_name', 'email', 'latitude', 'longitude');");
+    const click = read('services/click-followup.js');
+    expect(click).toContain("firstNameOf(await estimateGreetingFirstToken(db, est))");
+    expect(click).not.toContain('firstNameOf(est.customer_name)');
+  });
+
   test('the public payload change is documented (codex #5612 r1)', () => {
     const doc = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'public-route-contracts.md'), 'utf8');
     expect(doc).toContain('`estimate.customerFirstName` is the greeting token');

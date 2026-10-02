@@ -30,6 +30,7 @@
 
 const crypto = require('node:crypto');
 const db = require('../../models/db');
+const { greetingFirstToken } = require('../../utils/greeting-first-name');
 const { estimateFollowupBlockedReason } = require('../estimate-comms-eligibility');
 const { etDateString } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
@@ -162,7 +163,7 @@ async function loadCustomer(conn, customerId) {
   // never a thrown uuid-cast error (nothing a retry could change).
   if (!UUID_RE.test(clean(customerId))) return null;
   return conn('customers').where({ id: customerId }).whereNull('deleted_at')
-    .first('id', 'first_name', 'email', 'latitude', 'longitude');
+    .first('id', 'first_name', 'last_name', 'email', 'latitude', 'longitude');
 }
 
 // The completed, customer-visible, PERFORMED visit a service-record trigger
@@ -1217,7 +1218,9 @@ async function buildExpiredNurture({
   const areaIntel = city ? await deps.getAreaIntelSentence({ city, month: deps.now(), conn }) : null;
 
   const payload = {
-    first_name: firstToken(estimate.customer_name) || clean(customer.first_name) || 'there',
+    // A linked customer with no first name is greeted 'there', never by the surname the
+    // estimate name starts with (shared greeting rule, utils/greeting-first-name).
+    first_name: firstToken(greetingFirstToken({ customerName: estimate.customer_name, customer })) || clean(customer.first_name) || 'there',
     service_quoted: serviceQuoted,
     // The street half of the estimate's address, by the canonical parse (a leading
     // unit, "Unit 4, 100 Beach Rd, ...", survives as the unit, not as the street).
