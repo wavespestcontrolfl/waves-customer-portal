@@ -1,3 +1,4 @@
+import { clearStaffDeviceData } from "../../lib/adminAuth";
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
@@ -54,6 +55,7 @@ export default function MorePage() {
     clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
+    clearStaffDeviceData();
     refetchFlags();
     navigate("/admin/login", { replace: true });
   };

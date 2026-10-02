@@ -278,6 +278,8 @@ function buildOutlook({ forecast, weatherCall }) {
         emoji: entry.emoji || null,
         level: entry.level || null,
         trend: entry.trend || null,
+        baselineComparison: entry.baseline_comparison || null,
+        weekOverWeek: entry.week_over_week || null,
         note: entry.note || null,
       }
       : null,

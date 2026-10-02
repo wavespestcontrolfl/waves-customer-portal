@@ -90,32 +90,43 @@
       "monthName": "July",
       "locationLabel": "Parrish, FL",
       "weatherSummary": "Hot and humid with daily storms",
-      "headline": "Ant and mosquito pressure typically peaks in late July.",
-      "disclaimer": "Seasonal outlook based on regional trends.",
+      "headline": "Warm, wet weather puts the modeled ant outlook above the usual July baseline.",
+      "disclaimer": "A seasonal and weather-based model, not a measurement of pest activity.",
       "pests": [
         {
           "key": "ghost_ant",
           "label": "Ghost ants",
           "emoji": null,
           "level": "high",
-          "trend": "rising",
-          "note": "Rain pushes trails indoors."
+          "trend": "up",
+          "note": "Rain pushes trails indoors.",
+          "baselineComparison": "above",
+          "weekOverWeek": {
+            "direction": "down",
+            "delta": -1,
+            "previous_date": "2026-07-08",
+            "current_date": "2026-07-15"
+          }
         },
         {
           "key": "mosquito",
           "label": "Mosquitoes",
           "emoji": null,
           "level": "high",
-          "trend": "steady",
-          "note": "Standing water after storms."
+          "trend": "flat",
+          "note": "Standing water after storms.",
+          "baselineComparison": "near",
+          "weekOverWeek": null
         },
         {
           "key": "spider",
           "label": "Spiders",
           "emoji": null,
           "level": "moderate",
-          "trend": "steady",
-          "note": null
+          "trend": "flat",
+          "note": null,
+          "baselineComparison": "near",
+          "weekOverWeek": null
         }
       ]
     }

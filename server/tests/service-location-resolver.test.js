@@ -101,3 +101,54 @@ describe('deriveOutboundNumber + GATE_SMS_LINE_ADDRESS_FALLBACK', () => {
       .toBe(TWILIO_NUMBERS.getOutboundNumber('sarasota'));
   });
 });
+
+describe('home line (GATE_HOME_LINE)', () => {
+  const ORIGINAL = process.env.GATE_HOME_LINE;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.GATE_HOME_LINE;
+    else process.env.GATE_HOME_LINE = ORIGINAL;
+  });
+
+  const { homeLineLocationId } = require('../config/locations');
+  const { addressKey } = require('../services/customer-property-address-keys');
+  const TwilioService = require('../services/twilio');
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const address = { address_line1: '100 Main St', city: 'Palmetto', zip: '34221' };
+  // Stamped Venice for this exact address (e.g. under an older city map).
+  const stamped = { id: 'c3', ...address, home_line_location_id: 'venice', home_line_address_key: addressKey(address) };
+
+  test('a stamp for the current address wins over what the address resolves to today', () => {
+    expect(resolveServiceLocation(stamped).id).toBe('parrish');
+    expect(homeLineLocationId(stamped)).toBe('venice');
+  });
+
+  test('a stamp for an older address is ignored: the new address decides', () => {
+    expect(homeLineLocationId({ ...stamped, address_line1: '9 Other Rd' })).toBe('parrish');
+  });
+
+  test('no stamp, an unknown office id, or a missing key falls back to the address', () => {
+    expect(homeLineLocationId(address)).toBe('parrish');
+    expect(homeLineLocationId({ ...stamped, home_line_location_id: 'tampa' })).toBe('parrish');
+    expect(homeLineLocationId({ ...stamped, home_line_address_key: null })).toBe('parrish');
+  });
+
+  test('gate on: a known customer gets the home line even when a caller passes an office', async () => {
+    process.env.GATE_HOME_LINE = 'true';
+    expect(await TwilioService.deriveOutboundNumber({ customerLocationId: 'sarasota', customer: stamped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('venice'));
+  });
+
+  test('gate on: with no customer, the passed office still decides (leads)', async () => {
+    process.env.GATE_HOME_LINE = 'true';
+    expect(await TwilioService.deriveOutboundNumber({ customerLocationId: 'sarasota' }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('sarasota'));
+  });
+
+  test('gate off: byte-identical to before (passed office wins, stamp ignored)', async () => {
+    delete process.env.GATE_HOME_LINE;
+    expect(await TwilioService.deriveOutboundNumber({ customerLocationId: 'sarasota', customer: stamped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('sarasota'));
+    expect(await TwilioService.deriveOutboundNumber({ customer: stamped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('parrish'));
+  });
+});

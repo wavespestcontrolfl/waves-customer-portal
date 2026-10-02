@@ -75,9 +75,14 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
  *   form (SchedulePage.jsx CompletionPanel) or Fast Complete sheet.
  * - voice: voice fill writes the value (owner ruling 2026-09-27: voice fill
  *   covers every completion except WDO + pre-treat; 2026-09-28: "Found" and
- *   "Treated" are read-only summary lines filled from voice). Voice fill is
- *   a follow-up PR — no fact is voice-written TODAY; 'voice' marks the fact
- *   voice fill must write into (the tap path stays behind "Show all fields").
+ *   "Treated" are read-only summary lines filled from voice). Voice fill
+ *   ships DARK on the Fast Complete report flow (GATE_FAST_COMPLETE_REPORT):
+ *   where product went down, the pests named and how the sprays went down
+ *   are read from the note (services/visit-voice-facts.js) and sent as the
+ *   visit's areas serviced (a product's area only when one place was
+ *   heard), each product's targets and the sprays' method. Every other 'voice' fact is
+ *   still filled by tap; 'voice' marks the fact voice fill must write into
+ *   (the tap path stays behind "Show all fields").
  * - prefill: defaulted from the protocol / product label / service config;
  *   the tech confirms or adjusts rather than starting from blank.
  * - derived: computed by the server from other recorded facts or photos
@@ -403,12 +408,13 @@ function productFacts(opts = {}) {
  * termite-bait primary and palm. All land in service_records.structured_notes
  * (the object built ~5755 in complete-scheduled-service.js) except
  * technician_notes, a service_records column.
- * @param {{ extraReaders?: Record<string, VisitFactReader[]> }} [opts]
+ * @param {{ extraReaders?: Record<string, VisitFactReader[]>, extraWriters?: Record<string, VisitFactWriter[]> }} [opts]
  * @returns {VisitFact[]}
  */
 function genericCompletionFacts(opts = {}) {
   const extra = opts.extraReaders || {};
   const withExtra = (key, base) => base.concat(extra[key] || []);
+  const writersFor = (key, base) => base.concat((opts.extraWriters || {})[key] || []);
   return [
     {
       key: 'areas_treated',
@@ -435,7 +441,7 @@ function genericCompletionFacts(opts = {}) {
       label: 'Observations — form provenance only (no protocol defaults)',
       capture: ['voice', 'tap'],
       storage: 'structured_notes.formObservations',
-      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'structuredObservations')],
+      writers: writersFor('form_observations', [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'structuredObservations')]),
       readers: withExtra('form_observations', [{ file: REPORT_DATA, section: 'Findings (form-sourced, structuredObservations)' }]),
       whenMissing: 'hidden',
     },
@@ -480,6 +486,21 @@ function genericCompletionFacts(opts = {}) {
       ]),
       whenMissing: 'hidden',
       notes: 'The tech picks tip ids; the server resolves and freezes the copy (freezeTechTips). Merges into the Recommendations list per the 2026-09-28 ruling.',
+    },
+    {
+      key: 'blog_post',
+      label: 'A Waves blog post for the customer (one, picked from a search of the live blog)',
+      capture: ['tap'],
+      tapOnly: true,
+      reason: 'The tech searches the live Waves blog and picks one post; a dictated note never names a post.',
+      storage: 'structured_notes.blogPost',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'blogPostId')],
+      readers: [
+        { file: REPORT_DATA, section: 'From the Waves blog (payload.blogPost, GATE_REPORT_BLOG_POST)' },
+        { file: REPORT_VIEW_PAGE, section: 'From the Waves blog card', readerSymbol: 'blogPost' },
+      ],
+      whenMissing: 'hidden',
+      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Every service but WDO, termite pre-treat, lawn and tree, shrub & palm (report-blog-post.js blogPostAllowedFor).',
     },
     {
       key: 'protocol_actions_completed',
@@ -1138,6 +1159,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',
   invoiceAlreadySent: 'Billing bookkeeping flag, not a customer report fact.',
   completionSmsRecapMode: 'Completion-text claim marker (Fast Complete fixed re-service text, frozen at record insert): the one-text dedupe that pest-recap.js and recap-delivery.js honor; not a customer report fact.',
+  traceJudged: 'Fast Complete report-flow bookkeeping (GATE_FAST_COMPLETE_REPORT): the saved trace the record was judged against (its updated_at, or null for none), frozen at completion so report-data shows that trace only (treatment-zone-maps.js traceJudgedAllows) — it can only withhold the separately stored treatment_zone_maps trace, never adds a claim.',
   backfill: 'Backfill-completion audit marker (quiet/backdated closeout posture).',
   backfillMintRequired: 'Backfill invoice-mint bookkeeping (required-mint posture frozen at commit).',
   backfillMintAmountCents: 'Backfill invoice-mint bookkeeping (frozen amount).',
@@ -1223,7 +1245,9 @@ const VISIT_FACTS_CONTRACT = {
     catalogKeys: ['one_time_pest_control', 'fire_ant', 'tick_control', 'bee_wasp_removal', 'mud_dauber_removal', 'pest_initial_cleanout', 'bed_bug_treatment'],
     voiceFill: true,
     facts: [
-      ...genericCompletionFacts(),
+      // The lane visits' findings also come from the tech's Fast Complete
+      // sheet (GATE_LANE_VOICE_FILL: its record card, read from the note).
+      ...genericCompletionFacts({ extraWriters: { form_observations: [via(FAST_COMPLETE_SHEET, 'structuredObservations')] } }),
       pestActivityRatingFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1327,6 +1351,9 @@ const VISIT_FACTS_CONTRACT = {
         extraReaders: {
           finding_rows: [{ file: MOSQUITO_REPORT_V2, section: 'Habitat watch card (standing water / foliage / lanai)' }],
         },
+        // The mosquito lane's findings also come from the tech's Fast
+        // Complete sheet (GATE_LANE_VOICE_FILL).
+        extraWriters: { form_observations: [via(FAST_COMPLETE_SHEET, 'structuredObservations')] },
       }),
       ...productFacts(),
       ...photoFacts(),

@@ -500,6 +500,19 @@ function annualPrepayPretaxBase(term) {
 // term, so its pre-tax invoice subtotal is the correct default base).
 const ANNUAL_PREPAY_CURRENT_STATUSES = ["active", "renewal_pending"];
 
+// A current term's renewal default: the successor amount the annual rate
+// review told the customer when it set one (the renewal must charge exactly
+// that), else the term's own pre-tax base. The noticed amount is on the
+// term's tax-inclusive basis and the field is pre-tax, so it is the default
+// only for an untaxed term (pre-tax base equal to the term amount); a taxed
+// term keeps its pre-tax base and the server's noticed-amount check decides.
+function annualPrepayRenewalDefault(term) {
+  const base = annualPrepayPretaxBase(term);
+  const noticed = Number(term?.nextTermPrepayAmount);
+  const untaxed = Math.round(base * 100) === Math.round(Number(term?.prepayAmount) * 100);
+  return noticed > 0 && untaxed ? noticed : base;
+}
+
 function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
   const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayLabelsMatch(
     activeTerm.coverageServiceType || activeTerm.planLabel || "",
@@ -507,7 +520,7 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
   )
     ? activeTerm
     : null;
-  const matchingActiveBase = annualPrepayPretaxBase(matchingActiveTerm);
+  const matchingActiveBase = annualPrepayRenewalDefault(matchingActiveTerm);
   if (matchingActiveBase > 0) return matchingActiveBase;
 
   const activeTermMatch = Array.isArray(customer?.annualPrepayTerms)
@@ -516,7 +529,7 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
       return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayLabelsMatch(termLabel, serviceType);
     })
     : null;
-  const activeTermMatchBase = annualPrepayPretaxBase(activeTermMatch);
+  const activeTermMatchBase = annualPrepayRenewalDefault(activeTermMatch);
   if (activeTermMatchBase > 0) return activeTermMatchBase;
 
   const matchingPlan = Array.isArray(prepaidPlans) && prepaidPlans.length > 0

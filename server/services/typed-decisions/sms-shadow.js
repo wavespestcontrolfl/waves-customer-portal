@@ -11,9 +11,15 @@
  * moves a visit; the webhook ignores the result. Gate off, an ineligible
  * message or a missing customer returns before any provider call or write.
  * The ledger already files every provider call (askPackage).
+ *
+ * With GATE_TYPED_DECISIONS_CLEF also on, the same questions go to Cloudflare
+ * Clef as a second leg, and each provider's row is recorded with the other's
+ * answers as `siblingAnswers`, so a case where they differ queues both rows
+ * for the reviewer (shadow-recorder.sampleFor). One leg's failure never
+ * blocks the other; counts below are per leg.
  */
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
-const { typedDecisionsLive } = require('../../config/feature-gates');
+const { typedDecisionsLive, typedDecisionsClefLive } = require('../../config/feature-gates');
 
 // The last Waves text this customer was sent on this line, for the model's
 // "what was Waves answering" context. Same filters as the webhook's own
@@ -85,26 +91,44 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
   const state = { previous_waves_text: previous || null, customer_text: smsCustomerText(text) };
   const subjectHash = smsSubjectHash({ previous, body: text });
 
+  const providers = typedDecisionsClefLive() ? ['typesafe', 'cloudflare'] : ['typesafe'];
   await Promise.all(QUESTIONS.map(async ({ packageId, question, rule }) => {
-    out.asked += 1;
-    try {
-      const result = await askPackage(packageId, state);
-      if (!result || !result.ok) { out.failed += 1; return; }
-      const flag = typeof rules[rule] === 'boolean' ? rules[rule] : undefined;
-      const recorded = await recordDecisions({
-        capability: packageFor(packageId).capability,
-        pkg: packageFor(packageId),
-        subjectType: 'sms_log',
-        subjectId: smsLogId,
-        result,
-        baselines: { [question]: { rules: flag } },
-        subjectHash,
-      });
-      if (recorded.recorded > 0) out.recorded += 1; else out.failed += 1;
-    } catch (err) {
-      out.failed += 1;
-      require('../logger').warn(`[typed-decisions] sms shadow ${packageId} failed: ${err.message}`);
-    }
+    const flag = typeof rules[rule] === 'boolean' ? rules[rule] : undefined;
+    // Ask every provider first, so each row can be recorded with the others'
+    // answers; a leg that fails (ok:false or a throw) is counted and skipped.
+    const legs = await Promise.all(providers.map(async (provider) => {
+      out.asked += 1;
+      try {
+        const result = provider === 'typesafe' ? await askPackage(packageId, state) : await askPackage(packageId, state, { provider });
+        if (!result || !result.ok) { out.failed += 1; return null; }
+        return { provider, result };
+      } catch (err) {
+        out.failed += 1;
+        require('../logger').warn(`[typed-decisions] sms shadow ${packageId} (${provider}) failed: ${err.message}`);
+        return null;
+      }
+    }));
+    const answered = legs.filter(Boolean);
+    await Promise.all(answered.map(async ({ provider, result }) => {
+      try {
+        const siblings = answered.filter((leg) => leg.provider !== provider).map((leg) => leg.result.answers);
+        const recorded = await recordDecisions({
+          capability: packageFor(packageId).capability,
+          pkg: packageFor(packageId),
+          provider,
+          subjectType: 'sms_log',
+          subjectId: smsLogId,
+          result,
+          baselines: { [question]: { rules: flag } },
+          siblingAnswers: siblings.length ? { [question]: siblings.map((answers) => answers[question]).filter(Boolean) } : {},
+          subjectHash,
+        });
+        if (recorded.recorded > 0) out.recorded += 1; else out.failed += 1;
+      } catch (err) {
+        out.failed += 1;
+        require('../logger').warn(`[typed-decisions] sms shadow ${packageId} (${provider}) record failed: ${err.message}`);
+      }
+    }));
   }));
   return out;
 }
