@@ -61,17 +61,14 @@ describe('NoteBoxPhotos', () => {
     expect(screen.getByTestId('captions').textContent).toBe('b.jpg:|c.jpg:Third photo');
   });
 
-  it('words from a dictation that started for one photo never land on another', () => {
+  it('each photo\'s description gets its own mic: words from a closed editor never land in the next one', () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Describe by voice' }));
-    expect(dictation.toggle).toHaveBeenCalledTimes(1);
-    // Moving to photo 2 ends photo 1's session: the recording stops.
+    const photoOneWords = transcript;
     fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
-    expect(dictation.toggle).toHaveBeenCalledTimes(2);
-    expect(dictation.cancel).toHaveBeenCalled();
-    // The upload's words arrive late, for photo 1: dropped.
-    act(() => transcript('trap by the AC chase'));
+    expect(transcript).not.toBe(photoOneWords);
+    // Photo 1's editor is gone; its late words reach nothing.
+    act(() => photoOneWords('trap by the AC chase'));
     expect(screen.getByLabelText('Description for photo 2').value).toBe('');
   });
 

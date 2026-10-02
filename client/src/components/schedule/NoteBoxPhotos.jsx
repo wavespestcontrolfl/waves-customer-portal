@@ -5,7 +5,7 @@
 // notes and prints under the photo on the customer's report. The AI photo
 // read ("Describe with AI") and its summary live here too, so the separate
 // photo section goes away.
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { Camera, Mic, MicOff } from 'lucide-react';
 import useSpeechDictation from '../../hooks/useSpeechDictation';
 
@@ -28,44 +28,16 @@ export default function NoteBoxPhotos({
   onSummary,
   onAddSummaryToNotes,
 }) {
+  // The open description: which photo, and a session count that remounts
+  // its editor (and the editor's own mic) for every photo opened.
   const [editing, setEditing] = useState(null);
-  const [draft, setDraft] = useState('');
-  // A dictation belongs to the editor session that started it: words that
-  // arrive after that editor closed, or moved to another photo (an upload
-  // transcribes after the mic stops), are dropped, never written onto the
-  // wrong photo.
-  const sessionRef = useRef(0);
-  const dictatingForRef = useRef(null);
-  const dictation = useSpeechDictation(
-    (text) => {
-      if (dictatingForRef.current !== sessionRef.current) return;
-      setDraft((prev) => (prev ? `${prev} ${text}` : text).slice(0, PHOTO_CAPTION_MAX_CHARS));
-    },
-    { uploadServiceId: dictationServiceId },
-  );
-  // Ends the session's dictation: a recording stops (its clip's words are
-  // then dropped), and speech results still in flight are discarded.
-  const endSession = () => {
-    sessionRef.current += 1;
-    dictatingForRef.current = null;
-    if (dictation.listening) dictation.toggle();
-    dictation.cancel?.();
-  };
+  const [session, setSession] = useState(0);
   const open = (index) => {
     if (disabled) return;
-    endSession();
     setEditing(index);
-    setDraft(photos[index]?.caption || '');
+    setSession((n) => n + 1);
   };
-  const close = () => {
-    endSession();
-    setEditing(null);
-    setDraft('');
-  };
-  const save = () => {
-    onCaption(editing, draft.trim());
-    close();
-  };
+  const close = () => setEditing(null);
   const editingPhoto = editing != null ? photos[editing] : null;
   const button = {
     background: 'transparent',
@@ -86,170 +58,95 @@ export default function NoteBoxPhotos({
       {photos.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
           {photos.map((photo, index) => (
-            <div key={photo.data ? `${index}-${photo.name}` : index} style={{ position: 'relative', width: 112 }}>
-              <button
-                type="button"
-                onClick={() => open(index)}
-                disabled={disabled}
-                aria-label={`Describe photo ${index + 1}`}
-                style={{ display: 'block', padding: 0, border: 'none', background: 'none', cursor: disabled ? 'default' : 'pointer', width: '100%', textAlign: 'left' }}
-              >
-                <img
-                  src={photo.data}
-                  alt={photo.caption || photo.name || `Photo ${index + 1}`}
-                  style={{ width: 112, aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 8, border: `1px solid ${palette.border}`, display: 'block' }}
-                />
-                <span
-                  style={{
-                    display: 'block',
-                    marginTop: 4,
-                    fontSize: 14,
-                    lineHeight: 1.3,
-                    color: photo.caption ? palette.text : palette.muted,
-                    overflowWrap: 'anywhere',
-                  }}
-                >
-                  {photo.caption || 'Add a description'}
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  // Removing any photo shifts the ones after it, so an open
-                  // editor closes rather than save onto the wrong photo.
-                  if (editing != null) close();
-                  onRemove(index);
-                }}
-                disabled={disabled}
-                aria-label={`Remove photo ${index + 1}`}
-                style={{
-                  position: 'absolute',
-                  top: -6,
-                  right: -6,
-                  width: 22,
-                  height: 22,
-                  borderRadius: '50%',
-                  background: palette.text,
-                  color: palette.card,
-                  border: 'none',
-                  fontSize: 14,
-                  lineHeight: 1,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                ×
-              </button>
-            </div>
+            <PhotoThumb
+              key={photo.data ? `${index}-${photo.name}` : index}
+              photo={photo}
+              index={index}
+              disabled={disabled}
+              palette={palette}
+              onOpen={() => open(index)}
+              onRemove={() => {
+                // Removing any photo shifts the ones after it, so an open
+                // editor closes rather than save onto the wrong photo.
+                close();
+                onRemove(index);
+              }}
+            />
           ))}
         </div>
       )}
 
       {editingPhoto && (
-        <div style={{ display: 'grid', gap: 8 }}>
-          <label style={{ display: 'grid', gap: 4, fontSize: 14, color: palette.text }}>
-            {`Description for photo ${editing + 1}`}
-            <span style={{ position: 'relative', display: 'block' }}>
-              <input
-                value={draft}
-                maxLength={PHOTO_CAPTION_MAX_CHARS}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') { e.preventDefault(); save(); }
-                  if (e.key === 'Escape') { e.preventDefault(); close(); }
-                }}
-                placeholder={dictation.listening ? 'Listening… say what the photo shows' : 'What the photo shows, in a few words'}
-                autoFocus
-                style={{
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  background: palette.card,
-                  color: palette.text,
-                  border: `1px solid ${palette.border}`,
-                  borderRadius: 8,
-                  padding: '10px 12px',
-                  paddingRight: dictation.supported ? 48 : 12,
-                  fontSize: 14,
-                }}
-              />
-              {dictation.supported && (
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    if (!dictation.listening) dictatingForRef.current = sessionRef.current;
-                    dictation.toggle(event);
-                  }}
-                  disabled={dictation.uploading}
-                  aria-label={dictation.listening ? 'Stop describing by voice' : 'Describe by voice'}
-                  style={{
-                    position: 'absolute',
-                    top: '50%',
-                    right: 6,
-                    transform: 'translateY(-50%)',
-                    width: 36,
-                    height: 36,
-                    borderRadius: '50%',
-                    border: `1px solid ${dictation.listening ? palette.danger : palette.border}`,
-                    background: dictation.listening ? palette.danger : palette.card,
-                    color: dictation.listening ? palette.onDanger : palette.text,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {dictation.listening ? <MicOff size={15} strokeWidth={2.2} /> : <Mic size={15} strokeWidth={2.2} />}
-                </button>
-              )}
-            </span>
-          </label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button type="button" onClick={save} style={{ ...button, cursor: 'pointer', opacity: 1, background: palette.text, color: palette.card, borderColor: palette.text }}>
-              Save description
-            </button>
-            <button type="button" onClick={close} style={{ ...button, cursor: 'pointer', opacity: 1 }}>
-              Cancel
-            </button>
-          </div>
-        </div>
+        <CaptionEditor
+          key={session}
+          index={editing}
+          initial={editingPhoto.caption || ''}
+          palette={palette}
+          button={button}
+          dictationServiceId={dictationServiceId}
+          onSave={(caption) => {
+            onCaption(editing, caption);
+            close();
+          }}
+          onCancel={close}
+        />
       )}
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
-        <button
-          type="button"
-          onClick={onAdd}
-          disabled={disabled || photos.length >= max}
-          style={{ ...button, opacity: disabled || photos.length >= max ? 0.5 : 1 }}
-        >
-          <Camera size={15} strokeWidth={2.2} aria-hidden="true" />
-          {`Add photo${photos.length ? ` (${photos.length}/${max})` : ''}`}
-        </button>
-        {photos.length > 0 && onDescribeWithAi && (
-          <button
-            type="button"
-            onClick={onDescribeWithAi}
-            disabled={disabled || describing}
-            style={{ ...button, opacity: disabled || describing ? 0.5 : 1, cursor: describing ? 'wait' : button.cursor }}
-          >
-            {describing ? 'Describing…' : 'Describe with AI'}
-          </button>
-        )}
-        {photos.length > 0 && editing == null && (
-          <span style={{ fontSize: 14, color: palette.muted }}>Tap a photo to describe it</span>
-        )}
-      </div>
+      <PhotoActions
+        count={photos.length}
+        max={max}
+        disabled={disabled}
+        editing={editing != null}
+        button={button}
+        palette={palette}
+        onAdd={onAdd}
+        onDescribeWithAi={onDescribeWithAi}
+        describing={describing}
+      />
       {describeError && <div style={{ fontSize: 14, color: palette.danger }}>{describeError}</div>}
 
       {summary !== '' && onSummary && (
-        <div style={{ display: 'grid', gap: 6 }}>
-          <div style={{ fontSize: 14, fontWeight: 500, color: palette.text }}>{summaryLabel}</div>
-          <textarea
-            value={summary}
-            onChange={(e) => onSummary(e.target.value)}
-            rows={3}
-            maxLength={600}
+        <PhotoSummary
+          summary={summary}
+          label={summaryLabel}
+          disabled={disabled}
+          palette={palette}
+          button={button}
+          onSummary={onSummary}
+          onAddToNotes={onAddSummaryToNotes}
+        />
+      )}
+    </div>
+  );
+}
+
+// One photo's description, with its own mic: the editor mounts for that
+// photo and unmounts when it closes or another photo opens, so the
+// dictation hook's own unmount ends the session. A recording stops without
+// uploading, a microphone still asking for permission is released, and a
+// transcript in flight never reaches another photo.
+function CaptionEditor({ index, initial, palette, button, dictationServiceId, onSave, onCancel }) {
+  const [draft, setDraft] = useState(initial);
+  const dictation = useSpeechDictation(
+    (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text).slice(0, PHOTO_CAPTION_MAX_CHARS)),
+    { uploadServiceId: dictationServiceId },
+  );
+  const save = () => onSave(draft.trim());
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      <label style={{ display: 'grid', gap: 4, fontSize: 14, color: palette.text }}>
+        {`Description for photo ${index + 1}`}
+        <span style={{ position: 'relative', display: 'block' }}>
+          <input
+            value={draft}
+            maxLength={PHOTO_CAPTION_MAX_CHARS}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); save(); }
+              if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+            }}
+            placeholder={dictation.listening ? 'Listening… say what the photo shows' : 'What the photo shows, in a few words'}
+            autoFocus
             style={{
               width: '100%',
               boxSizing: 'border-box',
@@ -257,25 +154,172 @@ export default function NoteBoxPhotos({
               color: palette.text,
               border: `1px solid ${palette.border}`,
               borderRadius: 8,
-              padding: 10,
+              padding: '10px 12px',
+              paddingRight: dictation.supported ? 48 : 12,
               fontSize: 14,
-              resize: 'vertical',
             }}
           />
-          {onAddSummaryToNotes && (
-            <div>
-              <button
-                type="button"
-                onClick={onAddSummaryToNotes}
-                disabled={disabled || !summary.trim()}
-                style={{ ...button, opacity: disabled || !summary.trim() ? 0.5 : 1 }}
-              >
-                Add to technician notes
-              </button>
-            </div>
+          {dictation.supported && (
+            <button
+              type="button"
+              onClick={dictation.toggle}
+              disabled={dictation.uploading}
+              aria-label={dictation.listening ? 'Stop describing by voice' : 'Describe by voice'}
+              style={{
+                position: 'absolute',
+                top: '50%',
+                right: 6,
+                transform: 'translateY(-50%)',
+                width: 36,
+                height: 36,
+                borderRadius: '50%',
+                border: `1px solid ${dictation.listening ? palette.danger : palette.border}`,
+                background: dictation.listening ? palette.danger : palette.card,
+                color: dictation.listening ? palette.onDanger : palette.text,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+              }}
+            >
+              {dictation.listening ? <MicOff size={15} strokeWidth={2.2} /> : <Mic size={15} strokeWidth={2.2} />}
+            </button>
           )}
+        </span>
+      </label>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button type="button" onClick={save} style={{ ...button, cursor: 'pointer', opacity: 1, background: palette.text, color: palette.card, borderColor: palette.text }}>
+          Save description
+        </button>
+        <button type="button" onClick={onCancel} style={{ ...button, cursor: 'pointer', opacity: 1 }}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// One photo in the notes box: tap it to describe it; × removes it.
+function PhotoThumb({ photo, index, disabled, palette, onOpen, onRemove }) {
+  const caption = photo.caption || '';
+  return (
+    <div style={{ position: 'relative', width: 112 }}>
+      <button
+        type="button"
+        onClick={onOpen}
+        disabled={disabled}
+        aria-label={`Describe photo ${index + 1}`}
+        style={{ display: 'block', padding: 0, border: 'none', background: 'none', cursor: disabled ? 'default' : 'pointer', width: '100%', textAlign: 'left' }}
+      >
+        <img
+          src={photo.data}
+          alt={caption || photo.name || `Photo ${index + 1}`}
+          style={{ width: 112, aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 8, border: `1px solid ${palette.border}`, display: 'block' }}
+        />
+        <span
+          style={{
+            display: 'block',
+            marginTop: 4,
+            fontSize: 14,
+            lineHeight: 1.3,
+            color: caption ? palette.text : palette.muted,
+            overflowWrap: 'anywhere',
+          }}
+        >
+          {caption || 'Add a description'}
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={disabled}
+        aria-label={`Remove photo ${index + 1}`}
+        style={{
+          position: 'absolute',
+          top: -6,
+          right: -6,
+          width: 22,
+          height: 22,
+          borderRadius: '50%',
+          background: palette.text,
+          color: palette.card,
+          border: 'none',
+          fontSize: 14,
+          lineHeight: 1,
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+// The AI photo read's summary, reviewed in place ("Add to technician
+// notes" on an untyped visit; a typed visit's summary goes on the report).
+function PhotoSummary({ summary, label, disabled, palette, button, onSummary, onAddToNotes }) {
+  const empty = !summary.trim();
+  return (
+    <div style={{ display: 'grid', gap: 6 }}>
+      <div style={{ fontSize: 14, fontWeight: 500, color: palette.text }}>{label}</div>
+      <textarea
+        value={summary}
+        onChange={(e) => onSummary(e.target.value)}
+        rows={3}
+        maxLength={600}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          background: palette.card,
+          color: palette.text,
+          border: `1px solid ${palette.border}`,
+          borderRadius: 8,
+          padding: 10,
+          fontSize: 14,
+          resize: 'vertical',
+        }}
+      />
+      {onAddToNotes && (
+        <div>
+          <button
+            type="button"
+            onClick={onAddToNotes}
+            disabled={disabled || empty}
+            style={{ ...button, opacity: disabled || empty ? 0.5 : 1 }}
+          >
+            Add to technician notes
+          </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// The notes box's photo actions: Add photo (up to the visit's limit),
+// "Describe with AI" once there are photos, and the tap-to-describe hint.
+function PhotoActions({ count, max, disabled, editing, button, palette, onAdd, onDescribeWithAi, describing }) {
+  const addOff = disabled || count >= max;
+  const describeOff = disabled || describing;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+      <button type="button" onClick={onAdd} disabled={addOff} style={{ ...button, opacity: addOff ? 0.5 : 1 }}>
+        <Camera size={15} strokeWidth={2.2} aria-hidden="true" />
+        {count ? `Add photo (${count}/${max})` : 'Add photo'}
+      </button>
+      {count > 0 && onDescribeWithAi && (
+        <button
+          type="button"
+          onClick={onDescribeWithAi}
+          disabled={describeOff}
+          style={{ ...button, opacity: describeOff ? 0.5 : 1, cursor: describing ? 'wait' : button.cursor }}
+        >
+          {describing ? 'Describing…' : 'Describe with AI'}
+        </button>
+      )}
+      {count > 0 && !editing && <span style={{ fontSize: 14, color: palette.muted }}>Tap a photo to describe it</span>}
     </div>
   );
 }
