@@ -88,4 +88,42 @@ function homeLineCallerId(customer) {
   return (officeId && TWILIO_NUMBERS.locations[officeId]?.number) || main;
 }
 
-module.exports = { stampHomeLines, homeLineCallerId };
+// Owner ruling 2026-10-02: a staff reply stays on the conversation's line
+// while the person texted us there within this window.
+const CONVERSATION_WINDOW_DAYS = 30;
+
+/**
+ * The line a staff-composed text to this person leaves from under
+ * GATE_HOME_LINE (home-line PR 3, owner ruling 2026-10-02):
+ *   1. the Waves line (an office line or the main line) they last texted
+ *      within the last 30 days — keep the conversation where it is;
+ *   2. else their home line (homeLineCallerId: an office the address names);
+ *   3. else the main line (no customer, or a lead with no office).
+ * Callers check homeLineLive() first; gate off keeps the old derivation.
+ *
+ * @param {{ phone: string, customerId?: string|null, database?: Function, now?: Date }} args
+ * @returns {Promise<{ fromNumber: string, reason: 'conversation'|'home_line'|'main' }>}
+ */
+async function staffTextSender({ phone, customerId = null, database = db, now = new Date() }) {
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const customerLines = [TWILIO_NUMBERS.mainLine.number, ...Object.values(TWILIO_NUMBERS.locations).map((l) => l.number)];
+  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length === 10) {
+    const since = new Date(now.getTime() - CONVERSATION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const last = await database('sms_log')
+      .where('direction', 'inbound')
+      .whereIn('to_phone', customerLines)
+      .where('created_at', '>=', since)
+      .whereRaw("right(regexp_replace(coalesce(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+      .orderBy('created_at', 'desc')
+      .first('to_phone');
+    if (last?.to_phone) return { fromNumber: last.to_phone, reason: 'conversation' };
+  }
+  const customer = customerId
+    ? await database('customers').where({ id: customerId }).whereNull('deleted_at').first()
+    : null;
+  const fromNumber = homeLineCallerId(customer);
+  return { fromNumber, reason: fromNumber === TWILIO_NUMBERS.mainLine.number ? 'main' : 'home_line' };
+}
+
+module.exports = { stampHomeLines, homeLineCallerId, staffTextSender, CONVERSATION_WINDOW_DAYS };

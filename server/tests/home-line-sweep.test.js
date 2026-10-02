@@ -115,3 +115,59 @@ describe('homeLineCallerId (calls, PR 2)', () => {
     expect(homeLineCallerId({ id: 'far', city: 'Orlando', zip: '32801' })).toBe(MAIN);
   });
 });
+
+describe('staffTextSender (staff texts, PR 3)', () => {
+  const { staffTextSender } = require('../services/home-line');
+  const ORIGINAL = process.env.GATE_HOME_LINE;
+  beforeEach(() => { process.env.GATE_HOME_LINE = 'true'; });
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.GATE_HOME_LINE;
+    else process.env.GATE_HOME_LINE = ORIGINAL;
+  });
+  const MAIN = '+19412975749';
+  const PARRISH = '+19412972817';
+  const VENICE = '+19412973337';
+  const now = new Date('2026-10-02T12:00:00Z');
+
+  function senderDb({ lastInbound = null, customer = null } = {}) {
+    const seen = {};
+    const database = jest.fn((table) => {
+      const q = {
+        where: (...args) => { (seen[table] ||= []).push(['where', ...args]); return q; },
+        whereIn: (...args) => { (seen[table] ||= []).push(['whereIn', ...args]); return q; },
+        whereNull: () => q,
+        whereRaw: (...args) => { (seen[table] ||= []).push(['whereRaw', ...args]); return q; },
+        orderBy: () => q,
+        first: async () => (table === 'sms_log' ? lastInbound : customer),
+      };
+      return q;
+    });
+    return { database, seen };
+  }
+
+  test('a text from them on a Waves line within 30 days keeps that line', async () => {
+    const { database, seen } = senderDb({ lastInbound: { to_phone: VENICE }, customer: { id: 'c', zip: '34219', address_line1: '1 A St' } });
+    expect(await staffTextSender({ phone: '(555) 123-4567', customerId: 'c', database, now }))
+      .toEqual({ fromNumber: VENICE, reason: 'conversation' });
+    // Window, direction, our customer lines only, last-10 phone match.
+    expect(seen.sms_log).toEqual(expect.arrayContaining([
+      ['where', 'direction', 'inbound'],
+      ['where', 'created_at', '>=', new Date('2026-09-02T12:00:00Z')],
+      ['whereIn', 'to_phone', expect.arrayContaining([MAIN, PARRISH, VENICE])],
+      ['whereRaw', expect.stringContaining('from_phone'), ['5551234567']],
+    ]));
+  });
+
+  test('no recent conversation: the customer home line', async () => {
+    const { database } = senderDb({ customer: { id: 'c', zip: '34219', address_line1: '1 A St' } });
+    expect(await staffTextSender({ phone: '+15551234567', customerId: 'c', database, now }))
+      .toEqual({ fromNumber: PARRISH, reason: 'home_line' });
+  });
+
+  test('no customer, or a customer whose address names no office: main', async () => {
+    expect(await staffTextSender({ phone: '+15551234567', database: senderDb().database, now }))
+      .toEqual({ fromNumber: MAIN, reason: 'main' });
+    expect(await staffTextSender({ phone: '+15551234567', customerId: 'c', database: senderDb({ customer: { id: 'c', city: '', zip: '' } }).database, now }))
+      .toEqual({ fromNumber: MAIN, reason: 'main' });
+  });
+});

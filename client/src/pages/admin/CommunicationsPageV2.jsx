@@ -1311,6 +1311,31 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     }
   }, [customer?.id, customer?.phone, customerSenderNumber, customerSenderLabel, fromNumber, threadLock?.ourNumber, loadedMessageDraft]);
 
+  // GATE_HOME_LINE (home-line PR 3): for a fresh text the server picks the
+  // line — the one they texted within 30 days, else their home line, else
+  // main. It answers null while the gate is off or the thread is on a
+  // non-customer line (recruiting, tech), leaving the thread-line choice
+  // above untouched. Never overrides a draft in progress.
+  const fromNumberRef = useRef(fromNumber);
+  fromNumberRef.current = fromNumber;
+  useEffect(() => {
+    const phone = toNumber.trim();
+    if (phone.replace(/\D/g, "").length < 10 || loadedMessageDraft || msgBody.trim() || attachments.length) return undefined;
+    let cancelled = false;
+    const params = new URLSearchParams({ phone });
+    if (selectedCustomerId) params.set("customerId", selectedCustomerId);
+    if (fromNumberRef.current) params.set("currentLine", fromNumberRef.current);
+    adminFetch(`/admin/communications/sender?${params.toString()}`)
+      .then((r) => {
+        if (cancelled || !r?.fromNumber) return;
+        setFromNumber(r.fromNumber);
+        setThreadLock({ contactPhone: phone, ourNumber: r.fromNumber, label: NUMBER_LABEL_MAP[r.fromNumber] || r.label || r.fromNumber });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // Recipient changes only: a later staff pick of a line must stand.
+  }, [toNumber, selectedCustomerId, loadedMessageDraft]);
+
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();
     const normalizedSearch = search.trim();
