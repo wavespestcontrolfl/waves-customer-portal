@@ -441,6 +441,12 @@ function readNumber(tokens, i) {
   const point = readPointDigits(tokens, whole.next);
   if (point) return { value: whole.value + point.value, next: point.next };
   const joined = tokens[whole.next] === 'and' ? whole.next + 1 : whole.next;
+  // "one and three quarters": a counted fraction after "and" adds as one number
+  const numerator = joined !== whole.next ? readWholeWords(tokens, joined) : null;
+  const denominator = numerator && own(FRACTION_WORDS, tokens[numerator.next]);
+  if (denominator !== undefined && denominator !== null && numerator.value > 0) {
+    return { value: whole.value + numerator.value * denominator, next: numerator.next + 1 };
+  }
   const fraction = readFraction(tokens, joined);
   if (!fraction) return whole;
   // "three quarters" multiplies; "one and a half" / "1 1/2" / "1½" adds
@@ -518,6 +524,7 @@ const RATE_BASES = new Set(['gallon', 'gallons', 'gal', 'thousand', 'k', 'square
 // also "for every gallon", "for each gallon", "to the gallon" ("in a gallon" is the tank mix, the amount used)
 const isRate = (tokens, end) => tokens[end] === 'per'
   || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]))
+  || ((tokens[end] === 'every' || tokens[end] === 'each') && RATE_BASES.has(tokens[end + 1]))
   || (['for', 'to'].includes(tokens[end]) && ['every', 'each', 'the', 'a', 'an'].includes(tokens[end + 1]) && RATE_BASES.has(tokens[end + 2]));
 
 function quantitiesIn(text) {
@@ -959,7 +966,6 @@ function productSameAsLast(raw, amount, heard, transcript, unclear) {
 function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript = '', world = transcriptWorld(ctx, transcript)) {
   const byId = new Map(ctx.products.map((p) => [p.id, p]));
   const seen = new Set();
-  const refusedIds = new Set();
   const out = [];
   for (const raw of Array.isArray(rawProducts) ? rawProducts : []) {
     if (!raw || typeof raw !== 'object') continue;
@@ -969,7 +975,6 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
-      if (product) refusedIds.add(product.id);
       continue;
     }
     seen.add(product.id);
@@ -983,7 +988,9 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
   // Check, so a dropped application is never mistaken for a complete fill. Not
   // when the words also name another product ("the Alpine": already ambiguous or
   // the other one's) or a Check already quotes them.
-  const filled = new Set([...out.map((row) => row.productId), ...refusedIds]);
+  // A refused row does not account for its product: its Check quotes the model's
+  // words, which may not be the tech's (the quoted-words test below covers the rest).
+  const filled = new Set(out.map((row) => row.productId));
   const quoted = unclear.map((u) => ` ${tokensOf(u.heard).join(' ')} `);
   for (const product of ctx.products) {
     if (filled.has(product.id)) continue;
@@ -1266,6 +1273,15 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     else customer.push(text);
   }
   const officeText = [...officeSaid, ...office].join(' ');
+  // An office line the tech said that neither note carries is a Check, so access or
+  // billing words never vanish from an apparently complete fill.
+  const kept = ` ${norm(officeText)} `;
+  for (const sentence of String(transcript).split(SENTENCE_SPLIT_RE)) {
+    const text = sentence.trim();
+    if (!text || !(OFFICE_ADDRESSED_RE.test(text) || COMPLETION_ACCESS_CODE_RE.test(text))) continue;
+    const words = norm(text).split(' ').filter((w) => w.length >= 4 && !/^(office|dispatch|note|tell|that)$/.test(w));
+    if (words.length && !words.some((w) => kept.includes(` ${w} `))) pushUnclear(unclear, text, 'office_said_not_filled');
+  }
   return {
     customerNote: cleanNote(customer.join(' '), CAPS.customerNote),
     officeNote: cleanNote(officeText, CAPS.officeNote),

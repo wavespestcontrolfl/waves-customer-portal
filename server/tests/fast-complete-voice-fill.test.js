@@ -1300,3 +1300,34 @@ test('"four ounces per gallon and sprayed two gallons": neither number is the Ta
   expect(run(2, 'gal')).toBeNull();
   expect(run(4, 'fl_oz')).toBeNull();
 });
+
+describe('Codex #5580 round 8', () => {
+  const row = (productId, amount, unit, heard) => ({ productId, amount, unit, sameAsLast: false, method: '', heard });
+
+  test('"four ounces every gallon" is a rate', () => {
+    const t = 'Mixed Taurus at four ounces every gallon.';
+    expect(validateFill(answer({ products: [row('p-taurus', 4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"one and three quarters ounces" is 1.75', () => {
+    const t = 'Used one and three quarters ounces of Taurus.';
+    const run = (amount) => validateFill(answer({ products: [row('p-taurus', amount, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount;
+    expect(run(1.75)).toBe(1.75);
+    expect(run(1)).toBeNull();
+  });
+
+  test('an office line said but carried by neither note is a Check', () => {
+    const t = 'Treated outside. Office: gate code 1234.';
+    const out = validateFill(answer({}), ctx, t);
+    expect(out.unclear).toContainEqual({ heard: 'Office: gate code 1234.', reason: 'office_said_not_filled' });
+    const kept = validateFill(answer({ officeNote: 'gate code 1234.' }), ctx, t);
+    expect(kept.unclear.filter((u) => u.reason === 'office_said_not_filled')).toEqual([]);
+  });
+
+  test('a refused row claiming a product id does not hide that product\'s omission Check', () => {
+    const t = 'Used four ounces of Taurus.';
+    const out = validateFill(answer({ products: [row('p-taurus', 4, 'fl_oz', 'Talstar')] }), ctx, t);
+    expect(out.products).toEqual([]);
+    expect(out.unclear.map((u) => u.reason)).toContain('product_said_not_filled');
+  });
+});
