@@ -590,6 +590,7 @@ const SPRAY_SUBJECT = { perimeter: PERIMETER_WORDS_RE, spot: SPOT_WORDS_RE };
 // a spray the note does not deny or call undone, in a clause that does not
 // say "spot"), and a spray it denies ("didn't spray today").
 const SPRAY_ACTION_RE = /^spray(?:ed|ing|s)?$/;
+const SPRAY_WORD_RE = /\bspray(?:ed|ing|s)?\b/;
 function sprayInNote(note) {
   const perimeter = [...note.matchAll(new RegExp(PERIMETER_WORDS_RE.source, 'g'))].some((m) => {
     const { from, to } = clauseBounds(note, m.index);
@@ -614,14 +615,18 @@ function readSpray(spray, grounding) {
   // that it did not spray holds the sheet rather than record a spot spray.
   if (!SPRAY_METHODS.has(spray.method)) return { spray: null, unclearSpray: said.perimeter || said.denied, noSpray: false };
   const read = readQuote(spray.quote, grounding, { ...TREATMENT_FACT, subject: SPRAY_SUBJECT[spray.method] });
+  // A spray reading stands only on its own grounded quote that says it
+  // sprayed: "placed bait inside for ants" is no spray, and a quote the note
+  // does not hold is no evidence (pre-push P1 on #5538).
+  const sprayed = !!read && SPRAY_WORD_RE.test(read.quote);
   const contradicted = !!read && !METHOD_SUPPORTED[spray.method](read.quote);
-  const holds = !!read && !read.denied && !contradicted;
+  const holds = sprayed && !read.denied && !contradicted;
   return {
     spray: holds ? { method: spray.method, quote: read.quote } : null,
-    // A spot reading of a note that also sprayed around the house left the
-    // perimeter (and its trace) out: unclear too.
-    unclearSpray: (spray.method === 'perimeter' && !holds)
-      || (spray.method === 'spot' && (!!read?.denied || contradicted || said.perimeter)),
+    // Any spray reading that does not hold is unclear, never a spot spray by
+    // default; so is a spot reading of a note that also sprayed around the
+    // house (the perimeter and its trace left out).
+    unclearSpray: !holds || (spray.method === 'spot' && said.perimeter),
     noSpray: false,
   };
 }

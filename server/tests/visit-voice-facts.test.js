@@ -540,6 +540,15 @@ describe('validateVoiceFacts', () => {
     expect(read({ method: 'spot', quote: "Didn't spray today" })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
   });
 
+  test('a spray reading needs its own grounded quote that says it sprayed (pre-push P1 on #5538)', () => {
+    const note = 'Did not spray today; placed bait inside for ants.';
+    const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
+    expect(read({ method: 'spot', quote: 'placed bait inside for ants' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'spot', quote: 'spot sprayed the kitchen' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'perimeter', quote: 'placed bait inside for ants' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'none', quote: 'Did not spray today' })).toMatchObject({ spray: null, unclearSpray: false, noSpray: true });
+  });
+
   test('how the sprays went down stands only on a grounded quote that says it happened', () => {
     const note = 'Sprayed around the outside of the house. Didn\'t spray the garage door frames.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note).spray;
