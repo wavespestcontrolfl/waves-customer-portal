@@ -79,6 +79,11 @@ jobs:
         env:
           RECONCILE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/newsletter-list-reconcile-postgres.test.js
+      - name: Pest forecast snapshot tests
+        working-directory: server
+        env:
+          PEST_FORECAST_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --no-coverage tests/pest-forecast-history-postgres.test.js
       - name: Customer 360 SMS read and bell transaction tests
         run: |
           node <<'JS'

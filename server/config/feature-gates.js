@@ -2621,6 +2621,10 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // Daily city-level forecast snapshots + read-only historical comparisons.
+  // Opt-in everywhere after migration; live consumers use gateEnvValue at call time.
+  pestForecastHistory: gateEnvValue('GATE_PEST_FORECAST_HISTORY'),
+
   // ROUTE-TIERS — tiered day-move radius for recurring maintenance visits
   // inside the auto-dispatch run (≥14d: ±5 days; 7–13d: ±3; <7d: no day-moves;
   // <72h or 72h-reminder-sent: frozen), plus the ±5-day cumulative drift
