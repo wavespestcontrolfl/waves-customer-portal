@@ -309,10 +309,10 @@ test.each(['resolve', 'dismiss'])('%s requires the card version and leaves the p
 });
 
 describe('POST /admin/triage/:id/verdict', () => {
-  test('rejects a direct call verdict on a household_address_match suggestion (it asks the office to book on an account)', async () => {
+  test('rejects a direct call verdict on a missing_first_name card (an owed capture)', async () => {
     const { conn, tables } = fixture();
-    tables.triage_items[0].reason_code = 'household_address_match';
-    tables.triage_items[0].payload = { suggested_customer_id: 'cust-1' };
+    tables.triage_items[0].reason_code = 'missing_first_name';
+    tables.triage_items[0].payload = { heard_name_v1: { first_name: null, last_name: 'Murphy' } };
     wireDb(db, { conn });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });

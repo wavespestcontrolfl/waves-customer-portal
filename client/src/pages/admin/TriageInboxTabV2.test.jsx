@@ -281,43 +281,31 @@ describe('follow-up card Resolve path', () => {
   });
 });
 
-describe('household address suggestion card', () => {
-  const ACCOUNT = '11111111-1111-4111-8111-111111111111';
-  const card = { ...ordinary, id: 'hh', first_name: 'Sally', last_name: 'Caller', feedback_verdict: null,
-    reason_code: 'household_address_match', call_summary: 'Wasps by the lanai; John put out ant traps.',
-    summary: "Caller at Pat Example's address — book on that account?",
-    payload: JSON.stringify({ suggested_customer_id: ACCOUNT, suggested_customer_name: 'Pat Example', address: '1083 Example Shell Loop, Sarasota, 34240' }) };
+describe('missing first-name card', () => {
+  const card = { ...ordinary, id: 'fn', first_name: '', last_name: 'Murphy', feedback_verdict: null,
+    reason_code: 'missing_first_name', payload: JSON.stringify({ flag: 'missing_first_name', heard_name_v1: { first_name: null, last_name: 'Murphy' } }) };
+  const load = () => adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+    ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
 
-  it('shows its own summary, the suggested account with an Open account link, and no Accept/Deny', async () => {
-    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
-      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+  it('is an operational card: Resolve and Dismiss, no Accept/Deny', async () => {
+    load();
     render(<TriageInboxTabV2 />);
-    const el = (await screen.findByText('Sally Caller')).closest('.py-4');
-    expect(within(el).getByText("Caller at Pat Example's address — book on that account?")).toBeInTheDocument();
-    expect(within(el).queryByText(/Wasps by the lanai/)).toBeNull();
-    expect(within(el).getByText('Suggested account:')).toBeInTheDocument();
-    expect(within(el).getByText('Pat Example')).toBeInTheDocument();
-    expect(within(el).getByRole('link', { name: 'Open account' })).toHaveAttribute('href', `/admin/customers?customerId=${ACCOUNT}`);
+    const el = (await screen.findByText('Murphy')).closest('.py-4');
     expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
     expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
     expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
   });
 
   it('Resolve closes the card only: PUT /resolve with its version, never a /verdict', async () => {
-    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
-      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    load();
     render(<TriageInboxTabV2 />);
-    const el = (await screen.findByText('Sally Caller')).closest('.py-4');
+    const el = (await screen.findByText('Murphy')).closest('.py-4');
     fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
-    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/hh/resolve', {
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fn/resolve', {
       method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
     }));
     expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
-  });
-
-  it('a malformed suggested id never becomes a link', () => {
-    render(<ConfirmEvidence payload={{ flag: 'household_address_match', suggested_customer_id: 'not-a-uuid', suggested_customer_name: 'Pat Example' }} />);
-    expect(screen.queryByRole('link', { name: 'Open account' })).toBeNull();
   });
 });
 
