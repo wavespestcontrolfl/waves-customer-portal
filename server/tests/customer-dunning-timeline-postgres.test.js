@@ -680,6 +680,8 @@ postgres('customer-level overdue reminders: one customer through a whole episode
       expect(events.map((e) => e.at.getTime())).toEqual(events.map((e) => e.at.getTime()).sort((x, y) => x - y));
       expect(text).toContain('** UNDER 7 DAYS **');
       expect(text).toContain('touches under 7 days apart: 1');
+      expect(text).toContain('staff press  combined_reminders_pause  done');
+      expect(text).toContain('staff press  combined_reminders_resume  done');
       expect(text).toContain('closed 2026-10-01T14:16:00.000Z reason final_notice_delivered');
       for (const personal of ['Test', 'Customer', EMAIL, PHONE, 'synthetic billing question', 'SMS[']) expect(text).not.toContain(personal);
 

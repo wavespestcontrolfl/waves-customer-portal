@@ -250,8 +250,8 @@ describe('time ordering across every source', () => {
       'sequence', // Jul 6
       'schedule', // Jul 7 created
       'ledger', // Jul 8
-      'hold', // Aug 4 placed
-      'hold', // Aug 5 released
+      'flag', // Aug 4 set
+      'flag', // Aug 5 cleared
       'ledger', // Aug 5
       'staff', // Sep 1
       'schedule', // Oct 1 closed
@@ -277,10 +277,31 @@ describe('time ordering across every source', () => {
     expect(text).toContain('released ACTIVE');
   });
 
+  // Codex #5599 r3: a refused press (a send in flight, a dark schedule) must not read like one that worked.
+  test('a staff press says whether it was done or refused, by its logged status and code', () => {
+    const presses = [
+      { created_at: at('2026-09-01T13:00:00Z'), action: 'combined_reminders_pause', admin_user_id: ADMIN, metadata: JSON.stringify({ httpStatus: 200, code: null }) },
+      { created_at: at('2026-09-01T13:01:00Z'), action: 'combined_reminders_release', admin_user_id: ADMIN, metadata: { httpStatus: 409, code: 'IN_FLIGHT' } },
+      { created_at: at('2026-09-01T13:02:00Z'), action: 'combined_reminders_resume', admin_user_id: ADMIN, metadata: null },
+    ];
+    const text = Timeline.formatReport({ ...report, controls: presses }).join('\n');
+    expect(text).toContain('staff press  combined_reminders_pause  done');
+    expect(text).toContain('staff press  combined_reminders_release  refused IN_FLIGHT');
+    expect(text).toContain('staff press  combined_reminders_resume  result unknown');
+    expect(text).toContain('combined_reminders_release  refused IN_FLIGHT  admin');
+  });
+
+  // Codex #5599 r3: an unreadable ledger is an unknown count, never a clean 0.
+  test('an unreadable ledger prints the spacing count as UNKNOWN, not 0', () => {
+    const text = Timeline.formatReport({ ...report, attempts: [], ledgerUnreadable: true, notes: ['the collections contact ledger could not be read (42501)'] }).join('\n');
+    expect(text).toContain('touches under 7 days apart: UNKNOWN (the collections contact ledger could not be read)');
+    expect(text).not.toContain('touches under 7 days apart: 0');
+  });
+
   test('a row with no usable time is left out, never placed at the epoch', () => {
     const events = Timeline.buildEvents({ ...report, sequences: [{ ...report.sequences[0], last_touch_at: null }], holds: [{ id: 'x', kind: 'collection_hold', created_at: 'not a date', released_at: null }] });
     expect(events.every((e) => e.at.getTime() > 0)).toBe(true);
-    expect(events.some((e) => e.kind === 'sequence' || e.kind === 'hold')).toBe(false);
+    expect(events.some((e) => e.kind === 'sequence' || e.kind === 'flag')).toBe(false);
   });
 
   test('the printed report carries UTC and Eastern times, the under-7-day flag and every section', () => {
@@ -295,7 +316,7 @@ describe('time ordering across every source', () => {
     expect(text).toContain('2026-07-08T14:16:00.000Z | 2026-07-08 10:16 EDT');
     expect(text).toContain('gap 6.0d  ** UNDER 7 DAYS **');
     expect(text).toContain('touches under 7 days apart: 1');
-    for (const heading of ['PER-INVOICE SEQUENCES', 'REMINDER SCHEDULES', 'COLLECTIONS HOLDS', 'STAFF PRESSES']) expect(text).toContain(heading);
+    for (const heading of ['PER-INVOICE SEQUENCES', 'REMINDER SCHEDULES', 'COLLECTIONS FLAGS', 'STAFF PRESSES']) expect(text).toContain(heading);
     expect(text).toContain(`admin ${ADMIN}`);
     expect(text).toContain('released 2026-08-05T13:00:00.000Z');
   });

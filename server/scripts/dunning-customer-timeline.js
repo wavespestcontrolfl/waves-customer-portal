@@ -14,7 +14,7 @@
 //     collapseDunningReminderEvents), flagging any gap under 7 days;
 //   - the customer's per-invoice follow-up sequences,
 //   - the customer's reminder schedule rows (customer_dunning_schedules),
-//   - the customer's collections holds,
+//   - the customer's collections flags (holds and channel blocks),
 //   - the combined-reminder staff presses (activity_log combined_reminders_*).
 //
 // Prints ids, codes, times and counts only. A customer name, phone, email,
@@ -269,6 +269,15 @@ function attemptLine(a) {
   return `attempt  touch#${a.touch}  ${a.row.source}  ${a.row.channel}  ${a.state}  ${bits.join(' ')}  ${gapText(a)}`;
 }
 
+// What a staff press did (recordStaffControl's metadata: every press that reached a schedule is logged,
+// refusals included; Codex #5599 r3). Only the status and the machine code are printed.
+function pressResult(c) {
+  const meta = metadataOf(c);
+  if (meta.httpStatus === 200) return 'done';
+  if (meta.httpStatus == null) return 'result unknown';
+  return `refused ${codeOnly(meta.code) || meta.httpStatus}`;
+}
+
 /**
  * One time-ordered list across every source: { at, kind, text }, inside the
  * report's window. Pure; rows with no usable time are left out (they cannot be placed). Ties keep a stable order
@@ -286,11 +295,11 @@ function buildEvents(report) {
     push(s.closed_at, 'schedule', `schedule closed  episode ${s.episode}  status ${s.status}  reason ${knownReason(s.closed_reason) || '-'}`);
   }
   for (const h of report.holds || []) {
-    push(h.created_at, 'hold', `hold placed  id ${h.id}  kind ${codeOnly(h.kind) || '-'}`);
-    push(h.released_at, 'hold', `hold released  id ${h.id}  kind ${codeOnly(h.kind) || '-'}`);
+    push(h.created_at, 'flag', `flag set  id ${h.id}  kind ${codeOnly(h.kind) || '-'}`);
+    push(h.released_at, 'flag', `flag cleared  id ${h.id}  kind ${codeOnly(h.kind) || '-'}`);
   }
   for (const c of report.controls || []) {
-    push(c.created_at, 'staff', `staff press  ${codeOnly(c.action) || '-'}  admin ${c.admin_user_id || '-'}`);
+    push(c.created_at, 'staff', `staff press  ${codeOnly(c.action) || '-'}  ${pressResult(c)}  admin ${c.admin_user_id || '-'}`);
   }
   // Only the requested window (Codex #5599 r1 P2): sequences, schedules and active holds are read with no
   // lower bound for their own sections, so their older events are left out here.
@@ -311,9 +320,9 @@ const sequenceLine = (s) => `  invoice ${s.invoice_id}  status ${s.status}  step
 const scheduleLine = (s) => `  episode ${s.episode}  status ${s.status}  step ${s.step_index}  touches ${s.touches_sent}  last ${stamp(s.last_touch_at)}  next ${stamp(s.next_touch_at)}`
   + `  closed ${stamp(s.closed_at)} reason ${knownReason(s.closed_reason) || '-'}  held_reason ${knownReason(s.held_reason) || '-'}  paused_reason ${knownReason(s.paused_reason) || '-'}`;
 
-const holdLine = (h) => `  hold ${h.id}  kind ${codeOnly(h.kind) || '-'}  placed ${stamp(h.created_at)}  released ${h.released_at ? stamp(h.released_at) : 'ACTIVE'}`;
+const holdLine = (h) => `  flag ${h.id}  kind ${codeOnly(h.kind) || '-'}  placed ${stamp(h.created_at)}  released ${h.released_at ? stamp(h.released_at) : 'ACTIVE'}`;
 
-const controlLine = (c) => `  ${stamp(c.created_at)}  ${codeOnly(c.action) || '-'}  admin ${c.admin_user_id || '-'}`;
+const controlLine = (c) => `  ${stamp(c.created_at)}  ${codeOnly(c.action) || '-'}  ${pressResult(c)}  admin ${c.admin_user_id || '-'}`;
 
 /** The printed report, one string per line. Pure. */
 function formatReport(report) {
@@ -325,11 +334,13 @@ function formatReport(report) {
     'TIMELINE (UTC | Eastern). Gap = days since the previous reminder the spacing rule counts (any send not stamped failed;',
     '  a touch with several legs is timed by its latest one); a gap under 7 days is flagged.',
     ...(events.length ? events.map((e) => `  ${formatTimes(e.at)} | ${e.text}`) : ['  (no events in the window)']),
-    `  touches under 7 days apart: ${flagged}`,
+    report.ledgerUnreadable
+      ? '  touches under 7 days apart: UNKNOWN (the collections contact ledger could not be read)'
+      : `  touches under 7 days apart: ${flagged}`,
     '',
     ...section('PER-INVOICE SEQUENCES', report.sequences || [], sequenceLine, '(none)'),
     ...section('REMINDER SCHEDULES (customer_dunning_schedules)', report.schedules || [], scheduleLine, '(none)'),
-    ...section('COLLECTIONS HOLDS', report.holds || [], holdLine, '(none active or in the window)'),
+    ...section('COLLECTIONS FLAGS (collections_flags: holds and channel blocks)', report.holds || [], holdLine, '(none active or in the window)'),
     ...section('STAFF PRESSES (activity_log combined_reminders_*)', report.controls || [], controlLine, '(none)'),
     ...(report.notes || []).map((note) => `NOTE: ${note}`),
   ];
@@ -370,6 +381,7 @@ async function readTimeline(database, customerId, { now = new Date(), days = DEF
   const lookbackStart = new Date(windowStart.getTime() - 30 * DAY_MS);
   const notes = [];
 
+  const notesBeforeLedger = notes.length;
   const ledgerRows = await optionalRead(database, 'the collections contact ledger', notes, (sp) => sp('collections_contact_ledger')
     .where({ customer_id: customerId })
     .whereIn('source', [...OVERDUE_SOURCES])
@@ -378,6 +390,8 @@ async function readTimeline(database, customerId, { now = new Date(), days = DEF
     .where('occurred_at', '<=', now)
     .orderBy([{ column: 'occurred_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .select('id', 'customer_id', 'source', 'purpose', 'channel', 'occurred_at', 'metadata', 'invoice_ids'));
+  // An unreadable ledger is an unknown count, never a clean 0 (Codex #5599 r3).
+  const ledgerUnreadable = notes.length > notesBeforeLedger;
   const attempts = annotateAttempts(ledgerRows).filter((a) => new Date(a.row.occurred_at) >= windowStart);
 
   const sequences = await optionalRead(database, 'the per-invoice follow-up sequences', notes, (sp) => sp('invoice_followup_sequences')
@@ -403,10 +417,10 @@ async function readTimeline(database, customerId, { now = new Date(), days = DEF
     .whereRaw('action LIKE ?', ['combined\\_reminders\\_%'])
     .where('created_at', '>=', windowStart)
     .orderBy('created_at', 'asc')
-    .select('created_at', 'action', 'admin_user_id'));
+    .select('created_at', 'action', 'admin_user_id', 'metadata'));
 
   return {
-    customerId, now, days, windowStart, attempts, sequences, schedules, holds, controls, notes,
+    customerId, now, days, windowStart, ledgerUnreadable, attempts, sequences, schedules, holds, controls, notes,
   };
 }
 
