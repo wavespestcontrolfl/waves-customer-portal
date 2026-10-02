@@ -175,6 +175,12 @@ describe('request tally script', () => {
     }
   });
 
+  test('the whole tally reads one REPEATABLE READ, READ ONLY snapshot', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'ib-request-tally.js'), 'utf8');
+    expect(src).toMatch(/SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY/);
+    expect(src).not.toMatch(/SET TRANSACTION READ ONLY'/);
+  });
+
   test('arguments: default window, --days and --json, bad input refused', () => {
     expect(tally.parseArgs([])).toEqual({ days: 14, json: false, help: false });
     expect(tally.parseArgs(['--days', '30', '--json'])).toEqual({ days: 30, json: true, help: false });

@@ -6,13 +6,13 @@
  * so the ten workflows can be ranked by observed use without reading any
  * request text. It prints:
  *   - tool calls grouped by tool and by day, per operator id
- *   - proposal-phase and read failure counts per tool from tool_health_events
+ *   - tool-call health counts per tool from tool_health_events
  *   - confirmed-write outcomes per tool from ib_pending_actions
  *
  * It never selects, prints or exports the prompt or response columns of
  * intelligence_bar_queries, nor error_message from tool_health_events.
  * Operator ids are ids only; a value that looks like an email is replaced by a
- * short hash label. The whole run is one READ ONLY transaction.
+ * short hash label. The whole run is one READ ONLY, REPEATABLE READ transaction.
  *
  * Run it against production through Railway (the owner runs this; it needs the
  * production DATABASE_URL, which is why it is not run in CI):
@@ -29,9 +29,10 @@
  *   - public estimate Q&A rows share the table (a turn that called
  *     public_estimate_ask); they are customer traffic, not operator turns, and
  *     are left out of every count here
- *   - tool_health_events records a carded write when it is PROPOSED (and a
- *     read when it runs); the write that commits later records no health
- *     event. Committed-write outcomes (a rejected text, a stale write, a
+ *   - tool_health_events records a read when it runs and a carded write when
+ *     it is PROPOSED; the confirmed write records no health event. With
+ *     owner-direct on, a direct write records its health event as it
+ *     executes, so a failed direct write appears in both lists. Committed-write outcomes (a rejected text, a stale write, a
  *     database error) come from the consumed ib_pending_actions row instead,
  *     classified with the same executionOutcome the bar uses. A consumed row
  *     is a Confirm click or, with owner-direct on, a direct commit with no
@@ -217,7 +218,7 @@ function formatText(report) {
     }
   }
   lines.push('');
-  lines.push('Read and proposal-phase failures per tool (tool_health_events; a carded write is counted when proposed, not when confirmed)');
+  lines.push('Tool-call health events per tool (tool_health_events: reads, card proposals, and, with owner-direct on, direct writes as they execute, so a failed direct write also appears under committed outcomes)');
   if (!report.summary.failures.length) lines.push('  (no health events in the window)');
   for (const f of report.summary.failures) lines.push(`  ${String(f.failures).padStart(5)} failed / ${String(f.events).padStart(6)} events  ${f.tool}${f.circuit_open ? `  (circuit open on ${f.circuit_open})` : ''}`);
   lines.push('');
@@ -230,7 +231,8 @@ function formatText(report) {
 
 async function collect(db, days) {
   return db.transaction(async (trx) => {
-    await trx.raw('SET TRANSACTION READ ONLY');
+    // one snapshot for every query, so turns and their tool calls agree
+    await trx.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
     const calls = (await trx.raw(CALLS_SQL, [days])).rows;
     const turns = (await trx.raw(TURNS_SQL, [days])).rows;
     const failures = (await trx.raw(FAILURES_SQL, [days, HEALTH_SOURCES])).rows;
