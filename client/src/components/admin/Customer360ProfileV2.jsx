@@ -6360,21 +6360,21 @@ function CustomerProfileBilling({
         </>
       )}
       <BillingLanePanelV2
-        customerIdHint={c.id}
+        customerId={c.id}
         billingMode={c.billingMode}
         tier={c.tier}
         monthlyRate={c.monthlyRate}
         canEdit={isAdmin}
       />{" "}
       <AdminAutopayPanelV2
-        customerIdHint={c.id}
+        customerId={c.id}
         monthlyRate={c.monthlyRate}
         customerName={`${c.firstName} ${c.lastName}`}
         canCharge={isAdmin}
         collectionHold={collectionHold}
       />{" "}
       <AccountCreditPanelV2
-        customerIdHint={c.id}
+        customerId={c.id}
         customerName={`${c.firstName} ${c.lastName}`}
         canEdit={isAdmin}
       />{" "}
