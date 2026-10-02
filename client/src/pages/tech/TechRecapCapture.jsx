@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
+import { getAdminUser } from '../../lib/adminAuth';
+import { deleteRecapClipDraft, getRecapClipDraft, putRecapClipDraft } from '../../lib/completion-resume-store';
 
 // During-visit recap clip capture for the tech portal ("Your Visit, in Motion", P4b).
 // Native camera -> tag the action -> presigned PUT to S3 -> lands in the customer's
@@ -113,6 +115,39 @@ function forgetFailedDraft(map, serviceId, attemptId, onChange = () => {}) {
   return false;
 }
 
+// A clip saved on the device while its upload was still running: the app
+// closed (or the phone restarted) before it finished.
+const INTERRUPTED_MESSAGE = 'This clip didn’t finish uploading — retry or discard it.';
+
+// Unfinished clips are also kept on the device (completion-resume-store), so
+// closing the app in a dead zone does not lose them. Best effort: a device
+// without IndexedDB keeps today's in-memory recovery only.
+const operatorScope = () => {
+  const id = getAdminUser()?.id;
+  return id ? String(id) : '';
+};
+function saveClipOnDevice(serviceId, draft, message, scope) {
+  // A discard in progress is not saved as in progress: on reopen it is a
+  // plain retry of the discard.
+  // The name and type ride beside the File: not every IndexedDB keeps a
+  // File's name through storage, and the clip is shown by its name.
+  void putRecapClipDraft(serviceId, {
+    draft: { ...draft, discardPending: false }, message, fileName: draft.file?.name || '', fileType: draft.file?.type || '',
+  }, scope);
+}
+function restoredClipDraft(record) {
+  try {
+    const name = record.fileName || 'recap clip';
+    const file = new File([record.draft.file], name, { type: record.fileType || record.draft.contentType || '' });
+    return { ...record.draft, file };
+  } catch {
+    return null;
+  }
+}
+function forgetClipOnDevice(serviceId, scope) {
+  void deleteRecapClipDraft(serviceId, scope);
+}
+
 const mediaKey = (serviceId, mediaId) => `${serviceId}:${mediaId}`;
 const createRecoveryStore = () => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 });
 const captureButtonLabel = (uploading, failedUpload) => (
@@ -178,6 +213,25 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
     setUploading(recoveryStore.inFlightAttempts.has(serviceId) ? 1 : 0);
     setErr(retained?.message || null);
     if (serviceId) refresh(serviceId, generation);
+    if (serviceId && !retained) {
+      // Reopened app: bring back a clip saved on the device for this visit,
+      // unless this session already has its own recovery state for it.
+      getRecapClipDraft(serviceId, operatorScope()).then((record) => {
+        const restored = record?.draft?.file ? restoredClipDraft(record) : null;
+        if (!restored || !isCurrentService(serviceId, generation)) return;
+        if (recoveryStore.failedDrafts.has(serviceId) || recoveryStore.inFlightAttempts.has(serviceId)) return;
+        // A fresh attempt number in this session's counter, so Retry and
+        // Discard treat the restored clip as the visit's latest attempt.
+        const attemptId = recoveryStore.nextAttempt + 1;
+        recoveryStore.nextAttempt = attemptId;
+        recoveryStore.latestAttempts.set(serviceId, attemptId);
+        const draft = { ...restored, attemptId };
+        rememberFailedDraft(recoveryStore.failedDrafts, serviceId, draft, record.message || INTERRUPTED_MESSAGE);
+        onRecoveryChange();
+        setFailedUpload(draft);
+        setErr(record.message || INTERRUPTED_MESSAGE);
+      }).catch(() => {});
+    }
     return () => {
       serviceIdRef.current = null;
       if (serviceGenerationRef.current === generation) serviceGenerationRef.current += 1;
@@ -221,6 +275,8 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
     forgetFailedDraft(recoveryStore.failedDrafts, targetServiceId);
     onRecoveryChange();
     draft = { ...draft, attemptId };
+    const scope = operatorScope();
+    saveClipOnDevice(targetServiceId, draft, INTERRUPTED_MESSAGE, scope);
     const canRetainAttempt = () => recoveryStore.latestAttempts.get(targetServiceId) === attemptId;
     const canApplyAttempt = () => isVisibleAttempt(mountedRef.current, recoveryStore, serviceIdRef.current, targetServiceId, attemptId);
     setPendingFile(null);
@@ -249,6 +305,7 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
         const reconciled = await reconcileConfirmDraft(draft, request);
         draft = reconciled.draft;
         if (reconciled.readyItems) {
+          forgetClipOnDevice(targetServiceId, scope);
           if (isCurrentService(targetServiceId, generation)) {
             setItemState({ serviceId: targetServiceId, items: reconciled.readyItems });
           } else {
@@ -265,6 +322,7 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
           body: JSON.stringify({ role: draft.role, mediaType: draft.mediaType, contentType: draft.contentType }),
         });
         draft = { ...draft, mediaId: presigned.mediaId, uploadUrl: presigned.uploadUrl };
+        saveClipOnDevice(targetServiceId, draft, INTERRUPTED_MESSAGE, scope);
       }
 
       if (!draft.uploaded) {
@@ -281,9 +339,11 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
       // service even if the tech navigates away. The generation guard below
       // still suppresses every stale UI update in the newly selected visit.
       draft = { ...draft, needsReconcile: true };
+      saveClipOnDevice(targetServiceId, draft, INTERRUPTED_MESSAGE, scope);
       await request(`/tech/services/${targetServiceId}/recap-media/${draft.mediaId}/confirm`, {
         method: 'POST', body: JSON.stringify({ durationMs: draft.durationMs }),
       });
+      forgetClipOnDevice(targetServiceId, scope);
       if (serviceIdRef.current === targetServiceId) {
         await refresh(targetServiceId, serviceGenerationRef.current);
       } else {
@@ -293,6 +353,7 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
       const { retainedDraft, message } = await recoverUploadFailure(e, draft, request);
       if (canRetainAttempt()) {
         rememberFailedDraft(recoveryStore.failedDrafts, targetServiceId, retainedDraft, message);
+        saveClipOnDevice(targetServiceId, retainedDraft, message, scope);
       }
       if (canApplyAttempt()) {
         // Keep the in-memory File, role, and any completed upload stages so Retry
@@ -318,21 +379,27 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
   const discardFailedUpload = async () => {
     const discarded = failedUpload;
     if (!discarded) return;
+    const scope = operatorScope();
     if (!discarded.mediaId) {
       forgetFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, discarded.attemptId, onRecoveryChange);
+      forgetClipOnDevice(discarded.serviceId, scope);
       setFailedUpload(null);
       setErr(null);
       return;
     }
     const cleanupDraft = { ...discarded, retryable: false, discardRequested: true, discardPending: true };
     rememberFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, cleanupDraft, err);
+    saveClipOnDevice(discarded.serviceId, cleanupDraft, err, scope);
     onRecoveryChange();
     setFailedUpload(cleanupDraft);
     try {
       await deleteKnownDraft(discarded, request);
       const latest = recoveryStore.latestAttempts.get(discarded.serviceId) === discarded.attemptId;
       recoveryStore.discardedMedia.add(mediaKey(discarded.serviceId, discarded.mediaId));
-      if (latest) forgetFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, discarded.attemptId);
+      if (latest) {
+        forgetFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, discarded.attemptId);
+        forgetClipOnDevice(discarded.serviceId, scope);
+      }
       onRecoveryChange();
       if (latest && mountedRef.current && serviceIdRef.current === discarded.serviceId) {
         setItemState((current) => current.serviceId === discarded.serviceId
@@ -347,6 +414,7 @@ export default function TechRecapCapture({ service, request, recoveryStore: owne
       const message = 'Couldn’t discard this clip from the visit. Retry discard.';
       if (latest) {
         rememberFailedDraft(recoveryStore.failedDrafts, discarded.serviceId, failedCleanup, message);
+        saveClipOnDevice(discarded.serviceId, failedCleanup, message, scope);
         onRecoveryChange();
       }
       if (latest && mountedRef.current && serviceIdRef.current === discarded.serviceId) {
