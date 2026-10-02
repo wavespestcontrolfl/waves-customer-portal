@@ -12,6 +12,8 @@ afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 const yesNoRow = (over = {}) => ({
   id: 'r1',
+  provider: 'typesafe',
+  providerLabel: 'Jev',
   capability: 'sms_wants_callback',
   question: 'Does the customer want a call back?',
   subjectType: 'sms_log',
@@ -61,6 +63,80 @@ it('sends the inverse correct_value on Jev wrong and removes the row', async () 
     body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false, note: 'asked for text only' }),
   }));
   await waitFor(() => expect(screen.getByText('Nothing to review.')).toBeInTheDocument());
+});
+
+it('sends the tapped reason with Jev wrong and shows it on a labeled row', async () => {
+  mockList([yesNoRow()]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  fireEvent.click(screen.getByRole('button', { name: 'Wrong tone' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false, reason: 'wrong_tone' }),
+  }));
+  cleanup();
+  mockList([yesNoRow({ label: { verdict: 'jev_wrong', note: 'asked for text only', reason: 'wrong_tone' }, labelStatus: 'confirmed_error' })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText(/Labeled Jev Wrong — asked for text only \(Wrong tone\)/);
+});
+
+it('a chip tapped before Jev right is left out of that request and cleared, so a later Jev wrong does not reuse it', async () => {
+  mockList([yesNoRow()]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'all' } }); // the row stays mounted after a label
+  await screen.findByText('Does the customer want a call back?');
+  const chip = screen.getByRole('button', { name: 'Wrong tone' });
+  fireEvent.click(chip);
+  fireEvent.click(screen.getByRole('button', { name: 'Jev right' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_right', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null }),
+  }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Wrong tone' })).toHaveAttribute('aria-pressed', 'false'));
+  fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false }),
+  }));
+});
+
+it('a confirmed-wrong row opens with its saved reason pressed, and a re-label carries it', async () => {
+  mockList([yesNoRow({ label: { verdict: 'jev_wrong', correct_value: false, note: null, reason: 'missing_promise' }, labelStatus: 'confirmed_error' })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  expect(screen.getByRole('button', { name: 'Missing promise' })).toHaveAttribute('aria-pressed', 'true');
+  fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false, reason: 'missing_promise' }),
+  }));
+});
+
+it('successive Replaces on a still-mounted confirmed-wrong row keep its reason', async () => {
+  const labeled = yesNoRow({ label: { verdict: 'jev_wrong', correct_value: false, note: null, reason: 'missing_promise' }, labelStatus: 'confirmed_error' });
+  let posts = 0;
+  adminFetch.mockImplementation(async (url, options) => {
+    if (options?.method !== 'POST') return { reviews: [labeled], count: 1 };
+    posts += 1;
+    if (posts % 2 === 1) throw Object.assign(new Error('Already labeled'), { status: 409, details: { labelStatus: 'confirmed_error' } });
+    return { review: labeled };
+  });
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'all' } });
+  await screen.findByText('Does the customer want a call back?');
+  for (let round = 1; round <= 2; round += 1) {
+    expect(screen.getByRole('button', { name: 'Missing promise' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+      method: 'POST',
+      body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false, reason: 'missing_promise', force: true }),
+    }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull());
+  }
 });
 
 it('offers no Jev wrong button for choice questions', async () => {
@@ -206,4 +282,13 @@ it('a 409 subject_changed from the server locks the row instead of offering Repl
   fireEvent.click(screen.getByRole('button', { name: 'Jev right' }));
   expect(await screen.findByText(/changed after Jev answered/)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
+});
+
+it('names the provider whose answer a row holds: a Clef row reads Clef, with Clef right and Clef wrong', async () => {
+  mockList([yesNoRow({ provider: 'cloudflare', providerLabel: 'Clef' })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  expect(await screen.findByText('Clef: Yes (0.91)')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Clef right' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Clef wrong' })).toBeInTheDocument();
+  expect(screen.queryByText(/Jev/)).toBeNull();
 });

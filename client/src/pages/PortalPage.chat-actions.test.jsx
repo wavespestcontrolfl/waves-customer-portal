@@ -95,6 +95,24 @@ describe('payment card', () => {
   });
 });
 
+describe('visits card', () => {
+  it('renders each visit with its summary and only Waves report links', async () => {
+    await ask({
+      reply: 'Your last visit was Sep 28.',
+      cards: [{ type: 'visits', title: 'Your last 2 visits', rows: [
+        { id: 's1', service: 'Quarterly Pest Control', dateLabel: 'Sep 28, 2026', technician: 'Jordan', summary: 'Treated the lanai.', reportUrl: '/report/tok_r' },
+        { id: 's2', service: 'Lawn Care', dateLabel: 'Aug 20, 2026', technician: null, summary: null, reportUrl: 'https://evil.example/report/x' },
+      ] }],
+    });
+    expect(screen.getByText('Your last 2 visits')).toBeInTheDocument();
+    expect(screen.getByText('Sep 28, 2026 · Jordan')).toBeInTheDocument();
+    expect(screen.getByText('Treated the lanai.')).toBeInTheDocument();
+    const links = screen.getAllByRole('link', { name: 'View report' });
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAttribute('href', '/report/tok_r');
+  });
+});
+
 describe('payment card in the native app', () => {
   it('hands the receipt to the share sheet instead of a blank-target link', async () => {
     native.enabled = true;

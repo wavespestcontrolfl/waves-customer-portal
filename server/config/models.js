@@ -191,6 +191,9 @@ const DEFAULTS = Object.freeze({
   // max_tokens for always-thinking models and reads past thinking blocks.
   ADS_ADVISOR: 'claude-fable-5-1',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
+  // App lawn + tree/shrub/palm Photo ID (owner 2026-10-02, "same as pest"):
+  // the model for photoIdPlantV2's one Gemini read; set from the 27-photo eval.
+  GEMINI_PHOTO_ID_PLANT: 'gemini-3.6-flash',
   // App Photo ID pest engine (owner 2026-10-01, "lets just use Gemini"): on
   // the owner's chinch bug photo 3.6 Flash named it 4/4 in ~1.7 s through
   // the engine; 3.8 Flash gave chinch, seed bug and carpenter ant.
@@ -315,6 +318,7 @@ const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEF
 // advisor moves independently of FLAGSHIP / the highStakes policy.
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
+const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULTS.GEMINI_PHOTO_ID_PLANT;
 const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
@@ -597,6 +601,15 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
   }),
+  photoIdPlantV2: Object.freeze({
+    name: 'photoIdPlantV2',
+    // The customer app's lawn and tree/shrub/palm Photo ID (plant-engine.js
+    // with ladder 'gemini_only') only. Owner 2026-10-02: Gemini's one read
+    // answers; OpenAI stands in only when Gemini returns nothing usable.
+    // plantIdVision below keeps visit prep on its full ladder.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
+  }),
   plantIdVision: Object.freeze({
     name: 'plantIdVision',
     // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling
@@ -700,6 +713,7 @@ module.exports = {
   SMS_SONNET,
   GEMINI_VISION_BEST,
   GEMINI_PHOTO_ID_PEST,
+  GEMINI_PHOTO_ID_PLANT,
   GEMINI_TEXT_BEST,
   GEMINI_VISION_FALLBACK,
   GEMINI_IMAGE_PRO,

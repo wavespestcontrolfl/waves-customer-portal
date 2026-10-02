@@ -11,14 +11,16 @@
  * as long as the weather signals it was computed from (their freshUntil).
  */
 
-const { scorePests } = require('./pests');
+const { scorePests, MODEL_VERSION } = require('./pests');
 const { resolveLocation } = require('./locations');
 const { getWeatherSignals } = require('./weather');
+const { historyEnabled, compareForecasts, readPreviousForecast } = require('./history');
+const logger = require('../logger');
 
 const SITE = 'https://www.wavespestcontrol.com';
 const LANDING = `${SITE}/tools/pest-pressure-forecast/`;
 const BRAND = 'Waves Pest Control';
-const DISCLAIMER = 'An informational forecast based on Florida pest seasonality and local weather, not a guarantee of pest activity.';
+const DISCLAIMER = 'A seasonal and weather-based model, not a measurement or guarantee of pest activity. Local observation accuracy has not yet been validated.';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -46,7 +48,7 @@ function weatherLead(s, monthName) {
   if (s.warm && s.wet) return 'Warm, wet weather';
   if (s.wet) return 'A wet stretch';
   if (s.coolSnap) return 'A cool snap';
-  if (s.hot) return 'Hot, dry weather';
+  if (s.hot) return s.dry ? 'Hot, dry weather' : 'Hot weather';
   if (s.warm) return 'Warm weather';
   if (s.dry) return 'Dry weather';
   return `${monthName} weather`;
@@ -54,11 +56,11 @@ function weatherLead(s, monthName) {
 
 function buildSummary(pests, s, monthName) {
   const lead = weatherLead(s, monthName);
-  const rising = pests.filter((p) => p.trend === 'up').slice(0, 2).map((p) => p.shortName);
-  if (rising.length) return `${lead} → ${joinList(rising)} pressure is climbing this week.`;
+  const above = pests.filter((p) => p.baseline_comparison === 'above').slice(0, 2).map((p) => p.shortName);
+  if (above.length) return `${lead} puts the modeled outlook for ${joinList(above)} above the usual ${monthName} baseline.`;
   const watch = pests.filter((p) => p.level === 'high' || p.level === 'elevated').slice(0, 2).map((p) => p.shortName);
-  if (watch.length) return `${lead} keeps ${joinList(watch)} the pests to watch right now.`;
-  return `${lead} keeps overall pest pressure on the lower side this week.`;
+  if (watch.length) return `${lead}: the model rates ${joinList(watch)} as elevated for current conditions.`;
+  return `${lead}: the model rates overall pest pressure on the lower side for current conditions.`;
 }
 
 function weatherSummary(s) {
@@ -79,6 +81,8 @@ function computeForecast(location, signals, date) {
   const ranked = scorePests(month, signals);
 
   return {
+    model_version: MODEL_VERSION,
+    evidence: { kind: 'seasonal_weather_model', observation_validation: 'not_validated' },
     location: {
       slug: location.slug,
       label: location.label,
@@ -105,8 +109,12 @@ function computeForecast(location, signals, date) {
       category: p.category,
       score: p.score,
       score10: p.score10,
+      baseline: p.baseline,
+      baseline_comparison: p.baseline_comparison,
       level: p.level,
       trend: p.trend,
+      trend_basis: 'seasonal_baseline',
+      week_over_week: null,
       note: p.note,
     })),
     attribution: {
@@ -127,12 +135,25 @@ function computeForecast(location, signals, date) {
  */
 async function getForecastWithFreshness({ location, zip } = {}, { now } = {}) {
   const loc = resolveLocation({ location, zip });
-  const cached = _cache.get(loc.slug);
+  const withHistory = historyEnabled();
+  // A kill-switch change must not keep serving a history-enriched cached row.
+  const cacheKey = `${loc.slug}:${withHistory}`;
+  const cached = _cache.get(cacheKey);
   if (cached && Date.now() < cached.freshUntil) return cached;
 
   const signals = await getWeatherSignals({ lat: loc.lat, lng: loc.lng, region: loc.region });
-  const entry = { forecast: computeForecast(loc, signals, now || new Date()), freshUntil: signals.freshUntil };
-  _cache.set(loc.slug, entry);
+  let forecast = computeForecast(loc, signals, now || new Date());
+  if (withHistory) {
+    try {
+      forecast = compareForecasts(forecast, await readPreviousForecast(forecast));
+    } catch (err) {
+      // Missing migration / DB outage must not take the weather outlook down
+      // or turn an unavailable comparison into an invented "flat" trend.
+      logger.warn(`[pest-forecast] history unavailable: ${err.message}`);
+    }
+  }
+  const entry = { forecast, freshUntil: signals.freshUntil };
+  _cache.set(cacheKey, entry);
   return entry;
 }
 

@@ -17,6 +17,7 @@
  */
 
 const db = require('../models/db');
+const { estimateGreetingFirstName } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
@@ -567,7 +568,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       if (!estimate.customer_phone) {
         smsResult = { sent: false, reason: 'no_phone' };
       } else {
-        const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+        const firstName = await estimateGreetingFirstName(db, estimate);
         const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
         const viewUrl = await shortenOrPassthrough(longUrl, {
           kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
@@ -640,7 +641,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         emailResult = { sent: false, reason: 'no_email' };
       } else {
         const EmailTemplateLibrary = require('./email-template-library');
-        const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+        const firstName = await estimateGreetingFirstName(db, estimate);
         const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
           month: 'long', day: 'numeric', timeZone: 'America/New_York',
         });

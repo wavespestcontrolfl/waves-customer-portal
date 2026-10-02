@@ -2940,8 +2940,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(row.sms_context).toMatchObject({ basis: 'promise', due_date: tomorrow });
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     await refreshSmsCommitments({ conn: mockPg, now: new Date(new Date(row.due_at).getTime() + 60000) });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'A promise texted to a customer needs follow-up',
-      expect.any(String), expect.objectContaining({ bell: true }));
+    // Owner audit 2026-10-01: the bell names the customer and quotes the promise.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'Comms — follow up with Synthetic Fixture',
+      expect.stringContaining('We said “Gonna knock out your quarterly spray tomorrow”'), expect.objectContaining({ bell: true }));
   });
 
   test('Codex #5248 r2: the promised item sent by an automated text closes a general staff promise', async () => {
@@ -2982,8 +2983,9 @@ postgres('SMS commitments on PostgreSQL', () => {
       message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: late }).returning('id');
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
     const first = await refreshSmsCommitments({ conn: mockPg, now: new Date(late.getTime() + 2000) });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'A promise texted to a customer needs follow-up',
-      expect.stringContaining('only after the promised deadline'), expect.objectContaining({ bell: true,
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'Comms — follow up with Synthetic Fixture',
+      expect.stringContaining('done only after the promised time'), expect.objectContaining({ bell: true,
+        detail: expect.stringContaining('only after the promised deadline'),
         metadata: expect.objectContaining({ verification: 'kept_late' }) }));
     if (suppressed) {
       // No bell row to find next tick, so the row closes now.

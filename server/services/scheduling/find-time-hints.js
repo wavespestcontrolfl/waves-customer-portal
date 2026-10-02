@@ -24,6 +24,15 @@ function toMin(hhmm) {
 }
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+// A date that exists: 2026-09-31 matches the shape and sorts inside a
+// September–October range, but names no day.
+function realYmd(value) {
+  if (typeof value !== 'string' || !YMD.test(value)) return false;
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 
 /**
  * Request-shape check for the picker-hint params. Returns an error message
@@ -39,7 +48,9 @@ const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
  *                     answer is the best hour that clears it. The engine's
  *                     now+30 lead still applies underneath.
  */
-function validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin }) {
+function validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin, summary, pickedDate }) {
+  if (summary !== undefined && typeof summary !== 'boolean') return 'summary must be a boolean';
+  if (pickedDate !== undefined && !realYmd(pickedDate)) return 'pickedDate must be a real YYYY-MM-DD date';
   if (pickedStart !== undefined && !HHMM.test(String(pickedStart))) return 'pickedStart must be HH:MM';
   if (pickedEnd !== undefined && !HHMM.test(String(pickedEnd))) return 'pickedEnd must be HH:MM';
   if (sameDayFloorMin !== undefined && !(Number.isInteger(sameDayFloorMin) && sameDayFloorMin >= 0 && sameDayFloorMin <= 24 * 60)) {
@@ -82,44 +93,73 @@ function markUnknownDetours(slots) {
  * first wins) BEFORE slicing, or the chips row collapses below the
  * requested count. Fail-open like checkSlots: a snapshot failure keeps the
  * engine's answer, minus hours the picker itself would refuse.
+ *
+ * `every` (summary mode) also answers a second question from the SAME pass —
+ * not "the best start in this gap" but "every start that fits": each gap is
+ * walked to latest_start_min and every clear start kept, so a free
+ * 09:00–12:00 gap lists 09:00, 10:00 and 11:00 for a one-hour visit. The
+ * ranked answer is unchanged by it: one start per gap, deduped, sliced.
  */
-async function guardHintSlots(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN }) {
+async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN, every = false }) {
   const floorFor = (date) => (date === today && Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : 0);
-  let guarded = slots;
+  const restart = (s, m) => (m === toMin(s.start_time) ? s : { ...s, start_time: toHHMM(m), end_time: toHHMM(m + spanMin) });
+  // A gap's starts at the request's step, from the picker's floor through
+  // the last start whose end still clears the drive out. The full arrival
+  // simulation already checked every actual work span against unassigned/
+  // other-tech work and live holds — comparing its promise to nominal work
+  // blocks would recreate the bug — so such a slot is its own single start.
+  const gapStarts = (s) => {
+    const baseMin = toMin(s.start_time);
+    if (baseMin == null) return [];
+    if (s.route_mode === 'arrival_windows') return baseMin >= floorFor(s.date) ? [baseMin] : [];
+    let latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
+    // A gap ending at an after-hours stop runs past the day's close.
+    if (Number.isFinite(s.day_close_min)) latest = Math.min(latest, s.day_close_min - spanMin);
+    const starts = [];
+    for (let m = Math.max(baseMin, Math.ceil(floorFor(s.date) / step) * step); m <= latest; m += step) starts.push(m);
+    return starts;
+  };
+  // Per gap, in rank order: the starts that survive. Fail-open keeps the
+  // engine's own start (minus hours the picker itself would refuse) for the
+  // ranked answer, and every start in the gap for the summary.
+  let keptPerGap;
   try {
     const occupancyByDate = new Map();
     await Promise.all([...new Set(slots.map((s) => s.date))].map(async (d) => {
       occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
     }));
-    guarded = slots.flatMap((s) => {
-      const floorMin = floorFor(s.date);
-      // The full arrival simulation already checked every actual work span
-      // against unassigned/other-tech work and live holds. Comparing its
-      // promise to nominal work blocks here would recreate the bug.
-      if (s.route_mode === 'arrival_windows') return toMin(s.start_time) >= floorMin ? [s] : [];
-      const baseMin = toMin(s.start_time);
-      if (baseMin == null) return [];
-      const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
-      for (let m = Math.max(baseMin, Math.ceil(floorMin / step) * step); m <= latest; m += step) {
-        const window = { start: toHHMM(m), end: toHHMM(m + spanMin) };
-        const clear = conflictsForTarget(
-          occupancyByDate.get(s.date), null, s.date, window, { excludeServiceIds: excluded },
-        ).length === 0;
-        if (clear) return [m === baseMin ? s : { ...s, start_time: window.start, end_time: window.end }];
+    const clearAt = (s, m) => s.route_mode === 'arrival_windows' || conflictsForTarget(
+      occupancyByDate.get(s.date), null, s.date, { start: toHHMM(m), end: toHHMM(m + spanMin) }, { excludeServiceIds: excluded },
+    ).length === 0;
+    keptPerGap = slots.map((s) => {
+      const kept = [];
+      for (const m of gapStarts(s)) {
+        if (!clearAt(s, m)) continue;
+        kept.push(restart(s, m));
+        if (!every) break;
       }
-      return [];
+      return kept;
     });
   } catch (guardErr) {
     logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
-    guarded = slots.filter((s) => (toMin(s.start_time) ?? 0) >= floorFor(s.date));
+    keptPerGap = slots.map((s) => {
+      if (every) return gapStarts(s).map((m) => restart(s, m));
+      return (toMin(s.start_time) ?? 0) >= floorFor(s.date) ? [s] : [];
+    });
   }
-  const seenStarts = new Set();
-  return guarded.filter((s) => {
-    const key = `${s.date}|${s.start_time}`;
-    if (seenStarts.has(key)) return false;
-    seenStarts.add(key);
-    return true;
-  }).slice(0, topN);
+  const dedupe = (list) => {
+    const seenStarts = new Set();
+    return list.filter((s) => {
+      const key = `${s.date}|${s.start_time}`;
+      if (seenStarts.has(key)) return false;
+      seenStarts.add(key);
+      return true;
+    });
+  };
+  return {
+    ranked: dedupe(keptPerGap.flatMap((kept) => kept.slice(0, 1))).slice(0, topN),
+    every: every ? dedupe(keptPerGap.flat()) : null,
+  };
 }
 
 // Hours the engine never enumerates are absent from its list for bounds
@@ -168,8 +208,12 @@ function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMi
 // the picked window joins it so the checker's context is the row the save
 // would write — the save probe passes `changes: updates` the same way, and
 // derives the work span from THAT window, not the stored one (r7 P2).
-async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes }) {
-  if (!technicianId) return undefined;
+async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason }) {
+  // Summary mode names WHY there is no verdict, so the strip can say
+  // "can't check this day" instead of going silent; the three-line hint
+  // keeps its no-verdict contract (undefined).
+  const noVerdict = (reason) => (withReason ? { start: pickedWindow.start, fits: null, reason } : undefined);
+  if (!technicianId) return noVerdict('no_technician');
   try {
     const fit = await checkArrivalPlacement({
       serviceId, date: from, technicianId, excludeServiceIds,
@@ -182,10 +226,11 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
         drive_in_minutes: null, from_home_base: null, from_name: null, technician: null,
       };
     }
-    return fit.reason === 'route_unverified' ? undefined : { start: pickedWindow.start, fits: false };
+    if (fit.reason === 'route_unverified') return noVerdict('route_unverified');
+    return { start: pickedWindow.start, fits: false, ...(withReason ? { reason: fit.reason || 'arrival_window' } : {}) };
   } catch (checkErr) {
     logger.warn('[find-time] picked-hour arrival check failed (no verdict):', checkErr.message);
-    return undefined;
+    return noVerdict('route_unverified');
   }
 }
 
@@ -197,14 +242,15 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
 // ceiling. No gap = the hour doesn't fit that day's route; a gap the
 // tech-blind occupancy snapshot vetoes = same answer (fail-open on a
 // snapshot error, like the chips guard).
-async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded }) {
+async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason }) {
+  const miss = (reason) => ({ start: pickedWindow.start, fits: false, ...(withReason ? { reason } : {}) });
   const gap = rawSlots.find((s) => {
     if (s.date !== from) return false;
     const lo = toMin(s.start_time);
     const hi = Number.isFinite(s.latest_start_min) ? s.latest_start_min : lo;
     return lo != null && lo <= pickedMin && pickedEndMin <= hi + spanMin;
   });
-  if (!gap) return { start: pickedWindow.start, fits: false };
+  if (!gap) return miss('no_gap');
   let clear = true;
   try {
     clear = conflictsForTarget(
@@ -213,7 +259,7 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
   } catch (guardErr) {
     logger.warn('[find-time] picked-hour occupancy guard failed (fail-open):', guardErr.message);
   }
-  if (!clear) return { start: pickedWindow.start, fits: false };
+  if (!clear) return miss('occupied');
   return {
     start: pickedWindow.start,
     fits: true,
@@ -236,16 +282,142 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
  */
 async function scorePickedHour({
   rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
-  serviceId, technicianId, excludeServiceIds, excluded, changes,
+  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false,
 }) {
   const pickedMin = toMin(pickedStart);
-  if (pickedEnd !== undefined && toMin(pickedEnd) <= pickedMin) return undefined;
+  // `withReason` (summary mode): an hour no verdict can cover still gets a
+  // reason — fits stays null, never false, so no surface reads it as a miss.
+  const uncheckable = withReason ? { start: pickedStart, fits: null, reason: 'not_checkable' } : undefined;
+  if (pickedEnd !== undefined && toMin(pickedEnd) <= pickedMin) return uncheckable;
   const pickedEndMin = Math.max(pickedMin + spanMin, pickedEnd !== undefined ? toMin(pickedEnd) : 0);
-  if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return undefined;
+  if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return uncheckable;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
   return useArrivalWindows
-    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes })
-    : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded });
+    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason })
+    : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason });
 }
 
-module.exports = { validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour };
+// Summary mode (GATE_RESCHEDULE_AVAILABILITY): the availability strip shows
+// a run of days around the picked one, so the search is bounded here rather
+// than by the 90-day ceiling the ranged Find-a-Time button gets.
+const SUMMARY_MAX_DAYS = 14;
+
+function nextYmd(ymd) {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * What one find-time request searches, for every caller: the range, the date
+ * the picked hour's verdict is scored on, and the start step. The plain hint
+ * and the ranged button get back exactly what they asked for. A summary
+ * request (hint + summary:true + the gate) is narrowed three ways:
+ *   - it starts today at the earliest — the gap engine still walks past
+ *     dates, and a past hour must not be ranked, listed or called a fit;
+ *   - it covers at most SUMMARY_MAX_DAYS, so a debounced picker hint cannot
+ *     become a 90-day full enumeration;
+ *   - it is hourly whatever step was sent: the summary lists EVERY start in
+ *     a gap, and the save refuses a window that does not start on the hour.
+ * Throws a 400 for a range or picked date a summary cannot answer.
+ */
+function summaryRequestError(message) {
+  const err = new Error(message);
+  err.status = 400;
+  err.statusCode = 400;
+  err.isOperational = true;
+  return err;
+}
+
+function hintSearchPlan({ hint, summary, summaryEnabled, from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes }) {
+  const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined;
+  if (!(hint && summary === true && summaryEnabled)) {
+    return { summary: false, from, to: maxTo && to > maxTo ? maxTo : to, verdictDate: from, step };
+  }
+  // The legacy ceiling (maxTo) is measured from the asked `from`; a summary
+  // caps its own length from the today-clamped start instead, so a long-
+  // overdue dateFrom still searches the days ahead.
+  const start = from < today ? today : from;
+  if (to < start) throw summaryRequestError('a summary search cannot end before today');
+  const end = summaryRangeEnd(start, to);
+  // A summary search starts days before the pick, so the pick names its date
+  // (documented default: dateFrom, not the clamped start — a past pick is
+  // out of range, never scored against today's route). With no picked hour
+  // there is no verdict to place.
+  if (!pickedStart) return { summary: true, from: start, to: end, verdictDate: start, step: 60 };
+  const verdictDate = pickedDate !== undefined ? pickedDate : from;
+  if (verdictDate < start || verdictDate > end) throw summaryRequestError('pickedDate must be inside the searched range');
+  return { summary: true, from: start, to: end, verdictDate, step: 60 };
+}
+
+/** Last date a summary search may cover: `from` + SUMMARY_MAX_DAYS - 1. */
+function summaryRangeEnd(from, to) {
+  let last = from;
+  for (let i = 1; i < SUMMARY_MAX_DAYS && last < to; i++) last = nextYmd(last);
+  return last;
+}
+
+// Why a day has no hour to offer. The capacity engine counts each refused
+// candidate by reason per date; a day where the ONLY reason is an
+// unverifiable route (in progress, coordless stop) was never checked, which
+// is a different statement from "nothing fits". Engines that report no
+// reasons (gap mode, the pre-capacity arrival finder) leave it at 'full'.
+function emptyDayStatus(reasons) {
+  const keys = Object.keys(reasons || {}).filter((key) => reasons[key] > 0);
+  if (!keys.length) return 'full';
+  if (keys.every((key) => key === 'route_unverified')) return 'unverified';
+  if (keys.includes('day_overcommitted')) return 'overcommitted';
+  return 'full';
+}
+
+/**
+ * The guarded slot list as one row per date in [from, to] — every date is
+ * present, including the ones with nothing to offer, so the strip can say
+ * "full" rather than leave a hole. `slots` is guardHintStarts' `every` list:
+ * with no topN cap: already vetted against occupancy and the same-day floor
+ * and deduped by day + start (best-ranked technician wins). Hours are in
+ * clock order; ranking by added drive is the consumer's call.
+ */
+function summarizeHintDays(slots, { from, to, rejectionsByDate }) {
+  const byDate = new Map();
+  for (let date = from; date <= to; date = nextYmd(date)) byDate.set(date, []);
+  for (const slot of slots) {
+    const hours = byDate.get(slot.date);
+    if (!hours) continue;
+    hours.push({
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      detour_minutes: slot.detour_minutes ?? null,
+      estimated_arrival: slot.estimated_arrival || null,
+      stops_that_day: slot.stops_that_day ?? null,
+      technician: slot.technician ? { id: slot.technician.id, name: slot.technician.name } : null,
+    });
+  }
+  return [...byDate].map(([date, hours]) => ({
+    date,
+    status: hours.length ? 'open' : emptyDayStatus(rejectionsByDate?.[date]),
+    hours: hours.sort((a, b) => a.start_time.localeCompare(b.start_time)),
+  }));
+}
+
+// Budget for the strip's eleven days (the plain hint's range search covers
+// four). Logged so the first week of use says whether the range must shrink.
+const SUMMARY_SLOW_MS = 1500;
+
+/** The response's `summary` for a summary plan; undefined for any other. */
+function buildHintSummary(plan, everyStart, { rejectionsByDate, startedAt }) {
+  if (!plan.summary) return undefined;
+  const elapsedMs = Date.now() - startedAt;
+  if (elapsedMs > SUMMARY_SLOW_MS) {
+    logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
+  }
+  return {
+    days: summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate }),
+    elapsed_ms: elapsedMs,
+  };
+}
+
+module.exports = {
+  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour,
+  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS,
+};

@@ -14,6 +14,7 @@
  */
 
 const db = require('../models/db');
+const { estimateGreetingFirstName } = require('../utils/greeting-first-name');
 const EmailService = require('./email');
 const EmailTemplateLibrary = require('./email-template-library');
 const EmailTemplateAutomationExecutor = require('./email-template-automation-executor');
@@ -148,7 +149,7 @@ const EstimateAutoRenew = {
           });
           if (!updated) continue;
 
-          const firstName = (est.customer_name || '').split(' ')[0] || 'there';
+          const firstName = await estimateGreetingFirstName(db, est);
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           // Customer SMS removed 2026-07-06 — the estimate_auto_renewed

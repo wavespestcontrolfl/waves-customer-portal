@@ -14,6 +14,7 @@ import {
   UiSurface,
 } from "../ui";
 import BestTimeHint from "./BestTimeHint";
+import AvailabilityStrip, { stripCoversRouteWarning } from "./AvailabilityStrip";
 import SlotConflictNotice from "./SlotConflictNotice";
 import { seriesMoveSummary } from "./seriesMove";
 
@@ -47,6 +48,7 @@ export default function RescheduleDialogView({
   manualBestTimes,
   manualPicked,
   manualBestInRange,
+  manualAvailability,
   onClose,
 }) {
   return (
@@ -131,7 +133,24 @@ export default function RescheduleDialogView({
                 <Button className="sm:col-span-2" onClick={handleManualReschedule} disabled={sending || !manualDate}>Reschedule</Button>
               </div>
             )}
-            {showManual && <SlotConflictNotice conflicts={manualConflicts} style={{ marginTop: 10 }} />}
+            {showManual && (
+              <SlotConflictNotice
+                conflicts={stripCoversRouteWarning(manualAvailability, { currentDate: manualDate, currentStart: manualTime })
+                  ? (manualConflicts || []).filter((conflict) => !conflict.warning)
+                  : manualConflicts}
+                style={{ marginTop: 10 }}
+              />
+            )}
+            {showManual && (
+              <AvailabilityStrip
+                availability={manualAvailability}
+                currentDate={manualDate}
+                currentStart={manualTime}
+                currentTechnicianId={service.technicianId || service.technician_id}
+                onPick={(slot) => { setManualDate(slot.date); setManualTime(slot.start); }}
+                style={{ marginTop: 10 }}
+              />
+            )}
             {showManual && (
               <BestTimeHint
                 bestTimes={manualBestTimes}
