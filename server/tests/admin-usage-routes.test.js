@@ -428,30 +428,51 @@ describe('admin usage: page-key registry tracks the App.jsx route table', () => 
     // 'path="/admin" ' (closing quote + space) so /admin/login and friends
     // — standalone auth routes outside the admin layout, which never
     // beacon — don't match.
-    const start = src.indexOf('path="/admin" ');
+    const attr = src.indexOf('path="/admin" ');
+    expect(attr).toBeGreaterThan(-1);
+    // Scan from the layout <Route tag itself so it opens depth 1.
+    const start = src.lastIndexOf('<Route', attr);
     expect(start).toBeGreaterThan(-1);
     // Nesting-aware: /admin/today is a layout route with its own children
     // (tools, more, protocols, …), which beacon as pageKey "today" — only the
-    // layout's DIRECT children are page keys.
+    // layout's DIRECT children are page keys. A <Route …> tag's attributes
+    // hold JSX (element={<Suspense …><Page /></Suspense>}), so the tag end is
+    // found by walking braces, not by the first '>'.
     const fromRoutes = new Set(['dashboard']); // the bare /admin index
-    const tagRe = /<Route\b([^>]*?)(\/?)>|<\/Route>/g;
-    tagRe.lastIndex = start;
+    const tagEnd = (from) => {
+      let braces = 0;
+      for (let k = from; k < src.length; k += 1) {
+        const ch = src[k];
+        if (ch === '{') braces += 1;
+        else if (ch === '}') braces -= 1;
+        else if (ch === '>' && braces === 0) return k;
+      }
+      return -1;
+    };
     let depth = 0;
     let end = -1;
-    for (let m = tagRe.exec(src); m; m = tagRe.exec(src)) {
-      if (m[0] === '</Route>') {
+    let cursor = start;
+    for (;;) {
+      const open = src.indexOf('<Route', cursor);
+      const close = src.indexOf('</Route>', cursor);
+      if (close === -1) break;
+      if (open !== -1 && open < close && /[\s>]/.test(src[open + 6])) {
+        const gt = tagEnd(open);
+        expect(gt).toBeGreaterThan(open);
+        const tag = src.slice(open, gt + 1);
+        const selfClosing = src[gt - 1] === '/';
+        const pathMatch = /\spath="([^"]+)"/.exec(tag);
+        if (depth === 1 && pathMatch && pathMatch[1] !== '*') {
+          const first = pathMatch[1].split('/')[0];
+          fromRoutes.add(first === '_design-system' ? 'design-system' : first);
+        }
+        if (!selfClosing) depth += 1;
+        cursor = gt + 1;
+      } else {
         depth -= 1;
-        if (depth === 0) { end = m.index; break; }
-        continue;
+        cursor = close + 8;
+        if (depth === 0) { end = close; break; }
       }
-      const selfClosing = m[2] === '/';
-      const pathMatch = /path="([^"]+)"/.exec(m[1]);
-      // depth 1 = a direct child of the /admin layout route.
-      if (depth === 1 && pathMatch && pathMatch[1] !== '*') {
-        const first = pathMatch[1].split('/')[0];
-        fromRoutes.add(first === '_design-system' ? 'design-system' : first);
-      }
-      if (!selfClosing) depth += 1;
     }
     expect(end).toBeGreaterThan(start);
     expect([...fromRoutes].sort()).toEqual(

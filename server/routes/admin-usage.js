@@ -84,6 +84,9 @@ const KNOWN_PAGE_KEYS = new Set([
   'pricing-reality-check', 'projects', 'recruiting', 'referrals', 'revenue', 'reviews',
   'schedule', 'seo', 'service-library', 'settings', 'social-media', 'tax',
   'timetracking', 'today', 'tool-health', 'turf-height',
+  // Multi-line <Route\n path="…"> tags the old single-line scan skipped;
+  // both are real admin pages that beacon (nesting-aware scan, PR #5573).
+  'kb', 'lawn-protocol',
 ]);
 
 // Deep path segments that are real route structure (the route table's
