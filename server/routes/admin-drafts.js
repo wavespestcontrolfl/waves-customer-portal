@@ -7,7 +7,14 @@ const db = require('../models/db');
 // and the Agent Ops duplicate sweep also write status rejected with
 // approved_by. The two review endpoints stamp the status they set into
 // flags.review_verdict; the view requires the stamp to match the row's status.
-const reviewVerdictStamp = (dbh, status) => dbh.raw("COALESCE(flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ review_verdict: status })]);
+// flags is an object on some drafts and an ARRAY of tags on others (the
+// house-voice drafter writes an array), and array || object is an array, so
+// the stamp follows the row's shape: a 'review_verdict:<status>' tag on an
+// array, a review_verdict key on an object, a fresh object when null.
+const reviewVerdictStamp = (dbh, status) => dbh.raw(
+  "CASE jsonb_typeof(flags) WHEN 'array' THEN flags || ?::jsonb WHEN 'object' THEN flags || ?::jsonb ELSE ?::jsonb END",
+  [JSON.stringify([`review_verdict:${status}`]), JSON.stringify({ review_verdict: status }), JSON.stringify({ review_verdict: status })],
+);
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
