@@ -234,7 +234,9 @@ async function namedCustomers(prompt) {
   const singleNames = explicitSingleNames(prompt).filter(name => words.some((word, i) => word === name
     && (!words[i + 1] || AFTER_SINGLE_NAME.has(words[i + 1]))));
   if (!phrases.length && !singleNames.length) return { matches: [], complete: true };
-  const columns = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
+  // phone rides along so a read's name + phone selectors can be checked
+  // against the same row before task scope narrows it (Codex r5 P2).
+  const columns = ['id', 'first_name', 'last_name', 'phone', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
     .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));

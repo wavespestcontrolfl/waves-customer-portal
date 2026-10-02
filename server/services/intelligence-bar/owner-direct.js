@@ -48,6 +48,10 @@ const { ibFullAccess } = require('./ib-access');
 //   - set_estimate_presentation: writes model-authored customer-facing copy
 //     (a display name) onto an estimate; that stays reviewed on the card
 //     (Codex r4)
+//   - toggle_show_one_time_option: exposes or removes a priced one-time
+//     offer on a sent estimate (money; Codex r5)
+//   - cancel_queued_message: retires a scheduled customer text (a customer
+//     message, irreversible; Codex r5)
 //   - every external_action: send_sms, reply_via_sms, send_email_reply,
 //     review requests and replies, block_sender, outside-service writes
 const OWNER_DIRECT_TOOL_NAMES = new Set([
@@ -65,8 +69,6 @@ const OWNER_DIRECT_TOOL_NAMES = new Set([
   'create_restock_request',
   'update_restock_request',
   'toggle_estimate_v2_view',
-  'toggle_show_one_time_option',
-  'cancel_queued_message',
 ]);
 
 // update_customer also carries money, billing, lifecycle and comms fields.
@@ -89,6 +91,8 @@ function ownerDirectLive(req) {
   return gateEnvValue('GATE_IB_OWNER_DIRECT') && ibFullAccess(req);
 }
 
+const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().replace(/\s+/g, ' ') === String(b).trim().toLowerCase().replace(/\s+/g, ' ');
+
 // `preview` is the mutation-free preview the proposal just ran (two-step
 // tools); the decision reads it where the input alone cannot tell a single
 // record from a group.
@@ -102,7 +106,16 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
   if (toolName === 'assign_technician') {
     if (!Array.isArray(input?.service_ids) || input.service_ids.length !== 1) return false;
     const stops = preview?.stops;
-    return Array.isArray(stops) && stops.length === 1 && !stops[0]?.grouped_visit_id;
+    if (!Array.isArray(stops) || stops.length !== 1 || stops[0]?.grouped_visit_id) return false;
+    // The executor resolves technician_name by partial match; direct only
+    // when the name the model passed IS the resolved technician's full name
+    // (Codex r5), so "Adam" with two Adams on the roster keeps the card.
+    return Boolean(preview.would_assign_to_id) && sameName(input.technician_name, preview.would_assign_to);
+  }
+  // The lead tools give lead_id precedence over lead_name; a name beside an
+  // id is never checked against it (Codex r5), so direct needs the id alone.
+  if (toolName === 'update_lead_contact' || toolName === 'update_lead_status') {
+    return Boolean(input?.lead_id) && !input.lead_name;
   }
   // reschedule_appointment on a grouped visit detaches the service or
   // recomputes the parent visit window (the card discloses it; Codex r4), so
@@ -160,6 +173,13 @@ function directModelResult(committed) {
       error: body.result?.error || 'The outcome of this change could not be established.',
       note: 'OUTCOME UNKNOWN — the change may or may not have been applied. Do NOT call this tool again. Re-read the record to see whether it changed, and tell the operator in one short line what you found.' };
   }
+  if (body.success === true && body.outcome === 'partially_completed') {
+    // No card and no receipt card: this reply is the owner's only view of
+    // the failed follow-on step (Codex r5).
+    return { executed: true, outcome: 'partially_completed', result: body.result, ...persistence,
+      warning: body.result?.warning || persistence.warning || 'A follow-on step did not complete.',
+      note: 'PARTIAL — the change itself landed but a follow-on step failed (see warning). Tell the operator what changed AND quote the warning in one short line, and say what to re-check. Do not call this tool again.' };
+  }
   if (body.success === true) {
     return { executed: true, outcome: body.outcome, result: body.result, ...persistence,
       note: `Done — this executed directly, with no confirmation card. Tell the operator what changed in one short line.${persistence.warning ? ' Do not repeat the action.' : ''}` };
@@ -173,7 +193,7 @@ const OWNER_DIRECT_PROMPT = `
 
 OWNER MODE (overrides the sections above where they differ):
 You are talking to the owner. Do what they ask.
-- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, lead source and notes; an email, tier, rate, active or pipeline-stage change still shows a card. assign_technician and reschedule_appointment execute directly for one ungrouped stop; grouped visits and several stops show a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
+- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, lead source and notes; an email, tier, rate, active or pipeline-stage change still shows a card. Lead edits execute directly when you pass lead_id alone — never lead_id with lead_name. assign_technician executes directly for one ungrouped stop when technician_name is the technician's full name; reschedule_appointment for one ungrouped stop; grouped visits, several stops and a partial name show a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
 - Customer messages, money and bulk changes still show a one-tap card. Prepare it and say "tap Confirm" — nothing more.
 - Pick the record yourself from fresh lookups and pass its id: "the Murphy lead that came in today" is the Murphy lead created today. Use the phone, email, date, status or page record the owner gave to choose. Only when two records fit equally, ask ONE short question that lists the choices in a few words each.
 - A second name in a request (a technician, a spouse, a neighbor) is context, not a second target.

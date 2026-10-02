@@ -72,6 +72,7 @@ describe('which writes skip the card', () => {
     for (const name of ['send_sms', 'reply_via_sms', 'send_email_reply', 'trigger_review_request', 'submit_review_reply',
       'bulk_update_customers', 'bulk_update_leads', 'optimize_all_routes', 'swap_tech_assignments', 'move_stops_to_day',
       'create_appointment', 'cancel_appointment', 'cancel_plan', 'merge_customers', 'save_customer_estimate', 'switch_appointment_property', 'set_estimate_presentation',
+      'toggle_show_one_time_option', 'cancel_queued_message',
       'create_pending_estimate', 'approve_price', 'set_railway_gate', 'request_instant_payout']) {
       expect([name, OwnerDirect.executesWithoutCard(name, {})]).toEqual([name, false]);
     }
@@ -82,8 +83,17 @@ describe('which writes skip the card', () => {
   });
 
   test('the lead and schedule edits the owner asked for execute directly', () => {
-    for (const name of ['update_lead_contact', 'update_lead_status', 'update_property_access']) {
+    for (const name of ['update_property_access', 'add_customer_property', 'adjust_stock']) {
       expect([name, OwnerDirect.executesWithoutCard(name, {})]).toEqual([name, true]);
+    }
+  });
+
+  test('lead edits are direct with lead_id alone; a name beside the id, or a name only, keeps the card', () => {
+    for (const name of ['update_lead_contact', 'update_lead_status']) {
+      expect(OwnerDirect.executesWithoutCard(name, { lead_id: LEAD, first_name: 'Jay' })).toBe(true);
+      expect(OwnerDirect.executesWithoutCard(name, { lead_id: LEAD, lead_name: 'Fixture', first_name: 'Jay' })).toBe(false);
+      expect(OwnerDirect.executesWithoutCard(name, { lead_name: 'Fixture', first_name: 'Jay' })).toBe(false);
+      expect(OwnerDirect.executesWithoutCard(name, { first_name: 'Jay' })).toBe(false);
     }
   });
 
@@ -98,15 +108,20 @@ describe('which writes skip the card', () => {
 
   test('assign_technician is direct for one ungrouped stop; several stops, a grouped stop, or no preview keep the card', () => {
     const one = { service_ids: [A], technician_name: 'Synthetic Tech' };
-    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { stops: [{ id: A }] })).toBe(true);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { stops: [{ id: A, grouped_visit_id: 'visit-1' }] })).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { stops: [{ id: A }, { id: B }] })).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { stops: [] })).toBe(false);
+    const resolved = { would_assign_to: 'Synthetic Tech', would_assign_to_id: 'tech-1' };
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { ...resolved, stops: [{ id: A }] })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { ...one, technician_name: '  synthetic   tech ' }, { ...resolved, stops: [{ id: A }] })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { ...resolved, stops: [{ id: A, grouped_visit_id: 'visit-1' }] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { ...resolved, stops: [{ id: A }, { id: B }] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { ...resolved, stops: [] })).toBe(false);
     expect(OwnerDirect.executesWithoutCard('assign_technician', one, {})).toBe(false);
     expect(OwnerDirect.executesWithoutCard('assign_technician', one)).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [A, B], technician_name: 'Synthetic Tech' }, { stops: [{ id: A }] })).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [], technician_name: 'Synthetic Tech' }, { stops: [] })).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', { technician_name: 'Synthetic Tech' }, { stops: [{ id: A }] })).toBe(false);
+    // A partial name the executor matched to a fuller one keeps the card.
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { ...one, technician_name: 'Synthetic' }, { ...resolved, stops: [{ id: A }] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { would_assign_to: 'Synthetic Tech', stops: [{ id: A }] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [A, B], technician_name: 'Synthetic Tech' }, { ...resolved, stops: [{ id: A }] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [], technician_name: 'Synthetic Tech' }, { ...resolved, stops: [] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { technician_name: 'Synthetic Tech' }, { ...resolved, stops: [{ id: A }] })).toBe(false);
   });
 
   test('runDirectCommit: claims through the given commit path, cancels only an unconsumed approval, and reports uncertainty', async () => {
@@ -133,7 +148,9 @@ describe('which writes skip the card', () => {
     const unsaved = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 200, claimed: true, body: { success: true, outcome: 'completed', result: {}, receiptPersisted: false, warning: 'w' } }), cancel });
     expect(unsaved).toMatchObject({ actionId: 'pa-1', uncertain: true, partial: false, failed: false });
     const partial = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 200, claimed: true, body: { success: true, outcome: 'partially_completed', result: { success: true, warning: 'group repair failed' } } }), cancel });
-    expect(partial).toMatchObject({ actionId: 'pa-1', uncertain: false, partial: true, failed: false, result: { executed: true, outcome: 'partially_completed' } });
+    expect(partial).toMatchObject({ actionId: 'pa-1', uncertain: false, partial: true, failed: false, result: { executed: true, outcome: 'partially_completed', warning: 'group repair failed' } });
+    expect(partial.result.note).toMatch(/PARTIAL/);
+    expect(partial.result.note).toMatch(/quote the warning/);
 
     // A commit that throws before claiming releases the approval and rethrows.
     calls.length = 0;

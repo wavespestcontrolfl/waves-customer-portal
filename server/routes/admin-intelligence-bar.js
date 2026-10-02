@@ -2992,7 +2992,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               result = direct.result;
               if (direct.actionId) directActionIds.push(direct.actionId);
               if (direct.uncertain) writeFrontierBlocked = directOutcomeUncertain = true;
-              if (direct.partial) directOutcomePartial = true;
+              // A partial outcome closes the frontier too (Codex r5): the task
+              // store treats the partial receipt as unresolved, so a later
+              // write in the same turn must not build on it.
+              if (direct.partial) writeFrontierBlocked = directOutcomePartial = true;
               if (direct.failed) {
                 failed = true;
                 errorMessage = result.error;
