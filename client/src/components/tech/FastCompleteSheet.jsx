@@ -65,6 +65,9 @@ import {
   SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
+import {
+  OfficeNote, ProductHeardLines, VisitHeardLine, VoiceFillTop, useVoiceFillSheet,
+} from './FastCompleteVoiceFill';
 import { Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -199,7 +202,7 @@ function rowRate(row, sprayMethod) {
 // The first requirement the application record still needs, in screen order
 // (reason '' when none), and the product whose stock holds Complete when
 // that is what is missing.
-function missingRequirement(form, rows, ratingAllowed, dictationPending) {
+function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0) {
   const active = rows.filter((row) => row.active);
   // The server refuses the whole visit when a tracked stock would go below
   // zero; a stock already at zero is named here instead.
@@ -217,6 +220,8 @@ function missingRequirement(form, rows, ratingAllowed, dictationPending) {
     [!form.areas.size, 'Select where you treated.'],
     [needsLinearFt && !(Number(form.linearFt) > 0), 'Enter the linear feet you sprayed.'],
     [ratingAllowed && !form.activity, 'Select activity seen.'],
+    // Voice fill: something it could not settle is still open.
+    [openChecks > 0, 'Check what I couldn\'t fill.'],
   ].find(([missing]) => missing) || [];
   return { reason, stockRow };
 }
@@ -242,7 +247,7 @@ const NO_CUSTOMER_RECAP_FLAGS = {
   includePayLink: false,
 };
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled }) {
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled, officeNote = '' }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -269,6 +274,9 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
     areasServiced: [...form.areas],
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
+    // Voice fill's office note: staff-only (the visit's internal notes),
+    // sent only when there is one.
+    ...(officeNote.trim() ? { officeNote: officeNote.trim() } : {}),
     techTips: techTipsOf(form, tipsAvailable),
     // Gate off (GATE_FAST_COMPLETE_RECAP): no customer text, review ask or pay
     // link. Gate on: the fixed re-service text; the server composes it.
@@ -352,7 +360,7 @@ function usePhotoManager() {
   return { ...state, open, close, hiddenProps: state.isOpen ? { 'aria-hidden': true, inert: '' } : {} };
 }
 
-export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
+export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -406,12 +414,12 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
       )}
     >
       <SheetHeader titleId={titleId} title={done ? 'Re-service complete' : 'Complete re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, voiceFillEnabled }) {
   if (submission.done) {
     return (
       <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
@@ -422,7 +430,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, dictatio
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
-  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
+  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} />;
 }
 
 // The products on the sheet: the house mix it opened with, plus what the tech
@@ -454,14 +462,36 @@ function useProductRows(ctx, serviceType) {
   const clearFollowingRates = useCallback(() => {
     setRows((prev) => prev.map((row) => (followsVisitMethod(row) ? { ...row, rateInput: null } : row)));
   }, []);
+  // A voice fill: rows it adds (without opening their editors) and the patches
+  // it makes to rows already there; a product already on the sheet is not added twice.
+  const applyFill = useCallback((added, patches) => {
+    setRows((prev) => {
+      const known = new Set(prev.map((row) => row.productId));
+      const kept = prev.map((row) => (patches[row.productId] ? { ...row, ...patches[row.productId] } : row));
+      return [...kept, ...added.filter((row) => !known.has(row.productId))];
+    });
+  }, []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
     setRows((prev) => prev.map((row) => ({ ...row, product: withFreshStock(row.product, fresh) })));
   }, []);
-  return { rows, editingId, setEditingId, updateRow, addProduct, removeRow, clearFollowingRates, applyStock };
+  return { rows, editingId, setEditingId, updateRow, addProduct, removeRow, clearFollowingRates, applyFill, applyStock };
 }
 
-function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile }) {
+// The pest sheet's own row rules, handed to the voice-fill plan
+// (lib/fast-complete-voice-plan.js) so it reads rows and choices the way the
+// sheet does. `makeRow` is added per sheet (it needs the visit's service type).
+const VOICE_SHEET_OPS = {
+  rowMethod,
+  followsVisitMethod,
+  sprayMethods: SPRAY_METHODS,
+  defaultMethod: DEFAULT_METHOD,
+  pests: [...PEST_CHIPS, ...PEST_CHIPS_MORE],
+  areas: AREA_CHIPS,
+  activityValues: ACTIVITY_LEVELS.map((level) => level.value),
+};
+
+function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled }) {
   const products = useProductRows(ctx, service?.serviceType);
   const { rows, addProduct, clearFollowingRates } = products;
   const [editAmounts, setEditAmounts] = useState(false);
@@ -481,6 +511,20 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     setField('method', next);
     clearFollowingRates();
   }, [setField, clearFollowingRates]);
+  // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL, delivered as the `voiceFillEnabled`
+  // prop): off, nothing below renders and the sheet is as it always was.
+  const voiceOps = useMemo(() => ({
+    ...VOICE_SHEET_OPS,
+    makeRow: (product, extras) => productRow(product, { serviceType: service?.serviceType, added: true, ...extras }),
+  }), [service?.serviceType]);
+  const voice = useVoiceFillSheet({
+    enabled: voiceFillEnabled,
+    request,
+    serviceId: service?.id,
+    sheet: { ops: voiceOps, ctx, products, form, setForm, chooseMethod, appendNote },
+  });
+  // Words being recorded, transcribed or filled in would miss the save.
+  const busy = dictationPending || voice.filling;
   // The house mix is always on the sheet, so "Used most" lists the rest.
   const pickerCommonProducts = useMemo(() => {
     const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
@@ -490,13 +534,13 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     products: ctx.products,
     commonProducts: pickerCommonProducts,
     rows,
-    locked: locked || dictationPending,
+    locked: locked || busy,
     isMobile,
     onFullForm,
     onPick: (product) => addProduct(product, form.method),
   });
 
-  const { reason: missingReason, stockRow } = missingRequirement(form, rows, ctx.rating.allowed, dictationPending);
+  const { reason: missingReason, stockRow } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length);
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.
   const [checkingStock, setCheckingStock] = useState(false);
@@ -515,6 +559,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     submission.submit(
       () => completionBody(form, rows, {
         visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, recapEnabled: recapOn(service),
+        officeNote: voice.enabled ? voice.officeNote : '',
       }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
@@ -524,12 +569,15 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
+          <VoiceFillTop voice={voice} serviceId={service?.id} locked={locked} onPendingChange={onDictationPending} />
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
+          <OfficeNote voice={voice} locked={locked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
-          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked || dictationPending} />
+          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked || busy} />
           <ProductsSection
             products={products}
+            heardLines={<ProductHeardLines voice={voice} rows={rows} />}
             method={form.method}
             editAmounts={editAmounts}
             locked={locked}
@@ -551,6 +599,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               ))}
             </ChoiceSection>
           )}
+          <VisitHeardLine voice={voice} />
           {tipsAvailable && (
             <TipSection
               library={tips}
@@ -612,7 +661,7 @@ function CustomerTextResult({ outcome }) {
 
 // Every product on the sheet. A house-mix tile taps off and on (struck
 // through, never removed); an added product's tile opens its editor.
-function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, other, popover }) {
+function ProductsSection({ products, heardLines = null, method, editAmounts, locked, onToggleEdit, other, popover }) {
   const { rows, editingId, setEditingId, updateRow, removeRow } = products;
   const editorId = useId();
   const tileRefs = useRef(new Map());
@@ -654,6 +703,7 @@ function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, 
           />
         ))}
       </div>
+      {heardLines}
       {editing && (
         <AddedProductEditor
           key={editing.productId}
@@ -772,7 +822,9 @@ function RowMethodPicker({ row, method, locked, onChange }) {
 }
 
 function PestsSection({ form, setField, locked }) {
-  const [showMore, setShowMore] = useState(false);
+  const [moreTapped, setShowMore] = useState(false);
+  // A pest from the second row (a voice fill can pick one) keeps it open.
+  const showMore = moreTapped || PEST_CHIPS_MORE.some((label) => form.pests.has(label));
   const toggle = (label) => setField('pests', toggleInSet(form.pests, label));
   return (
     <>

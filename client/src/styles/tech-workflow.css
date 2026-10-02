@@ -249,6 +249,13 @@
 .ui-action.tech-visit-action.tech-visit-product-tile { flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 2px; min-height: 60px; padding: 8px 10px; border-radius: 12px; text-align: left; line-height: 1.25; }
 .tech-visit-product-name { font-weight: 700; overflow-wrap: anywhere; }
 .tech-visit-product-amount { font-size: 14px; font-weight: 400; white-space: nowrap; }
+/* Fast Complete voice fill: the big "Tell me what you did" mic, the muted
+   "Heard: ..." lines, and the Check chips that hold Complete. */
+.ui-action.tech-visit-action.tech-voice-mic { gap: 10px; min-height: 64px; font-size: 17px; font-weight: 700; }
+.tech-visit-heard { margin: 4px 0 0; color: var(--tech-muted); font-size: 14px; font-style: italic; overflow-wrap: anywhere; }
+.tech-visit-check-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.tech-visit-check { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid #fcd34d; border-radius: 12px; background: var(--tech-card); }
+.tech-visit-check-text { flex: 1; min-width: 0; font-size: 15px; overflow-wrap: anywhere; }
 /* Tree & Shrub Fast Complete: five photo slots (label, one-line caption,
    thumbnail, add / retake), then the photo read's finding tiles. */
 .tech-ts-slots { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; }
