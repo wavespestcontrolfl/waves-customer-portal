@@ -73,6 +73,7 @@ function fakeDb(seed) {
     };
     q.whereIn = (col, list) => { filters.push((row) => list.includes(row[strip(col)])); return q; };
     q.whereNotIn = (col, list) => { filters.push((row) => !list.includes(row[strip(col)])); return q; };
+    q.whereNotNull = (col) => { filters.push((row) => row[strip(col)] != null); return q; };
     q.delete = async () => {
       const keep = [];
       let n = 0;

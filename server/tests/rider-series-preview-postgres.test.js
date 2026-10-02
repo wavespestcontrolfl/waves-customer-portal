@@ -538,7 +538,7 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       });
       for (let i = 1; i <= 6; i++) {
         await row({
-          recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+          recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, service_type: 'Lawn Care - Every 6 Weeks',
           recurring_pattern: 'every_6_weeks', scheduled_date: addDays(etDateString(), 20 + i * 42),
         });
       }
@@ -573,7 +573,7 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false, lawnPropertyId, pestPropertyId: lawnPropertyId });
     const otherPropertyDate = addDays(ANCHOR, 90);
     await row({
-      recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+      recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, service_type: 'Lawn Care - Every 6 Weeks',
       recurring_pattern: 'every_6_weeks', scheduled_date: otherPropertyDate, property_id: otherPropertyId,
     });
     const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
@@ -714,7 +714,7 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
         scheduled_date: LAWN_START, // no property_id, no stamped address
       });
       await row({
-        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, service_type: 'Lawn Care - Every 6 Weeks',
         recurring_pattern: 'every_6_weeks', scheduled_date: LAWN_CHILD, property_id: propertyId, ...childFields,
       });
       const pestParent = await row({
@@ -741,7 +741,7 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
         scheduled_date: LAWN_START, property_id: same,
       });
       await row({
-        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, service_type: 'Lawn Care - Every 6 Weeks',
         recurring_pattern: 'every_6_weeks', scheduled_date: LAWN_CHILD,
         service_address_line1: '100 Test Lane', service_address_city: 'Test City', service_address_state: 'FL', service_address_zip: '00000',
       });
@@ -823,13 +823,13 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       // copyStampedServiceAddressFields leaves on a pre-move child row).
       const oldDate = addDays(LAWN_START, 81);
       await row({
-        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, service_type: 'Lawn Care - Every 6 Weeks',
         recurring_pattern: 'every_6_weeks', scheduled_date: oldDate, property_id: propOld,
       });
       // Spawned AFTER the move: stamped with the NEW property.
       const newDate = addDays(LAWN_START, 96);
       await row({
-        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, service_type: 'Lawn Care - Every 6 Weeks',
         recurring_pattern: 'every_6_weeks', scheduled_date: newDate, property_id: propNew,
       });
       const pestParent = await row({
@@ -854,7 +854,7 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       });
       const unstampedDate = addDays(LAWN_START, 96);
       await row({
-        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, service_type: 'Lawn Care - Every 6 Weeks',
         recurring_pattern: 'every_6_weeks', scheduled_date: unstampedDate, // no property_id at all
       });
       const pestParent = await row({
@@ -981,10 +981,10 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
   test('a host row tracked complete is not a host date', async () => {
     const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
     // An off-cadence lawn visit inside the 77-105 day window, so the host
-    // date (ANCHOR+80) differs from pest's own fallback date (ANCHOR+84).
+    // date (ANCHOR+82, a weekday: a host weekend date is not taken) differs from pest's own fallback date (ANCHOR+84).
     const offCadence = await row({
       recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, recurring_pattern: 'every_6_weeks',
-      service_type: 'Lawn Care - Every 6 Weeks', scheduled_date: addDays(ANCHOR, 80),
+      service_type: 'Lawn Care - Every 6 Weeks', scheduled_date: addDays(ANCHOR, 82),
     });
     const hostDate = dateOnlyStr(offCadence.scheduled_date);
     const before = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
