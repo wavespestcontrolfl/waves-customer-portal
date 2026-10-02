@@ -202,7 +202,7 @@ describe('scoreRows — tiers from the representative set only', () => {
   });
 
   test('coverage counts every recorded answer, labeled or not, and the confident share', () => {
-    const coverage = [{ capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', question_id: 'is_courtesy_only', served_model: 'jev-1.13.0', answered: '400', confident: '300' }];
+    const coverage = [{ capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', provider: 'typesafe', question_id: 'is_courtesy_only', served_model: 'jev-1.13.0', answered: '400', confident: '300' }];
     const [cap] = scoreRows(rows(3), coverage);
     expect(cap.questions[0].coverage).toEqual({ answered: 400, confident: 300, confidentShare: 0.75 });
     const [bare] = scoreRows([], coverage);
@@ -212,7 +212,7 @@ describe('scoreRows — tiers from the representative set only', () => {
 
   test('a choice question (no yes class) reports accuracy as precision and recall, and says so; the type is read from the answer when the package is unregistered', () => {
     const choice = (verdict, correct = null) => ({
-      capability: 'routing', package_id: 'routing.v0', question_id: 'team', served_model: 'jev-1.13.0', sampled_for: 'random_audit',
+      capability: 'routing', package_id: 'routing.v0', provider: 'typesafe', question_id: 'team', served_model: 'jev-1.13.0', sampled_for: 'random_audit',
       label_status: status[verdict], jev_answer: JSON.stringify({ choice: 'billing', confidence: 0.9, probabilities: {}, confident: true }), label: label(verdict, correct),
     });
     const labeled = [choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_wrong', 'technical')];
@@ -249,7 +249,7 @@ describe('scoreRows — tiers from the representative set only', () => {
   });
 
   test('a group opened by a coverage row for an unregistered package still learns its type from the labeled answers', () => {
-    const coverage = [{ capability: 'gone', package_id: 'gone.v1', question_id: 'q', served_model: 'jev-1.13.0', answered: 40, confident: 30 }];
+    const coverage = [{ capability: 'gone', package_id: 'gone.v1', provider: 'typesafe', question_id: 'q', served_model: 'jev-1.13.0', answered: 40, confident: 30 }];
     const [cap] = scoreRows(rows(10, { capability: 'gone', pkg: 'gone.v1', question: 'q' }), coverage);
     expect(cap.questions[0].type).toBe('noul');
     expect(cap.questions[0].representative.counts).toMatchObject({ labeled: 10, unclear: 0 });
@@ -285,7 +285,7 @@ describe('evaluateCapabilities — the read-only status query', () => {
     const now = new Date('2026-10-02T00:00:00Z');
     const conn = fakeConn([
       rows(60, { p: 0.9 }),
-      [{ capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', question_id: 'is_courtesy_only', served_model: 'jev-1.13.0', answered: 500, confident: 450 }],
+      [{ capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', provider: 'typesafe', question_id: 'is_courtesy_only', served_model: 'jev-1.13.0', answered: 500, confident: 450 }],
     ]);
     const out = await evaluateCapabilities({ days: 30, now, conn });
     expect(out).toMatchObject({ windowDays: 30, confidence: 0.95, generatedAt: now.toISOString() });
