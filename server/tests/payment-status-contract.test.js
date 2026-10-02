@@ -1037,3 +1037,14 @@ test('withoutSnapshotCopies strips receipt copies only; plan-price and balance c
   expect(c.withoutSnapshotCopies(P, snap)).toContain('$99.00');
   expect(c.withoutSnapshotCopies(B, snap)).toContain('$45.00');
 });
+
+// Codex round-75 P1: a Zelle offer answers how to pay, never whether a payment arrived
+describe('a copied Zelle offer is off target for a receipt-status question', () => {
+  const Z = 'You can pay invoice #WPC-2026-0001 by Zelle to pay@example.com.';
+  test.each(['Did you receive my Zelle payment?', 'Did my Zelle go through?', 'I sent it by Zelle yesterday, did you get it?'])('off target: %s', (i) => {
+    expect(c.copiesOffTarget([Z], i)).toBe(true);
+  });
+  test.each(['Can I pay by Zelle?', 'Do you take Zelle?', 'Can I Zelle you instead of card?'])('how-to-pay, on target: %s', (i) => {
+    expect(c.copiesOffTarget([Z], i)).toBe(false);
+  });
+});

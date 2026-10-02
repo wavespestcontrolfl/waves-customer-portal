@@ -412,10 +412,15 @@ async function zelleDeniedByDepositSettlement(invoice, dbh) {
   }
 }
 
-// { reason } when Zelle must be withheld; else { reason: null, invoice: <the fresh row>, projectedCredit }. Order: the fresh row, its DB-side
-// predicate (no caller overrides), the live payer, the projected (partial) credit, the PaymentIntent, and LAST the DB fences (deposit
-// settlement, saved-card claim - Codex rounds 69/70 P0: no read follows them).
+// { reason } when Zelle must be withheld; else { reason: null, invoice: <the fresh row>, projectedCredit }. Order: the PaymentIntent's live
+// Stripe state (the one slow await) FIRST, then the fresh row, its DB-side predicate (no caller overrides), the live payer, the projected
+// (partial) credit, and LAST the DB fences (deposit settlement, saved-card claim - Codex rounds 69/70/75: no slow await follows a DB read).
 async function zelleFinalPass(inv, { dbh, readOnly }) {
+  // Codex round-75 P0 (owner ruling: the full DB pass runs AFTER the slow Stripe probes): the attached PaymentIntent's live Stripe state
+  // is read FIRST, from the caller's row; every DB read below follows it, and the fresh row must still carry that same PaymentIntent.
+  try {
+    if (await withTimeout(zelleDeniedByPaymentIntent(inv), ZELLE_ELIGIBILITY_TIMEOUT_MS)) return { reason: 'invoice_changed' };
+  } catch { return { reason: 'eligibility_unverifiable' }; }
   let fresh;
   try { fresh = await dbh('invoices').where({ id: inv.id }).first(); } catch { return { reason: 'eligibility_unverifiable' }; }
   if (!fresh) return { reason: 'invoice_not_found' };
@@ -431,10 +436,9 @@ async function zelleFinalPass(inv, { dbh, readOnly }) {
   if (owned) return { reason: owned };
   let projectedCredit;
   try { projectedCredit = await invoiceProjectedCreditApplied(fresh, { database: dbh }); } catch { return { reason: 'credit_unverifiable' }; }
-  // The attached PaymentIntent's live Stripe state (the one slow await), THEN the DB fences as the last reads (Codex round-70 P0s): a
-  // received estimate deposit awaiting reconciliation, and a saved-card charge claim (read-only: never releases or promotes anything)
+  // the DB fences as the last reads (Codex round-70 P0s): a received estimate deposit awaiting reconciliation, and a saved-card charge
+  // claim (read-only: never releases or promotes anything)
   try {
-    if (await withTimeout(zelleDeniedByPaymentIntent(fresh), ZELLE_ELIGIBILITY_TIMEOUT_MS)) return { reason: 'invoice_changed' };
     const deposit = await zelleDeniedByDepositSettlement(fresh, dbh);
     if (deposit) return { reason: deposit };
     if (await zelleDeniedByChargeReconciliation(fresh, true, dbh)) return { reason: 'invoice_changed' };

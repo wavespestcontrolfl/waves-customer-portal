@@ -594,6 +594,12 @@ function sentenceDate(t) {
 }
 // the tender a rendered payment sentence names ('card' / 'ach'), or null when it names none
 const sentenceTender = (t) => (/ card payment\b/.test(t) ? 'card' : / ACH payment\b/.test(t) ? 'ach' : null);
+// Codex round-75 P1: a Zelle offer / unavailability line answers HOW to pay, never WHETHER a payment arrived - copied in answer to a
+// receipt-status question ("Did you receive my Zelle payment?") it would solicit a second transfer. A status question is a generic one
+// from the allow-list, a receipt-scope phrase ("go through", "get it", "on your end"), or a receipt verb about a payment / transfer.
+const RECEIPT_STATUS_ASK_RE = /\b(?:receiv\w*|got|get|gotten|post(?:ed)?|clear(?:ed)?|process(?:ed)?|land(?:ed)?|arriv\w*|show(?:s|ed|ing)? up)\b[^.?!]{0,40}\b(?:payments?|transfers?|zelle|money|funds?|it|that)\b|\b(?:payments?|transfers?|zelle|money|funds?)\b[^.?!]{0,40}\b(?:receiv\w*|post(?:ed)?|clear(?:ed)?|process(?:ed)?|land(?:ed)?|arriv\w*|show(?:s|ed|ing)? up|go(?:ne)? through|went through)\b/i;
+const inboundAsksPaymentStatus = (inbound) => inboundIsGenericStatusQuestion(inbound) || RECEIPT_SCOPE_RE.test(inbound) || RECEIPT_STATUS_ASK_RE.test(inbound);
+const isZelleTenderLine = (t) => ZELLE_WORD_RE.test(t) && sentenceFamily(t) == null;
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
   if (!inbound || !copied.length) return false;
@@ -615,8 +621,10 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const todayParts = (typeof today === 'string' ? dateParts(today) : today) || dateParts(require('../utils/datetime-et').etDateString());
   const namedDates = inboundDates(inbound, todayParts);
   const invoiceNamed = named.full.length > 0 || named.tail.length > 0;
+  const statusAsked = inboundAsksPaymentStatus(inbound);
   return copied.some((sentence) => {
     const t = String(sentence);
+    if (isZelleTenderLine(t) && statusAsked) return true;
     const inv = /\binvoice\s+([A-Za-z0-9][A-Za-z0-9-]{0,29})\b/i.exec(t);
     if (inv && invoiceNamed) return !(named.full.includes(inv[1].toUpperCase()) || namedTails.has(stripZeros(inv[1].toUpperCase().split('-').pop())));
     // Codex round-65 P2: no invoice named - an invoice sentence must match the amount / date / tender the customer did name, like a receipt

@@ -123,7 +123,7 @@ test('another customer\'s snapshot, unavailable billing and a throwing read all 
   ContextAggregator.getContextForCustomer.mockResolvedValue(live());
   await expect(attempt({ paymentStatusSnapshot: { ...SNAP, customer_id: '99999999-9999-4999-8999-999999999999' } })).resolves.toMatchObject({ sent: false, reason: 'payment_status_changed' });
   ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { unavailable: true } });
-  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'payment_status_changed' });
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
   ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('billing down'));
   await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
   expect(sendCustomerMessage).not.toHaveBeenCalled();

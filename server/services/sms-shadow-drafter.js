@@ -4574,7 +4574,7 @@ function zelleGuidanceText(context, extras) {
   if (zf && ['offer', 'invoice_unavailable', 'not_offered'].includes(zf.state)) return 'for anything about Zelle, copy the Zelle sentence in Payment status sentences word for word; never write about Zelle any other way';
   // Codex round-67 P2: no status may be asserted here (the contract would refuse it) - only a hand-off
   if (extras.zelleTargetConflict) return 'the invoice (number or amount) this customer named does not match one we can confirm here — do not say whether it is paid, open or owed; say a teammate will confirm which invoice they mean; do not mention Zelle';
-  if (extras.zelleTargetAmbiguous) return 'this customer has SEVERAL open invoices — ask which invoice they want to pay (its number or amount); do not mention Zelle';
+  if (extras.zelleTargetAmbiguous) return 'this customer has SEVERAL open invoices — ask which invoice they want to pay (its invoice number, or which invoice by its total, e.g. "the $200 invoice"); do not mention Zelle';
   return 'do not mention Zelle; if they ask about it, say a teammate will confirm';
 }
 

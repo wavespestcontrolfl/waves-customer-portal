@@ -231,7 +231,9 @@ async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx,
   if (snapshot.customer_id && String(snapshot.customer_id) !== String(customerId)) return { reason: 'payment_status_changed', zelle: null };
   try {
     const context = ctx || await loadCustomerContext(customerId, dbh);
-    if (!context) return { reason: 'payment_status_recheck_failed', zelle: null };
+    // Codex round-75 P2: the aggregator reports an inner read failure as billing.unavailable (not a throw) - an outage, retryable,
+    // never "the sentence is no longer true"
+    if (!context || context.billing?.unavailable === true) return { reason: 'payment_status_recheck_failed', zelle: null };
     const copiesZelle = copied.some((t) => ZELLE_WORD_RE.test(t));
     const zelle = copiesZelle ? await liveZelleFacts({ customerId, invoiceId: snapshot?.zelle?.invoice_id || null, dbh }) : null;
     // Codex round-71 P2: an UNREADABLE Zelle state (a target invoice whose eligibility could not be verified) is an outage, not a change -
@@ -272,7 +274,8 @@ async function staffZelleStale({ customerId, text, zelleInvoiceId, inboundMessag
   if (customerId && (bodyNamesInvoice || !invoiceId)) {
     try {
       const ctx = await loadCustomerContext(customerId, dbh);
-      const resolved = resolveZelleTargetInvoice(ctx?.billing, bodyNamesInvoice ? text : inboundMessage).invoiceId || null;
+      // (a staff-typed figure in the edited body is deliberate: it may select among several open invoices - the customer's may not)
+      const resolved = (bodyNamesInvoice ? resolveZelleTargetInvoice(ctx?.billing, text, { figuresIdentify: true }) : resolveZelleTargetInvoice(ctx?.billing, inboundMessage)).invoiceId || null;
       // a NUMBER re-targets firmly (unresolved => blocked); a figure re-targets only when it points at one invoice (Codex rounds 71/73:
       // "use Zelle to send $210" checks the $210 invoice) - a figure matching none (a staff-typed balance) keeps the decision's target
       invoiceId = resolved || (bodyNamesInvoice && !namesInvoiceNumber(text) && invoiceId) || null;

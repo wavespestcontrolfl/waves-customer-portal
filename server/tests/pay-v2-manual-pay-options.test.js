@@ -851,16 +851,24 @@ describe('the final pass ends with the DB fences', () => {
     deposits.assertInvoiceDepositSettlementReady.mockRejectedValueOnce(new Error('db down'));
     await expect(visibilityOf({ invoice: i, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
   });
-  test('order: PaymentIntent read, then deposit fence, then charge claim (last)', () => {
+  test('order (Codex round-75 P0): the PaymentIntent read FIRST, then the fresh row, then deposit fence, then charge claim (last)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/pay-v2'), 'utf8');
     const body = src.slice(src.indexOf('async function zelleFinalPass'), src.indexOf('const ZELLE_ELIGIBILITY_TIMEOUT_MS'));
-    const pi = body.indexOf('zelleDeniedByPaymentIntent(fresh)');
+    const pi = body.indexOf('zelleDeniedByPaymentIntent(inv)');
+    const row = body.indexOf("dbh('invoices')");
     const dep = body.indexOf('zelleDeniedByDepositSettlement(fresh, dbh)');
     const claim = body.indexOf('zelleDeniedByChargeReconciliation(fresh, true, dbh)');
     expect(pi).toBeGreaterThan(-1);
-    expect(dep).toBeGreaterThan(pi);
+    expect(row).toBeGreaterThan(pi); // no DB read precedes the slow Stripe await
+    expect(body.slice(0, pi)).not.toMatch(/dbh\(/);
+    expect(dep).toBeGreaterThan(row);
     expect(claim).toBeGreaterThan(dep);
     expect(body.slice(claim)).not.toMatch(/await (?!zelleDeniedByChargeReconciliation)/);
+  });
+  test('a PaymentIntent attached while the Stripe probe ran => invoice_changed', async () => {
+    const i = invoiceData({ status: 'overdue' });
+    setDbImpl((table) => (table === 'invoices' ? chain({ first: { ...i, stripe_payment_intent_id: 'pi_new' } }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+    await expect(visibilityOf({ invoice: i, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
   });
 });
 

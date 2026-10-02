@@ -26,8 +26,9 @@ describe('resolveZelleTargetInvoice', () => {
     expect(resolveZelleTargetInvoice(billing(open), 'zelle for invoice #0101?').invoiceId).toBe('inv-1');
     expect(resolveZelleTargetInvoice(billing(open), 'invoice 202 by zelle').invoiceId).toBe('inv-2');
   });
-  test('several open: a UNIQUE amount picks the invoice; a shared amount is ambiguous', () => {
-    expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE, OLDEST]), 'Can I Zelle the $120.50?').invoiceId).toBe('inv-1');
+  test('several open: an invoice-tied amount ("the $95 one") picks the invoice; a bare one never does (round 75); a shared amount is ambiguous', () => {
+    expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE, OLDEST]), 'Can I Zelle the $120.50?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
+    expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE, OLDEST]), 'Can I Zelle the $120.50 invoice?').invoiceId).toBe('inv-1');
     expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE, OLDEST]), 'zelle the $95 one').invoiceId).toBe('inv-3');
     const twins = [inv('a', 'WPC-2026-0001', 120), inv('b', 'WPC-2026-0002', 120)];
     expect(resolveZelleTargetInvoice(billing(twins), 'can I Zelle the $120?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
@@ -119,7 +120,7 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
     expect(payPageZelleVisibility).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true }));
   });
   test('a unique amount also resolves it', async () => {
-    const { zelleInvoiceId, checked } = await draft({ inboundMessage: 'Can I Zelle the $210?', open });
+    const { zelleInvoiceId, checked } = await draft({ inboundMessage: 'Can I Zelle the $210 invoice?', open });
     expect(checkedIds(checked)).toEqual(['inv-1']);
     expect(zelleInvoiceId).toBe('inv-1');
   });
@@ -129,7 +130,7 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
     expect(zelleInvoiceId).toBe(null);
     // Codex round-25 P1: NEITHER offered NOR denied - the fact tells the model to ask which invoice, and no Zelle sentence is rendered
     expect(factsBlock).toContain('SEVERAL open invoices');
-    expect(factsBlock).toContain('ask which invoice they want to pay (its number or amount); do not mention Zelle');
+    expect(factsBlock).toContain('ask which invoice they want to pay (its invoice number, or which invoice by its total, e.g. "the $200 invoice"); do not mention Zelle');
     expect(factsBlock).not.toContain('by Zelle to');
     expect(factsBlock).not.toContain("Zelle isn't available");
     expect(factsBlock).not.toContain("We don't take Zelle");
@@ -216,7 +217,7 @@ describe('the Payment options fact for the Zelle situations (Codex round-25 P1; 
   test('an ambiguous target (several open invoices): ask which invoice, mention no Zelle', () => {
     const ambiguous = line(null, { zelleTargetAmbiguous: true });
     expect(ambiguous).toContain('SEVERAL open invoices');
-    expect(ambiguous).toContain('ask which invoice they want to pay (its number or amount); do not mention Zelle');
+    expect(ambiguous).toContain('ask which invoice they want to pay (its invoice number, or which invoice by its total, e.g. "the $200 invoice"); do not mention Zelle');
     expect(ambiguous).not.toContain(COPY);
     expect(ambiguous).not.toContain('pay@example.com');
   });
@@ -353,8 +354,9 @@ describe('invoice-scoped amount vs bare amounts (round 31)', () => {
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle my $200 invoice? Did you receive my $100 payment?')).toEqual({ invoiceId: 'a', reason: 'unique_amount' });
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Did you receive my $100 payment? Can I Zelle the $200 bill?').invoiceId).toBe('a');
   });
-  test('with NO invoice-scoped amount the bare amounts still decide (unique => that invoice, several matches => ambiguous)', () => {
-    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle the $55?').invoiceId).toBe('c');
+  test('with NO invoice-scoped amount the bare amounts never decide among several open invoices (round 75: hold when ambiguous)', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle the $55?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'I paid $100 last time - can I Zelle the other invoice?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $200 or $100?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
   });
   test('a scoped amount that matches no open invoice is an explicit mismatch — never rescued by a bare amount that happens to match', () => {
@@ -420,9 +422,9 @@ describe('several bare amounts (round 41)', () => {
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100 or $200?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $200 or $100?').invoiceId).toBeNull();
   });
-  test('one bare amount that matches still resolves; a repeated amount is one amount; both alternatives matching stays ambiguous', () => {
-    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100?')).toEqual({ invoiceId: 'a', reason: 'unique_amount' });
-    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100? Yes the $100.')).toEqual({ invoiceId: 'a', reason: 'unique_amount' });
+  test('bare amounts never pick among several open invoices (round 75); the figure as a staff edit (figuresIdentify) does', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100? Yes the $100.', { figuresIdentify: true })).toEqual({ invoiceId: 'a', reason: 'unique_amount' });
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100 or $300?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
   });
 });

@@ -481,9 +481,9 @@ describe('paymentStatusSendBlockReason - the send-time half of the fixed-sentenc
     await expect(run(RECEIVED)).resolves.toBe('payment_status_recheck_failed');
   });
 
-  test('billing that is unavailable renders nothing, so every copied sentence is stale', async () => {
+  test('billing that is unavailable is an outage, not a change: held, retryable (Codex round-75 P2)', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { unavailable: true } });
-    await expect(run(RECEIVED)).resolves.toBe('payment_status_changed');
+    await expect(run(RECEIVED)).resolves.toBe('payment_status_recheck_failed');
   });
 });
 

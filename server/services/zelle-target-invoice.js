@@ -44,7 +44,8 @@ function invoiceAmountsNamed(text) {
     // same SENTENCE only ("Zelle invoice X. I sent $95 last month" ties nothing)
     const before = t.slice(Math.max(0, m.index - 30), m.index).split(/[.!?;]\s/).pop();
     const after = t.slice(m.index + m[0].length, m.index + m[0].length + 30).split(/[.!?;]\s/)[0];
-    if (/\b(?:invoices?|bills?|statements?)\b/i.test(`${before} ${after}`)) out.push(centsOf(m[0]));
+    // ("the $95 one" - the answer to "which invoice?" - picks an invoice too: Codex round-75, bare figures no longer do)
+    if (/\b(?:invoices?|bills?|statements?)\b/i.test(`${before} ${after}`) || (/\bthe\s*$/i.test(before) && /^\s*one\b/i.test(after))) out.push(centsOf(m[0]));
   }
   return [...new Set(out)];
 }
@@ -126,17 +127,23 @@ const everyAmountOpen = (open, amounts) => amounts.every((a) => open.some((inv) 
 // was named. Codex round-43 P2: from a CUT open list an amount-only identity never resolves (an omitted invoice may carry the
 // same amount due). Codex round-39 / round-41 P2: EVERY named figure must resolve to an open invoice - one that matches
 // nothing leaves the target unresolved, never silently dropped because a sibling matched.
-function resolveByAmount(open, billing, namedAmounts, bareAmounts) {
+function resolveByAmount(open, billing, namedAmounts, bareAmounts, { figuresIdentify = false } = {}) {
   if (billing?.openInvoicesTruncated && (namedAmounts.length || bareAmounts.length)) return { invoiceId: null, reason: 'open_list_truncated' };
   if (namedAmounts.length) {
     if (!everyAmountOpen(open, namedAmounts)) return { invoiceId: null, reason: 'named_amount_differs' };
     return uniqueByAmount(open, namedAmounts, 'named_amount_differs');
   }
-  if (bareAmounts.length > 1 && !everyAmountOpen(open, bareAmounts)) return { invoiceId: null, reason: 'ambiguous_amount' };
-  return (bareAmounts.length && uniqueByAmount(open, bareAmounts, null)) || { invoiceId: null, reason: 'multiple_open_unreferenced' };
+  // HOLD WHEN AMBIGUOUS (Codex round-75 P2): a CUSTOMER's bare figure never picks among several open invoices - it may be a past payment
+  // ("I paid $100 last time - can I Zelle the other one?"). Only a number or an invoice-tied figure identifies one; otherwise the drafter
+  // asks. A STAFF-typed figure in an edited Zelle body is deliberate (Codex round-71 P1): figuresIdentify lets it select.
+  if (figuresIdentify && bareAmounts.length) {
+    if (bareAmounts.length > 1 && !everyAmountOpen(open, bareAmounts)) return { invoiceId: null, reason: 'ambiguous_amount' };
+    return uniqueByAmount(open, bareAmounts, 'ambiguous_amount');
+  }
+  return { invoiceId: null, reason: bareAmounts.length ? 'ambiguous_amount' : 'multiple_open_unreferenced' };
 }
 
-function resolveZelleTargetInvoice(billing, inboundMessage) {
+function resolveZelleTargetInvoice(billing, inboundMessage, { figuresIdentify = false } = {}) {
   const open = openInvoicesOf(billing);
   // An own partially_paid invoice with an amount due is open to the customer (the pay page collects it and may show Zelle for it), but
   // its amount due is NOT knowable here: the paid portions live in payments, not in the invoice row. It is therefore never a target,
@@ -156,7 +163,7 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
     // explicit identification (a number above, or an amount tied to an invoice) selects a modeled row; anything else is unresolved
     || (billing?.hasUnmodeledInvoice === true && !namedAmounts.length ? { invoiceId: null, reason: 'unmodeled_invoice' } : null)
     || (open.length === 1 && !partialDue ? resolveLoneOpen(open[0], namedAmounts, bareAmounts) : null)
-    || resolveByAmount(open, billing, namedAmounts, bareAmounts);
+    || resolveByAmount(open, billing, namedAmounts, bareAmounts, { figuresIdentify });
 }
 
 // Does this text name a specific INVOICE (a number, or an amount tied to an invoice / bill)? Used to tell whether an
