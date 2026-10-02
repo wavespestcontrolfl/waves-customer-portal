@@ -109,3 +109,30 @@ it('keeps a default-on flag the server switched off OFF when a reload fails', as
 
   expect(screen.getByText('Receipt off')).toBeInTheDocument();
 });
+
+it.each([
+  ['the first read fails', false],
+  ['a gate mounts after a failed reload', true],
+])('fails a default-on flag closed when %s', async (_label, loadFirst) => {
+  let online = loadFirst;
+  vi.stubGlobal('fetch', vi.fn(async () => {
+    if (!online) throw new TypeError('Failed to fetch');
+    return { ok: true, status: 200, json: async () => ({ flags: {} }) };
+  }));
+  localStorage.setItem('waves_admin_token', 'login-a');
+  const { useFeatureFlag, useFeatureFlagReady, refetchFlags } = await import('./useFeatureFlag');
+  if (loadFirst) {
+    await refetchFlags();
+    online = false;
+    await refetchFlags();
+  }
+  function Gates() {
+    const plain = useFeatureFlag('ff_invoice_send_receipt', true);
+    const ready = useFeatureFlagReady('ff_invoice_send_receipt', true);
+    return <p>{`plain:${plain} ready:${ready.ready}/${ready.enabled}`}</p>;
+  }
+
+  render(<Gates />);
+
+  expect(await screen.findByText('plain:false ready:true/false')).toBeInTheDocument();
+});
