@@ -395,7 +395,7 @@ describe('handoff lock order (pre-push P1)', () => {
 describe('mint transaction lock order (pre-push P1)', () => {
   test('a technician mint locks invoice then customer before the visit re-check', () => {
     const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
-    const at = s.indexOf('in the billing lock order invoice → customer → visit (pre-push P1).');
+    const at = s.indexOf('let ownershipLostAtMint = false;');
     const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');", at);
     const cust = s.indexOf("await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');", at);
     const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, invoice)', at);

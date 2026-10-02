@@ -17535,7 +17535,6 @@ router.post('/:id/invoice', async (req, res, next) => {
       }
 
       return db.transaction(async (trx) => {
-        if (assertInTrx) await assertInTrx(trx);
         // Combined-session reservation (codex #3427 r38 P0): applying a
         // recorded out-of-band prepayment changes the remainder (or
         // settles the invoice) while a combined PI priced from the OLD
@@ -17549,6 +17548,11 @@ router.post('/:id/invoice', async (req, res, next) => {
           .where({ id: invoice.id })
           .forUpdate()
           .first();
+        // Ownership after the invoice lock: the billing order (invoice before
+        // visit) every collection path takes, so a concurrent Terminal
+        // handoff cannot deadlock against it (pre-push P1). The route's own
+        // locked pre-check already ran before this credit.
+        if (assertInTrx) await assertInTrx(trx);
         if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
         if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
 

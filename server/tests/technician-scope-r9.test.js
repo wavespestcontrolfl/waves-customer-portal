@@ -92,7 +92,8 @@ describe('codex #5568 r13', () => {
     const fenceAt = reuse.indexOf('if (isTechnicianRequest(req)) await db.transaction((trx) => assertTechStillOwnsLiveVisit(trx));');
     expect(fenceAt).toBeGreaterThan(-1);
     expect(fenceAt).toBeLessThan(reuse.indexOf('const applied = await applyPrepaidCredit(existing, { assertInTrx: assertTechStillOwnsLiveVisit });'));
-    expect(src).toMatch(/return db\.transaction\(async \(trx\) => \{\s*if \(assertInTrx\) await assertInTrx\(trx\);/);
+    const credit = src.slice(src.indexOf('const applyPrepaidCredit = async (invoice, { assertInTrx = null } = {}) => {'));
+    expect(credit.indexOf('if (assertInTrx) await assertInTrx(trx);')).toBeGreaterThan(credit.indexOf("const lockedInvoice = await trx('invoices')"));
     expect(src).toMatch(/assertEligibleInTrx: assertTechStillOwnsLiveVisit,/);
   });
 });
