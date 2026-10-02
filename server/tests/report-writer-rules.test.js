@@ -122,6 +122,12 @@ describe('prompt rewrites', () => {
     }
   });
 
+  test('the promise rule: only listed promises, only as the technician marked them', () => {
+    expect(OWNER_RULES).toMatch(/18\. Promises\. A PROMISES record lists what we promised this customer before today/);
+    expect(OWNER_RULES).toMatch(/Never mention a promise that is not listed, never decide on your own whether one was kept/);
+    expect(OWNER_RULES).toContain('REACH-OUT DATE, PROMISES, prior visits');
+  });
+
   test('the gauge rule keeps the activity level in words', () => {
     expect(OWNER_RULES).toMatch(/activity gauge's number or scale/);
     expect(OWNER_RULES).toMatch(/activity level in words .* belongs in WHAT WE FOUND/);
@@ -470,6 +476,20 @@ describe('four-section report: supplied timeframes and dates', () => {
 
   test('the timeframes are the whole phrases inside the approved lines, hedge and range kept', () => {
     expect(allowedPhrases).toEqual(['a few days', 'about 1–2 weeks', 'a week or two']);
+  });
+
+  test('a window with no number in an approved line is grounded whole, and only that window passes', () => {
+    const lines = [
+      'Expect a short spike in ant activity for several days, then a steady decline over the next couple of weeks.',
+      'Over the next week or two you may see roaches out in daylight.',
+      'Results build over the next few weeks.',
+    ];
+    const allowed = groundedTimeframePhrases(lines);
+    expect(allowed).toEqual(['several days', 'over the next couple of weeks', 'Over the next week or two', 'over the next few weeks']);
+    for (const line of lines) expect(writerRulesRejection(`WHAT TO EXPECT: ${line}`, { allowedPhrases: allowed })).toBeNull();
+    expect(writerRulesRejection('WHAT TO EXPECT: Activity drops over the next three weeks.', { allowedPhrases: allowed })).toBe('timeframe');
+    // The approved window with a different preposition is a new timeframe.
+    expect(writerRulesRejection('WHAT TO EXPECT: Activity declines within the next couple of weeks.', { allowedPhrases: allowed })).toBe('timeframe');
   });
 
   test('an approved window never passes shortened or without its hedge', () => {

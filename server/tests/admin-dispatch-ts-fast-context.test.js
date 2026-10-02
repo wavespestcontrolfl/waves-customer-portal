@@ -4,8 +4,7 @@
  * POST .../tree-shrub/assess-preview.
  *
  *  - Gate off answers 404 {enabled:false} without touching the database.
- *  - The caller's ts_fast_complete user flag is rechecked here, not only on
- *    the schedule payload: unflagged answers 404 {enabled:false}.
+ *  - No per-tech flag (owner 2026-10-01): the gate alone opens it.
  *  - A technician only reads their own visit; admins read any.
  *  - Gate on returns the context builder's body under {enabled:true}; a missing
  *    visit is 404 and an ineligible visit is a 200 with its reason.
@@ -34,10 +33,6 @@ jest.mock('../services/job-costing', () => ({
 }));
 jest.mock('../services/time-tracking', () => ({ adminEditEntry: jest.fn(async () => ({})) }));
 jest.mock('../services/tree-shrub-fast-context', () => ({ buildTreeShrubFastContext: jest.fn() }));
-jest.mock('../services/feature-flags', () => ({
-  ...jest.requireActual('../services/feature-flags'),
-  isUserFeatureEnabled: jest.fn(async () => true),
-}));
 jest.mock('../services/tree-shrub-assessment', () => ({
   ...jest.requireActual('../services/tree-shrub-assessment'),
   previewTreeShrubAssessment: jest.fn(),
@@ -46,7 +41,6 @@ jest.mock('../services/tree-shrub-assessment', () => ({
 const router = require('../routes/admin-dispatch');
 const { buildTreeShrubFastContext } = require('../services/tree-shrub-fast-context');
 const { previewTreeShrubAssessment } = require('../services/tree-shrub-assessment');
-const { isUserFeatureEnabled } = require('../services/feature-flags');
 
 function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
@@ -115,20 +109,6 @@ describe('GET tree-shrub/fast-context', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ enabled: true, eligible: true, reason: null, service: { id: 'visit-1' }, products: [], monthProducts: [], lastVisit: null, warnings: [] });
     expect(buildTreeShrubFastContext).toHaveBeenCalledWith('visit-1');
-  });
-
-  test.each([
-    ['without the ts_fast_complete flag', async () => false],
-    ['when the flag read fails', async () => { throw new Error('flags down'); }],
-  ])('gate on: a technician %s gets 404 {enabled:false} and no context', async (_label, impl) => {
-    process.env.GATE_TS_FAST_COMPLETE = 'true';
-    mockDbCurrent = dbWithOwner('tech-1');
-    isUserFeatureEnabled.mockImplementationOnce(impl);
-    const res = await invoke('get', FAST, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
-    expect(res.statusCode).toBe(404);
-    expect(res.body).toEqual({ enabled: false });
-    expect(isUserFeatureEnabled).toHaveBeenCalledWith('tech-1', 'ts_fast_complete');
-    expect(buildTreeShrubFastContext).not.toHaveBeenCalled();
   });
 
   test("gate on: a technician cannot read another technician's visit", async () => {

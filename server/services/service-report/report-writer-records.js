@@ -14,6 +14,7 @@ const { buildWhatToExpect, toExpectationProduct, whatToExpectClasses } = require
 const { findReportProductCopyEntry } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
 const { groundedTimeframePhrases } = require('./report-writer-rules');
+const { writerPromiseLines } = require('./visit-promises');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -48,8 +49,8 @@ const LINE_REQUIRES = new Map([
 ]);
 
 // Days to the far end of each pest class's stated window (EXPECTATION_TEXT
-// in pest-report-expectations.js: "about 1–2 weeks", "a week or two",
-// "about 10–14 days"). The longest one dates the reach-out line on one-time
+// in pest-report-expectations.js: "the next couple of weeks", "a week or
+// two"). The longest one dates the reach-out line on one-time
 // services and re-services (owner 2026-10-01). Classes with no closing
 // window ("a few days", "several weeks") set no date.
 const EXPECTATION_WINDOW_DAYS = Object.freeze({
@@ -77,7 +78,7 @@ function expectationProducts(applications) {
 
 function writerExpectations({ line = null, findingsType = null, applications = [] } = {}) {
   const products = line === 'pest' ? expectationProducts(applications) : [];
-  const pestLines = products.length ? (buildWhatToExpect({ products })?.lines || []) : [];
+  const pestLines = products.length ? (buildWhatToExpect({ products, plain: true })?.lines || []) : [];
   const classes = products.length ? whatToExpectClasses({ products }) : [];
   const recorded = Array.isArray(applications) ? applications : [];
   const serviceLines = (SERVICE_EXPECTATIONS[findingsType] || SERVICE_EXPECTATIONS[line] || [])
@@ -121,7 +122,7 @@ function reachOutDate(serviceYmd, days) {
 }
 
 function buildWriterRecords({
-  serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [],
+  serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [], promises = [],
 } = {}) {
   const sections = [];
   const expectations = writerExpectations({ line, findingsType, applications });
@@ -139,10 +140,19 @@ function buildWriterRecords({
   if (reach) {
     sections.push(`REACH-OUT DATE: ${reach.full} (the service date plus the longest window in EXPECTATIONS). When you tell the customer when to contact us, use this date exactly.`);
   }
+  // The technician's promise marks (visit-promises.js): only marked
+  // promises, each with its mark.
+  const promiseLines = writerPromiseLines(promises);
+  if (promiseLines.length) {
+    sections.push(`PROMISES (what we promised this customer before today, and how the technician marked each one today; mention only these, only as marked):\n${promiseLines.join('\n')}`);
+  }
   return {
     sections,
     allowedPhrases: groundedTimeframePhrases(expectations.lines),
     allowedDates: reach ? [reach.full, reach.monthDay] : [],
+    // How many marked promises reached the writer (the generate route's
+    // promise-only grounding check).
+    promiseCount: promiseLines.length,
   };
 }
 

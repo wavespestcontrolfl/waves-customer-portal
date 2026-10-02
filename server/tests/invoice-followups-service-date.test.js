@@ -79,6 +79,7 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
+    if ((!queue || !queue.length) && table === 'customer_dunning_schedules') return chain({ result: [] });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
@@ -111,6 +112,9 @@ describe('audit r1-timezone-2: follow-up service date is the stored calendar day
     jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
     jest.clearAllMocks();
     db.transaction = jest.fn(async (fn) => fn(db));
+    // fireStep takes the customer's dunning key (SHARED) and reads ownership
+    // (customer_dunning_schedules) under it; no schedule rows here.
+    db.raw = jest.fn(async () => ({ rows: [] }));
     db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   });
   afterEach(() => jest.useRealTimers());

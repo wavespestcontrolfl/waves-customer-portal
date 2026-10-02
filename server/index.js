@@ -905,6 +905,7 @@ app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthen
 app.use('/api/admin/data-hygiene', require('./routes/admin-data-hygiene'));
 app.use('/api/admin/agents', require('./routes/admin-agents'));
 app.use('/api/admin/agent-decisions', require('./routes/admin-agent-decisions'));
+app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions'));
 app.use('/api/admin/drafts', require('./routes/admin-drafts'));
 app.use('/api/admin/gbp', require('./routes/admin-gbp'));
 app.use('/api/admin/automations', require('./routes/admin-automations'));

@@ -563,6 +563,26 @@ describe('PUT /admin/drafts/:id/revise', () => {
     expect(input.metadata.customerLocationId).toBe('loc-9');
   });
 
+  test('a revised draft carries its composer-linked visits (UUIDs only) so the send step can hold a street-level address hold; none posted, none sent', async () => {
+    const VISIT = '3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c';
+    for (const [posted, expected] of [[[VISIT, 'junk', VISIT], [VISIT]], [undefined, undefined]]) {
+      sendCustomerMessage.mockClear();
+      enqueue('message_drafts', { returning: [campaignDraft({ campaign_type: 'reactivation', source_ref: 'customers:cust-1' })] });
+      enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ revisedResponse: 'Your reschedule link: https://example.test/r/abc', linkedVisitIds: posted }),
+        });
+        expect(res.status).toBe(200);
+      });
+      const { metadata } = sendCustomerMessage.mock.calls[0][0];
+      if (expected) expect(metadata.linked_scheduled_service_ids).toEqual(expected);
+      else expect(metadata).not.toHaveProperty('linked_scheduled_service_ids');
+    }
+  });
+
   test('gate off blocks revise-send for campaign drafts and restores the pending draft', async () => {
     mockGates.campaignDrafts = false;
     const draft = campaignDraft();

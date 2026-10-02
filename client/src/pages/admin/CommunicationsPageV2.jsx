@@ -325,6 +325,16 @@ function bodyHasLink(body, url) {
   const frag = linkFragment(url);
   return !!frag && String(body || "").toLowerCase().includes(frag);
 }
+// The visit ids of the tracked reschedule / appointment links that are still IN the body. Judged at the
+// synchronous send boundary (the cleanup effects run after render): a link the operator deleted no longer
+// carries its visit id. The server also resolves the body itself; this is the additional input.
+export function trackedVisitIdsInBody(body, resched, customerLinks) {
+  const appointment = customerLinks?.appointment;
+  return [
+    resched && bodyHasLink(body, resched.url) ? resched.visitId : null,
+    appointment && bodyHasLink(body, appointment.url) ? appointment.visitId : null,
+  ].filter(Boolean);
+}
 function stripLinkLines(body, url) {
   const frag = linkFragment(url);
   if (!frag) return body;
@@ -1862,6 +1872,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSendResult({ ok: false, text: "An attachment has expired. Remove it and attach it again before sending." });
       return;
     }
+    const linkedVisitIds = trackedVisitIdsInBody(msgBody, insertedResched, insertedCustomerLinks);
     setSending(true);
     sendInFlightRef.current = true;
     setSendResult(null);
@@ -1877,7 +1888,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         } else {
           await adminFetch(`/admin/drafts/${encodeURIComponent(loadedMessageDraft.id)}/revise`, {
             method: "PUT",
-            body: JSON.stringify({ revisedResponse: revised, fromNumber }),
+            body: JSON.stringify({ revisedResponse: revised, fromNumber, linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined }),
           });
         }
         setSendResult({ ok: true, text: "Draft sent." });
@@ -1896,6 +1907,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             messageType: "manual",
             fromNumber,
             scheduledFor,
+            linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined,
             agentDecisionId: selectedAgentDraft?.decisionId || undefined,
             agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
           }),
@@ -1948,6 +1960,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             // A freshly inserted contract signing link is unwritten until
             // this send activates it — the server needs the contract it names.
             contractId: insertedCustomerLinks.contract?.contractId || undefined,
+            // The visits the draft's reschedule / appointment links point at: the server's shared send
+            // step holds the text while one of them is a street-level address hold.
+            linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined,
           }),
         });
         if (!isAcceptedSms(sent)) {
@@ -2203,6 +2218,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         url: d.url,
         recipientKey: requestRecipientKey,
         customerId: requestCustomerId,
+        // The visit the link points at: the send carries it so a street-level address hold blocks the text.
+        visitId: d.appointment?.id || null,
       });
       setSendResult({
         ok: true,
@@ -2226,7 +2243,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // the operator deletes it (or the body clears on send).
   useEffect(() => {
     if (!insertedResched) return;
-    if (!msgBody.includes(insertedResched.url)) {
+    // Canonical presence (bodyHasLink): a harmless edit such as a hostname case change leaves the same live
+    // link in the body, so its tracking — and the visit id the send carries — must stay.
+    if (!bodyHasLink(msgBody, insertedResched.url)) {
       setInsertedResched(null);
       return;
     }
@@ -2238,14 +2257,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       currentRecipientKey !== insertedResched.recipientKey ||
       (selectedCustomerId || null) !== insertedResched.customerId
     ) {
-      setMsgBody((b) =>
-        b
-          .split("\n")
-          .filter((l) => !l.includes(insertedResched.url))
-          .join("\n")
-          .replace(/\n{3,}/g, "\n\n")
-          .trim(),
-      );
+      setMsgBody((b) => stripLinkLines(b, insertedResched.url));
       setInsertedResched(null);
       setSendResult({
         ok: true,
@@ -2523,6 +2535,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         // resolved lead id, so the send can route through the leads-page
         // send route and get its audit trail (pre-push Codex P2).
         leadId: d.leadId || null,
+        // The appointment-page link's visit: carried through the send (see insertedResched).
+        visitId: d.appointment?.id || null,
         // Both: the send posts reviewRequestEmail so the same ask is
         // emailed once the text has really gone out.
         emailToo: channel === "both",

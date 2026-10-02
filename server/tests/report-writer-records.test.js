@@ -12,8 +12,13 @@ describe('writer expectations', () => {
   test('pest product classes give the approved lines and the longest closing window', () => {
     const { lines, windowDays } = writerExpectations({ line: 'pest', applications: [TAURUS, ADVION] });
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatch(/^Non-repellent products .*ants may show up more for a few days/);
-    expect(lines[1]).toMatch(/^Ants that find the bait carry it back to the colony/);
+    // The writer's plain version: no active ingredient, no footage (its own
+    // owner rules), otherwise the approved customer wording.
+    expect(lines[0]).toMatch(/^We applied a non-repellent as a perimeter band .*spike in ant activity for several days/);
+    expect(lines[1]).toMatch(/^We placed a gel bait for the ants/);
+    expect(lines.join(' ')).not.toMatch(/fipronil|indoxacarb|6-foot/);
+    // No aftercare instruction (the writer's rule 7).
+    expect(lines.join(' ')).not.toMatch(/Leave them alone|over-the-counter/);
     expect(windowDays).toBe(14);
   });
 
@@ -77,7 +82,7 @@ describe('writer records', () => {
     expect(text).toContain('HOW IT WORKS (approved product wording');
     expect(text).toContain('SERVICE TYPE: re-service');
     expect(text).toContain('REACH-OUT DATE: Wednesday, October 14');
-    expect(allowedPhrases).toEqual(expect.arrayContaining(['a few days', 'about 1–2 weeks']));
+    expect(allowedPhrases).toEqual(expect.arrayContaining(['several days', 'a few days']));
     expect(allowedDates).toEqual(['Wednesday, October 14', 'October 14']);
   });
 
@@ -87,6 +92,27 @@ describe('writer records', () => {
     });
     expect(sections.join('\n')).not.toContain('REACH-OUT DATE');
     expect(allowedDates).toEqual([]);
+  });
+
+  test("the technician's promise marks become the PROMISES record; none, no record", () => {
+    const { sections } = buildWriterRecords({
+      serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS],
+      promises: [
+        { mark: 'done', description: 'Check under the dishwasher' },
+        { mark: 'partly', description: 'Look at the gap under the garage door', stillLeft: 'the left side' },
+      ],
+    });
+    const record = sections.find((section) => section.startsWith('PROMISES'));
+    expect(record).toContain('mention only these, only as marked');
+    expect(buildWriterRecords({
+      serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS],
+      promises: [{ mark: 'done', description: 'Check under the dishwasher' }],
+    }).promiseCount).toBe(1);
+    expect(record).toContain('- Done today: Check under the dishwasher');
+    expect(record).toContain('- Partly done today: Look at the gap under the garage door (still left: the left side)');
+    const none = buildWriterRecords({ serviceYmd: '2026-09-30', line: 'pest', serviceKind: 're_service', applications: [TAURUS] });
+    expect(none.sections.join('\n')).not.toContain('PROMISES');
+    expect(none.promiseCount).toBe(0);
   });
 
   test('carries no booking state: the report shows the next visit live', () => {

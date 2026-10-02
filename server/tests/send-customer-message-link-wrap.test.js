@@ -108,8 +108,17 @@ const WRAPPED_BODY = `${LEAD_IN}${HOST}/l/wrap1abcde`;
 
 let dbLog;
 function fakeDb(table) {
+  // The street-level hold step resolves the visits a body's links point at (composer-customer-links
+  // visitsLinkedInBody): a quiet "no such visit" answer, not part of what this file pins about the link wrap.
+  if (table === 'scheduled_services' || table === 'appointment_card_requests') {
+    const quiet = {};
+    for (const m of ['where', 'whereIn', 'orWhereIn']) quiet[m] = jest.fn((arg) => { if (typeof arg === 'function') arg(quiet); return quiet; });
+    quiet.select = jest.fn(async () => []);
+    return quiet;
+  }
   const b = {};
-  b.where = jest.fn((c) => { dbLog.push({ table, where: c }); return b; });
+  // (The hold step's short-code lookup of a wrapped link, where({ code }), is not a stamp: left out of the log.)
+  b.where = jest.fn((c) => { if (!(table === 'short_codes' && c && Object.keys(c).join() === 'code')) dbLog.push({ table, where: c }); return b; });
   b.whereIn = jest.fn((col, vals) => { dbLog.push({ table, whereIn: [col, vals] }); return b; });
   b.whereNull = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);

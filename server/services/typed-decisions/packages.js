@@ -125,4 +125,19 @@ const OUTCOME_SOURCES = deepFreeze({
   sms_log: '24h',
 });
 
-module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES };
+// True when `v` is a valid answer to `question`: a noul takes a boolean, a
+// choice one of its own criteria keys, a score a finite number. The label route
+// and the fixture exporter both judge a correct_value with this.
+function answerInDomain(question, v) {
+  if (!question) return false;
+  if (question.type === 'noul') return typeof v === 'boolean';
+  if (question.type === 'choice') return typeof v === 'string' && Object.prototype.hasOwnProperty.call(question.criteria || {}, v);
+  if (question.type === 'score') return typeof v === 'number' && Number.isFinite(v);
+  return false;
+}
+
+// How much of a call transcript call_judge is given (call-self-audit.js). The
+// admin review route shows the reviewer the same span.
+const CALL_TRANSCRIPT_CHARS = 5000;
+
+module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS };

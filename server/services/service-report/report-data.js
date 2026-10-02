@@ -17,6 +17,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
+const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
@@ -5297,11 +5298,42 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // the raw {holdUntil} token either (a null instruction drops it).
         lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);
       }
+      // GATE_LAWN_EXPECTATIONS (P9): the program line steps aside in Jun-Sep
+      // when the visit applied a nitrogen product, which the public
+      // applications[] shape does not carry, so read analysis_n from the
+      // catalog here. Gate off = no query, byte-identical. Only positive
+      // evidence clears nitrogen: a catalog hit OR the name-based check for
+      // products the catalog cannot resolve (no catalogId, no analysis_n row)
+      // both count, and a failed product load or catalog read counts as
+      // nitrogen applied (no line beats a wrong line; codex P1 pre-push).
+      let nitrogenApplied = null;
+      let programVisit = false;
+      if (typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()) {
+        nitrogenApplied = await resolveNitrogenApplied({
+          applications,
+          productsLoadFailed,
+          loadCatalogRows: (ids) => knex('products_catalog').whereIn('id', ids).select('id', 'analysis_n', 'category', 'product_type', 'subcategory'),
+        });
+        // Only a recurring lawn plan visit gets the program line: the visit's
+        // catalog service identity must be a recurring lawn plan (never the
+        // WaveGuard tier, which is a bundle discount, not a lawn program).
+        // One-time lawn jobs, callbacks and unresolved identities get null.
+        programVisit = await resolveProgramVisit({
+          // Frozen completion identity first (a later repoint of the scheduled
+          // row cannot change a permanent report); live resolution only for
+          // legacy records with no completedServiceKey.
+          serviceData: parseJsonObject(service.service_data),
+          scheduledService: scheduledServiceRow,
+          isCallback: !!service.is_callback,
+          loadProfile: (row) => require('../service-completion-profiles').resolveCompletionProfileForScheduledService(row, knex, { strict: true }),
+        });
+      }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
         wateringInstruction,
         mowingHeight,
         applications,
+        ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,
@@ -6166,95 +6198,18 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // snapshot) never resurfaces via the summary.
   {
     const technicianReport = technicianReportCustomerCopy(service.technician_notes);
-    // A viewer-visible trapping snapshot declaring an initial setup screens
-    // the body BEFORE it wins the summary. The snapshot that accepted this
-    // body can be a different findings type entirely (a non-trapping
-    // primary with a trapping COMPANION), so its acceptance never ran the
-    // setup guard — and a body generated before the companion's selector
-    // changed can still say the traps were checked or that nothing was
-    // caught, winning the Visit Summary beside the companion's frozen
-    // "Traps set" result (codex P1 r18). Same fallback as the narrative
-    // lanes: the recap stays, and with the source left as 'recap' the
-    // gated rodent narrative below rebuilds a grounded summary instead.
-    // Uses narrativeTrapSetupSnapshot so viewer visibility matches the
-    // narrative's stage rules exactly (round 12).
-    // The COUNT screen runs from the same viewer-visible trapping snapshot
-    // regardless of stage (pre-push P1 on 256c1f9): a follow-up companion
-    // whose traps_checked or captures was corrected after the body was
-    // generated would otherwise publish the stale number in the summary.
-    // Unverifiable values (blank/missing) screen nothing, by
-    // countContradictions' own rules.
-    const visibleTrapSnapshot = [
-      typedSnapshot,
-      ...companionSnapshots.filter((snap) => staffViewer || snap.delivery === 'auto_send'),
-    ].find((snap) => snap?.type === 'rodent_trapping') || null;
-    // Scoped require matches this file's pattern for report-time helpers.
-    const indicators = require('./activity-indicators');
-    // A confirmed reconciliation prompt (frozen onto the accepting
-    // snapshot's todaysResult at completion) is a PERSON overriding the
-    // matcher — this render-time screen must honor that decision, not
-    // silently re-reject the body they reviewed (codex P1 on the
-    // reconciliation round).
-    const trapSetupScreened = typedSnapshot?.todaysResult?.reconcileConfirmed === true
-      // Companion-only completions freeze the override on the trapping
-      // companion (there is no typed primary snapshot to carry it) —
-      // viewer-filtered like everything else, since visibleTrapSnapshot is.
-      || visibleTrapSnapshot?.todaysResult?.reconcileConfirmed === true
-      || !technicianReport?.body
-      || (
-        (!narrativeTrapSetupSnapshot
-          || indicators.setupContradictions(technicianReport.body).length === 0)
-        && (!visibleTrapSnapshot
-          || indicators.countContradictions(technicianReport.body, {
-            traps_checked: visibleTrapSnapshot.values?.traps_checked,
-            captures: visibleTrapSnapshot.values?.captures,
-          }).length === 0)
-      );
-    // When a typed story GOVERNS the visit — the primary snapshot, or on
-    // companion-only profiles any customer-visible companion snapshot — the
-    // body may only drive the summary if that story ACCEPTED it (bodySource
-    // stamped). Zero-state branches deliberately refuse the drafted body in
-    // favor of fixed wording, and the summary must not resurrect what
-    // Today's Result refused (codex r26 on #3420).
-    const governingSnapshots = [
-      typedSnapshot,
-      // CUSTOMER-facing companions only, for staff too (codex r78):
-      // completion never offers the body to an internal_only companion, so
-      // treating one as a governing story for staff makes acceptance
-      // impossible and the admin preview would fall back to the legacy
-      // recap while the customer report promotes the reviewed body. The
-      // summary decision must match what the customer actually receives.
-      ...(typedSnapshot ? [] : companionSnapshots.filter(
-        (snap) => snap.delivery === 'auto_send',
-      )),
-    ].filter((snap) => snap?.todaysResult);
-    const typedStoryAcceptedBody = !governingSnapshots.length
-      || governingSnapshots.some(
-        (snap) => snap.todaysResult?.bodySource === 'technician_report'
-          // A frozen reconcile confirmation is a PERSON accepting the body
-          // over the matcher — honored here like trapSetupScreened above,
-          // EXCEPT on zero-state snapshots: their stories refuse the body
-          // for fixed wording regardless of the count reconciliation, so
-          // the flag never means body acceptance there (codex r42). A
-          // non-gauge cleared severity/activity select is a zero state too
-          // (codex r80) — buildTodaysResult keeps the fixed "No active
-          // signs" template for it, so the summary must not resurrect the
-          // body that result refused (the reconcile flag can originate
-          // from a trapping companion's count prompt).
-          || (snap.todaysResult?.reconcileConfirmed === true
-            && snap.activity?.score !== 0
-            && !['None observed', 'No activity'].includes(
-              String(snap.values?.severity || snap.values?.activity_level || ''),
-            )),
-      );
-    // A completion-time request-context rejection (trade name from the
-    // visit's own products, companion contradiction) is frozen into
-    // service_data — untyped visits have no governing snapshot, so
-    // without this the reparse would promote the rejected body
-    // (codex r58).
-    const drivesSummary = technicianReport?.body && trapSetupScreened
-      && typedStoryAcceptedBody
-      && !serviceData.technicianReportBodyRejected;
+    // THE rule (activity-indicators technicianReportDrivesSummary): the
+    // completion-time rejection frozen into service_data (codex r58), the
+    // governing typed story's acceptance (codex r26/r42/r78/r80) and the
+    // rodent trapping screens for this viewer (codex P1 r18; pre-push P1 on
+    // 256c1f9), on the snapshots this report already normalised. Every
+    // other customer render of the note (context-aggregator.js
+    // customerSafeVisitNotes) runs the same rule, so none can show a body
+    // this report refuses.
+    const drivesSummary = technicianReport?.body
+      && require('./activity-indicators').technicianReportDrivesSummary({
+        serviceData, body: technicianReport.body, staffViewer, typedSnapshot, companionSnapshots,
+      });
     if (drivesSummary) {
       visitSummary = technicianReport.body;
       visitSummarySource = 'technician_report';

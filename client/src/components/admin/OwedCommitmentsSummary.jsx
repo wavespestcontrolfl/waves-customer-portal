@@ -97,6 +97,9 @@ export default function OwedCommitmentsSummary({ customerId, source = "call" }) 
             <Badge className="!text-14" tone={row.party === "waves" ? "strong" : "neutral"}>{row.party === "waves" ? "Waves" : "Customer"}</Badge>
             <span className="text-ink-primary min-w-0 break-words">{row.description}</span>
           </div>
+          {/* The office's note on the promise, and what a technician marked
+              still left at a visit (visit-promises.js). */}
+          {row.human_note && <p className="mt-1 text-ink-secondary whitespace-pre-line break-words">{row.human_note}</p>}
           <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <span className="text-ink-tertiary">{source === "sms" ? (row.channel === "email" ? "Email" : "SMS") : "Call"} {fmtWhen(row.sms_started_at || row.call_started_at)}</span>
             {enabled && (
