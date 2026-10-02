@@ -156,8 +156,10 @@ const KEY_LOCATION_RE = new RegExp(
   + '|(?:garage|gate|door)\\s+(?:remotes?|openers?|clickers?|fobs?)|remotes?|clickers?|(?:key\\s*)?fobs?|key\\s*cards?|access\\s+cards?'
   + '|(?:gate|door|garage|alarm|entry|access)\\s+codes?'
   + '|(?:under|beneath|behind)\\s+(?:the\\s+)?(?:door\\s*)?mat|doormat'
+  // combo / combination anywhere but "a combination of <pest>" (the shared
+  // rule, context-aggregator.js COMBINATION_NOUN, Codex r13).
   + `|${LOCK_WORD}\\s+(?:combination|combo)s?`
-  + `|(?:combination|combo)s?\\s+(?:lock|(?:to|for|on|of)\\s+(?:[\\w'-]+\\s+){0,3}?${LOCK_WORD}))\\b`,
+  + `|${require('../context-aggregator').COMBINATION_NOUN})\\b`,
   'i',
 );
 // Any pesticide-safety claim: "safe", "pet-safe", "kid friendly", "non-toxic",

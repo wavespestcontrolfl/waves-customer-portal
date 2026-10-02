@@ -315,7 +315,7 @@ function shoutedSentence(sentence) {
 // Access details never reach the writer: a sentence about getting in (a
 // code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
 // lowercase code ("blue", "open sesame") looks like any other word.
-const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|(?:combo|combination)s?(?!\s+of\b(?!\s+(?:the\s+|my\s+|our\s+)?(?:lock\s*box|lockbox|padlock|lock|gate|door|garage|shed|safe|keypad)))|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|into|inside|through|past)\s+(?:[\w-]+\s+){0,3}?(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?|house|home|unit|apartment|condo|building))\b/i;
+const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|into|inside|through|past)\s+(?:[\w-]+\s+){0,3}?(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?|house|home|unit|apartment|condo|building))\b/i;
 // So is a sentence about working a gate, door or lock ("blue works at the
 // side gate where the ants are", "use the side gate", "punch it in at the
 // door"), pest talk or not; "ants come in under the back door" stays.
@@ -327,9 +327,14 @@ const ACCESS_USE_RE = /\b(?:works?|worked|opens|opened|unlocks?|unlocked|use|usi
 // "combination of …" passes ACCESS_SENTENCE_RE as pest talk ("a combination
 // of ants and roaches"), but beside any access point in the same sentence
 // ("blue is the combination of the side gate") it is a credential (Codex r11).
+// combo / combination is an access word except as "a combination of <pest>"
+// (context-aggregator.js COMBINATION_NOUN, Codex r13); beside any access
+// point in the same sentence it is one regardless (Codex r11).
+const COMBINATION_CREDENTIAL_RE = new RegExp(`\\b${ContextAggregator.COMBINATION_NOUN}\\b`, 'i');
 const COMBINATION_WORD_RE = /\b(?:combo|combination)s?\b/i;
 const COMBINATION_LOCK_RE = /\b(?:padlocks?|lock\s*box(?:es)?|sheds?)\b/i;
 const accessSentence = (sentence) => ACCESS_SENTENCE_RE.test(sentence)
+  || COMBINATION_CREDENTIAL_RE.test(sentence)
   || (ACCESS_POINT_RE.test(sentence) && ACCESS_USE_RE.test(sentence))
   || (COMBINATION_WORD_RE.test(sentence) && (ACCESS_POINT_RE.test(sentence) || COMBINATION_LOCK_RE.test(sentence)));
 // And a sentence reaches the writer only when it talks about pests or the

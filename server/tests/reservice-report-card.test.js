@@ -685,3 +685,20 @@ describe('Codex r12 (#5542): the pressure word follows the gauge', () => {
     expect(src).toContain('pestPressureScore: pestPressure !== null ? (pestPressureRow || null) : null,');
   });
 });
+
+describe('Codex r13 (#5542): combination is a credential except "a combination of <pest>"', () => {
+  const words = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: scrubCustomerText })?.youToldUs?.text ?? null;
+  const own = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: (t) => t })?.youToldUs?.text ?? null;
+  test.each([
+    ['Ants are by the patio and blue is the combination of my backyard fence.', null],
+    ['Roaches inside. Waves is the combo for the pool equipment.', 'Roaches inside.'],
+    ['A combination of ants and roaches is in the kitchen.', 'A combination of ants and roaches is in the kitchen.'],
+    ['Combinations of the bugs keep coming back.', 'Combinations of the bugs keep coming back.'],
+  ])('production scrub: %p -> %p', (text, expected) => {
+    expect(words(text)).toBe(expected);
+  });
+  test('the card filter alone holds the same rule', () => {
+    expect(own('Ants on the patio. Blue is the combination of my backyard fence.')).toBe('Ants on the patio.');
+    expect(own('A combo of spiders and wasps by the door.')).toBe('A combo of spiders and wasps by the door.');
+  });
+});

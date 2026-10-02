@@ -54,11 +54,15 @@ const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${
 // every value-shaped token (digit run, ALLCAPS word, letter+digit mix) is
 // masked. Over-redaction is the safe direction for access text; the keyword
 // words themselves stay legible.
-// "A combination of ants and roaches" is a pest complaint, not a credential
-// (Codex #5542 r8): for the word-token passes below, combo / combination
-// followed by "of" counts only when a lock word follows ("the combination of
-// the gate is blue"). The digit passes above still key on the bare word.
-const COMBINATION_NOUN = '(?:combo|combination)(?!\\s+of\\b(?!\\s+(?:the\\s+|my\\s+|our\\s+)?(?:lock\\s*box|padlock|lock|gate|garage|door|shed|safe|keypad)))';
+// "A combination of ants and roaches" is a pest complaint, not a credential.
+// combo / combination is an access word EXCEPT in that one affirmative form
+// — "of" followed by a pest name (Codex #5542 r13: an allowlist of access
+// points always misses one, e.g. "the combination of my backyard fence").
+// One source for every screen: this module's token passes, the comms scrub
+// (completion-comms-context.js) and the re-service card's location filter.
+// The digit passes above still key on the bare word.
+const COMBINATION_PEST_NAME = '(?:pests?|bugs?|insects?|critters?|(?:fire\\s+)?ants?|roach(?:es)?|cockroach(?:es)?|spiders?|rodents?|rats?|mice|termites?|fleas?|ticks?|mosquito(?:e?s)?|wasps?|bees?|hornets?|fl(?:y|ies)|gnats?|beetles?|silverfish|crickets?|centipedes?|millipedes?|scorpions?|earwigs?|moths?|weevils?|lizards?|frogs?|snakes?|squirrels?|raccoons?)';
+const COMBINATION_NOUN = `(?:combo|combination)s?(?!\\s+of\\s+(?:the\\s+|these\\s+|those\\s+|both\\s+|several\\s+|different\\s+|two\\s+|three\\s+)?${COMBINATION_PEST_NAME}\\b)`;
 const TOKEN_CONTEXT_KEYWORDS = ACCESS_CODE_KEYWORDS.replace('combo|combination', COMBINATION_NOUN);
 const ACCESS_CODE_NOUN_RE = new RegExp(`\\b(?:code|pin|${COMBINATION_NOUN}|passcode|password|passphrase)\\b`, 'i');
 const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${TOKEN_CONTEXT_KEYWORDS})\\b`, 'i');
@@ -1712,6 +1716,7 @@ class ContextAggregator {
 module.exports = new ContextAggregator();
 module.exports.UPCOMING_SERVICE_STATUSES = UPCOMING_SERVICE_STATUSES;
 module.exports.redactAccessCodes = redactAccessCodes;
+module.exports.COMBINATION_NOUN = COMBINATION_NOUN;
 module.exports.lawnOverall = lawnOverall;
 module.exports.customerSafeVisitNotes = customerSafeVisitNotes;
 module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;
