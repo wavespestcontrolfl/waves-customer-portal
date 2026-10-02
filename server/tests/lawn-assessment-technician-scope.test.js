@@ -131,10 +131,18 @@ describe('POST /assess binds to the submitted visit', () => {
     mockServices = true;
     const scope = require('../services/technician-visit-scope');
     scope.technicianCurrentVisitFilter.mockImplementation((req, q) => q);
-    const chain = {};
-    for (const m of ['where', 'whereNotIn', 'whereIn', 'whereNull', 'join', 'leftJoin', 'select', 'orderBy', 'modify']) chain[m] = jest.fn(() => chain);
-    chain.first = jest.fn(async () => null); // the filtered lookup finds no owned row
-    db.mockImplementation(() => chain);
+    // The handler first snapshots the customer premise inside a transaction
+    // (advisory lock + customers read), then validates serviceId: the
+    // customers read returns a row, the filtered visit lookup finds none.
+    const chainFor = (table) => {
+      const chain = {};
+      for (const m of ['where', 'whereNotIn', 'whereIn', 'whereNull', 'join', 'leftJoin', 'select', 'orderBy', 'modify', 'forUpdate']) chain[m] = jest.fn(() => chain);
+      chain.first = jest.fn(async () => (table === 'customers' ? { id: CUSTOMER, address_line1: '1 Example Ln', lawn_type: 'st_augustine' } : null));
+      return chain;
+    };
+    db.mockImplementation((table) => chainFor(table));
+    db.raw = jest.fn(async () => ({ rows: [] }));
+    db.transaction = jest.fn(async (cb) => { const trx = (table) => chainFor(table); trx.raw = db.raw; return cb(trx); });
     await withServer(async (base) => {
       const res = await call(base, 'POST', '/assess', { customerId: CUSTOMER, serviceId: '22222222-2222-4333-8444-555555555555', photos: [{ data: 'x', mimeType: 'image/jpeg' }] });
       expect(res.status).toBe(404);
