@@ -43,6 +43,19 @@ describe('fastCompleteReportEnabled', () => {
     expect(await flags()).toEqual([false, false]);
   });
 
+  test('a combined service with required companion sections keeps the full form (Codex #5538)', async () => {
+    process.env.GATE_FAST_COMPLETE_REPORT = 'true';
+    const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+    resolveCompletionProfileForScheduledService.mockImplementation(async (svc) => (svc.id === 'svc-1'
+      ? { serviceKey: 'pest_rodent_quarterly', companions: [{ type: 'rodent_bait', delivery: 'auto_send' }] }
+      : { serviceKey: 'pest_general_quarterly', companions: [] }));
+    try {
+      expect(await flags()).toEqual([false, true]);
+    } finally {
+      resolveCompletionProfileForScheduledService.mockImplementation(async () => null);
+    }
+  });
+
   test('read at call time: a flip needs no reload', async () => {
     delete process.env.GATE_FAST_COMPLETE_REPORT;
     expect(await flags()).toEqual([false, false]);

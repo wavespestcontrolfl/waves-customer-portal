@@ -5125,8 +5125,12 @@ async function loadProjectCompletionContextByServiceId(services) {
       fastCompleteRecapEnabled: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
       // GATE_FAST_COMPLETE_REPORT — the same schedule-payload ride: with it on,
       // pest re-services and regular untyped pest visits open the Fast
-      // Complete report flow (talk, generate the report, trace, send).
-      fastCompleteReportEnabled: require('../config/feature-gates').fastCompleteReportLive(),
+      // Complete report flow (talk, generate the report, trace, send). Not a
+      // combined service (pest + rodent bait, pest + termite bait): its
+      // typed companion sections are required at completion and the report
+      // flow has none, so it keeps the full form (Codex #5538).
+      fastCompleteReportEnabled: require('../config/feature-gates').fastCompleteReportLive()
+        && !(completionProfile?.companions || []).length,
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
