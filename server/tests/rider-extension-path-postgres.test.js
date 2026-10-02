@@ -221,6 +221,40 @@ postgres('series extension keeps riding the lawn', () => {
     } finally { await trx.rollback(); }
   });
 
+  test('a ride whose own (longer) window would overlap another customer outside the stop is not kept', async () => {
+    const trx = await mockPg.transaction();
+    try {
+      // Lawn 09:00-09:30; the pest needs 60 minutes, so it runs 09:00-10:00 and
+      // would overlap another customer's 09:30 booking that the lawn does not.
+      const w = await world(trx, { lawnWindow: ['09:00', '09:30'] });
+      await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).update({ estimated_duration_minutes: 30 });
+      const rideDate = addDays(w.d0, 84);
+      const other = await customer(trx);
+      await trx('scheduled_services').insert({
+        customer_id: other.customerId, property_id: other.propertyId, service_type: 'Quarterly Pest Control Service',
+        scheduled_date: rideDate, status: 'pending', window_start: '09:30', window_end: '10:30', estimated_duration_minutes: 60,
+      });
+      await extend(trx, w.pestParent.id);
+      const rows = await extensionRows(trx, w.pestParent.id);
+      expect(rows).toHaveLength(1);
+      expect(dateOf(rows[0].scheduled_date)).not.toBe(rideDate);
+    } finally { await trx.rollback(); }
+  });
+
+  test('a ride whose stop technician is no longer field-dispatchable is not kept', async () => {
+    const trx = await mockPg.transaction();
+    try {
+      const w = await world(trx);
+      const rideDate = addDays(w.d0, 84);
+      await trx('technicians').where({ id: w.techLawn }).update({ field_dispatchable: false });
+      await extend(trx, w.pestParent.id);
+      const rows = await extensionRows(trx, w.pestParent.id);
+      expect(rows).toHaveLength(1);
+      expect(dateOf(rows[0].scheduled_date)).not.toBe(rideDate);
+      expect(rows[0].technician_id).not.toBe(w.techLawn);
+    } finally { await trx.rollback(); }
+  });
+
   test('an unplaceable ride window is skipped: the cadence walk runs, nothing lands on the lawn date', async () => {
     const trx = await mockPg.transaction();
     try {

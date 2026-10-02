@@ -19030,6 +19030,35 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
 // Does `rowId` sit in the same (non-null) visit as every row in `otherIds`?
 // The proof a grouped-or-nothing placement is judged by: the canonical
 // maybeGroupRow decided, we only read what it did.
+// The stop's technician for a grouped placement, through the SAME eligibility
+// fence a template technician gets (employment, field dispatchability, absence
+// that day, FOR SHARE on a trx). Not assignable = the grouped attempt fails and
+// its savepoint rolls back; an unassigned stop stays unassigned.
+async function assignablePlacementTechnicianId(conn, parent, technicianId, date) {
+  if (!technicianId) return null;
+  const checked = await assignableRecurringTemplateTechnicianId(conn, {
+    ...parent, recurring_technician_override: true, recurring_technician_id: technicianId,
+  }, date);
+  if (!checked || String(checked) !== String(technicianId)) throw new Error('the stop\'s technician is not assignable on that date');
+  return checked;
+}
+
+// Does a just-placed row's own window overlap any booking OUTSIDE its visit?
+async function placedRowOverlapsOutsideVisit(conn, rowId) {
+  const row = await conn('scheduled_services').where({ id: rowId })
+    .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+  const block = row && occupancyBlockFor(row);
+  if (!block) return false;
+  const members = row.visit_id
+    ? await conn('scheduled_services').where({ visit_id: row.visit_id }).pluck('id')
+    : [row.id];
+  const outside = await findConflictingVisits({
+    db: conn, date: dateOnly(row.scheduled_date), windowStart: block.start, windowEnd: block.end,
+    excludeServiceIds: members, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  });
+  return outside.length > 0;
+}
+
 async function rowsShareVisit(conn, rowId, otherIds) {
   const rows = await conn('scheduled_services').whereIn('id', [rowId, ...otherIds]).select('id', 'visit_id');
   const visitOf = (id) => rows.find((r) => String(r.id) === String(id))?.visit_id || null;
@@ -19183,6 +19212,13 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           });
           if (!visit) throw new Error('nothing placed');
           if (!(await rowsShareVisit(sp, visit.scheduledServiceId, mustShare))) throw new Error('not in the same visit');
+          // The placed row's OWN window (a ride ends by the rider's duration, so
+          // it can run past the stop) must not overlap anything outside its
+          // visit — another customer, a hold. Top-up keeps its advisory-only
+          // overlap policy.
+          if (!opts.overlapAdvisoryOnly && (await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId))) {
+            throw new Error('overlaps a booking outside the stop');
+          }
           return visit;
         });
         scope.keep();
@@ -19317,7 +19353,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const nextData = {
         customer_id: parent.customer_id,
         technician_id: placement.technicianId !== undefined
-          ? placement.technicianId
+          ? await assignablePlacementTechnicianId(conn, parent, placement.technicianId, nextStr)
           : await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
         scheduled_date: nextStr,
         window_start: placement.windowStart || nextWindowStart, window_end: placement.windowEnd || nextWindowEnd,
