@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_KB_SPECIES_QA=true (knowledge Q&A — texting assistant, tech field Q&A, lead agent — also reads the owner-approved species catalog; customer-facing callers get customer copy only, staff also get tech notes; read at call time via kbSpeciesQaLive(), dark by default)
  *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
  *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
@@ -132,8 +133,9 @@
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *   GATE_LAWN_WATERING_RULE=true (lawn report watering instruction: frozen per-product watering rules drive the aftercare writer, the top-of-report banner payload and the weekly-plan "not before" overlay; sets evidenceSource product_instruction so the existing verdict table finally resolves hold / credit; ships DARK, read at call time via lawnWateringRuleLive(); off = byte-identical report payload)
  *   GATE_LAWN_REPORT_LEAD=true (lawn report above-the-fold lead: derives reportV2.lead from the final reconciled strings (headline, why, progress, what we applied, your part this week, next visit) and the web report renders it in place of the snapshot hero + follow-up card; lawn only, never T&S; ships DARK, read at call time via lawnReportLeadLive(); off = byte-identical report payload and render)
+ *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the program focuses on this month, built from server/config/protocols.json months (lawn-program-line.js), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
- *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for technicians with the `ts_fast_complete` user flag. Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
+ *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for every technician (owner 2026-10-01: no per-tech flag; this gate is the only switch). Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve BOOK notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking of a slot starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule's DESTINATION slot, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
  *   SELF_SERVE_MOVE_NOTICE_HOURS=24 (not a gate — the self-serve MOVE notice window, same module, split out 2026-09-28 so a book-only env change never touches it, no fallback to SELF_SERVE_NOTICE_HOURS: no SELF-SERVE reschedule of a visit that itself currently starts within this many hours of now, on public reschedule (reschedule-public.js) and the promised-reschedule-link worker (reschedule-link-promises.js); the DESTINATION slot of a move still uses the book window above; read at call time, default 24)
@@ -3717,6 +3719,12 @@ const gates = {
   // lawnReportLeadLive().
   lawnReportLead: gateEnvValue('GATE_LAWN_REPORT_LEAD'),
 
+  // Lawn report monthly program line (lawn report rebuild P9): snapshot.seasonalNote
+  // becomes the month's program sentence from protocols.json. Ships DARK. This
+  // entry is for logGateStatus only: lawn-report-v2.js reads GATE_LAWN_EXPECTATIONS
+  // at call time via lawnExpectationsLive().
+  lawnExpectations: gateEnvValue('GATE_LAWN_EXPECTATIONS'),
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -3812,6 +3820,15 @@ function gateEnvValue(envName) {
 // bottom never conflict with it.
 function portalActivityLive() {
   return process.env.GATE_PORTAL_ACTIVITY === 'true';
+}
+
+// GATE_SERIES_MOVE_CARRIES_VISIT read at CALL time — strict `=== 'true'`.
+// Owner ruling 2026-10-01: a pest visit riding a lawn visit is ONE appointment;
+// when either moves, both move. Unset = a staff series move that sweeps an
+// occurrence sitting in a grouped visit is refused (VISIT_SERIES_MOVE_UNSUPPORTED),
+// byte-identical to before. Read by rebooker.js and visit-groups.js.
+function seriesMoveCarriesVisitLive() {
+  return process.env.GATE_SERIES_MOVE_CARRIES_VISIT === 'true';
 }
 
 // GATE_KB_SPECIES_QA read at CALL time (server/services/knowledge/wiki-qa.js).
@@ -4179,6 +4196,14 @@ function lawnWateringRuleLive() {
 // and the client keeps rendering the snapshot hero + follow-up card.
 function lawnReportLeadLive() {
   return gateEnvValue('GATE_LAWN_REPORT_LEAD');
+}
+
+// GATE_LAWN_EXPECTATIONS read at CALL time (same 1/true/on convention as
+// gateEnvValue). The one canonical reader for the lawn monthly program line:
+// buildLawnReportV2 swaps snapshot.seasonalNote for the protocols.json month
+// sentence while it is live. Off = the payload is byte-identical to before.
+function lawnExpectationsLive() {
+  return gateEnvValue('GATE_LAWN_EXPECTATIONS');
 }
 
 // GATE_LAWN_WATERING_SMS read at CALL time — strict `=== 'true'`, dark in every
@@ -4639,6 +4664,7 @@ module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLev
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
 module.exports.lawnReportLeadLive = lawnReportLeadLive;
+module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnWateringSmsLive = lawnWateringSmsLive;
 module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
 module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;
@@ -4659,6 +4685,9 @@ module.exports.pafPrepayLive = pafPrepayLive;
 module.exports.pafTermiteLive = pafTermiteLive;
 module.exports.adminBodyGuardAllLive = adminBodyGuardAllLive;
 // gates 1775330914
+// GATE_SERIES_MOVE_CARRIES_VISIT reader, on its own line mid-block (not the
+// shared list, not the file's last line) so other gate PRs never conflict.
+module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 // GATE_REPORT_WRITER_RULES reader, exported at the end of the file (after the
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;

@@ -550,7 +550,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .where((qb) => qb.whereRaw("fb.metadata->>'provider_sid' IS NULL").orWhereNull('fbs.id')
         .orWhereIn('fbs.status', DELIVERED_SMS_STATUSES))
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
-      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at")),
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at")),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -585,7 +585,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // limits) could abort the whole tick (codex P2 round 11). The GIN index
       // still serves each generated element.
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
-      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'a.sent_at'),
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', 'a.sent_at'),
   ];
   const results = [];
   if (conn.isTransaction) {
@@ -771,6 +771,22 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
 // raise an alert on the very date the customer was told the series moved
 // (codex P1 round 7). series_moves.rows carries only occurrences the move
 // actually moved; genuinely preserved ones are recorded separately.
+// A grouped partner carried WITH the anchor occurrence
+// (GATE_SERIES_MOVE_CARRIES_VISIT) is part of the stop the text quoted: the
+// series notice quotes the stop's landed start (the anchor occurrence's
+// visitWindowStart), so that partner gets that KNOWN start, not an unknown
+// window. Partners of later occurrences stay unknown like any sibling.
+function anchorStopStartAt(move) {
+  let result = move.result;
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result); } catch { return null; }
+  }
+  const occ = (result?.rescheduledOccurrences || []).find((o) => String(o.id) === String(move.anchor_service_id || ''));
+  if (!occ?.visitWindowStart || !occ.date) return null;
+  const at = parseETDateTime(`${String(occ.date).slice(0, 10)}T${String(occ.visitWindowStart).slice(0, 5)}`);
+  return Number.isFinite(at.getTime()) ? at.toISOString() : null;
+}
+
 function seriesSupersessions(rows = [], candidates = new Set()) {
   // One row per DELIVERED recipient of the move's text (a fan-out to two
   // appointment contacts writes two audit rows), so keep the earliest
@@ -785,7 +801,9 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
       const key = `${visitId}:${move.id}`;
       const prior = earliest.get(key);
       if (prior && instant(prior.communicated_at) <= instant(move.sent_at)) continue;
-      earliest.set(key, { visit_id: visitId, start_at: null, communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
+      const anchorStopPartner = occurrence.partner === true
+        && String(occurrence.forOccurrenceId || '') === String(move.anchor_service_id || '');
+      earliest.set(key, { visit_id: visitId, start_at: anchorStopPartner ? anchorStopStartAt(move) : null, communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
     }
   }
   return [...earliest.values()];
