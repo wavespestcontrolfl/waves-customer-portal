@@ -495,11 +495,14 @@ describe('TechLayout staff-session verification', () => {
     renderTech();
     expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
 
+    vi.mocked(refetchFlags).mockClear();
     // Tab 2 signs in as B: the storage event reaches this tab.
     localStorage.setItem('waves_admin_token', 'fixture-login-b');
     await act(async () => { window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_token', newValue: 'fixture-login-b' })); });
-    // A's identity is gone and nothing protected renders until B verifies.
+    // A's identity is gone and nothing protected renders until B verifies;
+    // A's per-user feature flags are dropped too.
     expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(refetchFlags).toHaveBeenCalled());
     await vi.waitFor(() => expect(answerB).toBeTypeOf('function'));
     await act(async () => { answerB(response(200, { id: 'tech-b', name: 'Fixture B', role: 'technician' })); });
 

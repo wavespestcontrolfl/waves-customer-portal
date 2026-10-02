@@ -185,6 +185,9 @@ export default function TechLayout() {
       setTechRole(null);
       setAuthStatus(getAdminAuthToken() ? 'checking' : 'unauthenticated');
       setVerifyRun((n) => n + 1);
+      // Feature flags are per user: drop the old login's cached set so the
+      // remounted shell waits for the new login's flags.
+      Promise.resolve().then(refetchFlags).catch(() => {});
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
