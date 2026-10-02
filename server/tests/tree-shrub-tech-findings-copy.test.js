@@ -888,3 +888,23 @@ describe('property score looks past visits with hidden findings (Codex r2 on #55
     expect(limits[0]).toBe(2);
   });
 });
+
+describe('writer grounding applies normalized hides (pre-push P1 on cfd376f364)', () => {
+  test('an edit with nothing printable left withholds its score, the overall and the prose', () => {
+    gateOn();
+    const scores = { foliageFullness: 50, leafColorVigor: 70, pestActivity: 80, diseaseLeafSpot: 90, waterHeatStress: 80, overallScore: 74 };
+    const photosHash = treeShrubPhotosHash(['data:image/jpeg;base64,YQ==']);
+    const review = {
+      scores, photosHash, observations: 'Sparse foliage.', photoCount: 1, scoredCount: 1, confirmed: true,
+      decisions: [{ key: 'leaf_color_vigor', action: 'edit', detail: 'The palm crown looks healthy.' }],
+    };
+    review.signature = treeShrubReviewSignature(scores, 1, 's1', photosHash, review.observations);
+    const on = validateTreeShrubReviewForReport(review, { serviceId: 's1' });
+    expect(on.grounding.techFindings[0].action).toBe('hidden');
+    expect(on.grounding.scores.leafColorVigor).toBeUndefined();
+    expect(on.grounding.scores.overallScore).toBeUndefined();
+    expect(on.grounding.observations).toBe('');
+    expect(on.grounding.hasHidden).toBe(true);
+    expect(on.grounding.scores.pestActivity).toBe(80);
+  });
+});

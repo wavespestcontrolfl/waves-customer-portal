@@ -147,10 +147,13 @@ function validateTreeShrubReviewForReport(review, { serviceId } = {}) {
     // GATE_TS_TECH_FINDINGS_COPY: the writer also hears the technician's own
     // confirmed / edited findings. An edited category's photo-read score and the
     // aggregate prose (written from the read the edit replaces) stay out.
+    // Normalized: an edit with nothing printable left reads as a hide, so its
+    // score goes like any hide's.
     const techFindings = normalizeTechFindings(decisions);
-    const edited = techFindings.filter((f) => editText(f));
-    for (const f of edited) delete grounding.scores[TREE_SHRUB_REVIEW_DECISION_KEYS[f.key]];
-    if (edited.length) {
+    const replaced = techFindings.filter((f) => f.action === 'hidden' || editText(f));
+    for (const f of replaced) delete grounding.scores[TREE_SHRUB_REVIEW_DECISION_KEYS[f.key]];
+    if (replaced.length) {
+      grounding.hasHidden = grounding.hasHidden || techFindings.some((f) => f.action === 'hidden');
       delete grounding.scores.overallScore;
       grounding.observations = '';
     }
