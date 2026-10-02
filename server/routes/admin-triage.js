@@ -749,6 +749,18 @@ async function transition(req, res, nextStatus) {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
+  // Resolve on a missing_first_name card means the name was ENTERED: refuse unless every
+  // customer the card lists is live with a nonblank first name (Dismiss is the explicit
+  // waiver). Judged on the card's current payload.
+  if (nextStatus === 'resolved') {
+    const owed = await db('triage_items').where({ id }).first('reason_code', 'payload');
+    if (owed && owed.reason_code === 'missing_first_name') {
+      const { everyOwedCustomerNamed } = require('../utils/missing-first-name-card');
+      if (!(await everyOwedCustomerNamed(db, owed.payload))) {
+        return res.status(409).json({ error: 'Enter the first name on the customer record first', code: 'FIRST_NAME_STILL_MISSING' });
+      }
+    }
+  }
   const result = await transitionCore({
     id, nextStatus, note, assignedTo: req.technicianId,
     expectedUpdatedAt: req.body?.expected_updated_at || null,

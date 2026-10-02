@@ -261,31 +261,41 @@ const SKIP = !process.env.DATABASE_URL;
     const [card] = await trx('triage_items').where({ call_log_id: callLogId });
     expect(card).toMatchObject({ reason_code: 'missing_first_name', category: 'name_review', severity: 'advisory', status: 'open' });
     // stamped with the customer it was filed FOR (the auto-resolve rule reads this record, never the call's later link)
-    expect(card.payload).toMatchObject({ customer_id: customerId, heard_name_v1: { first_name: null, last_name: 'Murphy' } });
+    expect(card.payload).toMatchObject({ customer_ids: [customerId], heard_name_v1: { first_name: null, last_name: 'Murphy' } });
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false); // booking-path site: no duplicate
     await trx('triage_items').update({ status: 'in_progress' });
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     await trx('triage_items').update({ status: 'resolved' }); // a resolved card is not re-opened by the other site
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(1);
-    // RELINK: the call moves to a DIFFERENT blank-name customer B. A's open card cannot be duplicated
-    // (one open card per call+reason), so it is RETARGETED to B — B gets its task, A's stamp moves.
+    // RELINK / REBOOK: the call now owes a first name on a DIFFERENT blank-name customer B while A's
+    // card is open. ONE open card per call (the unique index), so B is APPENDED to its list — A is never dropped.
     const other = randomUUID();
     await trx('triage_items').update({ status: 'open' });
     expect(await fileMissingFirstNameCard(trx, { ...args, customerId: other })).toBe(true);
     let rows = await trx('triage_items').where({ call_log_id: callLogId });
     expect(rows).toHaveLength(1);
-    expect(rows[0].payload.customer_id).toBe(other);
-    // filing again for B, or back for A's stamp-less retry of B, never duplicates
+    expect(rows[0].payload.customer_ids).toEqual([customerId, other]);
+    // listing either customer again never duplicates or reorders
     expect(await fileMissingFirstNameCard(trx, { ...args, customerId: other })).toBe(false);
-    // a TERMINAL card for A does not block a fresh card for B
-    await trx('triage_items').update({ status: 'resolved', payload: trx.raw("payload || ?::jsonb", [JSON.stringify({ customer_id: customerId })]) });
+    expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
+    // a third owed customer appends too
+    const third = randomUUID();
+    expect(await fileMissingFirstNameCard(trx, { ...args, customerId: third })).toBe(true);
+    expect((await trx('triage_items').where({ call_log_id: callLogId }))[0].payload.customer_ids).toEqual([customerId, other, third]);
+    // a card filed BEFORE the list shape (scalar customer_id) is read as a one-element list and appended to
+    await trx('triage_items').where({ call_log_id: callLogId }).update({ payload: JSON.stringify({ customer_id: customerId }) });
+    expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     expect(await fileMissingFirstNameCard(trx, { ...args, customerId: other })).toBe(true);
+    expect((await trx('triage_items').where({ call_log_id: callLogId }))[0].payload.customer_ids).toEqual([customerId, other]);
+    // when the call's cards are ALL terminal, a newly owed customer gets a FRESH card; a listed one is not re-opened
+    await trx('triage_items').update({ status: 'resolved' });
+    expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
+    expect(await fileMissingFirstNameCard(trx, { ...args, customerId: third })).toBe(true);
     rows = await trx('triage_items').where({ call_log_id: callLogId }).orderBy('created_at');
     expect(rows).toHaveLength(2);
     expect(rows.filter((r) => r.status === 'open')).toHaveLength(1);
-    // A's resolved card is not re-opened by A's own retry
-    expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
+    expect(rows.find((r) => r.status === 'open').payload.customer_ids).toEqual([third]);
     await trx('triage_items').where({ call_log_id: callLogId }).del();
     await fileMissingFirstNameCard(trx, args);
     // the finalization recheck: only an open / claimed card keeps the reason counting toward review_status

@@ -340,19 +340,33 @@ describe('verdict 409 with its own instruction', () => {
 // the call (a realtor's buyer, a landlord's tenant) — the card must show the
 // operator WHO to confirm, in both payload shapes the server produces.
 describe('ConfirmEvidence — missing first name', () => {
-  it('links the customer stamped on the task, not the call\'s current customer', () => {
-    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_id: '11111111-2222-4333-8444-555555555555' }} />);
-    const link = screen.getByRole('link', { name: 'Open customer' });
-    expect(link).toHaveAttribute('href', '/admin/customers?customerId=11111111-2222-4333-8444-555555555555');
-    expect(screen.getByText(/the customer this call created/)).toBeInTheDocument();
+  const A = '11111111-2222-4333-8444-555555555555';
+  const B = '66666666-7777-4888-8999-000000000000';
+  it('links the customer listed on the task with neutral wording', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_ids: [A] }} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    expect(screen.getByText(/the customer linked to this task/)).toBeInTheDocument();
   });
 
-  it('shows no customer link without a valid stamped id, or on another reason', () => {
-    const { unmount } = render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_id: 'not-a-uuid' }} />);
-    expect(screen.queryByRole('link', { name: 'Open customer' })).toBeNull();
+  it('a pre-list card (scalar customer_id) reads as one listed customer', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_id: A }} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+  });
+
+  it('several listed customers: plural wording and ONE link each, invalid ids dropped', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_ids: [A, B, A, 'not-a-uuid'] }} />);
+    expect(screen.getByText(/the customers linked to this task/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    expect(screen.getByRole('link', { name: 'Open customer 2' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    expect(screen.getAllByRole('link')).toHaveLength(2);
+  });
+
+  it('shows no customer link without a valid listed id, or on another reason', () => {
+    const { unmount } = render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_ids: ['not-a-uuid'] }} />);
+    expect(screen.queryByRole('link')).toBeNull();
     unmount();
-    render(<ConfirmEvidence reasonCode="email_unverified" payload={{ flag: 'email_unverified', customer_id: '11111111-2222-4333-8444-555555555555' }} />);
-    expect(screen.queryByRole('link', { name: 'Open customer' })).toBeNull();
+    render(<ConfirmEvidence reasonCode="email_unverified" payload={{ flag: 'email_unverified', customer_ids: [A], customer_id: A }} />);
+    expect(screen.queryByRole('link')).toBeNull();
   });
 });
 

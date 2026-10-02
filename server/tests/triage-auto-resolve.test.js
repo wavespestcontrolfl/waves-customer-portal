@@ -226,28 +226,26 @@ describe('moot-condition resolves', () => {
     expect(classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', payload: { heard_name: { first_name: 'Pat', last_name: null } } }), noBookings, { now: NOW })).toBeNull();
   });
 
-  test('missing_first_name resolves once the customer it was FILED FOR carries a first name the call did not hear (no timestamp needed)', () => {
+  test('missing_first_name resolves when EVERY listed customer is live with a nonblank first name, whatever its spelling', () => {
     const card = (over = {}) => item({
       reason_code: 'missing_first_name',
-      // the call's CURRENT link (customer_*) is deliberately a different, named person: only the stamped customer counts
+      // the call's CURRENT link (customer_*) is deliberately a different, named person: only the listed customers count
       customer_first_name: 'Relinked', customer_last_name: 'Other',
-      stamped_customer_id: 'cust-created', stamped_customer_first_name: 'Sam', stamped_customer_deleted_at: null,
-      customer_created_at: CUSTOMER_AFTER,
-      ...heardV1(null, 'Murphy'), ...over,
+      owed_total: 2, owed_named: 2,
+      customer_created_at: CUSTOMER_AFTER, ...heardV1(null, 'Murphy'), ...over,
     });
     expect(classifyTriageItem(card(), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
-    // still blank, or only whitespace, on the stamped customer -> stays open
-    expect(classifyTriageItem(card({ stamped_customer_first_name: '' }), noBookings, { now: NOW })).toBeNull();
-    expect(classifyTriageItem(card({ stamped_customer_first_name: '  ' }), noBookings, { now: NOW })).toBeNull();
-    // RELINK: the call now points at a named customer, but the stamped customer is still blank -> stays open
-    expect(classifyTriageItem(card({ stamped_customer_first_name: '', customer_first_name: 'Relinked' }), noBookings, { now: NOW })).toBeNull();
-    // no stamp (a card filed without its customer, or the stamped row is gone) never auto-resolves
-    expect(classifyTriageItem(card({ stamped_customer_id: null, stamped_customer_first_name: null }), noBookings, { now: NOW })).toBeNull();
-    // a first name the card's own snapshot heard is the call's, not independent
-    expect(classifyTriageItem(card(heardV1('Sam', 'Murphy')), noBookings, { now: NOW })).toBeNull();
-    // no filing-time snapshot -> fail closed; deleted stamped customer -> stays open
-    expect(classifyTriageItem(card({ payload: { flag: 'missing_first_name' } }), noBookings, { now: NOW })).toBeNull();
-    expect(classifyTriageItem(card({ stamped_customer_deleted_at: FRESH }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ owed_total: 1, owed_named: 1 }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
+    // a name the call itself heard is fulfilment too — the heard-name snapshot is no longer compared
+    expect(classifyTriageItem(card({ ...heardV1('Sam', 'Murphy'), owed_total: 1, owed_named: 1 }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
+    expect(classifyTriageItem(card({ payload: { flag: 'missing_first_name' }, owed_total: 1, owed_named: 1 }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
+    // one listed customer still blank / deleted / gone (the SQL counts it owed, not named) keeps the card open
+    expect(classifyTriageItem(card({ owed_named: 1 }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ owed_named: 0 }), noBookings, { now: NOW })).toBeNull();
+    // RELINK: the call points at a named customer but the listed one is still blank -> open
+    expect(classifyTriageItem(card({ owed_total: 1, owed_named: 0, customer_first_name: 'Relinked' }), noBookings, { now: NOW })).toBeNull();
+    // an empty list (nothing to prove) never auto-resolves
+    expect(classifyTriageItem(card({ owed_total: 0, owed_named: 0 }), noBookings, { now: NOW })).toBeNull();
     expect(RULE_NOTES.first_name_moot).toBeTruthy();
   });
 

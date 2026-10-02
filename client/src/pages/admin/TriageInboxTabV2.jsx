@@ -103,11 +103,13 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 export function ConfirmEvidence({ payload, reasonCode = null }) {
   const p = parsePayload(payload);
   if (!p) return null;
-  // A missing-first-name task belongs to the customer the call created
-  // (payload.customer_id, stamped at filing), not the call's current link: a
-  // relink must not send the office to edit some other account.
-  const firstNameCustomerId = reasonCode === "missing_first_name" && UUID_PATTERN.test(String(p.customer_id || ""))
-    ? String(p.customer_id) : null;
+  // A missing-first-name task is owed on EVERY customer it lists (payload.customer_ids; a
+  // pre-list card's scalar customer_id is one), not the call's current link: a relink must
+  // not send the office to edit some other account.
+  const firstNameCustomerIds = reasonCode === "missing_first_name"
+    ? [...new Set((Array.isArray(p.customer_ids) ? p.customer_ids : [p.customer_id])
+      .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))]
+    : [];
   const emailCandidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
   const addressCandidates = Array.isArray(p.address_candidates) ? p.address_candidates : [];
   // secondary_contact arrives in the V2 nested shape (name_full / phone_e164)
@@ -129,7 +131,7 @@ export function ConfirmEvidence({ payload, reasonCode = null }) {
     ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
     : [];
   const rows = [
-    firstNameCustomerId && { label: "Add first name on", value: "the customer this call created" },
+    firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
     // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured
@@ -304,9 +306,11 @@ export function ConfirmEvidence({ payload, reasonCode = null }) {
       {p.street_level_address && typeof p.visit_link === "string" && ADMIN_LINK_PATTERN.test(p.visit_link) && (
         <a href={p.visit_link} className="inline-block mt-1 text-13 font-medium text-zinc-900 underline">Open visit</a>
       )}
-      {firstNameCustomerId && (
-        <a href={`/admin/customers?customerId=${firstNameCustomerId}`} className="inline-block mt-1 text-13 font-medium text-zinc-900 underline">Open customer</a>
-      )}
+      {firstNameCustomerIds.map((id, i) => (
+        <a key={id} href={`/admin/customers?customerId=${id}`} className="inline-block mt-1 mr-3 text-14 font-medium text-zinc-900 underline">
+          {firstNameCustomerIds.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
+        </a>
+      ))}
     </div>
   );
 }

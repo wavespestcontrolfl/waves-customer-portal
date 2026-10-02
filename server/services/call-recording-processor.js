@@ -3761,34 +3761,38 @@ function firstNameAdvisoryAddressOk(av, extracted = {}, verdictInput = null) {
   return verdictAcceptsAddress(av) && !!verdictInput && addressesExactlyMatch(extracted, verdictInput);
 }
 
-// The missing_first_name card for a (call, customer), filed at customer creation AND on
-// the booking path. "Already filed" means a card for this call AND this stamped
-// payload.customer_id — never merely this call: a call relinked from blank-name customer
-// A to blank-name customer B must not leave B without a task. The one-open-card-per-
-// (call, reason) unique index forbids a second OPEN card, so when the call's open /
-// claimed card is stamped for a DIFFERENT customer it is RETARGETED to this one (payload
-// customer_id + heard names); a terminal card (resolved / dismissed) for a different
-// customer lets a fresh card be filed. A card for this customer in ANY status is
-// never duplicated or re-opened. Advisory; heard_name_v1 is what auto-resolve reads.
-// Returns true when a card for this customer was filed or retargeted.
+// The missing_first_name card: ONE open card per call (the unique index stays) whose
+// payload.customer_ids lists EVERY customer the call left owing a first name (a card
+// filed before the list shape carries the scalar customer_id, read as a one-element
+// list). Filed at customer creation AND on the booking path:
+//   - a customer already listed (on any card for the call, open or terminal) is never
+//     duplicated or re-opened;
+//   - while the call's card is open / claimed, a NEW owed customer (a relink or rebook to
+//     another blank-name customer) is APPENDED to its list — never replacing one;
+//   - when the call's cards are all terminal, a new owed customer gets a fresh card.
+// Advisory; the list is what Resolve, the sweep and the office link read.
+// Returns true when a customer was newly listed (filed or appended).
 async function fileMissingFirstNameCard(conn, { callLogId, customerId, extraction, extracted = {} }) {
+  const { owedCustomerIds } = require('../utils/missing-first-name-card');
   const stamp = customerId ? String(customerId) : null;
+  const heard = { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null };
   const rows = await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
     .select('id', 'status', 'payload');
-  const stampOf = (row) => {
-    const payload = typeof row.payload === 'string' ? (() => { try { return JSON.parse(row.payload); } catch { return {}; } })() : (row.payload || {});
-    return payload.customer_id ? String(payload.customer_id) : null;
-  };
-  if (rows.some((row) => stampOf(row) === stamp)) return false;
-  const heard = { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null };
+  if (rows.some((row) => stamp && owedCustomerIds(row.payload).includes(stamp))) return false;
   const live = rows.find((row) => ['open', 'in_progress'].includes(row.status));
   if (live) {
-    const moved = await conn('triage_items').where({ id: live.id }).whereIn('status', ['open', 'in_progress'])
-      .update({
-        payload: conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ customer_id: stamp, heard_name_v1: heard })]),
+    // Append under a row lock so two passes listing different customers both land.
+    return conn.transaction(async (trx) => {
+      const fresh = await trx('triage_items').where({ id: live.id }).whereIn('status', ['open', 'in_progress']).forUpdate().first('payload');
+      if (!fresh) return false;
+      const ids = owedCustomerIds(fresh.payload);
+      if (!stamp || ids.includes(stamp)) return false;
+      await trx('triage_items').where({ id: live.id }).update({
+        payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ customer_ids: [...ids, stamp] })]),
         updated_at: new Date(),
       });
-    return moved > 0;
+      return true;
+    });
   }
   await conn('triage_items')
     .insert(buildTriageItem({
@@ -3796,9 +3800,7 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
       flag: 'missing_first_name',
       extraction,
       severity: 'advisory',
-      // The customer this card is filed FOR: the auto-resolve rule reads THIS record,
-      // never whoever the call is later relinked to.
-      extraPayload: { customer_id: stamp, heard_name_v1: heard },
+      extraPayload: { customer_ids: stamp ? [stamp] : [], heard_name_v1: heard },
     }))
     .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
     .ignore();

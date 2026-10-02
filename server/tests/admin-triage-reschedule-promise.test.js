@@ -310,9 +310,9 @@ test.each(['resolve', 'dismiss'])('%s requires the card version and leaves the p
 
 describe('PUT /admin/triage/:id/resolve on a missing_first_name card', () => {
   const seed = () => {
-    const f = fixture();
+    const f = fixture({ customers: [{ id: '33333333-3333-4333-8333-333333333333', first_name: 'Sam', deleted_at: null }] });
     f.tables.triage_items[0].reason_code = 'missing_first_name';
-    f.tables.triage_items[0].payload = { customer_id: 'cust-1', heard_name_v1: { first_name: null, last_name: 'Murphy' } };
+    f.tables.triage_items[0].payload = { customer_ids: ['33333333-3333-4333-8333-333333333333'], heard_name_v1: { first_name: null, last_name: 'Murphy' } };
     return f;
   };
   test('a non-admin Resolve is refused (403) and the card stays open; Dismiss stays available', async () => {
@@ -323,6 +323,37 @@ describe('PUT /admin/triage/:id/resolve on a missing_first_name card', () => {
       expect(res.status).toBe(403);
     });
     expect(tables.triage_items[0].status).toBe('open');
+  });
+  test('Resolve is refused (409, plain message) until EVERY listed customer is live with a nonblank first name; Dismiss stays the waiver', async () => {
+    const A = '11111111-1111-4111-8111-111111111111';
+    const B = '22222222-2222-4222-8222-222222222222';
+    const f = fixture({ customers: [{ id: A, first_name: 'Sam', deleted_at: null }, { id: B, first_name: '', deleted_at: null }] });
+    f.tables.triage_items[0].reason_code = 'missing_first_name';
+    f.tables.triage_items[0].payload = { customer_ids: [A, B] };
+    wireDb(db, { conn: f.conn });
+    await withServer(async (baseUrl) => {
+      let res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe('Enter the first name on the customer record first');
+      expect(f.tables.triage_items[0].status).toBe('open');
+      // B gets a name -> allowed
+      f.tables.customers[1].first_name = 'Lee';
+      res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION });
+      expect(res.status).toBe(200);
+    });
+    expect(f.tables.triage_items[0].status).toBe('resolved');
+  });
+  test('a deleted or missing listed customer blocks Resolve; Dismiss still works', async () => {
+    const A = '11111111-1111-4111-8111-111111111111';
+    const f = fixture({ customers: [{ id: A, first_name: 'Sam', deleted_at: '2026-10-01T00:00:00Z' }] });
+    f.tables.triage_items[0].reason_code = 'missing_first_name';
+    f.tables.triage_items[0].payload = { customer_id: A }; // pre-list scalar shape
+    wireDb(db, { conn: f.conn });
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION })).status).toBe(409);
+      expect((await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+    });
+    expect(f.tables.triage_items[0].status).toBe('dismissed');
   });
   test('an admin Resolve closes it', async () => {
     const { conn, tables } = seed();

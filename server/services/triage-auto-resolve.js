@@ -930,13 +930,6 @@ function heardNames(item) {
   return { first: pick('first_name'), last: pick('last_name') };
 }
 
-function firstNameCameFromCall(item) {
-  const onFile = String(item.stamped_customer_first_name || '').trim().toLowerCase();
-  const names = heardNames(item);
-  // No filing-time names (a pre-snapshot card): not independent evidence.
-  return !names || names.first.includes(onFile);
-}
-
 function surnameCameFromCall(item) {
   const onFile = String(item.customer_last_name || '').trim().toLowerCase();
   if (!onFile) return false;
@@ -1026,21 +1019,18 @@ const CLASSIFY_RULES = [
       && callerMatchesCustomerFirstName(item)
       && !surnameCameFromCall(item)
       && filled(item.customer_last_name) },
-  // GATE_CALL_FIRST_NAME_ADVISORY's missing_first_name card: the customer was CREATED
-  // from this very call (first_name stored empty), so the surname rule's
-  // "pre-existing customer" guard cannot apply. The card is filed FOR one customer
-  // (payload.customer_id, stamped at filing) and is settled only by THAT record: a
-  // call later relinked to a named customer must not close it. The snapshot
-  // (payload.heard_name_v1) proves the name was blank at filing, so the ask is moot
-  // once the stamped customer — loaded directly, not through the call — is live and
-  // carries a nonblank first name the call did not hear (Customer 360's save does not
-  // bump updated_at, so no timestamp is required). No stamp, no auto-resolve.
+  // GATE_CALL_FIRST_NAME_ADVISORY's missing_first_name card lists EVERY customer the
+  // call left owing a first name (payload.customer_ids; a pre-list card's scalar
+  // customer_id counts as one). Each is loaded directly — never through the call's
+  // current link — and the ask is fulfilled when ALL of them are live with a nonblank
+  // first name, whatever its spelling: a name that later appears on the record IS the
+  // fulfilment (Customer 360's save does not bump updated_at, so no timestamp is
+  // needed). An empty list, or a listed customer that is gone or still blank, keeps
+  // the card.
   { rule: 'first_name_moot', action: 'resolve',
     when: (item) => item.reason_code === 'missing_first_name'
-      && !!item.stamped_customer_id
-      && !item.stamped_customer_deleted_at
-      && filled(item.stamped_customer_first_name)
-      && !firstNameCameFromCall(item) },
+      && Number(item.owed_total) > 0
+      && Number(item.owed_named) === Number(item.owed_total) },
   // Evidence rules: each flag is true only when the proof postdates the
   // CARD — see loadEvidence for the exact predicates.
   { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
@@ -1129,8 +1119,19 @@ function loadCandidateItems(conn, itemIds = null) {
   const q = conn('triage_items as t')
     .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
     .leftJoin('customers as c', 'c.id', 'cl.customer_id')
-    // The customer a missing_first_name card was filed FOR (payload.customer_id), never the call's current link.
-    .leftJoin('customers as sc', conn.raw("sc.id::text = t.payload->>'customer_id'"))
+    // The customers a missing_first_name card is owed on (payload.customer_ids, or the scalar
+    // customer_id of a pre-list card), each read directly: how many, and how many are live
+    // with a nonblank first name. A listed id whose row is gone counts as owed, not named.
+    .joinRaw(`left join lateral (
+      select count(*) as owed_total,
+        count(c2.id) filter (where c2.deleted_at is null and btrim(coalesce(c2.first_name, '')) <> '') as owed_named
+      from jsonb_array_elements_text(
+        case when jsonb_typeof(t.payload->'customer_ids') = 'array' then t.payload->'customer_ids'
+             when t.payload->>'customer_id' is not null then jsonb_build_array(t.payload->>'customer_id')
+             else '[]'::jsonb end) as ids(id)
+      left join customers c2 on c2.id::text = ids.id
+      where t.reason_code = 'missing_first_name'
+    ) fnc on true`)
     .where('t.status', 'open')
     .select(
       't.id', 't.call_log_id', 't.reason_code', 't.status', 't.severity',
@@ -1149,9 +1150,8 @@ function loadCandidateItems(conn, itemIds = null) {
       'cl.bridged_at as call_bridged_at',
       'cl.twilio_call_sid as call_twilio_call_sid',
       'cl.metadata as call_metadata',
-      'sc.id as stamped_customer_id',
-      'sc.first_name as stamped_customer_first_name',
-      'sc.deleted_at as stamped_customer_deleted_at',
+      'fnc.owed_total',
+      'fnc.owed_named',
       'c.created_at as customer_created_at',
       'c.deleted_at as customer_deleted_at',
       'c.pipeline_stage as customer_pipeline_stage',
