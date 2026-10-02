@@ -88,7 +88,8 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     (noted in the PR body).
 // 25: owner 2026-10-01 (false overdue bells): (a) a cancel ask that names a
 //     service is answered by a cancelled visit of that service even when the
-//     ask was not scoped to one property (cancelAskNamesService); (b) a
+//     ask was not scoped to one property and resolves, through the services
+//     catalog, to exactly that visit's service_key (resolveAskServices); (b) a
 //     delivered text a person wrote after a general staff promise closes it
 //     without the model, like a customer's ask (replyFulfillment).
 const FULFILLMENT_POLICY = 25;
@@ -198,28 +199,38 @@ function cancelAsk(commitment) {
   return CANCEL_WORD.test(words) && !NEGATED_CANCEL.test(words);
 }
 // Words that name a KIND of work or a schedule, never which service it was.
-// "inspection" is shared by WDO and termite inspections, "pest control" by
-// every recurring plan, "quarterly" by any cadence, so none can identify a
-// service on its own (Codex #5543 r1 P2).
 const GENERIC_SERVICE_WORDS = new Set([
   'service', 'services', 'visit', 'appointment', 'treatment', 'inspection', 'pest', 'control', 'care', 'program', 'plan',
   'quarterly', 'monthly', 'annual', 'bimonthly', 'recurring', 'initial', 'follow', 'one', 'time', 'the', 'and', 'for', 'with', 'our', 'my',
 ]);
 const contentWords = (text) => new Set(String(text || '').toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((w) => !GENERIC_SERVICE_WORDS.has(w)) ?? []);
-// An unscoped cancel ask (the customer has several properties, or none was
-// resolved) is answered by a cancelled visit only when the ask names that
-// visit's service IDENTITY: one of the visit's distinctive service terms
-// (what remains of its service_type after generic words are dropped — "wdo"
-// for "WDO Inspection Service", "lawn" for "Lawn Care Service") appears in
-// the ask. "Cancel WDO" and a WDO Inspection match; "cancel termite
-// inspection" does not match a WDO Inspection (only "inspection" is shared),
-// and a visit with no distinctive term never matches. The Codex #4816 r27
-// hazard was a cancellation at some OTHER property reading as the answer.
-// "Cancel my appointment" names no service and stays unanswerable here.
+// Which catalog services does a cancel ask name? A service is named when
+// EVERY distinctive (non-generic) term of its catalog name appears in the ask
+// ("WDO Inspection Service" -> {wdo}; "Termite Foam Service" -> {termite,
+// foam}); a name with no distinctive term ("Quarterly Pest Control Service")
+// is never named by words. Codex #5543 r1-r2: matching one shared word kept
+// admitting a different service, so identity is compared through the catalog
+// (services.service_key), never by overlap with the visit's free-text name.
+function resolveAskServices(askText, catalog) {
+  const asked = contentWords(askText);
+  const matched = (catalog || []).map((svc) => ({ key: svc.service_key, terms: contentWords(svc.name) }))
+    .filter(({ terms }) => terms.size > 0 && [...terms].every((w) => asked.has(w)));
+  // The most specific name wins: "termite foam" names Termite Foam {termite,
+  // foam} and, by its one shared term, Termite Inspection {termite}; a service
+  // whose terms are a strict subset of another matched service's is the less
+  // specific reading and is dropped. Equal term sets stay ambiguous.
+  return matched.filter((m) => !matched.some((o) => o !== m && o.terms.size > m.terms.size && [...m.terms].every((w) => o.terms.has(w))))
+    .map((m) => m.key);
+}
+// An unscoped cancel ask (several properties, or none resolved) is answered
+// by a cancelled visit only when the ask resolves to EXACTLY ONE catalog
+// service and that is the visit's own service_key (loadSmsFulfillmentEvidence
+// stamps `ask_names_visit_service`). Zero or several resolved services, or a
+// visit with no service_id, is not admissible: the ask still rings. The Codex
+// #4816 r27 hazard was a cancellation at some OTHER property reading as the
+// answer. "Cancel my appointment" names no service and stays unanswerable.
 function cancelAskNamesService(record, commitment) {
-  if (!cancelAsk(commitment)) return false;
-  const asked = contentWords(askWords(commitment));
-  return [...contentWords(record.service_type)].some((w) => asked.has(w));
+  return record.ask_names_visit_service === true && cancelAsk(commitment);
 }
 
 // The keys a payments row names its invoice by, as the Stripe webhook's
@@ -649,7 +660,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
             .where('r.created_at', '>', after).where('r.created_at', '<=', now));
       })
       .orderBy('scheduled_date', 'desc').limit(LIMIT + 1)
-      .select('id', 'status', 'created_at', conn.raw('scheduled_date::text as scheduled_date'), 'window_start', 'service_type', 'property_id',
+      .select('id', 'status', 'created_at', conn.raw('scheduled_date::text as scheduled_date'), 'window_start', 'service_type', 'property_id', 'service_id',
+        // The visit's catalog identity (a subselect: a join would make the
+        // visit's own columns ambiguous with the services table).
+        conn.raw('(SELECT s.service_key FROM services s WHERE s.id = scheduled_services.service_id) as service_key'),
         conn.raw('CASE WHEN completed_at <= ? THEN completed_at END as completed_at', [now]),
         conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
           WHERE h.job_id = scheduled_services.id AND h.to_status IN ('confirmed', 'rescheduled')
@@ -708,6 +722,17 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, 16000) });
     }
   });
+  // An unscoped cancel ask names the visit's service only through the catalog
+  // (resolveAskServices); the flag is read by visitWitnessAt. A visit with no
+  // service_id never carries it.
+  const visits = records.filter((row) => row.type === 'visit');
+  if (visits.length && !commitment.sms_context?.property_id && cancelAsk(commitment)) {
+    try {
+      const catalog = await conn('services').where({ is_active: true }).whereRaw('COALESCE(is_archived, false) = false').select('service_key', 'name');
+      const named = resolveAskServices(askWords(commitment), catalog);
+      for (const row of visits) row.ask_names_visit_service = named.length === 1 && !!row.service_key && named[0] === row.service_key;
+    } catch { failures.push('service_catalog'); }
+  }
   const unlinked = records.filter((row) => row.type === 'estimate' && !row.property_id);
   if (unlinked.length) {
     try {
@@ -1225,4 +1250,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, witness_refs: witnessR
   return groundFulfillment(result.json, evidence, commitment, { eventOnly });
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, replyFulfillment, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow };
+module.exports = { resolveAskServices, loadSmsFulfillmentEvidence, admissibleWitness, replyFulfillment, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow };

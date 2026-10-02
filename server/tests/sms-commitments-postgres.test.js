@@ -32,7 +32,7 @@ const schema = `sms_commitments_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
   'conversations', 'messages', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payment_methods', 'payers', 'setup_fee_claims', 'annual_prepay_terms', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
+  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payment_methods', 'payers', 'setup_fee_claims', 'annual_prepay_terms', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log', 'services'];
 let mockPg;
 let admin;
 // A property the customer no longer has: with it on file their scoped asks
@@ -3080,10 +3080,22 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(commitment.sms_context.property_id).toBeNull();
       return commitment;
     };
-    const cancelledVisit = async (serviceType, propertyId = context.properties[0].id) => {
+    // The active catalog the ask resolves against (Codex #5543 r2).
+    const CATALOG = [['wdo_inspection', 'WDO Inspection Service'], ['termite_inspection', 'Termite Inspection Service'],
+      ['foam_drill', 'Termite Foam Service'], ['lawn_care_unique', 'Lawn Care Service'], ['pest_quarterly', 'Quarterly Pest Control Service']];
+    const seedCatalog = async () => {
+      const ids = {};
+      for (const [service_key, name] of CATALOG) {
+        [{ id: ids[service_key] }] = await mockPg('services').insert({ service_key, name, category: 'other', is_active: true }).returning('id');
+      }
+      return ids;
+    };
+    const cancelledVisit = async (serviceKey, propertyId = context.properties[0].id) => {
+      const ids = await seedCatalog();
       const after = new Date(message.created_at.getTime() + 1000);
       const [visit] = await mockPg('scheduled_services').insert({
-        customer_id: message.customer_id, property_id: propertyId, service_type: serviceType,
+        customer_id: message.customer_id, property_id: propertyId, service_type: CATALOG.find(([k]) => k === serviceKey)?.[1] || 'Unlisted Service',
+        service_id: serviceKey ? ids[serviceKey] || null : null,
         scheduled_date: etDateString(new Date(after.getTime() + 3 * 86400000)), window_start: '09:00:00', status: 'cancelled',
         created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
       }).returning('id');
@@ -3092,25 +3104,48 @@ postgres('SMS commitments on PostgreSQL', () => {
     };
 
     test.each([
-      ['Please cancel WDO', 'WDO Inspection', true],
-      ['Please cancel the WDO inspection', 'WDO Inspection', true],
-      ['Please cancel WDO', 'Quarterly Pest Control', false],
-      ['Please cancel termite inspection', 'WDO Inspection Service', false],
-      ['Please cancel lawn', 'Lawn Care Service', true],
-      ['Please cancel lawn', 'WDO Inspection Service', false],
-      ['Please cancel my appointment', 'WDO Inspection', false],
-      ["Please don't cancel WDO", 'WDO Inspection', false],
-    ])('%s vs a cancelled %s visit: admissible %s', async (quote, serviceType, admissible) => {
+      ['Please cancel termite inspection', 'foam_drill', false], // shares "termite" only
+      ['Please cancel termite inspection', 'termite_inspection', true],
+      ['Please cancel WDO', 'wdo_inspection', true],
+      ['Please cancel the WDO inspection', 'wdo_inspection', true],
+      ['Please cancel WDO', 'termite_inspection', false],
+      ['Please cancel lawn care', 'lawn_care_unique', true],
+      ['Please cancel lawn', 'lawn_care_unique', true],
+      ['Please cancel my quarterly pest control', 'pest_quarterly', false], // no distinctive term: never named by words
+      ['Please cancel my appointment', 'wdo_inspection', false],
+      ["Please don't cancel WDO", 'wdo_inspection', false],
+      ['Please cancel WDO', null, false], // a visit with no service_id
+    ])('%s vs a cancelled %s visit: admissible %s', async (quote, serviceKey, admissible) => {
       const commitment = await cancelAskFor(quote);
-      const now = await cancelledVisit(serviceType);
+      const now = await cancelledVisit(serviceKey);
       const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
       const record = evidence.records.find((r) => r.type === 'visit');
       expect(admissibleWitness(record, commitment, evidence.records)).toBe(admissible);
     });
 
+    test('the same word naming two active services resolves to neither: the ask still rings', async () => {
+      await mockPg('services').insert({ service_key: 'lawn_care_other', name: 'Lawn Care Re-Service', category: 'other', is_active: true });
+      const commitment = await cancelAskFor('Please cancel lawn care');
+      // Two active catalog rows are named by "lawn care" now.
+      const now = await cancelledVisit('lawn_care_unique');
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+      expect(admissibleWitness(evidence.records.find((r) => r.type === 'visit'), commitment, evidence.records)).toBe(false);
+    });
+
+    test('a failed catalog read is an incomplete source, retried rather than answered', async () => {
+      const commitment = await cancelAskFor('Please cancel WDO');
+      const now = await cancelledVisit('wdo_inspection');
+      const failing = new Proxy(mockPg, { apply: (target, thisArg, args) => {
+        if (args[0] === 'services') throw new Error('synthetic catalog failure');
+        return target(...args);
+      } });
+      const evidence = await loadSmsFulfillmentEvidence(failing, commitment, message, now);
+      expect(evidence.failures).toContain('service_catalog');
+    });
+
     test('the cancelled WDO visit closes the ask end to end (model cites the cancelled visit), with no overdue bell', async () => {
       await cancelAskFor('Please cancel WDO');
-      const now = await cancelledVisit('WDO Inspection');
+      const now = await cancelledVisit('wdo_inspection');
       const visit = (await loadSmsFulfillmentEvidence(mockPg, (await mockPg('call_commitments').first()), message, now)).records.find((r) => r.type === 'visit');
       dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: visit.ref, quote: 'cancelled after the request' } });
       expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 3600000) })).toMatchObject({ scanned: 1, fulfilled: 1 });
