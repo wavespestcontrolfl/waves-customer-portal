@@ -11,6 +11,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
 const { listPortalPayments } = require('../portal-payment-history');
+const { listPortalServiceHistory } = require('../portal-service-history');
 
 // Tool definitions in Anthropic format
 const TOOLS = [
@@ -130,17 +131,34 @@ function paymentStatusLabel(p) {
   if (!SETTLED_REFUND_STATUSES.has(String(p.refundStatus || '').toLowerCase())) return null;
   return base === 'Paid' ? `Paid, ${moneyLabel(p.refundAmount)} refunded` : base;
 }
-const PORTAL_FACTS_TOOLS = [
-  ...PORTAL_TOOLS.slice(0, 4),
-  {
+const SHOW_RECENT_PAYMENTS_TOOL = {
     name: 'show_recent_payments',
     description: 'Show the customer a card with their most recent payments: date, amount, what it was for, the card or bank used, status, and a receipt link, plus an Open Billing button. Use for any question about a charge, a payment, a receipt, or whether a payment went through. You will be told only that the card was shown and how many payments it lists; the figures are on the card, not in your reply.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  PORTAL_TOOLS[4],
-];
+};
+// GATE_PORTAL_CHAT_VISIT_FACTS: the structured visit facts (date, service,
+// technician first name, kinds of product) go to the model so it can answer
+// in its own words; the reviewed summary, which is free text, goes on a card.
+const RECENT_VISITS_READ = 3;
+const VISIT_SUMMARY_CHARS = 600;
+const GET_RECENT_VISITS_TOOL = {
+  name: 'get_recent_visits',
+  description: 'Get the customer\'s most recent completed visits (date, service, the technician\'s first name, the kinds of product applied) and show the customer a card with each visit\'s reviewed summary and report link. Use for any question about what was done at a visit, when the last visit was, or where a service report is.',
+  input_schema: { type: 'object', properties: {}, additionalProperties: false },
+};
+// The portal tool set for the gates that are live: the four base tools, the
+// fact tools, then escalate last.
+function portalToolsFor({ payments = false, visits = false } = {}) {
+  return [
+    ...PORTAL_TOOLS.slice(0, 4),
+    ...(payments ? [SHOW_RECENT_PAYMENTS_TOOL] : []),
+    ...(visits ? [GET_RECENT_VISITS_TOOL] : []),
+    PORTAL_TOOLS[4],
+  ];
+}
+const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
 
-const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments']);
+const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits']);
 
 // One button per target. No count cap is needed, and none may refuse a
 // button a tool then reports as shown: the distinct targets are the portal
@@ -182,6 +200,8 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
         return openPortalSection(input.section, actions);
       case 'show_recent_payments':
         return await showRecentPayments(contextCustomerId, actions, cards);
+      case 'get_recent_visits':
+        return await getRecentVisits(contextCustomerId, actions, cards);
       case 'escalate':
         // Handled in assistant.js before reaching here
         return { escalated: true, reason: input.reason };
@@ -366,6 +386,62 @@ async function showRecentPayments(customerId, actions, cards) {
   };
 }
 
+async function getRecentVisits(customerId, actions, cards) {
+  const UNAVAILABLE = { visits: null, instruction: 'The visit history could not be read. Tell the customer the Completed visits page has it and, for a question about a specific visit, use the escalate tool.' };
+  if (!customerId || !Array.isArray(actions) || !Array.isArray(cards)) return UNAVAILABLE;
+  // Every read starts clean, and the page that lists every completed visit
+  // is the fallback on every exit.
+  const prior = cards.findIndex((c) => c.type === 'visits');
+  if (prior !== -1) cards.splice(prior, 1);
+  addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
+  let page;
+  try {
+    page = await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ, completedOnly: true });
+  } catch (err) {
+    logger.warn(`[ai-assistant] recent visits read failed for ${customerId}: ${err.message}`);
+    return UNAVAILABLE;
+  }
+  if (!page.services.length) {
+    return {
+      visits: [],
+      // An empty page with history behind it is not "no visits".
+      instruction: page.total > 0
+        ? UNAVAILABLE.instruction
+        : 'No completed visits are on record for this customer. Say so plainly.',
+    };
+  }
+  const rows = page.services.map((svc) => ({
+    id: String(svc.id),
+    service: String(svc.type || 'Visit'),
+    dateLabel: longDateLabel(svc.date),
+    technician: String(svc.technician || '').trim().split(/\s+/)[0] || null,
+    // The reviewed report text, shown to the customer on the card exactly as
+    // the Completed tab shows it. It is free text (it can name a product or
+    // a price), so it goes on the card and never to the model.
+    summary: svc.notes ? String(svc.notes).slice(0, VISIT_SUMMARY_CHARS) : null,
+    // The Waves report page only; a project report hosted elsewhere stays on
+    // the Completed visits page.
+    reportUrl: typeof svc.reportUrl === 'string' && /^\/report\/[A-Za-z0-9_-]+$/.test(svc.reportUrl) ? svc.reportUrl : null,
+    // Kinds only: product names are on the report, and the owner's rule is
+    // that the assistant never names a product brand.
+    productKinds: [...new Set((svc.products || []).map((p) => String(p.product_category || '').trim()).filter(Boolean))],
+  }));
+  cards.push({
+    type: 'visits',
+    title: rows.length === 1 ? 'Your most recent visit' : `Your last ${rows.length} visits`,
+    rows: rows.map(({ productKinds: _kinds, ...row }) => row),
+  });
+  return {
+    // Structured facts only. The summary text and the report link are on the
+    // card, not here.
+    visits: rows.map((r) => ({
+      date: r.dateLabel, service: r.service, technician: r.technician, product_kinds: r.productKinds,
+      summary_on_card: Boolean(r.summary), report_link_on_card: Boolean(r.reportUrl),
+    })),
+    instruction: 'A card under your reply shows each visit with its reviewed summary and report link. You are not given the summary text: say when the visit was, what service it was, who did it and the kinds of product applied, and point the customer to the card for what was found and treated. Do not add a finding, product or date that is not here, and never name a product brand.',
+  };
+}
+
 function openPortalSection(section, actions) {
   const target = Object.prototype.hasOwnProperty.call(PORTAL_SECTIONS, section) ? PORTAL_SECTIONS[section] : null;
   if (!target || !Array.isArray(actions)) return { shown: false, error: 'Unknown section' };
@@ -383,4 +459,4 @@ async function getPestAdvice(topic) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, executeToolCall };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall };
