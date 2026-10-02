@@ -251,6 +251,10 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       { stripe_payment_intent_id: `${refundPi}:partial-dispute:dp_${run}`, customer_id: R, invoice_id: null, amount: 30, source: 'combined_pay_webhook', original_db_error: 'Partial dispute on a combined balance charge' },
       { stripe_payment_intent_id: `${refundPi}:dispute-won:dp_${run}:${inv.r_a.id}`, customer_id: R, invoice_id: inv.r_a.id, amount: 80, source: 'combined_pay_webhook', original_db_error: 'Dispute won reinstated a share while a replacement owns the invoice' },
     ]);
+    // A refund Stripe returned as pending: stamped on the payment, but the money has not come back.
+    await invoice('g_pend', G, { total: 100, status: 'paid', paid_at: new Date() });
+    await db('payments').insert({ customer_id: G, payment_date: day(-2), amount: 100, status: 'refunded', refund_amount: 100, refund_status: 'pending', processor: 'stripe',
+      stripe_payment_intent_id: `pi_pend_${run}`, description: 'Stripe card payment', metadata: json({ invoice_id: inv.g_pend.id }) });
     // A packet invoice whose Bill-To moved AFTER it was sent: both payer columns stay null, only the withdrawal stamp records it.
     W = await customer(`Withdrawn${run}`, `Packet${run}`);
     await invoice('w_self', W, { total: 100 });
@@ -683,6 +687,23 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     for (const key of ['r_a', 'r_b']) {
       expect(list.invoices.find((i) => i.id === inv[key].id)).toMatchObject({ amount_paid: null, payment_recorded: true, reversal_reconciliation_required: 3, unreconciled_stripe_charges: 0, balance_due: 0 });
     }
+  });
+
+  test('review: a refund Stripe has not completed is pending, never reported as returned', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.g_pend.id });
+    const entry = detail.payments_timeline.find((e) => e.type === 'recorded_payment');
+    expect(entry).toMatchObject({ refund_status: 'pending', refund_pending: true, net_received: null, refunded_amount: 100 });
+    expect(entry.refund_note).toMatch(/PENDING/);
+    expect(detail.payment_summary).toMatchObject({ received: true, recorded_payments_net: null, refunds_pending: 1 });
+    expect(detail.payment_summary.statement).toMatch(/net amount UNKNOWN \(a refund is still pending\)/);
+    expect(detail.payment_summary.statement).not.toMatch(/net \$0\.00 after/);
+    const list = await read('get_customer_invoices', { customer_id: G, limit: 50 });
+    const item = list.invoices.find((i) => i.id === inv.g_pend.id);
+    expect(item.amount_paid).toBeNull();
+    expect(item.unknown.join(' ')).toMatch(/PENDING/);
+    // A completed refund still nets out.
+    const done = await read('get_invoice_detail', { invoice_id: inv.d_ref.id });
+    expect(done.payment_summary.refunds_pending).toBe(0);
   });
 
   test('review: a statement-level orphan (partial refund before settlement) is reconciliation-required on the statement\'s invoices', async () => {

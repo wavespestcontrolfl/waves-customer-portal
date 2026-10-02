@@ -319,6 +319,9 @@ async function nameFundingPayers(linked) {
 // refunded one was received and is shown with what came back; a dispute is a
 // state, not a payment.
 const RECEIVED_PAYMENT_STATUSES = ['paid', 'refunded'];
+// payments.refund_status holds Stripe's refund state (stripe.js stamps refund.status) or, from the webhook,
+// 'full' / 'partial'. A refund Stripe has not completed has not returned the money yet.
+const refundIsPending = (row) => Number(row.refund_amount) > 0 && ['pending', 'requires_action'].includes(String(row.refund_status || '').toLowerCase());
 function netReceived(row) {
   if (!RECEIVED_PAYMENT_STATUSES.includes(row.status)) return 0;
   return Math.max(0, fromCents(cents(row.amount) - cents(row.refund_amount)));
@@ -376,8 +379,10 @@ function paymentEntry(row, invoice) {
       : PAYMENT_STATE_NOTES[row.status] || 'Unrecognized payment status: treat as not received.',
     ...(ambiguous ? { ambiguous_outcome: true } : {}),
     amount: money(row.amount),
-    ...(received ? { net_received: fromCents(cents(row.amount) - cents(row.refund_amount)) } : {}),
+    ...(received ? { net_received: refundIsPending(row) ? null : fromCents(cents(row.amount) - cents(row.refund_amount)) } : {}),
     refunded_amount: money(row.refund_amount) || 0,
+    refund_status: row.refund_status || null,
+    ...(refundIsPending(row) ? { refund_pending: true, refund_note: `A $${money(row.refund_amount).toFixed(2)} refund is PENDING (Stripe has not completed it): the money has not returned yet, so the net amount is unknown. Do not call it refunded.` } : {}),
     source: manual ? 'manual' : row.processor,
     ...(manual ? {
       method: invoice.payment_method || null,
@@ -658,6 +663,12 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unc
       amountPaid = 0;
       basis = 'no recorded payment';
     }
+  }
+  const pendingRefunds = payments.filter(refundIsPending);
+  if (pendingRefunds.length) {
+    amountPaid = null;
+    basis = 'unknown: a refund on a linked payment is still pending';
+    unknown.push(`${pendingRefunds.length} refund(s) on this invoice's payment are PENDING (Stripe has not completed them): the net amount paid is unknown; do not call it refunded.`);
   }
   if (paymentsTruncated) {
     amountPaid = null;
@@ -975,7 +986,8 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   const disputed = entries.filter((entry) => entry.status === 'disputed');
   const statementReconciliation = entries.filter((entry) => entry.type === 'payer_statement_reconciliation');
   const reversalReconciliation = entries.filter((entry) => entry.type === 'payment_reversal_reconciliation');
-  const netUnknown = reversalReconciliation.length > 0;
+  const refundPendingEntries = entries.filter((entry) => entry.refund_pending === true);
+  const netUnknown = reversalReconciliation.length > 0 || refundPendingEntries.length > 0;
   const payerFunded = entries.filter((entry) => entry.type === 'payer_payment');
   const payerNames = [...new Set(payerFunded.map((entry) => entry.funded_by.name).filter(Boolean))];
   // Pending (a bank payment in flight) is not received YET. An unknown outcome (a charge handed to Stripe
@@ -1009,8 +1021,8 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
 
   const parts = [];
   const refundedTotal = fromCents(recorded.reduce((total, entry) => total + cents(entry.refunded_amount), 0));
-  if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, ${netUnknown ? 'net amount UNKNOWN (an unallocated refund or dispute exists)' : `net $${netRecorded.toFixed(2)}`}${!netUnknown && refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
-  if (netUnknown) parts.push(`${reversalReconciliation.length} refund or dispute record(s) on the covering payment not yet allocated to an invoice (reconciliation required)`);
+  if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, ${netUnknown ? `net amount UNKNOWN (${refundPendingEntries.length ? 'a refund is still pending' : 'an unallocated refund or dispute exists'})` : `net $${netRecorded.toFixed(2)}`}${!netUnknown && refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
+  if (reversalReconciliation.length) parts.push(`${reversalReconciliation.length} refund or dispute record(s) on the covering payment not yet allocated to an invoice (reconciliation required)`);
   if (stripeConfirmed.length) parts.push(`${stripeConfirmed.length} Stripe charge(s) that succeeded and are not confirmed in the payments table (needs reconciling)`);
   if (pending.length) parts.push(`${pending.length} payment(s) still processing (not received yet)`);
   if (unknownOutcome.length) parts.push(`${unknownOutcome.length} charge attempt(s) with an unknown outcome (Stripe may have charged the customer: receipt NOT confirmed)`);
@@ -1042,6 +1054,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   return {
     received: provenOrUnknown(receivedAny),
     recorded_payments_net: netUnknown ? null : netRecorded,
+    refunds_pending: refundPendingEntries.length,
     reversal_reconciliation_required: reversalReconciliation.length,
     stripe_succeeded_not_in_ledger: stripeConfirmed.length,
     unreconciled_stripe_charges: unreconciled.length,
