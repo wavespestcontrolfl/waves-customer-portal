@@ -8,6 +8,18 @@ let inflight = null;
 // older generation is aborted and its answer — or its failure — never
 // becomes the cache, so a previous user's flags cannot win a switch.
 let generation = 0;
+// Mounted flag hooks re-read after refetchFlags() (a toggle or a login
+// switch), so long-lived readers (the admin shell) and newly mounted ones
+// (the field shell) never disagree on the same account (Codex #5573 r15).
+const refetchListeners = new Set();
+function useFlagGeneration() {
+  const [gen, setGen] = useState(generation);
+  useEffect(() => {
+    refetchListeners.add(setGen);
+    return () => { refetchListeners.delete(setGen); };
+  }, []);
+  return gen;
+}
 let inflightAbort = null;
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // A flag read that never answers (a field dead zone) must not hold a gated
@@ -63,21 +75,22 @@ async function loadFlags() {
 // so the default applies.
 // refreshKey: see useFeatureFlagReady (a long-lived shell re-reads per account).
 export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined) {
-  const [state, setState] = useState(() => ({ key, refreshKey, enabled: defaultValue, resolved: false }));
+  const gen = useFlagGeneration();
+  const [state, setState] = useState(() => ({ key, refreshKey, gen, enabled: defaultValue, resolved: false }));
   useEffect(() => {
     let mounted = true;
     loadFlags().then((flags) => {
       if (!mounted) return;
-      setState({ key, refreshKey, enabled: Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue, resolved: true });
+      setState({ key, refreshKey, gen, enabled: Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue, resolved: true });
     });
     return () => {
       mounted = false;
     };
-  }, [key, defaultValue, refreshKey]);
+  }, [key, defaultValue, refreshKey, gen]);
   // Derived in render (Codex #5573 r10, r12): a value resolved for another
   // key/account, or while the cache is unloaded (refetched for a new
   // account), never shows; the default does until this read answers.
-  if (!state.resolved || state.key !== key || state.refreshKey !== refreshKey || cache === null) return defaultValue;
+  if (!state.resolved || state.key !== key || state.refreshKey !== refreshKey || state.gen !== gen || cache === null) return defaultValue;
   return state.enabled;
 }
 
@@ -88,17 +101,19 @@ export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined
 // refreshKey (optional): re-read when it changes, e.g. the verified staff
 // account, so a long-lived shell follows refetchFlags() after a login switch.
 export function useFeatureFlagReady(key, defaultValue = false, refreshKey = undefined) {
+  const gen = useFlagGeneration();
   const fromCache = () => (Object.prototype.hasOwnProperty.call(cache, key) ? !!cache[key] : defaultValue);
   const [state, setState] = useState(() => ({
     key,
     refreshKey,
+    gen,
     enabled: cache ? fromCache() : defaultValue,
     ready: cache !== null,
   }));
   useEffect(() => {
     let mounted = true;
     if (cache !== null) {
-      setState({ key, refreshKey, enabled: fromCache(), ready: true });
+      setState({ key, refreshKey, gen, enabled: fromCache(), ready: true });
       return undefined;
     }
     loadFlags().then((flags) => {
@@ -106,6 +121,7 @@ export function useFeatureFlagReady(key, defaultValue = false, refreshKey = unde
       setState({
         key,
         refreshKey,
+        gen,
         enabled: Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue,
         ready: true,
       });
@@ -113,11 +129,11 @@ export function useFeatureFlagReady(key, defaultValue = false, refreshKey = unde
     return () => {
       mounted = false;
     };
-  }, [key, defaultValue, refreshKey]);
+  }, [key, defaultValue, refreshKey, gen]);
   // Derived in render: a value resolved for another key/account, or while the
   // cache is unloaded (refetched for a new account), is never returned; the
   // default and not-ready are, until this read answers (Codex #5573 r12).
-  if (state.key !== key || state.refreshKey !== refreshKey || cache === null) {
+  if (state.key !== key || state.refreshKey !== refreshKey || state.gen !== gen || cache === null) {
     return { enabled: defaultValue, ready: false };
   }
   return { enabled: state.enabled, ready: state.ready };
@@ -131,6 +147,7 @@ export function refetchFlags() {
   inflightAbort = null;
   cache = null;
   inflight = null;
+  refetchListeners.forEach((notify) => notify(generation));
   return loadFlags();
 }
 

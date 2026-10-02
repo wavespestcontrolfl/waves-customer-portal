@@ -21,7 +21,9 @@ export default function TechFieldShell({ children, techName, techRole, staffProf
   // child routes: snap it to the top on navigation like AdminLayoutV2 does
   // for .admin-main.
   const mainRef = useRef(null);
-  useEffect(() => { mainRef.current?.scrollTo?.({ top: 0, behavior: 'instant' }); }, [pathname]);
+  // Opening or closing a visit changes only ?visit=: reset then too (Codex #5573 r15).
+  const visitKey = new URLSearchParams(search).get('visit');
+  useEffect(() => { mainRef.current?.scrollTo?.({ top: 0, behavior: 'instant' }); }, [pathname, visitKey]);
   const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
   const documentsRoute = Boolean(matchPath(`${base}/documents`, pathname));
   const payGrowthRoute = Boolean(matchPath(`${base}/pay-growth`, pathname));

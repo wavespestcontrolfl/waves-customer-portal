@@ -107,3 +107,23 @@ it('a refetch for a new account fails closed until the new read answers (Codex #
   expect(await screen.findByText('b:true')).toBeTruthy();
   cleanup();
 });
+
+it('a same-account refetch updates already-mounted readers (Codex #5573 r15)', async () => {
+  const React = await import('react');
+  const { render, screen, act, cleanup } = await import('@testing-library/react');
+  localStorage.setItem('waves_admin_token', 'fixture-only');
+  let answer = { 'tech-field-workspace': false };
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ flags: answer }) })));
+  const mod = await import('./useFeatureFlag');
+  function Probe() {
+    const { enabled, ready } = mod.useFeatureFlagReady('tech-field-workspace', false, 'same-user');
+    const plain = mod.useFeatureFlag('tech-field-workspace', false, 'same-user');
+    return React.createElement('output', null, `${ready}:${enabled}:${plain}`);
+  }
+  render(React.createElement(Probe));
+  expect(await screen.findByText('true:false:false')).toBeTruthy();
+  answer = { 'tech-field-workspace': true };
+  await act(async () => { await mod.refetchFlags(); });
+  expect(await screen.findByText('true:true:true')).toBeTruthy();
+  cleanup();
+});

@@ -103,3 +103,17 @@ it('protects document departure without a router history index only while busy',
   window.dispatchEvent(settledDeparture);
   expect(settledDeparture.defaultPrevented).toBe(false);
 });
+
+it('opening a visit (?visit= only) scrolls the field main back to the top (Codex #5573 r15)', async () => {
+  const scrollTo = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: scrollTo });
+  function Go() { const { setNavigationBusy } = useOutletContext(); void setNavigationBusy; return <Link to="/admin/today?visit=row%3Aone">Open stop</Link>; }
+  render(<TechNavigationLock><MemoryRouter initialEntries={['/admin/today']}><Routes>
+    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={false}><div>Existing route</div></TechFieldShell>}>
+      <Route index element={<Go />} />
+    </Route>
+  </Routes></MemoryRouter></TechNavigationLock>);
+  const before = scrollTo.mock.calls.length;
+  fireEvent.click(screen.getByRole('link', { name: 'Open stop' }));
+  await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(before));
+});

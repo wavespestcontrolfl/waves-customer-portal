@@ -160,7 +160,10 @@ const CONTEXT_COLORS = {
   estimates: D.teal,
 };
 
-function detectContext(pathname, search = "", hash = "", user) {
+function detectContext(rawPathname, search = "", hash = "", user) {
+  // React Router matches /ADMIN/TODAY too: pick the context case-insensitively
+  // (Codex #5573 r15).
+  const pathname = String(rawPathname || "").toLowerCase();
   if (pathname.replace(/\/+$/, "") === "/admin/communications" && user?.role === "admin"
     && new URLSearchParams(hash.replace(/^#/, "")).get("tab") === "email") return "email";
   // /admin/pipeline hosts both the Leads pipeline and the consolidated
