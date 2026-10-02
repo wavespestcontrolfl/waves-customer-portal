@@ -14,9 +14,11 @@
 //      removed, ANY remaining payment-status vocabulary in a payment-scoped reply
 //      is an unauthorized assertion. False holds are fine (staff review); a false
 //      pass is not.
-// Pay-METHOD answers ("how can I pay", "do you take Zelle") carry no status
-// vocabulary and never reach the contract; they keep the Zelle path in
-// sms-amount-recheck.
+// WIDENED (owner 2026-10-01 ~23:58Z, "widen the contract to ALL money content"): in an unedited AI body every sentence that names a
+// dollar amount, Zelle, or a payment receipt / status must be a verbatim copy of a rendered sentence - the monthly plan price and
+// card charge, and the Zelle offer / unavailability per target invoice are rendered too. The clause grammar that used to classify
+// Zelle offers / denials and pool owed amounts is gone. A pay-METHOD answer with no amount and no Zelle ("you can pay by card or bank
+// account through your pay link") needs no sentence.
 //
 // One shape table drives rendering AND parsing (a frozen replay reads its
 // sentences back out of its own facts block), so the two cannot drift.
@@ -25,8 +27,8 @@ const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
 const MAX_REPLY_CHARS = 2000;
 const MAX_INBOUND_CHARS = 1000;
 
-const SECTION_HEADER = '- Payment status sentences (the ONLY way to state a payment, invoice, refund or balance status is to copy one of these word for word, as a whole sentence, and only one that answers what the customer asked):';
-const SECTION_NONE = '- Payment status sentences: none on file right now - state no payment, invoice, refund or balance status at all; say a teammate will confirm';
+const SECTION_HEADER = '- Payment status sentences (the ONLY way to state a payment, invoice, refund or balance status, ANY dollar amount, or anything about Zelle is to copy one of these word for word, as a whole sentence, and only one that answers what the customer asked):';
+const SECTION_NONE = '- Payment status sentences: none on file right now - state no payment, invoice, refund or balance status, no dollar amount and nothing about Zelle; say a teammate will confirm';
 const SENTENCE_BULLET = '  - ';
 
 // ---- Rendering -------------------------------------------------------------
@@ -84,6 +86,12 @@ const SHAPES = Object.freeze({
   no_balance: /^Your account has no balance due\.$/,
   no_payment_since: new RegExp(`^We don't see a payment on your account since ${DAY}\\.$`),
   no_payments: /^We don't see any payments on your account\.$/,
+  // the money every reply may need to state (owner 2026-10-01 ~23:58Z): the plan price, the card charge, and Zelle per target invoice
+  dues_monthly: new RegExp(`^Your monthly plan price is ${AMT}\\.$`),
+  dues_card_charge: new RegExp(`^When your dues are charged to the credit card on file, the monthly charge is ${AMT}: ${AMT} dues plus a ${AMT} credit-card fee\\.$`),
+  zelle_offer: new RegExp(`^You can pay invoice ${INVOICE} by Zelle to [^,\\n]{3,80}, with your name or the invoice number in the Zelle memo\\.$`),
+  zelle_invoice_unavailable: new RegExp(`^Zelle isn't available for invoice ${INVOICE} right now\\.$`),
+  zelle_not_offered: /^We don't take Zelle right now\.$/,
 });
 const kindOf = (text) => Object.keys(SHAPES).find((k) => SHAPES[k].test(text)) || null;
 
@@ -231,7 +239,41 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   const depositUnknown = billing.hasDepositActivity !== false;
   const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length || depositUnknown || !everyRowRenders(billing, rows, todayParts))
     ? null : absenceSentence(billing, rows, todayParts);
-  return absence ? [...out, absence] : out;
+  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...zelleSentences(billing.zelleFacts)];
+}
+
+// The monthly plan price, and the card charge only when the lane resolved it exactly (context.customer.billingLane, the same facts the
+// dues line and authorizedDuesCents read). Any other dues state renders no charge figure.
+function duesSentences(context) {
+  const lane = context?.customer?.billingLane;
+  const dues = lane?.monthlyBilled ? lane.monthlyDues : null;
+  const base = finiteCents(dues?.base);
+  if (!base) return [];
+  const out = [{ kind: 'dues_monthly', text: `Your monthly plan price is ${money(base)}.` }];
+  const total = finiteCents(dues.total);
+  const fee = finiteCents(dues.surcharge);
+  if (dues.surcharged && total && fee) {
+    out.push({ kind: 'dues_card_charge', text: `When your dues are charged to the credit card on file, the monthly charge is ${money(total)}: ${money(base)} dues plus a ${money(fee)} credit-card fee.` });
+  }
+  return out;
+}
+
+// Zelle, per the target invoice the caller resolved and checked live (zelleFacts = { state, invoiceNumber, recipient }):
+//   offer               - the invoice is Zelle-eligible right now and a recipient is configured
+//   invoice_unavailable - the invoice is CONFIRMED not Zelle-eligible (never for an unverifiable state)
+//   not_offered         - no Zelle recipient is configured at all
+// Anything else (no target, several open invoices, an unverifiable state) renders nothing, so Zelle cannot be mentioned at all.
+function zelleSentences(zelleFacts) {
+  const f = zelleFacts || {};
+  const number = String(f.invoiceNumber || '');
+  const numberOk = new RegExp(`^${INVOICE}$`).test(number);
+  const recipient = String(f.recipient || '').trim();
+  if (f.state === 'offer' && numberOk && /^[^,\n]{3,80}$/.test(recipient)) {
+    return [{ kind: 'zelle_offer', text: `You can pay invoice ${number} by Zelle to ${recipient}, with your name or the invoice number in the Zelle memo.` }];
+  }
+  if (f.state === 'invoice_unavailable' && numberOk) return [{ kind: 'zelle_invoice_unavailable', text: `Zelle isn't available for invoice ${number} right now.` }];
+  if (f.state === 'not_offered') return [{ kind: 'zelle_not_offered', text: "We don't take Zelle right now." }];
+  return [];
 }
 
 function balanceSentences(billing, onPlan) {
@@ -406,9 +448,6 @@ const statusHit = (sentence) => STATUS_RE.test(sentence) || STATUS_WORDS_RE.test
 // answer, and whatever it says about that thing is held - so a status said in words no list knows ("we banked it", "your
 // payment is in the books") cannot pass just because it avoided the status words above.
 const PAYMENT_THING_RE = /\b(?:payments?|invoices?|bills?|refunds?|transfers?|deposits?|charges?|funds|money|transactions?|balance|receipts?|statements?)\b/i;
-// a Zelle sentence that reads as a pay-METHOD sentence (an offer, a recipient, a denial, the memo); the Zelle recheck covers those
-const ZELLE_METHOD_RE = /\bzelle\b/i;
-const ZELLE_METHOD_CUE_RE = /\b(?:can|could|may|will|would|should|please|to|via|use|using|send|sending|accept\w*|take|takes|taking|offer\w*|available|unavailable|works?|memo|option)\b|@|\d{3}[\s.-]\d{4}/i;
 const HOW_TO_PAY_RE = new RegExp([
   '\\bpay(?:ment)?\\s+(?:links?|page|portal|online|options?|methods?|instructions?)\\b',
   '\\b(?:invoice|bill)\\s+(?:number|link|page|portal|copy|pdf)\\b',
@@ -461,8 +500,7 @@ function assertsPaymentStatus(text, { inboundText = null, scopeTexts = [], scope
     if (!sentence) return false;
     const status = statusHit(sentence);
     if (/\?$/.test(sentence) && INTERROGATIVE_START_RE.test(sentence.replace(GREETING_RE, ''))) return status;
-    // (a Zelle sentence with a pay-method cue is a pay-method sentence: its recipient and the invoice's eligibility are rechecked by the Zelle path)
-    return status || (!(ZELLE_METHOD_RE.test(sentence) && ZELLE_METHOD_CUE_RE.test(sentence)) && PAYMENT_THING_RE.test(sentence.replace(HOW_TO_PAY_RE, ' ')));
+    return status || PAYMENT_THING_RE.test(sentence.replace(HOW_TO_PAY_RE, ' '));
   });
 }
 
@@ -485,7 +523,7 @@ function copiesOffTarget(copied, inboundText) {
   const amounts = new Set((inbound.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf));
   return copied.some((sentence) => {
     const t = String(sentence);
-    const inv = /^Invoice\s+(\S+?)\s/.exec(t);
+    const inv = /\binvoice\s+([A-Za-z0-9][A-Za-z0-9-]{0,29})\b/i.exec(t);
     if (inv && (named.full.length || named.tail.length)) {
       const num = inv[1].toUpperCase();
       return !(named.full.includes(num) || namedTails.has(stripZeros(num.split('-').pop())));
@@ -495,13 +533,24 @@ function copiesOffTarget(copied, inboundText) {
   });
 }
 
+// MONEY CONTENT (owner 2026-10-01 ~23:58Z): once the verbatim copies are removed, an unedited AI reply carries no dollar figure, no price
+// grammar ("fifty dollars", "45/mo") and no mention of Zelle - whatever the wording, in any scope. (An unparseable check fails closed.)
+const MONEY_FIGURE_RE = /\$\s?\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars?|bucks|usd)\b/i;
+const ZELLE_WORD_RE = /\bzelle\b/i;
+function remainderHasMoney(remainder) {
+  const text = String(remainder ?? '');
+  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text)) return true;
+  try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
+}
+
 function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTexts = [], scoped = false }) {
   const texts = (sentences || []).map((s) => (typeof s === 'string' ? s : s.text));
   const text = String(reply ?? '');
   if (text.length > MAX_REPLY_CHARS) return { ok: false, copied: [], remainder: canonText(text) };
   const copied = copiedSentences(text, texts);
   const remainder = withoutCopies(text, copied);
-  return { ok: !copiesOffTarget(copied, inboundText) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped }), copied, remainder };
+  const ok = !copiesOffTarget(copied, inboundText) && !remainderHasMoney(remainder) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped });
+  return { ok, copied, remainder };
 }
 
 // ---- Auto-send: a payment-scoped reply may carry nothing but verbatim copies and inert text ---------------------------------------
@@ -546,16 +595,20 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
  * What a decision persists (input_snapshot.payment_status_snapshot): the sentences its final reply copies, and whether the draft was
  * payment-scoped (the reply, the customer's message or the thread it was written from touches money). null when it is neither.
  */
-function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inboundText = null, scopeTexts = [] }) {
+function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inboundText = null, scopeTexts = [], zelleInvoiceId = null }) {
   const copied = copiedSentences(reply, (sentences || []).map((s) => (typeof s === 'string' ? s : s.text)));
   // (a snapshot that copied a sentence is payment-scoped by that alone; `scoped` marks the draft that copied none)
   const scoped = !copied.length && isPaymentScoped({ reply, inboundText, scopeTexts });
   if (!copied.length && !scoped) return null;
-  return { customer_id: customerId ?? null, sentences: copied, ...(scoped ? { scoped: true } : {}) };
+  // a copied Zelle sentence is re-rendered at send for the SAME invoice (its live eligibility and the current recipient)
+  const zelle = copied.some((t) => ZELLE_WORD_RE.test(t)) && zelleInvoiceId ? { invoice_id: String(zelleInvoiceId) } : null;
+  return { customer_id: customerId ?? null, sentences: copied, ...(scoped ? { scoped: true } : {}), ...(zelle ? { zelle } : {}) };
 }
 
 module.exports = {
   copiesOffTarget,
+  remainderHasMoney,
+  zelleSentences,
   paymentDayKey,
   isUnmodeledInvoice: unmodeledStatus,
   SECTION_HEADER,
@@ -578,5 +631,5 @@ module.exports = {
   autoSendScopeBlock,
   remainderIsInert,
   // every module regex, for the adversarial-input timing test
-  REGEXES: { TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, ZELLE_METHOD_RE, ZELLE_METHOD_CUE_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
+  REGEXES: { TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
 };

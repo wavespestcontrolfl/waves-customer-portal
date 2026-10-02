@@ -107,10 +107,11 @@ function followupBlock({ decision, outgoingBody }) {
 // fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
 async function amountsBlock({ decision, outgoingBody }) {
   const realAnswers = isRealAnswersDecision(decision);
-  const { outgoingAmountsStale, hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
+  const { outgoingAmountsStale, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
   // Codex round-23 P2: a Zelle OFFER or DENIAL is rechecked for every decision (an edited pre-v12 body too); v12 decisions always
   // run the whole recheck.
-  const zelleClaim = hasAffirmativeZelleMention(outgoingBody) || hasNegativeZelleAvailabilityClaim(outgoingBody);
+  // (any mention of Zelle - the money-sentence contract has no offer / denial grammar)
+  const zelleClaim = /\bzelle\b/i.test(String(outgoingBody || ''));
   if (!realAnswers && !zelleClaim) return null;
   // A staff edit's free-text status is theirs: it neither needs the contract's reads nor can the contract fail it. Zelle and amount rules stay.
   const staffEdited = realAnswers && bodyIsStaffEdited(decision.suggested_message, outgoingBody);
@@ -136,8 +137,8 @@ async function amountsBlock({ decision, outgoingBody }) {
   });
   // the invoice a Zelle offer was checked against: the provider-boundary check inspects its live PaymentIntent (Codex round-50 P1)
   if (!amounts.stale) {
-    decision.zelle_boundary_invoice_id = amounts.zelleInvoiceId || null;
-    decision.zelle_boundary_denial = amounts.zelleDenial || null;
+    // the live Zelle facts the verdict stood on: the provider-boundary check re-reads them (owner ruling 2026-10-01)
+    decision.zelle_boundary = amounts.zelle || null;
   }
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
@@ -292,7 +293,7 @@ function amountsProviderPreSendCheck({ decision, getBody }) {
   if (!billingBoundaryJudged(decision, body)) return undefined;
   return require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({
     customerId: decision.customer_id, fingerprint: decision.billing_fingerprint ?? null,
-    zelleInvoiceId: decision.zelle_boundary_invoice_id ?? null, zelleDenial: decision.zelle_boundary_denial ?? null, getBody,
+    zelle: decision.zelle_boundary ?? null,
   });
 }
 

@@ -19,10 +19,9 @@ jest.mock('../services/sms-followup-sla', () => ({
   ...jest.requireActual('../services/sms-followup-sla'),
   followupPromiseBlockReason: jest.fn(() => null),
 }));
-// hasAffirmativeZelleMention is kept REAL (only outgoingAmountsStale is
-// mocked) so this suite exercises the actual Zelle-offer detection that now
-// gates whether the amounts/Zelle recheck runs at all (independent-review
-// P1, round 6, PR #5331), not a stand-in.
+// The pre-screens (bodyNeedsPaymentRecheck, ...) and liveZelleFacts are kept REAL (only outgoingAmountsStale is mocked) so this suite
+// exercises the actual detection that gates whether the amounts / Zelle recheck runs at all (any Zelle word, a figure, price grammar;
+// independent-review P1, round 6, PR #5331; owner 2026-10-01 ~23:58Z), not a stand-in.
 jest.mock('../services/sms-amount-recheck', () => ({
   ...jest.requireActual('../services/sms-amount-recheck'),
   outgoingAmountsStale: jest.fn(async () => ({ stale: false })),
@@ -162,7 +161,7 @@ test('no snapshot → no availability call; an older-prompt decision skips the r
   expect(outgoingAmountsStale).not.toHaveBeenCalled();
 });
 
-// A Zelle OFFER or DENIAL is rechecked for every decision (an edited pre-v12 body too); a payment-status assertion or a figure
+// ANY mention of Zelle is rechecked for every decision (an edited pre-v12 body too); a payment-status assertion or a figure
 // is rechecked only for a real-answers (v12) decision - an older-prompt decision keeps main's behavior (gate off byte-identical).
 describe('the recheck gate (PR #5331)', () => {
   const v11 = (over = {}) => decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11', ...over });
@@ -705,6 +704,34 @@ describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unch
   });
   test('a Zelle offer on a pre-v12 decision is judged too', () => {
     expect(typeof amountsProviderPreSendCheck({ decision: { ...decision, prompt_version: 'house_voice_v11', billing_fingerprint: 'x' }, getBody: () => 'You can Zelle us at pay@example.com.' })).toBe('function');
+  });
+  // Owner 2026-10-01 ~23:58Z: the live Zelle facts the verdict stood on ride the decision to the boundary, which re-reads them
+  test('the Zelle facts the recheck stood on are recorded on the decision, and re-read at the boundary: unchanged => ok; changed => ZELLE_CHANGED_AT_BOUNDARY', async () => {
+    const recheck = require('../services/sms-amount-recheck');
+    const facts = { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' };
+    const d = { ...decision, suggested_message: 'You can pay invoice WPC-2026-0001 by Zelle to pay@example.com, with your name or the invoice number in the Zelle memo.' };
+    outgoingAmountsStale.mockResolvedValue({ stale: false, zelle: facts });
+    await expect(agentDecisionSendBlockReason({ decision: d, outgoingBody: d.suggested_message })).resolves.toBeNull();
+    expect(d.zelle_boundary).toEqual(facts);
+    // a verdict that stood on no Zelle facts clears it
+    outgoingAmountsStale.mockResolvedValue({ stale: false });
+    await agentDecisionSendBlockReason({ decision: d, outgoingBody: d.suggested_message });
+    expect(d.zelle_boundary).toBeNull();
+    // the boundary check gets { customerId, fingerprint, zelle } and re-reads the SAME invoice
+    const live = jest.spyOn(recheck, 'liveZelleFacts').mockResolvedValue({ ...facts });
+    try {
+      const fp = `fp-1@${require('../utils/datetime-et').etDateString()}`;
+      const check = amountsProviderPreSendCheck({ decision: { ...d, billing_fingerprint: fp, zelle_boundary: facts }, getBody: () => d.suggested_message });
+      const dbi = dbiWith('fp-1');
+      await expect(check({ dbi })).resolves.toEqual({ ok: true });
+      expect(live).toHaveBeenCalledWith({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbi });
+      live.mockResolvedValue({ ...facts, recipient: 'rotated@example.com' });
+      await expect(check({ dbi })).resolves.toMatchObject({ ok: false, code: 'ZELLE_CHANGED_AT_BOUNDARY', retryable: true });
+      // no Zelle facts on the decision: no Zelle read at all
+      live.mockClear();
+      await expect(amountsProviderPreSendCheck({ decision: { ...d, billing_fingerprint: fp }, getBody: () => d.suggested_message })({ dbi })).resolves.toEqual({ ok: true });
+      expect(live).not.toHaveBeenCalled();
+    } finally { live.mockRestore(); }
   });
   test('the Agent Review route takes the fingerprint BEFORE the full recheck and composes the boundary check with the ETA one', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-communications'), 'utf8');

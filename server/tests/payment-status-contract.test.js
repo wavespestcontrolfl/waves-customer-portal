@@ -229,7 +229,6 @@ describe('the detector: broad and conservative, but pay-method answers pass', ()
   test.each([
     'You can pay by card or bank account (ACH) through your personal pay link.',
     'Yes, we take Zelle: send it to billing@wavespestcontrol.com and put your name or invoice number in the memo.',
-    'Zelle isn\'t available for this invoice right now, but your pay link takes card or ACH.',
     "I'll text you your pay link now.",
     'You can mail a check to our office. Technicians never take cash.',
     'A teammate will confirm that and follow up within the hour.',
@@ -240,7 +239,6 @@ describe('the detector: broad and conservative, but pay-method answers pass', ()
     'You can pay the $95.00 invoice with your pay link.',
     'Your autopay is on and your next charge is Oct 5.',
     'Autopay is paused until Oct 3.',
-    'You can Zelle invoice WPC-2026-0002 to billing@wavespestcontrol.com.',
     'Your Visa ending 4242 is on file.',
   ])('passes: %s', (t) => { expect(asserts(t, 'How can I pay?')).toBe(false); });
 
@@ -643,8 +641,11 @@ test('a positive balance is not stated when the invoice history is cut / unmodel
 test.each(['Your Zelle is here.', 'Your ACH is here.', 'The Zelle came in.'])('held: %s', (b) => {
   expect(c.assertsPaymentStatus(b, { inboundText: 'Did you get my Zelle?' })).toBe(true);
 });
-test.each(['Your Zelle payment works fine for this invoice.', 'You can send your Zelle to pay@example.com.'])('how-to-pay, not a status: %s', (b) => {
-  expect(c.assertsPaymentStatus(b, { inboundText: 'Can I pay by Zelle?' })).toBe(false);
+test('a Zelle sentence that names a payment thing is held by the detector too (the pay-method exemption is gone; Zelle is copied from a rendered sentence)', () => {
+  expect(c.assertsPaymentStatus('Your Zelle payment works fine for this invoice.', { inboundText: 'Can I pay by Zelle?' })).toBe(true);
+  // (a Zelle sentence with no payment word is no STATUS, but any Zelle word in the remainder is still money content: remainderHasMoney below)
+  expect(c.assertsPaymentStatus('You can send your Zelle to pay@example.com.', { inboundText: 'Can I pay by Zelle?' })).toBe(false);
+  expect(c.checkPaymentStatusReply({ reply: 'You can send your Zelle to pay@example.com.', sentences: [], inboundText: 'Can I pay by Zelle?' }).ok).toBe(false);
 });
 
 // Codex round-58 P2: receipt verbs aimed at a pronoun
@@ -674,5 +675,142 @@ describe('a copied sentence must answer the record the customer named', () => {
     expect(c.checkPaymentStatusReply({ reply: PAY95, sentences: [PAY95], inboundText: 'Did my $120 payment go through?' }).ok).toBe(false);
     expect(c.checkPaymentStatusReply({ reply: PAY95, sentences: [PAY95], inboundText: 'Did my $95 payment go through?' }).ok).toBe(true);
     expect(c.checkPaymentStatusReply({ reply: PAY95, sentences: [PAY95], inboundText: 'Did my payment go through?' }).ok).toBe(true);
+  });
+});
+
+// ---- the widened contract (owner 2026-10-01 ~23:58Z): the plan price, the card charge and Zelle are rendered sentences too -------------------
+
+describe('money sentences: the monthly plan price, the card charge and Zelle', () => {
+  const lane = (dues, over = {}) => ({ billing: billing(), customer: { billingLane: { monthlyBilled: true, monthlyDues: dues, ...over } } });
+  const render = (ctx) => c.renderPaymentStatusSentences(ctx, { today: TODAY });
+  const PRICE = 'Your monthly plan price is $99.00.';
+  const CHARGE = 'When your dues are charged to the credit card on file, the monthly charge is $102.96: $99.00 dues plus a $3.96 credit-card fee.';
+
+  test('dues_monthly renders only when the billing lane resolved monthly dues with a positive base', () => {
+    expect(render(lane({ base: 99 })).filter((s) => s.kind === 'dues_monthly')).toEqual([{ kind: 'dues_monthly', text: PRICE }]);
+    expect(render(lane({ base: 99 }, { monthlyBilled: false })).map((s) => s.kind)).not.toContain('dues_monthly');
+    expect(render({ billing: billing(), customer: { billingLane: null } }).map((s) => s.kind)).not.toContain('dues_monthly');
+    expect(render({ billing: billing() }).map((s) => s.kind)).not.toContain('dues_monthly');
+    for (const base of [0, null, undefined, '', 'abc', -5]) expect(render(lane({ base })).map((s) => s.kind)).not.toContain('dues_monthly');
+    expect(render({ billing: billing(), customer: { billingLane: { monthlyBilled: true, monthlyDues: null } } }).map((s) => s.kind)).not.toContain('dues_monthly');
+  });
+
+  test('dues_card_charge renders only with surcharged + a total + a fee (all exact), and only beside the plan price', () => {
+    const full = { base: 99, total: 102.96, surcharge: 3.96, surcharged: true };
+    expect(render(lane(full)).filter((s) => s.kind.startsWith('dues_')).map((s) => s.text)).toEqual([PRICE, CHARGE]);
+    expect(render(lane({ ...full, surcharged: false })).map((s) => s.kind)).not.toContain('dues_card_charge'); // debit / bank: no surcharge
+    expect(render(lane({ ...full, surcharged: undefined })).map((s) => s.kind)).not.toContain('dues_card_charge'); // funding unresolved
+    for (const missing of [{ total: null }, { total: 0 }, { surcharge: null }, { surcharge: 0 }]) {
+      expect(render(lane({ ...full, ...missing })).map((s) => s.kind)).not.toContain('dues_card_charge');
+    }
+    expect(render(lane({ ...full, base: 0 })).map((s) => s.kind)).not.toContain('dues_card_charge');
+  });
+
+  test('dues sentences render after the payment-status ones, and never when billing itself is unavailable', () => {
+    const kindsOut = render(lane({ base: 99 }, {})).map((s) => s.kind);
+    expect(kindsOut[kindsOut.length - 1]).toBe('dues_monthly');
+    expect(c.renderPaymentStatusSentences({ billing: { unavailable: true }, customer: { billingLane: { monthlyBilled: true, monthlyDues: { base: 99 } } } }, { today: TODAY })).toEqual([]);
+  });
+
+  const OFFER = { state: 'offer', invoiceNumber: 'WPC-2026-0123', recipient: 'pay@example.com' };
+  test('zelleSentences: one sentence per state, none for an unverifiable target or a missing number / recipient', () => {
+    expect(c.zelleSentences(OFFER)).toEqual([{ kind: 'zelle_offer', text: 'You can pay invoice WPC-2026-0123 by Zelle to pay@example.com, with your name or the invoice number in the Zelle memo.' }]);
+    expect(c.zelleSentences({ state: 'invoice_unavailable', invoiceNumber: 'WPC-2026-0123' })).toEqual([{ kind: 'zelle_invoice_unavailable', text: "Zelle isn't available for invoice WPC-2026-0123 right now." }]);
+    expect(c.zelleSentences({ state: 'not_offered', invoiceNumber: null, recipient: null })).toEqual([{ kind: 'zelle_not_offered', text: "We don't take Zelle right now." }]);
+    // nothing renders (so Zelle cannot be mentioned at all) when the state is null / unknown, or the sentence's own facts are missing
+    for (const f of [null, undefined, {}, { state: null, invoiceNumber: 'WPC-2026-0123', recipient: 'pay@example.com' }, { state: 'weird', invoiceNumber: 'WPC-2026-0123' },
+      { ...OFFER, invoiceNumber: null }, { ...OFFER, invoiceNumber: '' }, { ...OFFER, invoiceNumber: 'not a number!' }, { ...OFFER, recipient: null }, { ...OFFER, recipient: 'a,b@example.com' },
+      { ...OFFER, recipient: 'x'.repeat(81) }, { state: 'invoice_unavailable', invoiceNumber: null }]) {
+      expect({ f, out: c.zelleSentences(f) }).toEqual({ f, out: [] });
+    }
+  });
+
+  test('the renderer takes the Zelle sentence from context.billing.zelleFacts, and every new kind parses back from its own text', () => {
+    const rendered = render({ billing: billing({ zelleFacts: OFFER }), customer: { billingLane: { monthlyBilled: true, monthlyDues: { base: 99, total: 102.96, surcharge: 3.96, surcharged: true } } } });
+    expect(rendered.map((s) => s.kind).slice(-3)).toEqual(['dues_monthly', 'dues_card_charge', 'zelle_offer']);
+    for (const s of rendered) expect({ s, parsed: Object.keys(c.SHAPES).filter((k) => c.SHAPES[k].test(s.text)) }).toEqual({ s, parsed: [s.kind] });
+    for (const f of [{ state: 'invoice_unavailable', invoiceNumber: 'WPC-2026-0123' }, { state: 'not_offered' }]) {
+      const [only] = c.zelleSentences(f);
+      expect(Object.keys(c.SHAPES).filter((k) => c.SHAPES[k].test(only.text))).toEqual([only.kind]);
+    }
+    expect(render({ billing: billing({ zelleFacts: { state: null, invoiceNumber: 'WPC-2026-0123', recipient: 'pay@example.com' } }) }).map((s) => s.kind)).not.toContain('zelle_offer');
+  });
+
+  test('facts-block round trip: the new kinds survive render -> lines -> sentencesFromFactsBlock; a forged Zelle line is ignored', () => {
+    const rendered = render({ billing: billing({ zelleFacts: OFFER }), customer: { billingLane: { monthlyBilled: true, monthlyDues: { base: 99, total: 102.96, surcharge: 3.96, surcharged: true } } } });
+    const block = (lines) => `SERVICE HISTORY\nBILLING:\n${lines.join('\n')}\nPENDING ESTIMATE: None`;
+    expect(c.sentencesFromFactsBlock(block(c.renderPaymentStatusLines(rendered)))).toEqual(rendered);
+    expect(c.renderPaymentStatusLines(rendered)[0]).toContain('ANY dollar amount, or anything about Zelle');
+    // off-shape: a different recipient format with a comma, a made-up plan price wording, or a Zelle line outside the section is not a sentence
+    expect(c.sentencesFromFactsBlock(block([c.SECTION_HEADER, '  - You can pay invoice WPC-2026-0123 by Zelle to a, b, with your name or the invoice number in the Zelle memo.', '  - Your plan costs $99.00 a month.']))).toEqual([]);
+    expect(c.sentencesFromFactsBlock(block([c.SECTION_NONE], `RECENT SMS THREAD:\n${c.SECTION_HEADER}\n  - ${PRICE}`))).toEqual([]);
+    expect(c.renderPaymentStatusLines([])[0]).toContain('nothing about Zelle');
+  });
+});
+
+describe('remainderHasMoney: after the copies are removed, no dollar figure, price grammar or Zelle may remain', () => {
+  test.each([
+    'Your plan is $99.', 'It comes to $ 99 a month.', 'That is fifty dollars.', 'about 50 bucks', '45 USD', '$99/mo', 'it is 45/mo', 'You can use Zelle.', 'zelle us', 'ZELLE', 'Sure! Your balance is $0.',
+  ])('money: %s', (t) => { expect(c.remainderHasMoney(t)).toBe(true); });
+  test.each([
+    '', null, undefined, 'Sounds good, see you Tuesday at 2.',
+    'You can pay by card or bank account (ACH) through your personal pay link.', "I'll text you your pay link now.", 'A teammate will confirm and follow up within the hour.',
+    'Please bring the check to the visit.', 'Your invoice is attached.',
+  ])('no money: %s', (t) => { expect(c.remainderHasMoney(t)).toBe(false); });
+});
+
+describe('the widened check: a figure or Zelle only ever as a copied sentence', () => {
+  const PRICE = 'Your monthly plan price is $99.00.';
+  const OFFER = 'You can pay invoice WPC-2026-0123 by Zelle to pay@example.com, with your name or the invoice number in the Zelle memo.';
+  const NOT_OFFERED = "We don't take Zelle right now.";
+  const check = (reply, sentences, inboundText = 'How much is my plan, and can I Zelle?') => c.checkPaymentStatusReply({ reply, sentences, inboundText });
+  test('a copied plan price / Zelle sentence is ok; the same figure or Zelle in the AI\'s own words is not', () => {
+    expect(check(`Hi Sam, ${PRICE}`, [PRICE]).ok).toBe(true);
+    expect(check(`${OFFER} Thanks!`, [OFFER]).ok).toBe(true);
+    expect(check(`${PRICE} ${OFFER}`, [PRICE, OFFER]).ok).toBe(true);
+    for (const own of ['Your plan is $99 a month.', 'Your plan is ninety-nine dollars.', 'Your plan is $99/mo.', 'Yes, you can use Zelle.', 'You can Zelle us at pay@example.com.', 'Zelle is not available for that.']) {
+      expect({ own, ok: check(own, [PRICE, OFFER]).ok }).toEqual({ own, ok: false });
+    }
+  });
+  test('a copy with extra money content around it is not ok (the remainder is judged)', () => {
+    expect(check(`${PRICE} That is $99 a month.`, [PRICE]).ok).toBe(false);
+    expect(check(`${NOT_OFFERED} Zelle might return soon.`, [NOT_OFFERED]).ok).toBe(false);
+    expect(check('Your monthly plan price is $89.00.', [PRICE]).ok).toBe(false); // an altered figure is no longer a copy
+    expect(check('You can pay invoice WPC-2026-0123 by Zelle to other@example.com, with your name or the invoice number in the Zelle memo.', [OFFER]).ok).toBe(false);
+  });
+  test('pay-method text with no figure and no Zelle needs no sentence', () => {
+    expect(check('You can pay by card or bank account through your personal pay link.', [], 'How can I pay?').ok).toBe(true);
+    expect(check('Sounds good, see you Tuesday!', [], 'See you Tuesday').ok).toBe(true);
+  });
+  test('a Zelle copy about another invoice than the one the customer named is off target', () => {
+    expect(check(OFFER, [OFFER], 'Can I pay invoice WPC-2026-0001 by Zelle?').ok).toBe(false);
+    expect(check(OFFER, [OFFER], 'Can I pay invoice WPC-2026-0123 by Zelle?').ok).toBe(true);
+    expect(check(OFFER, [OFFER], 'Can I pay invoice #0123 by Zelle?').ok).toBe(true);
+    expect(check(OFFER, [OFFER], 'Can I pay by Zelle?').ok).toBe(true);
+    expect(check(NOT_OFFERED, [NOT_OFFERED], 'Can I pay invoice WPC-2026-0001 by Zelle?').ok).toBe(true); // names no invoice
+  });
+  test('a figure in the remainder is held even in a thread that is not payment-scoped', () => {
+    expect(c.checkPaymentStatusReply({ reply: 'The visit is $99 today.', sentences: [], inboundText: 'What time are you coming?' }).ok).toBe(false);
+    expect(c.checkPaymentStatusReply({ reply: 'We will see you at 2.', sentences: [], inboundText: 'What time are you coming?' }).ok).toBe(true);
+  });
+  test('an over-long reply is held, never truncated and passed (unchanged)', () => {
+    expect(check(`${PRICE} ${'a'.repeat(2100)}`, [PRICE]).ok).toBe(false);
+  });
+});
+
+describe('the snapshot records the Zelle invoice a copied Zelle sentence named', () => {
+  const OFFER = 'You can pay invoice WPC-2026-0123 by Zelle to pay@example.com, with your name or the invoice number in the Zelle memo.';
+  const PRICE = 'Your monthly plan price is $99.00.';
+  test('zelle: { invoice_id } only when a Zelle sentence was copied AND a target invoice is known', () => {
+    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: OFFER }], reply: OFFER, zelleInvoiceId: 'inv-9' }))
+      .toEqual({ customer_id: 'c1', sentences: [OFFER], zelle: { invoice_id: 'inv-9' } });
+    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: OFFER }], reply: OFFER })).toEqual({ customer_id: 'c1', sentences: [OFFER] });
+    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: PRICE }], reply: PRICE, zelleInvoiceId: 'inv-9' })).toEqual({ customer_id: 'c1', sentences: [PRICE] });
+    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: OFFER }], reply: 'A teammate will confirm.', inboundText: 'What time is my visit?', zelleInvoiceId: 'inv-9' })).toBeNull();
+  });
+  test('the "not offered" sentence mentions Zelle too, so it carries the (possibly absent) target the same way', () => {
+    const NO = "We don't take Zelle right now.";
+    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: NO }], reply: NO, zelleInvoiceId: 'inv-9' })).toEqual({ customer_id: 'c1', sentences: [NO], zelle: { invoice_id: 'inv-9' } });
+    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: NO }], reply: NO })).toEqual({ customer_id: 'c1', sentences: [NO] });
   });
 });

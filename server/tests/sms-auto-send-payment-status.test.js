@@ -28,7 +28,6 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   AMOUNT_MASK_RE: /\$\s?\d[\d,]*(?:\.\d{1,2})?/g,
   PAYMENT_ACK_RE: /\bpayment\b/i,
   billingAmountCents: jest.fn(() => ({ owed: new Set(), paid: new Set() })),
-  remainderAmountsUngrounded: jest.fn(() => false),
   // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend call - "never claims an ETA" here, so it never
   // reaches the DB/track-transitions leg (see sms-auto-send-open-times.test.js, sms-eta-freshness.test.js).
   findEtaMinutesClaims: jest.fn(() => []),

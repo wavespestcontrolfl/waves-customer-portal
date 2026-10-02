@@ -136,7 +136,7 @@ describe('recheckScheduledSmsAmounts', () => {
     dbReturning({ prompt_version: 'house_voice_v12_real_answers', input_snapshot: null });
     recheck.outgoingAmountsStale.mockResolvedValue({ stale: false });
     for (const body of ["You're paid up!", 'Your balance is $95.', "Your payment isn't showing yet."]) {
-      await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: body }, claimMeta })).resolves.toMatchObject({ stale: false, reason: null, boundary: { customerId: 'c1', zelleInvoiceId: null } });
+      await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: body }, claimMeta })).resolves.toMatchObject({ stale: false, reason: null, boundary: { customerId: 'c1', zelle: null } });
     }
     expect(recheck.outgoingAmountsStale).toHaveBeenCalledTimes(3);
   });
@@ -222,21 +222,22 @@ describe('amountsStaleNote (reviewer-facing)', () => {
 
 // Codex round-50 P1: scheduled replies get the same provider-boundary billing check as the immediate and auto-send paths
 describe('scheduled replies: billing fingerprint before the recheck, checked again at the provider boundary', () => {
-  test('the fingerprint is read BEFORE the recheck and rides back with the Zelle invoice the recheck checked', async () => {
+  test('the fingerprint is read BEFORE the recheck and rides back with the live Zelle facts the recheck stood on', async () => {
     const order = [];
+    const ZELLE_FACTS = { state: 'offer', invoiceId: 'inv-9', invoiceNumber: 'WPC-2026-0009', recipient: 'pay@example.com' };
     const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ prompt_version: 'house_voice_v11', input_snapshot: null, customer_id: 'c1', suggested_message: 'x' })) };
     db.mockReset().mockImplementation(() => q);
     db.raw = jest.fn(async () => { order.push('fingerprint'); return { rows: [{ fingerprint: 'fp-1' }] }; });
-    recheck.outgoingAmountsStale.mockReset().mockImplementation(async () => { order.push('recheck'); return { stale: false, zelleInvoiceId: 'inv-9' }; });
+    recheck.outgoingAmountsStale.mockReset().mockImplementation(async () => { order.push('recheck'); return { stale: false, zelle: ZELLE_FACTS }; });
     const verdict = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'You can Zelle us at pay@example.com.' }, claimMeta });
     expect(order).toEqual(['fingerprint', 'recheck']);
-    expect(verdict).toEqual({ stale: false, reason: null, boundary: { customerId: 'c1', fingerprint: `fp-1@${require('../utils/datetime-et').etDateString()}`, zelleInvoiceId: 'inv-9', zelleDenial: null } });
+    expect(verdict).toEqual({ stale: false, reason: null, boundary: { customerId: 'c1', fingerprint: `fp-1@${require('../utils/datetime-et').etDateString()}`, zelle: ZELLE_FACTS } });
     delete db.raw;
   });
   test('the replay composes the billing boundary check after the ETA one', () => {
     const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
     expect(src).toContain('billingBoundary = amountsVerdict.boundary || null;');
-    expect(src).toContain("require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ ...billingBoundary, getBody: () => replayInput.body })");
+    expect(src).toContain("require('./billing-fingerprint').billingUnchangedProviderPreSendCheck(billingBoundary)");
   });
 });
 

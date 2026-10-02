@@ -1,7 +1,8 @@
 /**
  * sms-amount-recheck - the send-time revalidation shared by the scheduler's fire-time path and the immediate Agent Review send
- * (PR #5119 follow-up #2), plus (PR #5331) the PAYMENT STATUS contract at send time and the Zelle recheck: fresh context,
- * current obligations only, fail closed on any error.
+ * (PR #5119 follow-up #2), plus (PR #5331) the MONEY-SENTENCE contract at send time (owner 2026-10-01 ~23:58Z: an unedited AI body states
+ * a payment status, a dollar figure or anything about Zelle only as a verbatim copy of a rendered sentence, re-rendered from live data),
+ * the live Zelle facts, and the staff-edit Zelle-contact recheck: fresh context, current obligations only, fail closed on any error.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/context-aggregator', () => ({
@@ -18,8 +19,8 @@ const ContextAggregator = require('../services/context-aggregator');
 const { payPageZelleVisibility } = require('../routes/pay-v2');
 const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
 const {
-  outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention, classifyZelleClause, paymentStatusSendBlockReason, bodyNeedsPaymentRecheck,
+  outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible, liveZelleFacts,
+  paymentStatusSendBlockReason, paymentStatusVerdict, bodyNeedsPaymentRecheck, bodyNeedsBillingBoundaryCheck,
 } = require('../services/sms-amount-recheck');
 
 const V12 = 'house_voice_v12_real_answers5_cfl_p';
@@ -89,7 +90,6 @@ describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still 
     const stale = { stale: true, reason: 'zelle_recipient_stale' };
     // the auditor's split (clause 1 is already an offer) and the receipt-then-instruction split
     expect(outgoingZelleStale('Send it via Zelle. Use old-recipient@wavespestcontrol.com for $120.')).toEqual(stale);
-    expect(hasAffirmativeZelleMention('We received your Zelle payment. Use old-recipient@wavespestcontrol.com for the rest.')).toBe(true);
     expect(zelleBodyContacts('We received your Zelle payment. Use old-recipient@wavespestcontrol.com for the rest.')).toHaveLength(1);
     expect(outgoingZelleStale('We received your Zelle payment. Use old-recipient@wavespestcontrol.com for the rest.')).toEqual(stale);
     expect(outgoingZelleStale('We received your Zelle payment. Send the rest to (941) 555-1234.')).toEqual(stale);
@@ -99,23 +99,16 @@ describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still 
     expect(outgoingZelleStale('We received your Zelle payment. Use pay@example.com for the rest.')).toEqual(stale);
   });
 
-  test('no over-trigger: a portal instruction or negated Zelle stay clean', () => {
+  // PR #5331: there is no offer / denial grammar any more - a body is judged by its CONTACTS only (the AI's own Zelle prose is held by the
+  // contract before it gets here; a staff member's contact-free Zelle words are theirs).
+  test('no over-trigger: a body with no Zelle word has no contacts, whatever else it names; a Zelle mention with no contact has nothing to compare', () => {
     process.env.ZELLE_RECIPIENT = 'new-recipient@wavespestcontrol.com';
     for (const body of [
       "We don't take Zelle. Pay online at the portal.",
       'Thanks! Send the rest through the invoice page.',
-    ]) expect({ body, mention: hasAffirmativeZelleMention(body) }).toEqual({ body, mention: false });
-  });
-
-  // PR #5331: a rendered payment-status sentence never names a manual tender, so ANY affirmative Zelle clause is a live
-  // instruction/offer (recipient + invoice rechecked) - there is no separate "Zelle receipt" kind to exempt.
-  test('a Zelle clause is an offer unless negated; a receipt-shaped Zelle clause is NOT exempt (fail closed)', () => {
-    expect(classifyZelleClause('We received your $120 Zelle payment from Sep 12.')).toBe('offer');
-    expect(hasAffirmativeZelleMention('We received your $120 Zelle payment from Sep 12.')).toBe(true);
-    expect(classifyZelleClause("We don't take Zelle anymore")).toBeNull();
-    expect(classifyZelleClause('see you Tuesday')).toBeNull();
-    expect(classifyZelleClause('Zelle works great for that')).toBe('offer');
-    expect(classifyZelleClause('you can Zelle us anytime')).toBe('offer');
+      'Email billing@wavespestcontrol.com with questions.', // a contact, but no Zelle word
+    ]) expect({ body, r: outgoingZelleStale(body) }).toEqual({ body, r: { stale: false } });
+    expect(zelleBodyContacts('Email billing@wavespestcontrol.com with questions.')).toEqual([]);
   });
 
   test('recipient reconfigured since draft ⇒ stale', () => {
@@ -156,21 +149,19 @@ describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still 
     expect(outgoingZelleStale("Sorry, we don't take Zelle anymore.")).toEqual({ stale: false });
   });
 
-  // Independent-review P1 (round 3, PR #5331, finding 1): an AFFIRMATIVE
-  // Zelle offer with NO specific contact ("Yes, you can use Zelle") still
-  // needs the recipient-enabled check — the prior rule treated "no contact"
-  // as safe outright, so this offer still sent after ZELLE_RECIPIENT was
-  // disabled.
-  describe('an AFFIRMATIVE Zelle mention with NO contact still runs the recipient-enabled check', () => {
-    test('Zelle disabled (ZELLE_RECIPIENT unset) ⇒ stale', () => {
-      delete process.env.ZELLE_RECIPIENT;
-      expect(outgoingZelleStale('Yes, you can use Zelle for that.')).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
-    });
+  // (owner 2026-10-01: a contact-free Zelle mention is no instruction to check; the recipient, the invoice and the wording of an AI Zelle
+  // sentence are all pinned by re-rendering it - paymentStatusVerdict below)
+  test('a Zelle mention with NO contact is never stale here, whether Zelle is configured or not', () => {
+    delete process.env.ZELLE_RECIPIENT;
+    expect(outgoingZelleStale('Yes, you can use Zelle for that.')).toEqual({ stale: false });
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    expect(outgoingZelleStale('Yes, you can use Zelle for that.')).toEqual({ stale: false });
+  });
 
-    test('Zelle currently enabled ⇒ not stale (nothing to compare a missing contact against)', () => {
-      process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
-      expect(outgoingZelleStale('Yes, you can use Zelle for that.')).toEqual({ stale: false });
-    });
+  test('a receipt-shaped Zelle clause that names a contact is judged on that contact like any other (fail closed)', () => {
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    expect(outgoingZelleStale('We received your $120 Zelle payment at old@wavespestcontrol.com.')).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+    expect(zelleBodyContacts('We received your $120 Zelle payment from Sep 12.')).toEqual([]);
   });
 
   test('outgoingAmountsStale blocks on a stale Zelle contact even with no dollar amount in the body', async () => {
@@ -255,7 +246,7 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
   });
 
   // Independent-review P1 (round 2, PR #5331): a receipt can commit (and its
-  // credit stay unapplied) between the draft's own fetchZelleEligibility
+  // credit stay unapplied) between the draft's own liveZelleFacts
   // read and this send-time recheck — GET /:token refuses the whole pay
   // page for that case, and this recheck must too, before ever asking
   // pay-v2's own payPageZelleVisibility predicate.
@@ -283,19 +274,19 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
     expect(payPageZelleVisibility).not.toHaveBeenCalled();
   });
 
-  test('outgoingAmountsStale: recipient still matches, but the snapshot carries no invoice id ⇒ blocked', async () => {
+  test('outgoingAmountsStale: recipient still matches, but the decision carries no target invoice id ⇒ blocked (a staff Zelle contact needs a live invoice)', async () => {
     const body = 'You can Zelle to payments@wavespestcontrol.com — just add your name.';
     await expect(outgoingAmountsStale({ customerId: 'c1', body, zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }) }))
-      .resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
+      .resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
 
   test('outgoingAmountsStale: recipient matches AND the invoice is still eligible ⇒ not stale (no dollar amount in the body)', async () => {
     const body = 'You can Zelle to payments@wavespestcontrol.com — just add your name.';
-    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open', invoice_number: 'WPC-2026-0001' };
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(outgoingAmountsStale({
       customerId: 'c1', body, zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }),
-    })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-1' });
+    })).resolves.toEqual({ stale: false, zelle: { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'payments@wavespestcontrol.com' } });
     // the amount branch is never reached — the Zelle body carries no dollar
     // figure — so the customers/billing lookup never runs.
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
@@ -310,25 +301,14 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
     })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
 
-  // Independent-review P1 (round 3, PR #5331, finding 1): an affirmative
-  // offer with NO contact ("Yes, you can use Zelle") must ALSO run the
-  // invoice-eligibility recheck — the prior gate ran only when the body
-  // named a specific contact.
-  test('outgoingAmountsStale: an affirmative Zelle mention with NO contact still runs the invoice-eligibility recheck', async () => {
+  test('outgoingAmountsStale: a staff Zelle mention with NO contact is the staff member\'s own wording - passes with no invoice check', async () => {
     await expect(outgoingAmountsStale({
       customerId: 'c1', body: 'Yes, you can use Zelle for that.', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }),
-    })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
-
-    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
-    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    })).resolves.toEqual({ stale: false });
     await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'Yes, you can use Zelle for that.', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }),
-    })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-1' });
-
-    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-    await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'Yes, you can use Zelle for that.', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: { ...invoiceRow, status: 'paid' } }),
-    })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
+      customerId: 'c1', body: 'Yes, you can use Zelle for that.', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: { id: 'inv-1', customer_id: 'c1', status: 'paid' } }),
+    })).resolves.toEqual({ stale: false });
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
   });
 });
 
@@ -359,10 +339,10 @@ test('fails closed: no customer id, a missing customer row, or a lookup error', 
 });
 
 
-test('gate ON: price grammar with no numeric amount ("fifty dollars", "45/mo") is unverifiable → stale, billing never read', async () => {
+test('gate ON: price grammar with no numeric amount ("fifty dollars", "45/mo") is money content outside a copied sentence → unauthorized, billing never read', async () => {
   realAnswersGateOn.mockReturnValue(true);
-  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'The monthly fee is fifty dollars.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
-  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your plan is 45/mo.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'The monthly fee is fifty dollars.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your plan is 45/mo.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
   expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
 });
 
@@ -377,7 +357,7 @@ test('a settled DECIMAL payment that cleared the balance still backs its acknowl
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Thank you for your payment of $95.50.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: false });
 });
 
-describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\'s CURRENT open invoice when no drafted snapshot names one', () => {
+describe('staff-edited / pre-v12 bodies: the Zelle recheck is about the invoice the body names, else the decision\'s target, else the resolved one', () => {
   let priorZelle;
   beforeEach(() => {
     priorZelle = process.env.ZELLE_RECIPIENT;
@@ -388,27 +368,24 @@ describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\
     else process.env.ZELLE_RECIPIENT = priorZelle;
   });
 
-  test('no zelleInvoiceId passed: resolves the customer\'s open invoice via the context aggregator and checks IT', async () => {
+  test('no target invoice on the decision: the customer\'s one open invoice is resolved (same resolver as the draft) and checked', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-current' } } });
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'You can Zelle it to payments@wavespestcontrol.com.', zelleInvoiceId: null, dbh: dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-current', customer_id: 'c1' } }),
-    })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-current' });
-    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalled();
-  });
-
-  test('no zelleInvoiceId AND no current open invoice at all: fails closed', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null } });
+      customerId: 'c1', body: 'You can Zelle it to payments@wavespestcontrol.com.', zelleInvoiceId: null, dbh: dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-current', customer_id: 'c1', invoice_number: 'WPC-2026-0009' } }), trustOwedAmounts: true,
+    })).resolves.toMatchObject({ stale: false, zelle: { invoiceId: 'inv-current' } });
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
     await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'You can Zelle it to payments@wavespestcontrol.com.', zelleInvoiceId: null, dbh: dbWithTables({ customers: { id: 'c1' } }),
-    })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
+      customerId: 'c1', body: 'You can Zelle it to payments@wavespestcontrol.com.', zelleInvoiceId: null, dbh: dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-current', customer_id: 'c1' } }), trustOwedAmounts: true,
+    })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
 
-  test('a snapshot-provided zelleInvoiceId is used as-is — no fallback lookup', async () => {
+  test('a decision-provided zelleInvoiceId is used as-is — no fallback lookup — and the live facts ride back', async () => {
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(outgoingAmountsStale({
-      customerId: 'c1', body: 'You can Zelle it to payments@wavespestcontrol.com.', zelleInvoiceId: 'inv-drafted', dbh: dbWithTables({ invoices: { id: 'inv-drafted', customer_id: 'c1' } }),
-    })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-drafted' });
+      customerId: 'c1', body: 'You can Zelle it to payments@wavespestcontrol.com.', zelleInvoiceId: 'inv-drafted',
+      dbh: dbWithTables({ invoices: { id: 'inv-drafted', customer_id: 'c1', invoice_number: 'WPC-2026-0007' } }),
+    })).resolves.toEqual({ stale: false, zelle: { state: 'offer', invoiceId: 'inv-drafted', invoiceNumber: 'WPC-2026-0007', recipient: 'payments@wavespestcontrol.com' } });
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
 
@@ -440,284 +417,6 @@ describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\
     })).resolves.toEqual({ stale: false });
   });
 });
-
-describe('Codex round-6 pre-push audit P1: negation is scoped to the Zelle offer itself', () => {
-  const saved = process.env.ZELLE_RECIPIENT;
-  afterEach(() => { if (saved === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = saved; });
-
-  test('"You don\'t need a card to use Zelle to old@example.com." is still an offer and is stale when Zelle is disabled', () => {
-    delete process.env.ZELLE_RECIPIENT;
-    const body = "You don't need a card to use Zelle to old@example.com.";
-    expect(classifyZelleClause(body)).toBe('offer');
-    expect(hasAffirmativeZelleMention(body)).toBe(true);
-    expect(outgoingZelleStale(body)).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
-  });
-
-  test('...and stale when the contact is not the CURRENT recipient; fine when it is', () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    expect(outgoingZelleStale("You don't need a card to use Zelle to old@example.com.")).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
-    expect(outgoingZelleStale("You don't need a card to use Zelle to pay@example.com.")).toEqual({ stale: false });
-  });
-
-  test('a contact makes even a negator-bearing clause an offer ("we don\'t take Zelle at old@example.com")', () => {
-    expect(classifyZelleClause("Sorry, we don't take Zelle at old@example.com")).toBe('offer');
-  });
-
-  test('a contact-free affirmative clause with an unrelated negator is still an offer', () => {
-    expect(classifyZelleClause("You don't need a card to use Zelle.")).toBe('offer');
-    expect(classifyZelleClause("Don't worry, you can use Zelle.")).toBe('offer');
-  });
-
-  test('genuinely negated Zelle offers are NOT offers', () => {
-    for (const c of [
-      "We don't accept Zelle.", "Sorry, we don't take Zelle anymore.", "Zelle isn't available right now.",
-      "We can't use Zelle at the moment.", 'We no longer accept payments by Zelle.', "We've stopped taking Zelle.",
-      'Zelle is not currently supported.', "we don't accept payments via Zelle",
-    ]) {
-      expect(classifyZelleClause(c)).toBeNull();
-      expect(hasAffirmativeZelleMention(c)).toBe(false);
-    }
-  });
-});
-
-describe('negative Zelle availability claims are revalidated before sending', () => {
-  const { hasNegativeZelleAvailabilityClaim, zelleDenialStale, bodyNeedsPaymentRecheck } = require('../services/sms-amount-recheck');
-  let priorZelle;
-  beforeEach(() => { priorZelle = process.env.ZELLE_RECIPIENT; });
-  afterEach(() => { if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = priorZelle; });
-  const dbh = dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-1', customer_id: 'c1', status: 'open' } });
-  const DENIALS = ["Zelle isn't available right now.", "We don't take Zelle.", 'Zelle is not available for this account right now, so use your pay link.'];
-
-  // Codex round-45 P2: ordinary off-state wording is a denial too, not an affirmative offer
-  test.each([
-    'Zelle is disabled for your account.', 'Zelle is currently turned off.', "Zelle isn't set up for this account.", 'Zelle is not set up right now.',
-    'Zelle has been deactivated.', "Zelle's unavailable for your account.", 'Zelle payments are paused.', 'Zelle is currently unavailable for invoice WPC-2026-0002.',
-    'Zelle is switched off for now.', 'Zelle is no longer an option.',
-  ])('off-state wording is a DENIAL, never an offer: %s', (d) => {
-    const { zelleClauseTexts, classifyZelleClause: classify } = require('../services/sms-amount-recheck');
-    expect({ d, offer: classify(d), neg: hasNegativeZelleAvailabilityClaim(d), aff: hasAffirmativeZelleMention(d) }).toEqual({ d, offer: null, neg: true, aff: false });
-    expect(zelleClauseTexts(d).offerText).toBe('');
-  });
-  // Codex round-46 P1: the instruction / invoice reference in a clause that never says Zelle still belongs to the offer
-  test.each([
-    'We take Zelle. Send it to pay@example.com for invoice WPC-2026-0002.',
-    'You can use Zelle. Invoice WPC-2026-0002 is the one to pay.',
-  ])('a cross-clause Zelle offer keeps the invoice its instruction names: %s', (b) => {
-    const { zelleClauseTexts } = require('../services/sms-amount-recheck');
-    expect(zelleClauseTexts(b).offerText).toContain('WPC-2026-0002');
-  });
-  test('a denial clause never lends its invoice to the offer', () => {
-    const { zelleClauseTexts } = require('../services/sms-amount-recheck');
-    const t = zelleClauseTexts("Zelle isn't available for invoice WPC-2026-0001. You can Zelle invoice WPC-2026-0002.");
-    expect(t.offerText).not.toContain('0001');
-    expect(t.denialText).toContain('0001');
-  });
-  // Codex round-51 P2: a reference-only clause belongs to the NEAREST Zelle clause - a denial keeps its own target too
-  test('a reference-only clause after a denial scopes the DENIAL; after an offer, the offer', () => {
-    const { zelleClauseTexts } = require('../services/sms-amount-recheck');
-    const d = zelleClauseTexts("Zelle isn't available for your invoice. Regarding invoice #0002.");
-    expect(d.denialText).toContain('#0002');
-    expect(d.offerText).toBe('');
-    const o = zelleClauseTexts('You can use Zelle. Invoice WPC-2026-0002 is the one to pay.');
-    expect(o.offerText).toContain('WPC-2026-0002');
-    expect(o.denialText).toBe('');
-    const both = zelleClauseTexts("Zelle isn't available for invoice WPC-2026-0001. You can Zelle invoice WPC-2026-0002.");
-    expect(both.denialText).not.toContain('0002');
-    expect(both.offerText).not.toContain('0001');
-  });
-  test.each(['You can use Zelle.', 'Zelle is available for your account.', 'Yes, Zelle is on for this invoice.', 'Zelle is accepted here: pay@example.com'])('and affirmative wording stays an offer: %s', (d) => {
-    expect(hasAffirmativeZelleMention(d)).toBe(true);
-  });
-  test('a disabled-Zelle denial is stale when Zelle is in fact available now, and stands when it is not', async () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
-    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
-    const body = 'Zelle is disabled for this account right now.';
-    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_p', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
-    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_p', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', recipientConfigured: true } });
-  });
-
-  test('detected as denials (not offers); the scheduler prescreen sends them to the recheck', () => {
-    for (const d of DENIALS) {
-      expect({ d, neg: hasNegativeZelleAvailabilityClaim(d), aff: hasAffirmativeZelleMention(d), screen: bodyNeedsPaymentRecheck(d) }).toEqual({ d, neg: true, aff: false, screen: true });
-    }
-    expect(hasNegativeZelleAvailabilityClaim('You can Zelle us at pay@example.com')).toBe(false);
-    expect(hasNegativeZelleAvailabilityClaim('Thanks, see you Tuesday!')).toBe(false);
-  });
-
-  test('Zelle now visible for the open invoice => the denial is STALE (zelle_now_available)', async () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
-    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
-    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
-    for (const d of DENIALS) {
-      await expect(outgoingAmountsStale({ customerId: 'c1', body: d, promptVersion: 'house_voice_v12_real_answers_cf_p', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
-    }
-  });
-
-  test('still unavailable => the denial stands: no recipient configured, no open invoice, or the invoice is ineligible', async () => {
-    delete process.env.ZELLE_RECIPIENT;
-    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: null, recipientConfigured: false } });
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null } });
-    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: null, recipientConfigured: true } });
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
-    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', recipientConfigured: true } });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for this account right now.", promptVersion: 'house_voice_v12_real_answers_cf_p', dbh })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', recipientConfigured: true } });
-  });
-
-  // Codex round-44 (older thread, judged on 9f0f509): an unreadable billing leaves the open-invoice list EMPTY, which must not read as a
-  // genuine `no_open_invoice` that lets an account-scoped denial stand.
-  test('billing UNAVAILABLE (invoice / ownership read failed) => an account-scoped denial is blocked, never confirmed', async () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { unavailable: true, openInvoice: null, openInvoices: [] } });
-    const body = "Zelle isn't available for this account right now.";
-    await expect(zelleDenialStale({ customerId: 'c1', dbh, body })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_p', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null } }); // ...and a READABLE empty list still stands
-    await expect(zelleDenialStale({ customerId: 'c1', dbh, body })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: null, recipientConfigured: true } });
-  });
-  // Codex round-44 P2 (context-aggregator.js:1192): an own partially_paid invoice is not in the open list but is collectible on the pay page.
-  // Its amount due is not knowable (paid portions live in payments), so it is never a target AND "no open invoice" cannot be concluded.
-  test('a partially paid invoice (amount due unknowable) => the denial is blocked as an ambiguous target, not confirmed by an empty list', async () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null, openInvoices: [], hasUncountedPartialDue: true } });
-    const body = "Zelle isn't available for this account right now.";
-    await expect(zelleDenialStale({ customerId: 'c1', dbh, body })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
-  });
-
-  // Codex round-38 P2 class: a denial is only true when EXPLICITLY scoped to this account / invoice; a general or business-wide
-  // denial is false while a recipient is configured, whatever the invoice state.
-  test('a business-wide / unscoped denial is stale while a recipient is configured, even with no open invoice or an ineligible one', async () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    for (const ctx of [{ openInvoice: null }, { openInvoice: { id: 'inv-1' } }]) {
-      ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: ctx });
-      payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
-      for (const body of ["We don't accept Zelle.", "We don't take Zelle for payments.", "Zelle isn't available right now.", 'We no longer offer Zelle.']) {
-        await expect({ body, r: await zelleDenialStale({ customerId: 'c1', dbh, body }) }).toEqual({ body, r: { stale: true, reason: 'zelle_now_available' } });
-        await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_p', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
-      }
-    }
-  });
-  test('an explicitly account- or invoice-scoped denial still stands when no invoice is open / the invoice is ineligible', async () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null } });
-    for (const body of ["Zelle isn't available for this account right now.", "We can't take Zelle for your invoice.", "Zelle isn't available for invoice WPC-2026-0002."]) {
-      await expect({ body, r: await zelleDenialStale({ customerId: 'c1', dbh, body }) }).toEqual({ body, r: { stale: false, zelleDenial: { invoiceId: null, recipientConfigured: true } } });
-    }
-  });
-  test('with no recipient configured an unscoped denial is true (nothing to accept)', async () => {
-    delete process.env.ZELLE_RECIPIENT;
-    await expect(zelleDenialStale({ customerId: 'c1', dbh, body: "We don't accept Zelle." })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: null, recipientConfigured: false } });
-  });
-
-  // Codex round-21 P2: an UNVERIFIABLE Zelle state is not a confirmed "ineligible" — the denial can't be confirmed.
-  test.each([['payer_unverifiable', true], ['credit_unverifiable', true], ['eligibility_unverifiable', true], ['payer_owned', false], ['not_eligible', false], ['credit_pending', false]])(
-    'visibility reason %s: denial stale=%s', async (reason, stale) => {
-      process.env.ZELLE_RECIPIENT = 'pay@example.com';
-      ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
-      payPageZelleVisibility.mockResolvedValue({ visible: false, reason });
-      const out = await zelleDenialStale({ customerId: 'c1', dbh });
-      if (stale) {
-        expect(out.stale).toBe(true);
-        expect(out.reason).toMatch(/^(?:payer_unverifiable|credit_unverifiable|zelle_recheck_failed)$/);
-      } else {
-        expect(out).toEqual({ stale: false, zelleDenial: { invoiceId: 'inv-1', recipientConfigured: true } });
-      }
-    },
-  );
-
-  test('an unverifiable check fails CLOSED (blocks the send)', async () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('db down'));
-    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
-    await expect(zelleDenialStale({ customerId: null, dbh })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
-  });
-});
-
-// Codex round-19 P1: the send-time recheck validates the invoice the customer NAMED when several are open.
-describe('several open invoices: the send-time Zelle recheck resolves the same invoice as the draft', () => {
-  const { zelleDenialStale } = require('../services/sms-amount-recheck');
-  let priorZelle;
-  beforeEach(() => { priorZelle = process.env.ZELLE_RECIPIENT; process.env.ZELLE_RECIPIENT = 'pay@example.com'; });
-  afterEach(() => { if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = priorZelle; });
-  const open = [
-    { id: 'inv-3', invoiceNumber: 'WPC-2026-0303', status: 'sent', amountDue: 95 },
-    { id: 'inv-1', invoiceNumber: 'WPC-2026-0101', status: 'overdue', amountDue: 210 },
-  ];
-  const dbh = dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'x', customer_id: 'c1', status: 'open' } });
-  const ctxWith = (list) => ({ billing: { openInvoice: list[0], openInvoices: list } });
-  const BODY = 'You can Zelle to pay@example.com.';
-
-  test('a human-typed Zelle offer (no persisted id): the invoice the inbound names is rechecked, not the newest', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
-    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?' })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-1' });
-    expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: expect.objectContaining({ id: 'x' }), dbh: expect.any(Function), readOnly: true });
-  });
-  test('several open and no reference: the offer cannot be tied to one invoice => blocked (unresolved)', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
-    expect(payPageZelleVisibility).not.toHaveBeenCalled();
-  });
-  test('a persisted invoice id (from the decision) is used as-is', async () => {
-    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, zelleInvoiceId: 'inv-1', inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: false, zelleInvoiceId: 'inv-1' });
-    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
-  });
-  test('a Zelle DENIAL: unresolvable with several open => UNVERIFIABLE, blocked (the draft asks which invoice); named invoice now eligible => stale', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
-    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
-    await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
-    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for your invoice.", dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
-    // an ambiguous reference (two invoices share the amount) is unverifiable too; a named invoice that is not open too
-    await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I Zelle invoice WPC-2026-0999?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
-    // nothing open at all: there is nothing to pay by Zelle, the denial stands
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith([]));
-    await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: false, zelleDenial: { invoiceId: null, recipientConfigured: true } });
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
-    await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I Zelle invoice WPC-2026-0101?' })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
-  });
-});
-
-// Codex round-30 P2: subject-first MODAL denials are negative availability claims, not offers.
-describe('subject-first modal Zelle denials (round 30)', () => {
-  const { hasNegativeZelleAvailabilityClaim, bodyNeedsPaymentRecheck } = require('../services/sms-amount-recheck');
-  const DENIALS = [
-    'Zelle cannot be used for this.', "Zelle can't be used right now.", "Zelle won't be available this week.", 'Zelle could not be offered.', 'Zelle will not be accepted.',
-    "Zelle wouldn't be an option.", 'Zelle payments cannot be taken.', 'Zelle may not be available.', "Zelle couldn't be processed.",
-  ];
-  test.each(DENIALS)('%s => negative availability claim, not an offer, sent to the recheck', (body) => {
-    expect({ body, neg: hasNegativeZelleAvailabilityClaim(body), aff: hasAffirmativeZelleMention(body), screen: bodyNeedsPaymentRecheck(body) }).toEqual({ body, neg: true, aff: false, screen: true });
-  });
-  test('genuine offers are unchanged', () => {
-    for (const body of ['You can use Zelle.', 'Zelle can be used for this.', 'Zelle works great for that.', 'We take Zelle.']) {
-      expect({ body, neg: hasNegativeZelleAvailabilityClaim(body) }).toEqual({ body, neg: false });
-    }
-  });
-});
-
-// Codex round-33 P2: plain copular denials are denials (checked before the offer rule), never offers.
-describe('copular Zelle denials classify as denials, not offers', () => {
-  const { hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, classifyZelleClause } = require('../services/sms-amount-recheck');
-  test.each([
-    'We are not accepting Zelle.', "We aren't taking Zelle.", "We're not accepting Zelle right now.", 'Zelle is not an option.', "Zelle isn't an option.",
-    "We're not set up for Zelle.", 'We take card, not Zelle.', 'We are not currently taking Zelle payments.',
-  ])('%s', (t) => {
-    expect(hasNegativeZelleAvailabilityClaim(t)).toBe(true);
-    expect(hasAffirmativeZelleMention(t)).toBe(false);
-    expect(classifyZelleClause(t)).toBeNull();
-  });
-  test.each([
-    'You can use Zelle.', 'We accept Zelle.', 'Do not hesitate to Zelle us.', 'Not only can you use Zelle, you can also pay by card.',
-    "We aren't accepting Zelle at pay@example.com.", // a transfer contact is always a live instruction
-  ])('an offer stays an offer: %s', (t) => {
-    expect(hasAffirmativeZelleMention(t)).toBe(true);
-  });
-});
-
 
 // ---------------------------------------------------------------------------------------------------------------------
 // PAYMENT STATUS at send time (PR #5331, owner ruling 2026-10-01). The decision's payment_status_snapshot names the sentences
@@ -794,11 +493,12 @@ describe('outgoingAmountsStale - real-answers (strict) decisions run the status 
   const ctxWith = (over = {}) => ({ billing: { outstandingBalance: 95, openInvoice: { amountDue: 95 }, hasProcessingPayment: false, recentPayments: [{ id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }], ...over } });
   const args = (body, over = {}) => ({ customerId: 'c1', body, promptVersion: V12, paymentStatusSnapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }), ...over });
 
-  test('a copied sentence\'s own figure is not judged against the owed figures (it was just re-rendered); a stray paid figure is', async () => {
+  test('a copied sentence\'s own figure is not judged against the owed figures (it was just re-rendered); any figure outside a copy is held', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith());
     await expect(outgoingAmountsStale(args(`${RECEIVED} Your balance is $95.00.`))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' }); // "balance" is a status word: copy the sentence or hand off
-    await expect(outgoingAmountsStale(args(`${RECEIVED} You can pay the $95.00 invoice with your pay link.`))).resolves.toEqual({ stale: false }); // an OWED figure in an owed clause
-    await expect(outgoingAmountsStale(args(`${RECEIVED} You can pay the $120.00 invoice with your pay link.`))).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    // PR #5331 (widened): an owed figure typed in the AI's own words is money content too - only a RENDERED sentence may state one
+    await expect(outgoingAmountsStale(args(`${RECEIVED} You can pay the $95.00 invoice with your pay link.`))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+    await expect(outgoingAmountsStale(args(`${RECEIVED} You can pay the $120.00 invoice with your pay link.`))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
   });
 
   test('stale sentence => the status reason comes back before any amount rule', async () => {
@@ -823,14 +523,16 @@ describe('outgoingAmountsStale - real-answers (strict) decisions run the status 
     await expect(outgoingAmountsStale(args('Your balance is $9,999.00.', { promptVersion: 'house_voice_v11', paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   });
 
-  test('trustOwedAmounts (a reviewed edit) skips the owed-figure rule but never the status contract or the Zelle recheck', async () => {
+  test('trustOwedAmounts (a reviewed edit) skips the owed-figure rule of the staff / pre-v12 path - never the contract on an UNEDITED real-answers body', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith());
-    await expect(outgoingAmountsStale(args('You can pay the $9,999.00 invoice with your pay link.', { trustOwedAmounts: true }))).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale(args('You can pay the $9,999.00 invoice with your pay link.', { trustOwedAmounts: true, humanEditedBody: true }))).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale(args('You can pay the $9,999.00 invoice with your pay link.', { trustOwedAmounts: true }))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
     await expect(outgoingAmountsStale(args("You're paid up!", { trustOwedAmounts: true, paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
   });
 
-  test('price grammar the extractor cannot verify stays unverifiable on a strict decision', async () => {
-    await expect(outgoingAmountsStale(args('The fee is fifty dollars.', { paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
+  test('price grammar the extractor cannot verify is money content outside a copy on a strict decision: unauthorized', async () => {
+    await expect(outgoingAmountsStale(args('The fee is fifty dollars.', { paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+    await expect(outgoingAmountsStale(args('Your plan is 45/mo.', { paymentStatusSnapshot: null }))).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
   });
 });
 
@@ -868,20 +570,28 @@ describe('bodyNeedsPaymentRecheck - the read-free pre-screen', () => {
 });
 
 
-// Codex round-45 P1: send time uses the same plan-aware owed figures as the draft.
-describe('send-time: an active payment plan does not authorize the invoice total', () => {
-  const { outgoingAmountsStale: stale } = require('../services/sms-amount-recheck');
+// Codex round-45 P1 (PR #5331, widened): on an ACTIVE PAYMENT PLAN no invoice total is stated by a rendered sentence (the renderer
+// withholds it), so an unedited real-answers body can never carry one; the pooled (staff / pre-v12) owed rule is main's, unchanged.
+describe('send-time: an active payment plan states no invoice total', () => {
   const dbh = dbWithTables({ customers: { id: 'c1' } });
   const planBilling = (over = {}) => ({ outstandingBalance: 300, openInvoice: { id: 'i1', amountDue: 300 }, hasActivePaymentPlan: true, ...over });
-  test('v12: "The total is $300.00." is stale on a plan and authorized off one', async () => {
+  test('v12: "The total is $300.00." is held as unauthorized (on a plan or off one - only a rendered sentence may state a figure)', async () => {
+    for (const hasActivePaymentPlan of [true, false]) {
+      ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: planBilling({ hasActivePaymentPlan }) });
+      await expect(outgoingAmountsStale({ customerId: 'c1', body: 'The total is $300.00.', promptVersion: V12, dbh, inboundMessage: 'How much?' })).resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+    }
+  });
+  test('a copied balance sentence is stale once a plan starts (the renderer withholds every balance / due figure on a plan)', async () => {
+    const BAL = 'Your account balance is $300.00.';
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 300, hasProcessingPayment: false, recentPayments: [] } });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: BAL, promptVersion: V12, dbh, paymentStatusSnapshot: { customer_id: 'c1', sentences: [BAL] }, inboundMessage: 'How much?' })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 300, hasProcessingPayment: false, recentPayments: [], hasActivePaymentPlan: true } });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: BAL, promptVersion: V12, dbh, paymentStatusSnapshot: { customer_id: 'c1', sentences: [BAL] }, inboundMessage: 'How much?' })).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
+  });
+  test('the pooled rule (staff-edited / pre-v12) is main\'s: the invoice total is an owed figure whether or not a plan is active', async () => {
     const drafter = require('../services/sms-shadow-drafter');
-    const spy = jest.spyOn(drafter, 'remainderAmountsUngrounded');
-    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: planBilling() });
-    // the real drafter is mocked away in this file only for the owed rule: use its billingAmountCents seam directly
-    expect(drafter.billingAmountCents({ billing: planBilling() }, { planAware: true }).owed.has(30000)).toBe(false);
-    expect(drafter.billingAmountCents({ billing: planBilling({ hasActivePaymentPlan: false }) }, { planAware: true }).owed.has(30000)).toBe(true);
-    spy.mockRestore();
-    await expect(stale({ customerId: 'c1', body: 'The total is $300.00.', promptVersion: V12, dbh, inboundMessage: 'How much?' })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    expect(drafter.billingAmountCents({ billing: planBilling() }).owed.has(30000)).toBe(true);
+    expect(drafter.billingAmountCents({ billing: planBilling({ hasActivePaymentPlan: false }) }).owed.has(30000)).toBe(true);
   });
 });
 
@@ -925,60 +635,235 @@ describe('outgoingAmountsStale humanEditedBody (staff edits)', () => {
   });
 });
 
-// Codex round-53 P2: a negator over a payment-method list carries to Zelle at its end
-describe('negation across a payment-method list', () => {
-  const { hasNegativeZelleAvailabilityClaim: neg, hasAffirmativeZelleMention: aff, zelleClauseTexts } = require('../services/sms-amount-recheck');
-  test.each(["We don't take cards and Zelle.", "We don't accept checks, cards, or Zelle.", "We do not currently accept cash or Zelle."])('a denial, never an offer: %s', (b) => {
-    expect({ neg: neg(b), aff: aff(b), offer: zelleClauseTexts(b).offerText }).toEqual({ neg: true, aff: false, offer: '' });
+// ---------------------------------------------------------------------------------------------------------------------
+// LIVE ZELLE FACTS (owner 2026-10-01 ~23:58Z): the ONE function that decides which Zelle sentence (if any) exists for a target invoice - the
+// drafter builds the draft's facts from it and the send path re-renders from it.
+// ---------------------------------------------------------------------------------------------------------------------
+describe('liveZelleFacts', () => {
+  let priorZelle;
+  beforeEach(() => { priorZelle = process.env.ZELLE_RECIPIENT; process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com'; });
+  afterEach(() => { if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = priorZelle; });
+  const INV = { id: 'inv-1', customer_id: 'c1', status: 'sent', invoice_number: 'WPC-2026-0001' };
+  const dbh = dbWithTables({ invoices: INV });
+  const RECIPIENT = 'payments@wavespestcontrol.com';
+
+  test('no recipient configured => not_offered, with no invoice read at all (nothing to take Zelle at)', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    const dbSpy = jest.fn(dbh);
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbSpy })).resolves.toEqual({ state: 'not_offered', invoiceId: 'inv-1', invoiceNumber: null, recipient: null });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: null, dbh: dbSpy })).resolves.toEqual({ state: 'not_offered', invoiceId: null, invoiceNumber: null, recipient: null });
+    expect(dbSpy).not.toHaveBeenCalled();
   });
-  test.each(["We don't take cards but Zelle works fine.", 'You can use Zelle, card, or ACH.', 'We take card and Zelle.'])('still an offer: %s', (b) => {
-    expect(aff(b)).toBe(true);
-    expect(neg(b)).toBe(false);
+
+  test('no target invoice (or no customer) => null: Zelle can be neither offered nor denied', async () => {
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: null, dbh })).resolves.toEqual({ state: null, invoiceId: null, invoiceNumber: null, recipient: RECIPIENT });
+    await expect(liveZelleFacts({ customerId: null, invoiceId: 'inv-1', dbh })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: null, recipient: RECIPIENT });
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
+  });
+
+  test('the invoice still takes Zelle => offer, carrying its number and the live recipient (read-only visibility check)', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toEqual({ state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: RECIPIENT });
+    expect(payPageZelleVisibility).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true }));
+  });
+
+  test.each(['not_eligible', 'credit_pending', 'payer_owned', 'invoice_not_found', 'not_configured', undefined])(
+    'CONFIRMED not eligible (%s) => invoice_unavailable', async (reason) => {
+      payPageZelleVisibility.mockResolvedValue({ visible: false, reason });
+      await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toEqual({ state: 'invoice_unavailable', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: RECIPIENT });
+    },
+  );
+
+  test('a pending estimate-deposit receipt (DEPOSIT_RECONCILIATION_REQUIRED) is a confirmed ineligibility too', async () => {
+    assertInvoiceDepositSettlementReady.mockRejectedValueOnce(Object.assign(new Error('awaiting reconciliation'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' }));
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: 'invoice_unavailable' });
+  });
+
+  test.each(['payer_unverifiable', 'credit_unverifiable', 'eligibility_unverifiable'])('an UNVERIFIABLE state (%s) => null: never an offer and never a denial', async (reason) => {
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: RECIPIENT });
+  });
+
+  test('a lookup that throws, an unexpected deposit read error, or an invoice that no longer resolves for this customer => null', async () => {
+    payPageZelleVisibility.mockRejectedValue(new Error('stripe down'));
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: null });
+    payPageZelleVisibility.mockReset();
+    assertInvoiceDepositSettlementReady.mockRejectedValueOnce(new Error('db down'));
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: null });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbWithTables({ invoices: undefined }) })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: null, recipient: RECIPIENT });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbWithTables({ invoices: new Error('db down') }) })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: null, recipient: RECIPIENT });
   });
 });
 
-// Codex round-55 P2: an elliptical negated clause inherits the Zelle subject and is a denial
-describe('elliptical Zelle denials', () => {
-  const { hasNegativeZelleAvailabilityClaim: neg, zelleClauseTexts } = require('../services/sms-amount-recheck');
-  test.each(['We accept Zelle, but not for invoice #0002.', 'You can use Zelle, except for invoice WPC-2026-0002.', 'We take Zelle. Not for this invoice though.'])('a denial is checked: %s', (b) => {
-    const t = zelleClauseTexts(b);
-    expect(neg(b)).toBe(true);
-    expect(t.denialText).not.toBe('');
-    expect(t.offerText).not.toMatch(/\bnot\b|except/i);
+// ---------------------------------------------------------------------------------------------------------------------
+// THE CONTRACT AT SEND TIME for money content: a copied Zelle / plan-price sentence is re-rendered from live data; anything money-shaped
+// the draft did not copy is held.
+// ---------------------------------------------------------------------------------------------------------------------
+describe('paymentStatusVerdict - Zelle and plan-price sentences are re-rendered at send time', () => {
+  let priorZelle;
+  const RECIPIENT = 'payments@wavespestcontrol.com';
+  beforeEach(() => { priorZelle = process.env.ZELLE_RECIPIENT; process.env.ZELLE_RECIPIENT = RECIPIENT; });
+  afterEach(() => { if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = priorZelle; });
+  const OFFER = `You can pay invoice WPC-2026-0001 by Zelle to ${RECIPIENT}, with your name or the invoice number in the Zelle memo.`;
+  const UNAVAILABLE = "Zelle isn't available for invoice WPC-2026-0001 right now.";
+  const NOT_OFFERED = "We don't take Zelle right now.";
+  const PRICE = 'Your monthly plan price is $99.00.';
+  const CHARGE = 'When your dues are charged to the credit card on file, the monthly charge is $102.96: $99.00 dues plus a $3.96 credit-card fee.';
+  const snap = (sentences, zelle = { invoice_id: 'inv-1' }) => ({ customer_id: 'c1', sentences, ...(zelle ? { zelle } : {}) });
+  const dbh = dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-1', customer_id: 'c1', status: 'sent', invoice_number: 'WPC-2026-0001' } });
+  const baseCtx = (over = {}) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], ...over }, customer: { id: 'c1' } });
+  beforeEach(() => { ContextAggregator.getContextForCustomer.mockResolvedValue(baseCtx()); });
+  const run = (body, snapshot, extra = {}) => paymentStatusVerdict({ customerId: 'c1', body, snapshot, dbh, inboundMessage: 'Can I pay by Zelle?', ...extra });
+  const LIVE_OFFER = { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: RECIPIENT };
+
+  test('a copied Zelle offer whose recipient AND invoice are still live goes out; the verdict carries the live Zelle facts', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(run(`Hi Sam! ${OFFER}`, snap([OFFER]))).resolves.toEqual({ reason: null, zelle: LIVE_OFFER });
+    // the reason-only wrapper is the same decision
+    await expect(paymentStatusSendBlockReason({ customerId: 'c1', body: OFFER, snapshot: snap([OFFER]), dbh })).resolves.toBeNull();
   });
-  test.each(['We accept Zelle for invoice #0002.', 'Thanks, not a problem at all.'])('no denial: %s', (b) => {
-    expect(neg(b)).toBe(false);
-    expect(zelleClauseTexts(b).denialText).toBe('');
+
+  test('the Zelle recipient was rotated or removed since the draft => payment_status_changed (the offer re-renders differently / not at all)', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    process.env.ZELLE_RECIPIENT = 'new@wavespestcontrol.com';
+    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    delete process.env.ZELLE_RECIPIENT;
+    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+  });
+
+  test('the invoice stopped taking Zelle since the draft (eligibility flipped) => payment_status_changed', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
+    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+  });
+
+  test.each(['payer_unverifiable', 'credit_unverifiable', 'eligibility_unverifiable'])('eligibility is UNVERIFIABLE now (%s) => payment_status_changed (a Zelle sentence is never rendered on a guess)', async (reason) => {
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason });
+    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    payPageZelleVisibility.mockRejectedValue(new Error('stripe down'));
+    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+  });
+
+  test('the target invoice is gone / renumbered, or the snapshot names no Zelle invoice => payment_status_changed', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(run(OFFER, snap([OFFER]), { dbh: dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-1', customer_id: 'c1', invoice_number: 'WPC-2026-0099' } }) })).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    await expect(run(OFFER, snap([OFFER]), { dbh: dbWithTables({ customers: { id: 'c1' }, invoices: undefined }) })).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    await expect(run(OFFER, snap([OFFER], null))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+  });
+
+  test('a copied "Zelle isn\'t available for invoice N" stands only while that invoice is still CONFIRMED ineligible', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
+    await expect(run(UNAVAILABLE, snap([UNAVAILABLE]))).resolves.toEqual({ reason: null, zelle: { ...LIVE_OFFER, state: 'invoice_unavailable' } });
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null }); // Zelle became available
+    await expect(run(UNAVAILABLE, snap([UNAVAILABLE]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'credit_unverifiable' }); // can no longer be confirmed
+    await expect(run(UNAVAILABLE, snap([UNAVAILABLE]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+  });
+
+  test('a copied "We don\'t take Zelle right now." stands only while no recipient is configured', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    await expect(run(NOT_OFFERED, snap([NOT_OFFERED], null))).resolves.toEqual({ reason: null, zelle: { state: 'not_offered', invoiceId: null, invoiceNumber: null, recipient: null } });
+    process.env.ZELLE_RECIPIENT = RECIPIENT; // Zelle was set up since the draft
+    await expect(run(NOT_OFFERED, snap([NOT_OFFERED], null))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+  });
+
+  test('Zelle prose the draft did not copy - an offer, a denial, a contact, any mention - is unauthorized with no reads at all', async () => {
+    for (const body of ['Yes, you can use Zelle.', `You can Zelle us at ${RECIPIENT}.`, "Sorry, we don't take Zelle.", "Zelle isn't available for that invoice.",
+      `${OFFER} Zelle is the fastest way.`, `You can pay invoice WPC-2026-0001 by Zelle to other@example.com, with your name or the invoice number in the Zelle memo.`]) {
+      expect({ body, r: await run(body, snap([OFFER])) }).toEqual({ body, r: { reason: 'payment_status_unauthorized', zelle: null } });
+    }
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
+  });
+
+  test('a Zelle copy about another invoice than the one the customer named is unauthorized (off target)', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(run(OFFER, snap([OFFER]), { inboundMessage: 'Can I pay invoice WPC-2026-0002 by Zelle?' })).resolves.toEqual({ reason: 'payment_status_unauthorized', zelle: null });
+    await expect(run(OFFER, snap([OFFER]), { inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?' })).resolves.toMatchObject({ reason: null });
+  });
+
+  test('an autonomous reply must be copies + inert text: a Zelle copy alone passes the scope block, extra prose does not', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(run(OFFER, snap([OFFER]), { autoSend: true })).resolves.toEqual({ reason: null, zelle: LIVE_OFFER });
+    await expect(run(`${OFFER} Anything else, just ask.`, snap([OFFER]), { autoSend: true })).resolves.toMatchObject({ reason: expect.any(String) });
+  });
+
+  test('a copied plan price / card charge is re-rendered from the lane: stale once the price changed or the lane is no longer monthly', async () => {
+    const lane = (dues, over = {}) => ({ ...baseCtx(), customer: { id: 'c1', billingLane: { monthlyBilled: true, monthlyDues: dues, ...over } } });
+    const dues = { base: 99, total: 102.96, surcharge: 3.96, surcharged: true };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(lane(dues));
+    await expect(run(`${PRICE} ${CHARGE}`, snap([PRICE, CHARGE], null))).resolves.toEqual({ reason: null, zelle: null });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(lane({ ...dues, base: 109 }));
+    await expect(run(PRICE, snap([PRICE], null))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(lane(dues, { monthlyBilled: false }));
+    await expect(run(PRICE, snap([PRICE], null))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(lane({ ...dues, surcharged: false })); // card funding no longer resolves to a surcharge
+    await expect(run(CHARGE, snap([CHARGE], null))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+  });
+
+  test('a plan price or figure the draft did not copy is unauthorized, however plainly it matches the account', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ ...baseCtx(), customer: { id: 'c1', billingLane: { monthlyBilled: true, monthlyDues: { base: 99 } } } });
+    for (const body of ['Your plan is $99 a month.', 'Your plan is fifty dollars.', 'It is $99/mo.']) {
+      expect({ body, r: (await run(body, snap([PRICE], null))).reason }).toEqual({ body, r: 'payment_status_unauthorized' });
+    }
   });
 });
 
-// Codex round-56 P2: an inline "except" / "excluding" starts a denial clause
-test.each(['We accept Zelle except for invoice #0002.', 'We accept Zelle excluding invoice WPC-2026-0002.'])('inline exception is a denial: %s', (b) => {
-  const { hasNegativeZelleAvailabilityClaim: neg, zelleClauseTexts } = require('../services/sms-amount-recheck');
-  expect(neg(b)).toBe(true);
-  expect(zelleClauseTexts(b)).toEqual({ offerText: 'We accept Zelle', denialText: expect.stringMatching(/^(?:except|excluding)/) });
+describe('outgoingAmountsStale carries the live Zelle facts (the provider boundary re-reads them)', () => {
+  let priorZelle;
+  beforeEach(() => { priorZelle = process.env.ZELLE_RECIPIENT; process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com'; });
+  afterEach(() => { if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = priorZelle; });
+  const OFFER = 'You can pay invoice WPC-2026-0001 by Zelle to payments@wavespestcontrol.com, with your name or the invoice number in the Zelle memo.';
+  const dbh = dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-1', customer_id: 'c1', status: 'sent', invoice_number: 'WPC-2026-0001' } });
+  const SNAP = { customer_id: 'c1', sentences: [OFFER], zelle: { invoice_id: 'inv-1' } };
+  const FACTS = { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'payments@wavespestcontrol.com' };
+  beforeEach(() => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [] } });
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+  });
+
+  test('unedited v12: ONLY the contract judges it (no owed-figure rule, no staff-contact path) and the verdict returns { stale: false, zelle }', async () => {
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: OFFER, promptVersion: V12, paymentStatusSnapshot: SNAP, inboundMessage: 'Can I pay by Zelle?', zelleInvoiceId: 'inv-OTHER', dbh }))
+      .resolves.toEqual({ stale: false, zelle: FACTS });
+    // (the snapshot's own Zelle invoice decides - zelleInvoiceId is the staff path's argument)
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: OFFER, promptVersion: V12, paymentStatusSnapshot: SNAP, dbh })).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
+  });
+
+  test('unedited v12 with Zelle prose it did not copy: payment_status_unauthorized (a Zelle contact in it never reaches the staff path)', async () => {
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'You can Zelle us at payments@wavespestcontrol.com.', promptVersion: V12, paymentStatusSnapshot: null, zelleInvoiceId: 'inv-1', dbh }))
+      .resolves.toEqual({ stale: true, reason: 'payment_status_unauthorized' });
+  });
+
+  test('STAFF-EDITED v12 (humanEditedBody): a Zelle contact must be the current recipient AND the target invoice must still take Zelle; contact-free Zelle words pass', async () => {
+    const edit = (body, over = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, paymentStatusSnapshot: SNAP, humanEditedBody: true, zelleInvoiceId: 'inv-1', trustOwedAmounts: true, dbh, ...over });
+    await expect(edit('Sure - Zelle to payments@wavespestcontrol.com works.')).resolves.toEqual({ stale: false, zelle: FACTS });
+    await expect(edit('Sure - Zelle to old@wavespestcontrol.com works.')).resolves.toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
+    await expect(edit('Sure - Zelle to payments@wavespestcontrol.com works.')).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
+    await expect(edit('Sure - we take Zelle, just put your name in the memo.')).resolves.toEqual({ stale: false });
+  });
+
+  test('pre-v12 body with a Zelle contact: the same staff-contact path, then main\'s owed-amount rule unless the caller trusts the figures', async () => {
+    const pre = (body, over = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v11', zelleInvoiceId: 'inv-1', dbh, ...over });
+    await expect(pre('You can Zelle payments@wavespestcontrol.com.')).resolves.toEqual({ stale: false, zelle: FACTS });
+    await expect(pre('You can Zelle payments@wavespestcontrol.com for the $9,999.00 balance.')).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    await expect(pre('You can Zelle payments@wavespestcontrol.com for the $9,999.00 balance.', { trustOwedAmounts: true })).resolves.toEqual({ stale: false, zelle: FACTS });
+  });
 });
 
-// Codex round-57 P2: a negated clause that also carries the recipient is rechecked as BOTH an offer and a denial
-test('a contact-bearing denial is a denial too (and its instruction still an offer)', () => {
-  const r = require('../services/sms-amount-recheck');
-  const b = "Zelle isn't available for your invoice at pay@example.com";
-  expect(r.hasNegativeZelleAvailabilityClaim(b)).toBe(true);
-  expect(r.hasAffirmativeZelleMention(b)).toBe(true);
-  expect(r.zelleClauseTexts(b).denialText).toBe(b);
-  expect(r.hasNegativeZelleAvailabilityClaim('You can Zelle us at pay@example.com.')).toBe(false);
-});
-
-// Codex round-58 P2: typographic apostrophes classify like ASCII ones
-test.each(['Zelle isn\u2019t available for your invoice', 'We don\u2019t take cards and Zelle.'])('a denial with a curly apostrophe: %s', (b) => {
-  const r = require('../services/sms-amount-recheck');
-  expect(r.hasNegativeZelleAvailabilityClaim(b)).toBe(true);
-  expect(r.hasAffirmativeZelleMention(b)).toBe(false);
-});
-
-// Codex round-59 P2: an exception aimed at Zelle denies it
-test.each(['We accept cards except Zelle.', 'We take anything other than Zelle.'])('an exception-led Zelle clause is a denial: %s', (b) => {
-  const r = require('../services/sms-amount-recheck');
-  expect(r.hasNegativeZelleAvailabilityClaim(b)).toBe(true);
-  expect(r.hasAffirmativeZelleMention(b)).toBe(false);
+describe('the read-free pre-screens select any Zelle word and price grammar (and are one definition)', () => {
+  beforeEach(() => { realAnswersGateOn.mockReturnValue(false); });
+  test.each(['You can Zelle us.', "We don't take Zelle.", 'zelle', 'Your plan is fifty dollars.', 'It is 45/mo.', 'You owe $5.'])('selects even with the gate off: %s', (body) => {
+    expect(bodyNeedsPaymentRecheck(body)).toBe(true);
+    expect(bodyNeedsBillingBoundaryCheck(body)).toBe(true);
+  });
+  test.each(['Sounds good, see you Tuesday!', 'You can pay by card or bank account through your pay link.', ''])('leaves alone: %s', (body) => {
+    expect(bodyNeedsPaymentRecheck(body)).toBe(false);
+    expect(bodyNeedsBillingBoundaryCheck(body)).toBe(false);
+  });
+  test('the boundary pre-screen is the recheck pre-screen, status vocabulary included', () => {
+    expect(bodyNeedsBillingBoundaryCheck).toBe(bodyNeedsPaymentRecheck);
+    expect(bodyNeedsBillingBoundaryCheck("You're paid up.", { promptVersion: V12 })).toBe(true);
+  });
 });

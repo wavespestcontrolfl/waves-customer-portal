@@ -242,15 +242,72 @@ describe('an active payment plan withholds every invoice total from the prompt a
     const { drafter } = load([COPY]);
     expect(drafter.buildFactsBlock(planContext())).toContain('- Balance: $300.00 outstanding');
   });
-  test('"The total is $300.00" is authorized without a plan and UNGROUNDED on one (draft time)', () => {
+  test('draft time: a figure is authorized only as its rendered sentence - the balance sentence off a plan, and NOTHING on a plan; "The total is $300.00." is held either way', () => {
     const { drafter } = load([COPY]);
-    const reply = 'The total is $300.00.';
-    expect(drafter.replyQuotesUngroundedAmount(reply, planContext({ hasActivePaymentPlan: false }), { inboundMessage: 'How much do I owe?' })).toBe(false);
-    expect(drafter.replyQuotesUngroundedAmount(reply, planContext(), { inboundMessage: 'How much do I owe?' })).toBe(true);
+    const ask = (reply, ctx) => drafter.replyQuotesUngroundedAmount(reply, ctx, { inboundMessage: 'How much do I owe?' });
+    const BAL = 'Your account balance is $300.00.';
+    expect(ask(BAL, planContext({ hasActivePaymentPlan: false }))).toBe(false);
+    expect(ask(BAL, planContext())).toBe(true); // the renderer withholds the balance on a plan: no such sentence exists
+    expect(ask('The total is $300.00.', planContext({ hasActivePaymentPlan: false }))).toBe(true);
+    expect(ask('The total is $300.00.', planContext())).toBe(true);
   });
-  test('the pooled gate-off rule still authorizes the figure (billingAmountCents without planAware is main\'s)', () => {
+  test('the pooled gate-off rule still authorizes the figure (billingAmountCents is main\'s: no plan-aware variant any more)', () => {
     const { drafter } = load([COPY]);
     expect(drafter.billingAmountCents(planContext()).owed.has(30000)).toBe(true);
-    expect(drafter.billingAmountCents(planContext(), { planAware: true }).owed.has(30000)).toBe(false);
+    expect(drafter.billingAmountCents(planContext({ hasActivePaymentPlan: false })).owed.has(30000)).toBe(true);
+  });
+});
+
+// Owner 2026-10-01 ~23:58Z: Zelle and the plan price reach a customer only as rendered sentences, through the same verify / revise loop.
+describe('Zelle and the plan price through the drafter loop', () => {
+  const NOT_OFFERED = "We don't take Zelle right now.";
+  const ZELLE_INBOUND = 'Can I pay by Zelle?';
+  let priorRecipient;
+  beforeEach(() => { priorRecipient = process.env.ZELLE_RECIPIENT; });
+  afterEach(() => { if (priorRecipient === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = priorRecipient; });
+  const ask = (drafter, context = contextWith(), inboundMessage = ZELLE_INBOUND) => drafter.generateGroundedDraft({
+    client: {}, context, inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false, voiceProfile: null,
+  });
+
+  test('no recipient configured: the facts carry "We don\'t take Zelle right now."; copying it converges and is recorded; Zelle in the model\'s own words is fed back', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    const copy = load([NOT_OFFERED]);
+    const ok = await ask(copy.drafter);
+    expect(ok.factsBlock).toContain(`\n  - ${NOT_OFFERED}\n`);
+    expect(ok.converged).toBe(true);
+    expect(ok.paymentStatusSnapshot).toEqual({ customer_id: 'cust-1', sentences: [NOT_OFFERED] }); // (no target invoice, so no zelle field)
+    const own = load(["Sorry, we don't accept Zelle, but your pay link takes card.", NOT_OFFERED]);
+    const fixed = await ask(own.drafter);
+    expect(own.dispatched).toHaveLength(2);
+    expect(own.dispatched[1]).toContain('something about Zelle that is not a word-for-word copy');
+    expect(fixed.parsed.reply).toBe(NOT_OFFERED);
+    expect(fixed.converged).toBe(true);
+  });
+
+  test('a recipient is configured but no target invoice resolves (no open invoice): NO Zelle sentence exists, so any Zelle wording never converges', async () => {
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    const { drafter, dispatched } = load(['Yes, you can use Zelle to payments@wavespestcontrol.com.']);
+    const result = await ask(drafter);
+    expect(result.factsBlock).not.toContain('by Zelle to');
+    expect(result.factsBlock).not.toContain("We don't take Zelle");
+    expect(result.factsBlock).not.toContain('payments@wavespestcontrol.com');
+    expect(result.converged).toBe(false);
+    expect(dispatched.length).toBe(drafter.MAX_REVISIONS + 1);
+    expect(result.zelleInvoiceId).toBeNull();
+  });
+
+  test('the plan price: the facts carry the rendered sentence; copying it converges, the same figure in the model\'s own words is a violation', async () => {
+    const PRICE = 'Your monthly plan price is $99.00.';
+    const ctx = () => ({ ...contextWith(), customer: { id: 'cust-1', billingLane: { monthlyBilled: true, monthlyDues: { base: 99 } } } });
+    const copy = load([PRICE]);
+    const ok = await ask(copy.drafter, ctx(), 'How much is my plan?');
+    expect(ok.factsBlock).toContain(`\n  - ${PRICE}\n`);
+    expect(ok.converged).toBe(true);
+    expect(ok.paymentStatusSnapshot.sentences).toEqual([PRICE]);
+    const own = load(['Your plan is $99 a month.', PRICE]);
+    const fixed = await ask(own.drafter, ctx(), 'How much is my plan?');
+    expect(own.dispatched).toHaveLength(2);
+    expect(fixed.parsed.reply).toBe(PRICE);
+    expect(fixed.converged).toBe(true);
   });
 });

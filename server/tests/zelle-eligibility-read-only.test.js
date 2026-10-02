@@ -79,13 +79,21 @@ describe('isZelleTransferEligible / payPageZelleVisibility readOnly plumbing', (
 });
 
 describe('SMS callers pass readOnly (the two entry points)', () => {
-  test('zelleInvoiceStillEligible (send-time / denial rechecks) => payPageZelleVisibility({ readOnly: true })', () => {
+  test('zelleInvoiceStillEligible (the one eligibility read: send-time rechecks) => payPageZelleVisibility({ readOnly: true })', () => {
     const src = require('fs').readFileSync(require.resolve('../services/sms-amount-recheck'), 'utf8');
     expect(src).toMatch(/payPageZelleVisibility\(\{ invoice: invoiceRow, dbh, readOnly: true \}\)/);
   });
-  test('fetchZelleEligibility (draft time) => payPageZelleVisibility({ readOnly: true })', () => {
+  test('liveZelleFacts (draft time AND send time) reads eligibility only through zelleInvoiceStillEligible, so it is read-only too', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/sms-amount-recheck'), 'utf8');
+    const live = src.slice(src.indexOf('async function liveZelleFacts'), src.indexOf('// Cheap, read-free pre-screen'));
+    expect(live).toMatch(/await zelleInvoiceStillEligible\(\{ customerId, zelleInvoiceId: invoiceId, dbh \}\)/);
+    expect(live).not.toMatch(/payPageZelleVisibility/);
+  });
+  test('the drafter asks liveZelleFacts (no eligibility lookup of its own, no direct pay-page call)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/sms-shadow-drafter'), 'utf8');
-    expect(src).toMatch(/payPageZelleVisibility\(\{ invoice: row, readOnly: true \}\)/);
+    expect(src).toMatch(/require\('\.\/sms-amount-recheck'\)\.liveZelleFacts\(/);
+    expect(src).not.toMatch(/payPageZelleVisibility/);
+    expect(src).not.toMatch(/fetchZelleEligibility/);
   });
   test('the public GET route does not opt in (main\'s behavior)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/pay-v2'), 'utf8');

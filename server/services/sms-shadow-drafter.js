@@ -38,7 +38,6 @@ const { etParts } = require('../utils/datetime-et');
 // the public /pay page's off-Stripe options block uses (Codex/owner: never a
 // hardcoded Zelle contact). ZELLE_RECIPIENT unset ⇒ null, and the PAYMENT
 // OPTIONS fact below states card/ACH only.
-const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
 // The payment-status contract: the only way an AI draft may state a payment / invoice / refund / balance status is by copying a
 // sentence this module renders from the customer's records (owner ruling 2026-10-01).
 const paymentStatus = require('./payment-status-contract');
@@ -770,72 +769,6 @@ function reserviceLanesBlockedReason(lanes, state, anyOf = false) {
   return blocked.every((lane) => state.eligible.includes(lane))
     ? `a free${names} re-service is already booked (an open re-service visit exists) — the link would land on the already-booked page`
     : `no longer eligible for a free${names} re-service`;
-}
-
-// Independent-review P1 (PR #5331): the PAYMENT OPTIONS fact must not offer
-// Zelle for a customer whose open invoice the public pay page would itself
-// withhold it for — a saved-method-required invoice (per_application,
-// annual_prepay, a recurring signup's first invoice; owner ruling
-// 2026-09-28: new customers pay at visit, card on file only), a credit that
-// will fully cover it, a combined previous balance, a pending saved-card
-// reconciliation, an already succeeded/processing PaymentIntent, or a
-// committed estimate-deposit receipt whose credit isn't posted yet (round 2:
-// GET /:token itself refuses the whole page for that case via
-// withInvoiceDepositSettlement — a check pay-v2.js's own payPageZelleVisibility
-// predicate does NOT run, since every one of ITS callers besides this one
-// already sits inside that same fence; run explicitly here since this path
-// does not), or a partial account credit still pending application (round 5,
-// finding 4). Reuses pay-v2.js's OWN predicate (payPageZelleVisibility) —
-// never a re-derived copy — so this fact and the pay page can never
-// disagree. Resolved upstream of buildFactsBlock (which stays SYNC on
-// purpose — see its own comment) exactly like OPEN TIMES / re-service
-// lanes. Fails CLOSED: no open invoice, a DB error, or a timeout all
-// resolve to "not eligible" — under-offering Zelle is the safe direction,
-// never over-offering it past what the pay page would actually show.
-// Independent-review P2 (round 4, PR #5331, finding 5): every DB/Stripe read
-// this does (the invoice row, the deposit-settlement check, the Zelle
-// eligibility predicate) is dead work whenever real answers is off or no
-// Zelle recipient is configured — the PAYMENT OPTIONS fact's Zelle branch
-// can never render either way (see buildFactsBlock below). Short-circuited
-// on the SAME two live reads the fact itself gates on, before any lookup.
-function fetchZelleEligibility({ customerId, openInvoiceId } = {}) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !manualPayOptionsFromEnv()?.zelle?.recipient) {
-    return Promise.resolve(false);
-  }
-  return fetchZelleEligibilityLookup({ customerId, openInvoiceId });
-}
-async function fetchZelleEligibilityLookup({ customerId, openInvoiceId } = {}) {
-  if (!customerId || !openInvoiceId) return false;
-  let timer = null;
-  try {
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Zelle eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
-    });
-    const work = (async () => {
-      const row = await db('invoices').where({ id: openInvoiceId, customer_id: customerId }).first();
-      if (!row) return false;
-      try {
-        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, row, { lock: false });
-      } catch (err) {
-        if (err.code !== 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
-        return false;
-      }
-      // Independent-review P1 (round 5, findings 3 & 4): payPageZelleVisibility
-      // is now the ONE shared decision (pay-v2.js) — folds in the live-payer
-      // and credit-pending fixes so this draft-time fact can never offer
-      // Zelle in a case the pay page itself would withhold it.
-      const { payPageZelleVisibility } = require('../routes/pay-v2');
-      // READ-ONLY (Codex round-26 P1): this runs while DRAFTING an SMS — an inbound question must never release or
-      // promote a saved-card charge claim whose worker may still commit.
-      return Boolean((await payPageZelleVisibility({ invoice: row, readOnly: true })).visible);
-    })();
-    return await Promise.race([work, timeout]);
-  } catch (err) {
-    logger.warn(`[sms-shadow] Zelle eligibility check failed (${err.message}); treating as not eligible`);
-    return false;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 // LABEL FACTS (owner ruling 2026-09-30): rainfast/re-entry times from the
@@ -4045,22 +3978,6 @@ function offerSpanInText(text, day, window) {
 // the estimate-review lane reused only hasPriceQuote and threw away every
 // grounded v12 answer). true when the reply carries an amount the facts
 // block did not authorize, or price grammar the extractor cannot verify.
-// Language that states what is OWED or charged on an ongoing basis.
-const OWED_DUES_RE = /\b(?:dues|membership|plan|monthly|per month|a month|each month)\b|\/\s?mo(?:nth)?\b/i;
-const OWED_INVOICE_RE = /\b(?:invoice[sd]?|bill)\b/i;
-const OWED_BALANCE_RE = /\b(?:balance|total|owe[sd]?|outstanding|amount due)\b/i;
-// The owed figures by SOURCE (the real-answers remainder guard binds each to its wording); same plan / cut-history rules as the pool.
-function owedAmountSources(context) {
-  const billing = context?.billing || {};
-  const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
-  const finiteSet = (list) => new Set(list.filter((v) => Number.isFinite(v)));
-  const onPlan = billing.hasActivePaymentPlan === true;
-  const balance = finiteSet([billing.outstandingBalance > 0 && !onPlan && billing.hasUnmodeledInvoice !== true ? centsOf(billing.outstandingBalance) : NaN]);
-  // every listed open invoice's amount due; with no invoice amount known at all, the balance stands in (one-invoice accounts)
-  const invoice = finiteSet(onPlan ? [] : [billing.openInvoice?.amountDue, ...(billing.openInvoices || []).map((inv) => inv?.amountDue)].map(centsOf));
-  return { balance, invoice: invoice.size ? invoice : balance, dues: finiteSet(require('./context-aggregator').authorizedDuesCents(context)) };
-}
-const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
 // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
 // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
 // unit-less numerals stay out of the deterministic guard (dates, house
@@ -4074,20 +3991,14 @@ const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpay
 // The billing figures a reply may quote, in cents — one definition for this
 // draft-time guard and the send-time recheck (sms-amount-recheck): what is
 // OWED (balance, open invoice, published monthly dues) and what was PAID.
-// `planAware` (the real-answers rules only): on an ACTIVE PAYMENT PLAN the invoice balance / amount due is not what is due now
-// (installments are not reflected in it), so those figures are NOT owed figures a reply may quote - the payment-status renderer
-// withholds them for the same reason. Dues stay.
-function billingAmountCents(context, { planAware = false } = {}) {
+function billingAmountCents(context) {
   const billing = context?.billing || {};
-  const onPlan = planAware && billing.hasActivePaymentPlan === true;
-  // a cut / unmodeled invoice history makes the AGGREGATE balance a partial sum (Codex round-58 P2): not an owed figure to quote
-  const balanceCut = planAware && billing.hasUnmodeledInvoice === true;
   const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
   const finiteSet = (list) => new Set(list.filter((v) => Number.isFinite(v)));
   return {
     owed: finiteSet([
-      billing.outstandingBalance > 0 && !onPlan && !balanceCut ? centsOf(billing.outstandingBalance) : NaN,
-      onPlan ? NaN : centsOf(billing.openInvoice?.amountDue),
+      billing.outstandingBalance > 0 ? centsOf(billing.outstandingBalance) : NaN,
+      centsOf(billing.openInvoice?.amountDue),
       ...require('./context-aggregator').authorizedDuesCents(context),
     ]),
     paid: finiteSet((billing.recentPayments || []).map((p) => centsOf(p?.amount))),
@@ -4095,29 +4006,6 @@ function billingAmountCents(context, { planAware = false } = {}) {
 }
 const amountCentsIn = (t) => (String(t || '').match(AMOUNT_MASK_RE) || []).map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
 
-// Gate on: what is left of a reply once its copied payment-status sentences are removed may still quote a dollar figure, but only
-// an OWED one (balance, open invoice, published dues) in a clause that talks about what is owed. A paid figure outside a copied
-// sentence is never authorized; neither is price grammar the extractor cannot verify (Codex #5194 r4/r8).
-function remainderAmountsUngrounded(remainder, context) {
-  const suggestMode = require('./sms-suggest-mode');
-  const text = String(remainder || '');
-  const amounts = amountCentsIn(text);
-  if (suggestMode.hasPriceQuote(text) && amounts.length === 0) return true;
-  const { owed } = billingAmountCents(context, { planAware: true });
-  const sources = owedAmountSources(context);
-  for (const clause of text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/)) {
-    const masked = String(clause || '').replace(AMOUNT_MASK_RE, ' AMT ');
-    if (suggestMode.hasPriceQuote(masked)) return true;
-    const found = amountCentsIn(clause);
-    if (!found.length) continue;
-    if (!AMOUNT_OWED_RE.test(masked)) return true;
-    // Codex round-59 P2: a figure must come from the source its wording names - dues / monthly wording => the dues figures, invoice
-    // wording => the open invoice, balance / total / owed wording => the account balance; only wording that names none uses the pool
-    const allowed = OWED_DUES_RE.test(masked) ? sources.dues : OWED_INVOICE_RE.test(masked) ? sources.invoice : OWED_BALANCE_RE.test(masked) ? sources.balance : owed;
-    if (found.some((a) => !allowed.has(a))) return true;
-  }
-  return false;
-}
 
 // `opts.byMeaning` pins the strict (real-answers) rule regardless of the live gate (Codex #5194 r2 P1): a v12 review card that
 // outlives a gate rollback is still a v12 draft and is rechecked as one. Gate off: main's pooled allowlist, unchanged.
@@ -4141,7 +4029,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     inboundText: opts.inboundMessage == null ? null : String(opts.inboundMessage),
     scopeTexts: paymentThreadTexts(context),
   });
-  return !verdict.ok || remainderAmountsUngrounded(verdict.remainder, context);
+  return !verdict.ok;
 }
 
 // The reply guard inside the verify/revise loop: the facts block the model saw is the only source of copyable sentences (a frozen
@@ -4154,7 +4042,7 @@ function validatePaymentStatus({ reply, factsBlock, inboundMessage, context = nu
   });
   return verdict.ok ? { ok: true, violations: [] } : { ok: false, violations: [PAYMENT_STATUS_VIOLATION] };
 }
-const PAYMENT_STATUS_VIOLATION = 'the reply states a payment, invoice, refund or balance status that is not a word-for-word copy of one "Payment status sentences" line in BILLING - copy the single sentence that answers the question exactly (the whole sentence, unchanged), or state no status at all and say a teammate will confirm and follow up';
+const PAYMENT_STATUS_VIOLATION = 'the reply states a payment, invoice, refund or balance status, a dollar amount, or something about Zelle that is not a word-for-word copy of one "Payment status sentences" line in BILLING - copy the single sentence that answers the question exactly (the whole sentence, unchanged), or state none of it and say a teammate will confirm and follow up';
 
 // The sentences the final reply copied, persisted next to open_times_snapshot so every send path can re-render them from live
 // data (sms-amount-recheck.paymentStatusSendBlockReason). null when the reply copies none.
@@ -4165,6 +4053,7 @@ function computePaymentStatusSnapshot({ customerId, reply, factsBlock, inboundMe
   return paymentStatus.paymentStatusSnapshotFor({
     customerId, sentences: paymentStatus.sentencesFromFactsBlock(factsBlock), reply,
     inboundText: inboundMessage == null ? null : String(inboundMessage), scopeTexts: paymentThreadTexts(context),
+    zelleInvoiceId: context?.billing?.zelleFacts?.invoiceId || null,
   });
 }
 // The recent thread messages the draft was written from (the newest few of the facts window, either direction): a reply to a thread
@@ -4456,8 +4345,8 @@ LABEL FACTS (product timing from the label):
   // as '' off the gate rather than always.
   const paymentMoneyExtra = realAnswersOn
     ? `
-- Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
-- PAYMENT STATUS ("did you get my payment", "is my invoice paid", "was I refunded", "do I owe anything", an amount or balance question): BILLING carries "Payment status sentences". State a payment, invoice, refund or balance status ONLY by copying one of those sentences word for word, as a whole sentence (nothing added to it, put inside it or cut from it), and only a sentence that is about the payment or invoice the customer asked about. If none fits - or BILLING says none is on file - do NOT state, imply or deny any status ("you're all set", "paid up", "we got it", "it's processing", "it failed", "it isn't showing", "you owe nothing" are all forbidden unless copied from a sentence): say a teammate will confirm, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}. Never name how a payment was made unless a copied sentence does.`
+- Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — name the methods in the Payment options line (card or bank account through their pay link), and for ANYTHING about Zelle copy the Zelle sentence from "Payment status sentences" word for word; never write a Zelle contact, an amount, or a Zelle answer in your own words. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
+- MONEY ("did you get my payment", "is my invoice paid", "was I refunded", "do I owe anything", "how much is my plan", any amount or balance question): BILLING carries "Payment status sentences". State a payment, invoice, refund or balance status, ANY dollar amount (a balance, an invoice, the monthly plan price or card charge), or anything about Zelle ONLY by copying one of those sentences word for word, as a whole sentence (nothing added to it, put inside it or cut from it), and only a sentence that is about the payment or invoice the customer asked about. Never write a dollar figure any other way. If none fits - or BILLING says none is on file - do NOT state, imply or deny any status ("you're all set", "paid up", "we got it", "it's processing", "it failed", "it isn't showing", "you owe nothing" are all forbidden unless copied from a sentence): say a teammate will confirm, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}. Never name how a payment was made unless a copied sentence does.`
     : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
@@ -4736,7 +4625,7 @@ function buildFactsBlock(context, extras = {}) {
     : 'Nothing scheduled';
 
   // Real answers, ACTIVE PAYMENT PLAN: the invoice balance is not what is due now, so no invoice total / balance / amount due reaches the
-  // prompt anywhere (Balance line, Open invoice line, summary, flags) - and billingAmountCents({planAware}) does not authorize them.
+  // prompt anywhere (Balance line, Open invoice line, summary, flags), and no rendered sentence states one (the money-sentence contract).
   const onPaymentPlan = gateEnvValue('GATE_SMS_REAL_ANSWERS') && context.billing?.hasActivePaymentPlan === true;
   const balanceUnverifiable = gateEnvValue('GATE_SMS_REAL_ANSWERS') && context.billing?.hasUnmodeledInvoice === true;
   const balance = onPaymentPlan
@@ -4782,7 +4671,8 @@ function buildFactsBlock(context, extras = {}) {
   // stated only when the funding that decides the surcharge is known.
   const dues = lane?.monthlyBilled ? lane.monthlyDues : null;
   if (dues) {
-    billingLines.push(`- Monthly dues: $${dues.base.toFixed(2)} per month — the plan price for this membership, and this IS their price when they ask${monthlyChargeNote(dues)}`);
+    // (real answers: the figures are stated only by copying the plan-price / card-charge sentences in Payment status sentences)
+    billingLines.push(`- Monthly dues: $${dues.base.toFixed(2)} per month — the plan price for this membership, and this IS their price when they ask${monthlyChargeNote(dues)}${gateEnvValue('GATE_SMS_REAL_ANSWERS') ? '. To state it, copy the plan-price sentence (or the card-charge sentence) from Payment status sentences word for word' : ''}`);
   }
   billingLines.push(...(context.billing?.unavailable
     ? ["- Billing records are unavailable right now — defer any balance, invoice, or amount question and say you'll confirm"]
@@ -4833,43 +4723,21 @@ function buildFactsBlock(context, extras = {}) {
   // paymentMoneyExtra above, which is the only prompt text that references
   // this line.
   if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
-    const manualPayOptions = manualPayOptionsFromEnv();
-    const configuredZelleRecipient = manualPayOptions?.zelle?.recipient || null;
-    // Zelle is offered in the fact ONLY when a recipient is configured AND
-    // this customer's own open invoice (when there is one) passes the SAME
-    // eligibility the pay page enforces (fetchZelleEligibility, resolved
-    // upstream — independent-review P1). No open invoice at all ⇒ not
-    // eligible: with nothing to check against, the safe direction is to
-    // under-offer Zelle rather than risk it for a new customer whose first
-    // (not-yet-open, or just-created) invoice would require a saved card.
-    const zelleRecipient = (configuredZelleRecipient && extras.zelleEligible) ? configuredZelleRecipient : null;
-    // Neutral about what the pay PAGE itself renders (independent-review
-    // P1) — the page's own Zelle-eligibility rules (collectible, not
-    // withdrawn, no saved-method requirement, etc., pay-v2.js) are a
-    // separate, narrower gate than "a Zelle recipient is configured", so
-    // this line never asserts the page shows a Pay button or Zelle info;
-    // it only describes what the action does. Three distinct wordings so
-    // the fact never states something untrue: no recipient configured at
-    // all, vs a recipient exists but this account isn't Zelle-eligible
-    // right now (a saved-method-required invoice, combined balance, etc.).
-    // Codex round-25 P1: with SEVERAL open invoices and no way to tell which one the customer means, Zelle is
-    // neither offered nor DENIED — the fact tells the model to ask which invoice. (Design call: even when every
-    // open invoice happens to be Zelle-eligible we still ask, rather than claim availability without a target —
-    // the offer, and the send-time recheck, are always about ONE named invoice.)
-    if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetConflict) {
-      // the customer NAMED an invoice / amount that is not their open invoice: a target-specific fact, never the
-      // "several open invoices" wording (Codex round-27 P2)
-      billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; the invoice (number or amount) this customer named does NOT match an open invoice on their account — do not offer Zelle for it and do not say Zelle is unavailable in general; tell them that invoice is not open and that the office can confirm which invoice they mean');
-    } else if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetUnknown) {
-      billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; whether Zelle works for what this customer owes needs the office to confirm — do not offer Zelle and do not say it is unavailable; say a teammate will confirm');
-    } else if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetAmbiguous) {
-      billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; this customer has SEVERAL open invoices and whether Zelle works depends on WHICH invoice they mean — do not offer Zelle and do not say it is unavailable; ask which invoice they want to pay (its number or amount)');
-    } else
-    billingLines.push(zelleRecipient
-      ? `- Payment options: card or bank account (ACH) through their personal pay link, or Zelle to ${zelleRecipient} (have them put their name or invoice number in the Zelle memo so the office can match it) — {"type":"send_payment_link"} texts their personal pay link`
-      : configuredZelleRecipient
-        ? '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; Zelle is not available for this account right now, so do not offer it'
-        : '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; no Zelle recipient is configured right now, so do not offer Zelle');
+    // MONEY-SENTENCE CONTRACT (owner 2026-10-01 ~23:58Z): Zelle reaches the model ONLY as a rendered sentence in Payment status sentences
+    // (the offer for ONE target invoice with the live recipient, "Zelle isn't available for invoice N", or "We don't take Zelle") - this
+    // line names the methods and how to treat Zelle, never the recipient. Which Zelle sentence exists is decided upstream
+    // (liveZelleFacts: the pay page's own eligibility for the target invoice); several open invoices / a named invoice that is not open /
+    // an unverifiable state render none, and the line says what to do instead.
+    const zf = context.billing?.zelleFacts || null;
+    const base = '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link';
+    const zelleGuidance = (zf && ['offer', 'invoice_unavailable', 'not_offered'].includes(zf.state))
+      ? 'for anything about Zelle, copy the Zelle sentence in Payment status sentences word for word; never write about Zelle any other way'
+      : extras.zelleTargetConflict
+        ? 'the invoice (number or amount) this customer named does NOT match an open invoice on their account — tell them that invoice is not open and that the office can confirm which invoice they mean; do not mention Zelle'
+        : extras.zelleTargetAmbiguous
+          ? 'this customer has SEVERAL open invoices — ask which invoice they want to pay (its number or amount); do not mention Zelle'
+          : 'do not mention Zelle; if they ask about it, say a teammate will confirm';
+    billingLines.push(`${base}; ${zelleGuidance}`);
   }
   if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
     // PAYMENT STATUS (owner ruling 2026-10-01): payments, invoices, refunds and the balance reach the model ONLY as finished
@@ -5471,9 +5339,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // abstains (no Zelle fact). The resolved id is what is persisted below, so the send-time recheck validates it.
   // Gate off (v11) has no Payment options fact and persists no Zelle snapshot — no target resolution or eligibility read (round 33).
   const zelleTarget = (presetFactsBlock || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) ? { invoiceId: null, reason: 'no_open_invoice' } : require('./zelle-target-invoice').resolveZelleTargetInvoice(context?.billing, inboundMessage);
-  const zelleEligible = presetFactsBlock || !zelleTarget.invoiceId
-    ? false
-    : await fetchZelleEligibility({ customerId: context?.customer?.id || null, openInvoiceId: zelleTarget.invoiceId });
+  // MONEY-SENTENCE CONTRACT (owner 2026-10-01 ~23:58Z): the SAME liveZelleFacts the send-time recheck re-renders from - the renderer turns
+  // them into the one Zelle sentence the reply may copy (offer / invoice unavailable / not offered; none when unresolved or unverifiable).
+  const zelleFacts = (presetFactsBlock || !gateEnvValue('GATE_SMS_REAL_ANSWERS'))
+    ? null
+    : await require('./sms-amount-recheck').liveZelleFacts({ customerId: context?.customer?.id || null, invoiceId: zelleTarget.invoiceId || null });
+  if (zelleFacts && context?.billing && typeof context.billing === 'object') context.billing.zelleFacts = zelleFacts;
+  const zelleEligible = zelleFacts?.state === 'offer';
   // Pre-push audit P1 (finding 2): the invoice this Zelle eligibility check
   // actually ran against, for the caller to persist alongside
   // facts_generated_at. A send-time recheck re-runs isZelleTransferEligible
@@ -5482,7 +5354,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // eligible for (paid off, replaced, or a saved-card charge/PI started
   // since). null when the fact was never offered, so a body a human typed
   // Zelle into by hand (no snapshot) fails the send-time recheck closed.
-  const zelleInvoiceId = zelleEligible ? zelleTarget.invoiceId : null;
+  // the target invoice whenever there is one (an offer or an unavailability sentence is rechecked against it; a staff edit's Zelle contact too)
+  const zelleInvoiceId = zelleTarget.invoiceId || null;
   // (the LABEL FACTS section exists only with real answers on: with the gate off no label query runs at all)
   const fetchedLabelFacts = presetFactsBlock || !realAnswersApplied ? null : await fetchLabelFacts({ customerId: context?.customer?.id || null });
   // LABEL FACTS speaks for the customer's LATEST performed visit only: a text
@@ -6279,10 +6152,8 @@ module.exports = {
   replyPromisesFollowup: followupSla.replyPromisesFollowup,
   slaPhraseStatus: followupSla.slaPhraseStatus,
   replyQuotesUngroundedAmount,
-  remainderAmountsUngrounded,
   validatePaymentStatus,
   computePaymentStatusSnapshot,
-  fetchZelleEligibility,
   billingAmountCents,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,

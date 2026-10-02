@@ -767,27 +767,57 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
   });
 
-  test('ZELLE_RECIPIENT unset ⇒ card/ACH only, never a guessed Zelle contact', () => {
+  // Owner 2026-10-01 ~23:58Z: Zelle reaches the model ONLY as a rendered sentence ("Payment status sentences"); the Payment options line names
+  // the methods and says how to treat Zelle - never a recipient.
+  const OPTIONS_BASE = '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link';
+  const COPY_ZELLE = 'for anything about Zelle, copy the Zelle sentence in Payment status sentences word for word; never write about Zelle any other way';
+  const optionsLine = (block) => block.split('\n').find((l) => l.startsWith('- Payment options:'));
+
+  test('no Zelle facts (nothing resolved: no target invoice, unverifiable state) ⇒ card/ACH only: "do not mention Zelle", never a guessed Zelle contact', () => {
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
     const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } });
-    expect(block).toContain('- Payment options: card or bank account (ACH) through their personal pay link');
-    expect(block).toContain('no Zelle recipient is configured right now, so do not offer Zelle');
+    expect(optionsLine(block)).toBe(`${OPTIONS_BASE}; do not mention Zelle; if they ask about it, say a teammate will confirm`);
+    expect(block).not.toMatch(/Zelle to \S/);
+    expect(block).not.toContain('payments@wavespestcontrol.com');
+    // an unverifiable state is the same thing: no sentence exists
+    const unverifiable = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50, zelleFacts: { state: null, invoiceId: 'i1', invoiceNumber: 'WPC-2026-0001', recipient: 'payments@wavespestcontrol.com' } } });
+    expect(optionsLine(unverifiable)).toContain('do not mention Zelle');
+    expect(unverifiable).not.toMatch(/Zelle to \S/);
+  });
+
+  test('no recipient configured (state not_offered) ⇒ the line says copy the Zelle sentence, and the sentence is "We don\'t take Zelle right now."', () => {
+    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50, zelleFacts: { state: 'not_offered', invoiceId: null, invoiceNumber: null, recipient: null } } });
+    expect(optionsLine(block)).toBe(`${OPTIONS_BASE}; ${COPY_ZELLE}`);
+    expect(block).toContain("  - We don't take Zelle right now.");
     expect(block).not.toMatch(/Zelle to \S/);
   });
 
-  test('ZELLE_RECIPIENT set but this customer is NOT Zelle-eligible (no zelleEligible extra) ⇒ card/ACH only, distinct wording from "not configured"', () => {
-    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
-    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } });
-    expect(block).not.toMatch(/Zelle to \S/);
-    expect(block).toContain('Zelle is not available for this account right now, so do not offer it');
+  test('a target invoice that does not take Zelle (invoice_unavailable) ⇒ the sentence says so for THAT invoice; the line never offers it', () => {
+    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50, zelleFacts: { state: 'invoice_unavailable', invoiceId: 'i1', invoiceNumber: 'WPC-2026-0001', recipient: 'payments@wavespestcontrol.com' } } });
+    expect(optionsLine(block)).toContain(COPY_ZELLE);
+    expect(block).toContain("  - Zelle isn't available for invoice WPC-2026-0001 right now.");
+    expect(block).not.toMatch(/by Zelle to \S/);
   });
 
-  test('ZELLE_RECIPIENT set AND this customer is Zelle-eligible ⇒ the SAME canonical value the public /pay page reads, never a hardcoded one', () => {
-    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
-    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } }, { zelleEligible: true });
-    expect(block).toContain('Zelle to payments@wavespestcontrol.com');
-    expect(block).toContain('their name or invoice number in the Zelle memo');
+  test('a Zelle-eligible target ⇒ the SAME canonical recipient the public /pay page reads is in the rendered offer SENTENCE only (never in the options line, never hardcoded)', () => {
+    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50, zelleFacts: { state: 'offer', invoiceId: 'i1', invoiceNumber: 'WPC-2026-0001', recipient: 'payments@wavespestcontrol.com' } } });
+    expect(block).toContain('  - You can pay invoice WPC-2026-0001 by Zelle to payments@wavespestcontrol.com, with your name or the invoice number in the Zelle memo.');
+    expect(optionsLine(block)).toBe(`${OPTIONS_BASE}; ${COPY_ZELLE}`);
+    expect(optionsLine(block)).not.toContain('payments@wavespestcontrol.com');
     // Neutral about what the pay page itself renders (independent-review P1)
     expect(block).toContain('{"type":"send_payment_link"} texts their personal pay link');
+  });
+
+  test('the Monthly dues line tells the model to COPY the plan-price (or card-charge) sentence - gate on only; the renderer adds those sentences under "Payment status sentences"', () => {
+    const ctx = { summary: 'X', billing: { outstandingBalance: 0, recentPayments: [], hasProcessingPayment: false }, customer: { billingLane: { monthlyBilled: true, monthlyDues: { base: 99, total: 102.96, surcharge: 3.96, surcharged: true } } } };
+    const on = buildFactsBlock(ctx);
+    const duesLine = on.split('\n').find((l) => l.startsWith('- Monthly dues:'));
+    expect(duesLine).toContain('To state it, copy the plan-price sentence (or the card-charge sentence) from Payment status sentences word for word');
+    expect(on).toContain('  - Your monthly plan price is $99.00.');
+    expect(on).toContain('  - When your dues are charged to the credit card on file, the monthly charge is $102.96: $99.00 dues plus a $3.96 credit-card fee.');
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const off = buildFactsBlock(ctx).split('\n').find((l) => l.startsWith('- Monthly dues:'));
+    expect(off).not.toContain('copy the plan-price sentence');
   });
 
   test('renders even when billing itself is unavailable — payment options are business config, not this customer\'s ledger', () => {
@@ -795,17 +825,21 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     expect(block).toContain('- Payment options: card or bank account (ACH)');
   });
 
-  test('BILLING & MONEY RULES: payment-method questions answer from PAYMENT OPTIONS; payment STATUS only by copying a rendered sentence', () => {
+  test('BILLING & MONEY RULES: payment-method questions name the methods; ANY status, dollar figure or Zelle word only by copying a rendered sentence', () => {
     const p = buildSystemPrompt();
-    expect(p).toMatch(/Payment-method questions.*answer directly from the Payment options line/i);
-    expect(p).toMatch(/never invent a Zelle phone\/email/i);
-    expect(p).toMatch(/PAYMENT STATUS \("did you get my payment".*BILLING carries "Payment status sentences"/i);
-    expect(p).toMatch(/ONLY by copying one of those sentences word for word, as a whole sentence/i);
+    expect(p).toMatch(/Payment-method questions.*name the methods in the Payment options line/i);
+    expect(p).toMatch(/for ANYTHING about Zelle copy the Zelle sentence from "Payment status sentences" word for word/);
+    expect(p).toMatch(/never write a Zelle contact, an amount, or a Zelle answer in your own words/i);
+    expect(p).toMatch(/MONEY \("did you get my payment".*"how much is my plan".*BILLING carries "Payment status sentences"/i);
+    expect(p).toMatch(/ANY dollar amount \(a balance, an invoice, the monthly plan price or card charge\), or anything about Zelle ONLY by copying one of those sentences word for word, as a whole sentence/i);
+    expect(p).toMatch(/Never write a dollar figure any other way/i);
     expect(p).toMatch(/If none fits - or BILLING says none is on file - do NOT state, imply or deny any status/i);
     expect(p).toMatch(/say a teammate will confirm, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW/i);
     // the old row-reading rules (Recent payments / "via" tags / paid lines) are gone: the model never sees raw payment rows
     expect(p).not.toMatch(/Recent payments/i);
     expect(p).not.toMatch(/\(or Open invoice\)/i);
+    // ... and the old "exact Zelle contact from the Payment options line" license is gone
+    expect(p).not.toMatch(/exact Zelle contact ONLY when one is listed/i);
   });
 
   test('gate off ⇒ neither BILLING & MONEY RULES bullet nor the PAYMENT OPTIONS fact appear (byte-identical to v11)', () => {
@@ -817,7 +851,9 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     expect(block).not.toContain('Payment options');
   });
 
-  test('a Zelle phone/email in the facts never trips the deterministic amount guard (real or spoofed formats)', () => {
+  // (the draft-time guard: gate off = main's pooled rule, which never trips on a Zelle contact; gate on = the contract, which holds ANY Zelle
+  // mention that is not a copy of the rendered Zelle sentence, and passes the copy itself)
+  test('draft-time guard: gate off, a Zelle phone/email never trips the amount rule; gate on, Zelle prose is held unless it is the rendered sentence', () => {
     const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
     const ctx = { billing: { outstandingBalance: 50 } };
     const replies = [
@@ -827,8 +863,21 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     ];
     for (const reply of replies) {
       expect(replyQuotesUngroundedAmount(reply, ctx, { byMeaning: false })).toBe(false);
-      expect(replyQuotesUngroundedAmount(reply, ctx, { byMeaning: true })).toBe(false);
+      expect(replyQuotesUngroundedAmount(reply, ctx, { byMeaning: true })).toBe(true); // not a copy of any rendered sentence
     }
+    const withZelle = { billing: { outstandingBalance: 50, zelleFacts: { state: 'offer', invoiceId: 'i1', invoiceNumber: 'WPC-2026-0001', recipient: 'payments@wavespestcontrol.com' } } };
+    const SENTENCE = 'You can pay invoice WPC-2026-0001 by Zelle to payments@wavespestcontrol.com, with your name or the invoice number in the Zelle memo.';
+    expect(replyQuotesUngroundedAmount(SENTENCE, withZelle, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount(`Sure! ${SENTENCE}`, withZelle, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount(SENTENCE, ctx, { byMeaning: true })).toBe(true); // no such sentence is rendered for this account
+  });
+
+  test('draft-time guard (real answers): the monthly plan price is stated only as the rendered sentence; the same figure in the model\'s own words is held', () => {
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    const ctx = { billing: { outstandingBalance: 0, recentPayments: [], hasProcessingPayment: false }, customer: { billingLane: { monthlyBilled: true, monthlyDues: { base: 99 } } } };
+    expect(replyQuotesUngroundedAmount('Your monthly plan price is $99.00.', ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your plan is $99 a month.', ctx, { byMeaning: true })).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your monthly plan price is $89.00.', ctx, { byMeaning: true })).toBe(true);
   });
 });
 
@@ -1116,143 +1165,3 @@ describe('auto-send fallback publication', () => {
     }
   });
 });
-
-describe('Codex round 4 P2 (finding 5): fetchZelleEligibility short-circuits with no DB/Stripe reads when unused', () => {
-  let priorGate, priorZelle;
-  beforeEach(() => {
-    priorGate = process.env.GATE_SMS_REAL_ANSWERS;
-    priorZelle = process.env.ZELLE_RECIPIENT;
-  });
-  afterEach(() => {
-    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
-    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
-    if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT;
-    else process.env.ZELLE_RECIPIENT = priorZelle;
-    jest.dontMock('../models/db');
-    jest.dontMock('../services/estimate-deposits');
-    jest.dontMock('../routes/pay-v2');
-    jest.resetModules();
-  });
-
-  function freshDrafterWithSpies() {
-    jest.resetModules();
-    const dbFn = jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('DB should never be read'); } }) }));
-    jest.doMock('../models/db', () => dbFn);
-    const assertInvoiceDepositSettlementReady = jest.fn(async () => { throw new Error('deposit settlement should never be read'); });
-    jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady }));
-    const payPageZelleVisibility = jest.fn(async () => { throw new Error('Stripe/pay-v2 should never be read'); });
-    jest.doMock('../routes/pay-v2', () => ({ payPageZelleVisibility }));
-    const drafter = require('../services/sms-shadow-drafter');
-    return { drafter, dbFn, assertInvoiceDepositSettlementReady, payPageZelleVisibility };
-  }
-
-  test('GATE_SMS_REAL_ANSWERS off ⇒ false, no DB/Stripe reads even with a Zelle recipient configured', async () => {
-    delete process.env.GATE_SMS_REAL_ANSWERS;
-    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
-    const { drafter, dbFn, payPageZelleVisibility } = freshDrafterWithSpies();
-    await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(false);
-    expect(dbFn).not.toHaveBeenCalled();
-    expect(payPageZelleVisibility).not.toHaveBeenCalled();
-  });
-
-  test('GATE_SMS_REAL_ANSWERS on but no ZELLE_RECIPIENT ⇒ false, no DB/Stripe reads', async () => {
-    process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    delete process.env.ZELLE_RECIPIENT;
-    const { drafter, dbFn, payPageZelleVisibility } = freshDrafterWithSpies();
-    await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(false);
-    expect(dbFn).not.toHaveBeenCalled();
-    expect(payPageZelleVisibility).not.toHaveBeenCalled();
-  });
-
-  test('both gate ON and a recipient configured ⇒ the real lookup runs', async () => {
-    process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
-    jest.resetModules();
-    jest.doMock('../models/db', () => jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'inv-1', customer_id: 'c1' }) }) })));
-    jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
-    const payPageZelleVisibility = jest.fn(async () => ({ visible: true, reason: null }));
-    jest.doMock('../routes/pay-v2', () => ({ payPageZelleVisibility }));
-    const drafter = require('../services/sms-shadow-drafter');
-    await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(true);
-    expect(payPageZelleVisibility).toHaveBeenCalled();
-  });
-});
-
-describe('fetchZelleEligibility — independent-review P1 (round 2, PR #5331): a committed-but-unapplied estimate-deposit receipt blocks Zelle at DRAFT time too', () => {
-  // Independent-review P2 (round 4, finding 5): fetchZelleEligibility now
-  // short-circuits before any lookup unless real answers is on AND a Zelle
-  // recipient is configured — the two live reads the fact itself gates on.
-  // Every test in this block exercises the ACTUAL lookup, so both must be set.
-  let priorGate, priorZelle;
-  beforeEach(() => {
-    priorGate = process.env.GATE_SMS_REAL_ANSWERS;
-    process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    priorZelle = process.env.ZELLE_RECIPIENT;
-    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
-  });
-  afterEach(() => {
-    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
-    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
-    if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT;
-    else process.env.ZELLE_RECIPIENT = priorZelle;
-  });
-
-  function freshDrafter({ invoiceRow, depositError, zelleVisible }) {
-    jest.resetModules();
-    jest.doMock('../models/db', () => {
-      const dbFn = jest.fn(() => ({ where: () => ({ first: async () => invoiceRow }) }));
-      return dbFn;
-    });
-    jest.doMock('../services/estimate-deposits', () => ({
-      assertInvoiceDepositSettlementReady: jest.fn(async () => {
-        if (depositError) throw depositError;
-      }),
-    }));
-    jest.doMock('../routes/pay-v2', () => ({
-      payPageZelleVisibility: jest.fn(async () => ({ visible: zelleVisible, reason: zelleVisible ? null : 'not_eligible' })),
-    }));
-    return require('../services/sms-shadow-drafter');
-  }
-
-  afterEach(() => {
-    jest.dontMock('../models/db');
-    jest.dontMock('../services/estimate-deposits');
-    jest.dontMock('../routes/pay-v2');
-    jest.resetModules();
-  });
-
-  test('no customerId / openInvoiceId → false without a lookup', async () => {
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1' }, zelleVisible: true });
-    expect(await drafter.fetchZelleEligibility({ customerId: null, openInvoiceId: 'inv-1' })).toBe(false);
-    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: null })).toBe(false);
-  });
-
-  test('a pending deposit-settlement receipt blocks Zelle even when payPageZelleVisibility would say yes', async () => {
-    const depositError = Object.assign(new Error('A received deposit is awaiting invoice reconciliation'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' });
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError, zelleVisible: true });
-    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
-    const { payPageZelleVisibility } = require('../routes/pay-v2');
-    // Fails closed BEFORE reaching pay-v2's own predicate.
-    expect(payPageZelleVisibility).not.toHaveBeenCalled();
-  });
-
-  test('deposit settlement ready and payPageZelleVisibility visible → eligible', async () => {
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, zelleVisible: true });
-    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(true);
-  });
-
-  // Independent-review P1 (round 5, finding 4): payPageZelleVisibility
-  // returns visible:false while a partial account credit is pending —
-  // fetchZelleEligibility must read that as ineligible, same as any other
-  // not-visible reason.
-  test('payPageZelleVisibility visible:false (e.g. credit_pending) → not eligible', async () => {
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, zelleVisible: false });
-    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
-  });
-
-  test('an unexpected deposit-settlement read error fails closed too (never a throw)', async () => {
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError: new Error('db down'), zelleVisible: true });
-    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
-  });
-});
-

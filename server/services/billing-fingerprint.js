@@ -46,31 +46,19 @@ async function billingFingerprint(customerId, dbh = db) {
   }
 }
 
-// A repeatable provider-boundary predicate: the billing rows are still exactly as they were when `fingerprint` was taken (before the
-// full recheck). `dbi` = the handoff's connection. Any change or read failure => retryable refusal.
-// ZELLE (owner ruling 2026-10-01, "rerun full check"): a Zelle offer or denial also depends on state no hashed row records (the
-// recipient env, a PaymentIntent, a deposit, payer activation, ...). Rather than a hand-kept dependency list, the boundary reruns the
-// SAME checks the full recheck ran: the recipient (outgoingZelleStale) and the invoice's live eligibility (zelleInvoiceStillEligible) for
-// the invoice the recheck resolved. Parts of that read go through the pool (a second connection for a moment, the cron-lock pattern).
-function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleInvoiceId = null, zelleDenial = null, getBody = null }) {
+// A repeatable provider-boundary predicate (`dbi` = the handoff's connection):
+//   1. ZELLE - when the send-time verdict stood on live Zelle facts (a copied Zelle sentence, or a staff-written Zelle contact), those facts
+//      are re-read (the same liveZelleFacts: recipient + the invoice's live eligibility - deposits, PaymentIntents, saved-card charges,
+//      credit, payer, siblings) and must be unchanged; a recipient change or an eligibility flip refuses.
+//   2. the billing fingerprint, LAST (Codex round-57 P1): the rows the full recheck read are exactly as they were.
+// Any change or read failure => retryable refusal (the retry reruns the full recheck).
+function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelle = null }) {
   const check = async ({ dbi } = {}) => {
     const dbh = dbi || db;
-    const body = String((typeof getBody === 'function' ? getBody() : getBody) || '');
-    const recheck = require('./sms-amount-recheck');
-    // Zelle first; the fingerprint is the LAST read (Codex round-57 P1) - a payment changing during the Zelle DB / Stripe reads is caught
-    if (recheck.hasAffirmativeZelleMention(body)) {
-      const offer = await zelleOfferStillEligible({ recheck, customerId, zelleInvoiceId, body, dbh });
-      if (!offer.ok) return offer;
-    }
-    if (zelleDenial && recheck.hasNegativeZelleAvailabilityClaim(body)) {
-      // a recipient configured (or removed) since the recheck changes every denial's premise (Codex round-53 P2)
-      const configured = !!require('../routes/pay-v2-helpers').manualPayOptionsFromEnv()?.zelle?.recipient;
-      if (configured !== (zelleDenial.recipientConfigured !== false)) {
-        return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: 'Zelle setup changed since the recheck', retryable: true };
-      }
-      if (zelleDenial.invoiceId) {
-        const denial = await zelleDenialStillStands({ recheck, customerId, invoiceId: zelleDenial.invoiceId, dbh });
-        if (!denial.ok) return denial;
+    if (zelle) {
+      const live = await require('./sms-amount-recheck').liveZelleFacts({ customerId, invoiceId: zelle.invoiceId || null, dbh });
+      if (live.state !== zelle.state || live.recipient !== zelle.recipient || String(live.invoiceNumber || '') !== String(zelle.invoiceNumber || '')) {
+        return { ok: false, code: 'ZELLE_CHANGED_AT_BOUNDARY', reason: 'Zelle availability changed since the recheck', retryable: true };
       }
     }
     const now = fingerprint ? await billingFingerprint(customerId, dbh) : null;
@@ -86,25 +74,6 @@ function billingUnchangedProviderPreSendCheck({ customerId, fingerprint, zelleIn
   };
   check.afterMarker = check;
   return check;
-}
-
-async function zelleOfferStillEligible({ recheck, customerId, zelleInvoiceId, body, dbh }) {
-  const recipient = recheck.outgoingZelleStale(body);
-  if (recipient.stale) return { ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', reason: `the Zelle offer is no longer valid (${recipient.reason})` };
-  const eligibility = await recheck.zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh });
-  return eligibility.eligible
-    ? { ok: true }
-    : { ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', reason: `the Zelle offer is no longer valid (${eligibility.reason})`, retryable: true };
-}
-
-// A scoped denial stands only while its invoice is still confirmed ineligible (same rule as the full recheck's zelleDenialVerdict).
-async function zelleDenialStillStands({ recheck, customerId, invoiceId, dbh }) {
-  const eligibility = await recheck.zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
-  if (eligibility.eligible) return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: 'Zelle became available for the invoice', retryable: true };
-  if (recheck.ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason)) {
-    return { ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', reason: `Zelle availability could not be confirmed (${eligibility.reason})`, retryable: true };
-  }
-  return { ok: true };
 }
 
 module.exports = { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL, BILLING_FINGERPRINT_PARAMS };

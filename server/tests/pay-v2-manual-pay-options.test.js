@@ -375,8 +375,8 @@ describe('GET /pay/:token manualPayOptions', () => {
 
 // The extracted contract itself (independent-review P1, round 5, findings 3
 // & 4): payPageZelleVisibility({ invoice }) → { visible, reason }, the ONE
-// function GET /:token, fetchZelleEligibility (draft time) and
-// zelleInvoiceStillEligible (send time) all now call.
+// function GET /:token and zelleInvoiceStillEligible (liveZelleFacts: draft
+// time and send time) all now call.
 describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
   const { payPageZelleVisibility } = payRouter;
 

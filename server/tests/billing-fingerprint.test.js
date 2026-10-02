@@ -3,10 +3,10 @@
  * provider boundary on the handoff connection.
  */
 jest.mock('../models/db', () => jest.fn());
-const mockEligible = jest.fn(async () => ({ eligible: true }));
+const mockLive = jest.fn(async () => ({ state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' }));
 jest.mock('../services/sms-amount-recheck', () => ({
   ...jest.requireActual('../services/sms-amount-recheck'),
-  zelleInvoiceStillEligible: (...a) => mockEligible(...a),
+  liveZelleFacts: (...a) => mockLive(...a),
 }));
 const { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL } = require('../services/billing-fingerprint');
 // billingFingerprint appends the ET calendar day (Codex round-59 P2): a SAVED fingerprint carries it, the raw row hash does not
@@ -48,80 +48,57 @@ describe('billingUnchangedProviderPreSendCheck', () => {
   });
 });
 
-// Owner ruling 2026-10-01 ("rerun full check"): a Zelle offer / denial reruns the SAME eligibility the full recheck ran, at the boundary
-describe('Zelle at the provider boundary: the full recheck\'s own checks run again', () => {
+// Owner ruling 2026-10-01: when the send-time verdict stood on live Zelle facts (a copied Zelle sentence, or a staff Zelle contact), the
+// boundary re-reads them (liveZelleFacts) and refuses when the recipient, the invoice or the state moved.
+describe('Zelle at the provider boundary: the live facts are re-read and must be unchanged', () => {
   const dbiWith = () => { const dbi = jest.fn(); dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] }); return dbi; };
-  const run = (over) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP, ...over });
-  beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; });
-  afterEach(() => { mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); delete process.env.ZELLE_RECIPIENT; });
-  test('an offer: still eligible => ok (on the invoice the recheck resolved, through the handoff connection)', async () => {
+  const OFFER = { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' };
+  const run = (zelle) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP, zelle });
+  afterEach(() => { mockLive.mockReset(); mockLive.mockResolvedValue({ ...OFFER }); });
+  test('unchanged facts => ok (re-read for the same invoice, through the handoff connection)', async () => {
     const dbi = dbiWith();
-    await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at pay@example.com.' })({ dbi })).resolves.toEqual({ ok: true });
-    expect(mockEligible).toHaveBeenCalledWith({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbi });
+    await expect(run({ ...OFFER })({ dbi })).resolves.toEqual({ ok: true });
+    expect(mockLive).toHaveBeenCalledWith({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbi });
   });
-  test.each(['payment_in_flight', 'zelle_invoice_ineligible', 'credit_unverifiable', 'zelle_invoice_unresolved'])(
-    'an offer whose invoice became ineligible after the recheck (%s: a deposit, a payment in flight, credit, ...) is refused', async (reason) => {
-      mockEligible.mockResolvedValue({ eligible: false, reason });
-      await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at pay@example.com.' })({ dbi: dbiWith() }))
-        .resolves.toMatchObject({ ok: false, code: 'ZELLE_OFFER_UNSENDABLE_AT_BOUNDARY', retryable: true });
-    },
-  );
-  test('an offer whose recipient was removed or rotated is refused without the eligibility read', async () => {
-    process.env.ZELLE_RECIPIENT = 'new@example.com';
-    await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at old@example.com.' })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false });
-    delete process.env.ZELLE_RECIPIENT;
-    await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'You can Zelle us at old@example.com.' })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false });
-    expect(mockEligible).not.toHaveBeenCalled();
+  test.each([
+    ['the state flipped (the invoice stopped taking Zelle: a deposit, a payment in flight, credit, ...)', { state: 'invoice_unavailable' }],
+    ['the state became unverifiable', { state: null }],
+    ['the recipient was rotated', { recipient: 'new@example.com' }],
+    ['the recipient was removed', { state: 'not_offered', recipient: null }],
+    ['the invoice number changed', { invoiceNumber: 'WPC-2026-0009' }],
+  ])('%s => refused (retryable)', async (_name, change) => {
+    mockLive.mockResolvedValue({ ...OFFER, ...change });
+    await expect(run({ ...OFFER })(({ dbi: dbiWith() }))).resolves.toMatchObject({ ok: false, code: 'ZELLE_CHANGED_AT_BOUNDARY', retryable: true });
   });
-  test('a denial stands while its invoice is still confirmed ineligible; Zelle available now or unverifiable => refused', async () => {
-    const denial = run({ zelleDenial: { invoiceId: 'inv-1' }, getBody: () => "Zelle isn't available for your invoice right now." });
-    mockEligible.mockResolvedValue({ eligible: false, reason: 'zelle_invoice_ineligible' });
-    await expect(denial({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
-    mockEligible.mockResolvedValue({ eligible: true });
-    await expect(denial({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', retryable: true });
-    mockEligible.mockResolvedValue({ eligible: false, reason: 'zelle_recheck_failed' });
-    await expect(denial({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false, retryable: true });
+  test('an unavailability / not-offered sentence is re-read too: Zelle becoming available (or set up) refuses it', async () => {
+    const unavailable = { state: 'invoice_unavailable', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' };
+    mockLive.mockResolvedValue({ ...unavailable });
+    await expect(run(unavailable)({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
+    mockLive.mockResolvedValue({ ...OFFER });
+    await expect(run(unavailable)({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false, code: 'ZELLE_CHANGED_AT_BOUNDARY' });
+    const notOffered = { state: 'not_offered', invoiceId: null, invoiceNumber: null, recipient: null };
+    mockLive.mockResolvedValue({ ...notOffered });
+    await expect(run(notOffered)({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
+    mockLive.mockResolvedValue({ ...OFFER });
+    await expect(run(notOffered)({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false, code: 'ZELLE_CHANGED_AT_BOUNDARY' });
   });
-  test('a body with no Zelle claim never runs the eligibility read', async () => {
-    await expect(run({ zelleInvoiceId: 'inv-1', getBody: () => 'Your account balance is $95.00.' })({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
-    expect(mockEligible).not.toHaveBeenCalled();
-  });
-});
-
-
-
-// Codex round-53: retry fields drive the failed-payment balance; a denial approved with Zelle off is rechecked when it is set up
-describe('a denial that stood because Zelle was not set up', () => {
-  const dbiWith = () => { const dbi = jest.fn(); dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] }); return dbi; };
-  const denial = (zelleDenial) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP, zelleDenial, getBody: () => "We don't accept Zelle." });
-  afterEach(() => { delete process.env.ZELLE_RECIPIENT; mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); });
-  test('still not set up => ok; set up during the send => refused (retryable)', async () => {
-    delete process.env.ZELLE_RECIPIENT;
-    await expect(denial({ invoiceId: null, recipientConfigured: false })({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    await expect(denial({ invoiceId: null, recipientConfigured: false })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false, code: 'ZELLE_DENIAL_UNSENDABLE_AT_BOUNDARY', retryable: true });
-  });
-  test('a no-open-invoice denial (recipient set) stands while the recipient stays set', async () => {
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
-    await expect(denial({ invoiceId: null, recipientConfigured: true })({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
-    delete process.env.ZELLE_RECIPIENT;
-    await expect(denial({ invoiceId: null, recipientConfigured: true })({ dbi: dbiWith() })).resolves.toMatchObject({ ok: false });
+  test('no Zelle facts (the verdict stood on none) => the live read never runs', async () => {
+    await expect(run(null)({ dbi: dbiWith() })).resolves.toEqual({ ok: true });
+    expect(mockLive).not.toHaveBeenCalled();
   });
 });
-
 
 // Codex round-57 P1: the fingerprint is the LAST boundary read - a payment changing during the Zelle reads is caught
 test('the fingerprint is read after the Zelle checks', async () => {
-  process.env.ZELLE_RECIPIENT = 'pay@example.com';
   const order = [];
-  mockEligible.mockImplementation(async () => { order.push('zelle'); return { eligible: true }; });
+  mockLive.mockImplementation(async () => { order.push('zelle'); return { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' }; });
   const dbi = jest.fn();
   dbi.raw = async () => { order.push('fingerprint'); return { rows: [{ fingerprint: 'abc' }] }; };
-  const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP, zelleInvoiceId: 'inv-1', getBody: () => 'We received your $120.00 card payment on Sep 12, 2026. You can Zelle us at pay@example.com.' });
+  const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP, zelle: { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' } });
   try {
     await expect(check({ dbi })).resolves.toEqual({ ok: true });
     expect(order).toEqual(['zelle', 'fingerprint']);
-  } finally { delete process.env.ZELLE_RECIPIENT; mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); }
+  } finally { mockLive.mockReset(); }
 });
 
 // Codex round-59 P2: crossing ET midnight between the recheck and the provider call refuses (card expiry / monthly eligibility)

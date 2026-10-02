@@ -1820,10 +1820,10 @@ describe('replyQuotesUngroundedAmount — a paid figure is authorized only insid
     expect(replyQuotesUngroundedAmount('Hi Dana, We received your $95.00 payment on Sep 12, 2026. Anything else I can help with?', ctx)).toBe(false);
     expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12 — thank you!', ctx)).toBe(true);
   });
-  test('the current balance is grounded as its rendered sentence (an owed figure in an owed clause stays allowed)', () => {
+  test('the current balance is grounded as its rendered sentence ONLY (owner 2026-10-01 ~23:58Z: an owed figure in the model\'s own words is held too)', () => {
     const ctx = { billing: { outstandingBalance: 120.5, recentPayments: [] } };
     expect(replyQuotesUngroundedAmount('Your account balance is $120.50.', ctx)).toBe(false);
-    expect(replyQuotesUngroundedAmount('You can pay the $120.50 invoice with your pay link.', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('You can pay the $120.50 invoice with your pay link.', ctx)).toBe(true); // a figure typed outside a copied sentence
     expect(replyQuotesUngroundedAmount('Your balance is $120.50.', ctx)).toBe(true); // a status said in other words
   });
 });
@@ -5264,14 +5264,15 @@ describe('#5194 review rounds', () => {
     const prior = process.env.GATE_SMS_REAL_ANSWERS;
     try {
       // gate off keeps main's pooled rule (covered by the gate-OFF describe above); gate on:
-      // the balance rides in its rendered sentence; the unreadable price still cannot ride along (r8 P1: a readable figure cannot carry an unreadable one)
+      // the balance rides in its rendered sentence; no other figure rides along, readable or not (r8 P1: a readable figure cannot carry an unreadable one;
+      // owner 2026-10-01 ~23:58Z: a figure outside a copied sentence is held whatever its wording)
       process.env.GATE_SMS_REAL_ANSWERS = 'true';
       expect(replyQuotesUngroundedAmount('Your balance is $95, and the fee is fifty dollars.', context)).toBe(true);
       expect(replyQuotesUngroundedAmount('Your balance is $95 plus a fee of fifty dollars.', context)).toBe(true);
       expect(replyQuotesUngroundedAmount('Your account balance is $95.00.', context)).toBe(false);
       expect(replyQuotesUngroundedAmount('Your account balance is $95.00. The visit fee is fifty dollars.', context)).toBe(true);
       expect(replyQuotesUngroundedAmount('You can pay the $95.00 invoice online, and the fee is fifty dollars.', context)).toBe(true);
-      expect(replyQuotesUngroundedAmount('You can pay the $95.00 invoice online.', context)).toBe(false);
+      expect(replyQuotesUngroundedAmount('You can pay the $95.00 invoice online.', context)).toBe(true); // typed, not copied
     } finally {
       if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior;
     }
@@ -5301,29 +5302,37 @@ describe('#5194 review rounds', () => {
 test('an unmodeled invoice history withholds the aggregate balance from the allowlist and the facts', () => {
   const { billingAmountCents, buildFactsBlock } = require('../services/sms-shadow-drafter');
   const ctx = { summary: 'T', billing: { outstandingBalance: 412.5, recentPayments: [], hasUnmodeledInvoice: true } };
-  expect(billingAmountCents(ctx, { planAware: true }).owed.has(41250)).toBe(false);
-  expect(billingAmountCents({ billing: { ...ctx.billing, hasUnmodeledInvoice: false } }, { planAware: true }).owed.has(41250)).toBe(true);
+  // (the pooled gate-off rule is main's and unchanged: no plan-aware / cut-history variant any more)
+  expect(billingAmountCents(ctx).owed.has(41250)).toBe(true);
   const prev = process.env.GATE_SMS_REAL_ANSWERS;
   process.env.GATE_SMS_REAL_ANSWERS = 'true';
   try {
     const facts = buildFactsBlock(ctx, { now: new Date('2026-09-29T15:00:00Z') });
     expect(facts).not.toContain('$412.50 outstanding');
     expect(facts).toContain('never state an account balance');
+    // ... and no balance sentence is rendered for it, so the figure cannot be stated at all (draft time)
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    expect(replyQuotesUngroundedAmount('Your account balance is $412.50.', ctx, { inboundMessage: 'What do I owe?' })).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your account balance is $412.50.', { billing: { ...ctx.billing, hasUnmodeledInvoice: false } }, { inboundMessage: 'What do I owe?' })).toBe(false);
   } finally { if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev; }
 });
 
-// Codex round-59 P2: an owed figure must come from the source its wording names
-test('a dues figure cannot stand in for the balance / total; each wording binds its own source', () => {
+// Codex round-59 P2 (PR #5331, widened 2026-10-01): a dues figure cannot stand in for the balance / total - each figure is stated only through the
+// rendered sentence of its own source (the plan price through "Your monthly plan price is $X.", the balance through "Your account balance is $X.")
+test('a dues figure cannot stand in for the balance / total; each figure binds its own rendered sentence', () => {
   const drafter = require('../services/sms-shadow-drafter');
-  const agg = require('../services/context-aggregator');
-  const spy = jest.spyOn(agg, 'authorizedDuesCents').mockReturnValue([5000]);
+  const prev = process.env.GATE_SMS_REAL_ANSWERS;
+  process.env.GATE_SMS_REAL_ANSWERS = 'true';
   try {
-    const ctx = { billing: { outstandingBalance: 120, recentPayments: [], openInvoice: { amountDue: 120 } } };
-    expect(drafter.remainderAmountsUngrounded('The total is $50.00.', ctx)).toBe(true);
-    expect(drafter.remainderAmountsUngrounded('Your balance is $50.00.', ctx)).toBe(true);
-    expect(drafter.remainderAmountsUngrounded('Your monthly plan is $50.00.', ctx)).toBe(false);
-    expect(drafter.remainderAmountsUngrounded('The total is $120.00.', ctx)).toBe(false);
-    expect(drafter.remainderAmountsUngrounded('Your invoice is $50.00.', ctx)).toBe(true);
-    expect(drafter.remainderAmountsUngrounded('Your invoice is $120.00.', ctx)).toBe(false);
-  } finally { spy.mockRestore(); }
+    const ctx = { billing: { outstandingBalance: 120, recentPayments: [], hasProcessingPayment: false, openInvoice: { amountDue: 120 } }, customer: { billingLane: { monthlyBilled: true, monthlyDues: { base: 50 } } } };
+    const held = (reply) => drafter.replyQuotesUngroundedAmount(reply, ctx, { inboundMessage: 'How much?' });
+    expect(held('The total is $50.00.')).toBe(true);
+    expect(held('Your balance is $50.00.')).toBe(true);
+    expect(held('Your monthly plan is $50.00.')).toBe(true); // the figure is right but not the rendered wording
+    expect(held('Your monthly plan price is $50.00.')).toBe(false);
+    expect(held('Your account balance is $50.00.')).toBe(true); // the plan price in the balance sentence is no copy of anything rendered
+    expect(held('Your account balance is $120.00.')).toBe(false);
+    expect(held('Your invoice is $50.00.')).toBe(true);
+    expect(held('Your invoice is $120.00.')).toBe(true); // typed, not copied
+  } finally { if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev; }
 });

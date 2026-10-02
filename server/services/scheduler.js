@@ -55,7 +55,7 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
     const verdict = await recheck.outgoingAmountsStale(args);
     if (verdict.stale) return { stale: true, reason: verdict.reason || 'amount_recheck_failed' };
     if (!boundaryJudged) return { stale: false, reason: null };
-    return { stale: false, reason: null, boundary: { customerId: args.customerId, fingerprint, zelleInvoiceId: verdict.zelleInvoiceId || null, zelleDenial: verdict.zelleDenial || null } };
+    return { stale: false, reason: null, boundary: { customerId: args.customerId, fingerprint, zelle: verdict.zelle || null } };
   } catch (err) {
     logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
     return { stale: true, reason: 'amount_recheck_failed' };
@@ -5089,7 +5089,7 @@ function initScheduledJobs() {
               // BILLING at the same boundary (Codex round-50 P1): the rows the amount recheck judged are unchanged, and a Zelle offer's
               // invoice has no card / bank payment in flight
               billingBoundary
-                ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ ...billingBoundary, getBody: () => replayInput.body })
+                ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck(billingBoundary)
                 : undefined,
             );
           }

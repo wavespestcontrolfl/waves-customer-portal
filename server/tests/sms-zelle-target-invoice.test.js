@@ -1,7 +1,8 @@
 /**
  * Codex round-19 P1 (PR #5331): with several open invoices the Zelle fact / recheck is about the invoice the
  * customer's message NAMES (number, then a unique amount) — not always the newest — and a reference that
- * can't be tied to exactly one abstains. The resolved id is what the decision persists (zelleInvoiceId).
+ * can't be tied to exactly one abstains. The resolved id is what the decision persists (zelleInvoiceId). (Owner 2026-10-01 ~23:58Z: the
+ * target's live Zelle facts reach the model only as a rendered Zelle sentence; the Payment options line carries guidance, never a contact.)
  */
 const { resolveZelleTargetInvoice } = require('../services/zelle-target-invoice');
 
@@ -51,16 +52,16 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
     jest.resetModules();
   });
 
-  async function draft({ inboundMessage, open, visible = true }) {
+  async function draft({ inboundMessage, open, visible = true, noRecipient = false, gateOff = false }) {
     jest.resetModules();
-    process.env[GATE] = 'true';
-    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    if (gateOff) delete process.env[GATE]; else process.env[GATE] = 'true';
+    if (noRecipient) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = 'pay@example.com';
     process.env.SHADOW_DRAFT_VERIFY = 'false';
     process.env.SHADOW_FEWSHOT = 'false';
     const checked = [];
     const mockDb = jest.fn((table) => {
       if (table === 'message_drafts') return { insert: jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'draft-1' }]) })) };
-      if (table === 'invoices') return { where: jest.fn((w) => ({ first: jest.fn(async () => { checked.push(w.id); return { id: w.id, customer_id: 'customer-1', status: 'sent' }; }) })) };
+      if (table === 'invoices') return { where: jest.fn((w) => ({ first: jest.fn(async () => { checked.push(w.id); return { id: w.id, customer_id: 'customer-1', status: 'sent', invoice_number: (open.find((i) => i.id === w.id) || {}).invoiceNumber }; }) })) };
       throw new Error(`unexpected table: ${table}`);
     });
     jest.doMock('../models/db', () => mockDb);
@@ -105,10 +106,13 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
     { id: 'inv-1', invoiceNumber: 'WPC-2026-0101', status: 'overdue', amountDue: 210 },
   ];
 
-  test('the customer names the OLDER invoice: eligibility is checked on it and ITS id is persisted', async () => {
-    const { zelleInvoiceId, checked } = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open });
-    expect(checked).toEqual(['inv-1']);
+  const checkedIds = (checked) => [...new Set(checked)]; // (liveZelleFacts reads the invoice row twice: its number, then its eligibility)
+  test('the customer names the OLDER invoice: eligibility is checked on it, ITS id is persisted, and ITS Zelle sentence is rendered', async () => {
+    const { zelleInvoiceId, checked, factsBlock } = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open });
+    expect(checkedIds(checked)).toEqual(['inv-1']);
     expect(zelleInvoiceId).toBe('inv-1');
+    expect(factsBlock).toContain('  - You can pay invoice WPC-2026-0101 by Zelle to pay@example.com, with your name or the invoice number in the Zelle memo.');
+    expect(factsBlock).not.toContain('WPC-2026-0303 by Zelle');
   });
   test('drafting runs the pay page Zelle check READ-ONLY (Codex round-26 P1: an inbound question never writes charge-claim state)', async () => {
     const { payPageZelleVisibility } = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open });
@@ -116,27 +120,45 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
   });
   test('a unique amount also resolves it', async () => {
     const { zelleInvoiceId, checked } = await draft({ inboundMessage: 'Can I Zelle the $210?', open });
-    expect(checked).toEqual(['inv-1']);
+    expect(checkedIds(checked)).toEqual(['inv-1']);
     expect(zelleInvoiceId).toBe('inv-1');
   });
-  test('no reference with several open: NO Zelle fact, no invoice checked, nothing persisted', async () => {
+  test('no reference with several open: NO Zelle sentence, no invoice checked, nothing persisted', async () => {
     const { zelleInvoiceId, checked, factsBlock } = await draft({ inboundMessage: 'Can I pay by Zelle?', open });
     expect(checked).toEqual([]);
     expect(zelleInvoiceId).toBe(null);
-    // Codex round-25 P1: NEITHER offered NOR denied — the fact tells the model to ask which invoice
+    // Codex round-25 P1: NEITHER offered NOR denied - the fact tells the model to ask which invoice, and no Zelle sentence is rendered
     expect(factsBlock).toContain('SEVERAL open invoices');
-    expect(factsBlock).toContain('do not offer Zelle and do not say it is unavailable; ask which invoice');
-    expect(factsBlock).not.toContain('Zelle is not available for this account');
-    expect(factsBlock).not.toContain('or Zelle to pay@example.com');
+    expect(factsBlock).toContain('ask which invoice they want to pay (its number or amount); do not mention Zelle');
+    expect(factsBlock).not.toContain('by Zelle to');
+    expect(factsBlock).not.toContain("Zelle isn't available");
+    expect(factsBlock).not.toContain("We don't take Zelle");
+    expect(factsBlock).not.toContain('pay@example.com');
   });
   test('one open invoice: unchanged (that invoice)', async () => {
     const { zelleInvoiceId, checked } = await draft({ inboundMessage: 'Can I pay by Zelle?', open: [open[0]] });
-    expect(checked).toEqual(['inv-3']);
+    expect(checkedIds(checked)).toEqual(['inv-3']);
     expect(zelleInvoiceId).toBe('inv-3');
   });
-  test('the named invoice fails the pay page\'s Zelle check: not persisted either', async () => {
+  test('the named invoice fails the pay page\'s Zelle check: its id is still the persisted target, and the facts carry the unavailability sentence (never an offer)', async () => {
     const { zelleInvoiceId, factsBlock } = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open, visible: false });
-    expect(zelleInvoiceId).toBe(null);
+    expect(zelleInvoiceId).toBe('inv-1');
+    expect(factsBlock).toContain("  - Zelle isn't available for invoice WPC-2026-0101 right now.");
+    expect(factsBlock).not.toContain('by Zelle to');
+  });
+  test('gate off (v11): no target resolution, no invoice / Stripe read, no Zelle snapshot - byte-identical to main', async () => {
+    const r = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open, gateOff: true });
+    expect(r.checked).toEqual([]);
+    expect(r.payPageZelleVisibility).not.toHaveBeenCalled();
+    expect(r.zelleInvoiceId).toBe(null);
+    expect(r.factsBlock).not.toContain('Payment options');
+    expect(r.factsBlock).not.toContain('by Zelle to');
+  });
+  test('no Zelle recipient configured: the "we don\'t take Zelle" sentence is rendered and no invoice is read', async () => {
+    const r = await draft({ inboundMessage: 'Can I pay by Zelle?', open, noRecipient: true });
+    expect(r.checked).toEqual([]);
+    expect(r.factsBlock).toContain("  - We don't take Zelle right now.");
+    expect(r.factsBlock).not.toContain('pay@example.com');
   });
 });
 
@@ -167,34 +189,46 @@ describe('resolveZelleTargetInvoice with ONE open invoice', () => {
   });
 });
 
-describe('the Payment options fact for the three Zelle situations (Codex round-25 P1)', () => {
+describe('the Payment options fact for the Zelle situations (Codex round-25 P1; owner 2026-10-01: Zelle only as a rendered sentence)', () => {
   const { buildFactsBlock } = require('../services/sms-shadow-drafter');
   const GATE = 'GATE_SMS_REAL_ANSWERS';
-  const line = (extras) => {
+  const factsFor = (zelleFacts, extras) => {
     process.env[GATE] = 'true';
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     try {
-      return buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), ...extras })
-        .split('\n').find((l) => l.startsWith('- Payment options:'));
+      return buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [], ...(zelleFacts ? { zelleFacts } : {}) } }, { now: new Date('2026-09-29T15:00:00Z'), ...extras });
     } finally { delete process.env[GATE]; delete process.env.ZELLE_RECIPIENT; }
   };
-  test('eligible target => offered; ineligible single target => denied; ambiguous target => ask which invoice (neither)', () => {
-    expect(line({ zelleEligible: true })).toContain('or Zelle to pay@example.com');
-    expect(line({ zelleEligible: false })).toContain('Zelle is not available for this account right now');
-    const ambiguous = line({ zelleEligible: false, zelleTargetAmbiguous: true });
-    expect(ambiguous).toContain('ask which invoice they want to pay');
-    expect(ambiguous).not.toContain('or Zelle to');
-    expect(ambiguous).not.toContain('is not available');
-    expect(ambiguous.startsWith('- Payment options:')).toBe(true); // the sealed-eval marker line is unchanged
+  const line = (zelleFacts, extras) => factsFor(zelleFacts, extras).split('\n').find((l) => l.startsWith('- Payment options:'));
+  const OFFER = { state: 'offer', invoiceId: 'a', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' };
+  const COPY = 'for anything about Zelle, copy the Zelle sentence in Payment status sentences word for word; never write about Zelle any other way';
+  test('a rendered Zelle sentence (offer / invoice unavailable / not offered): the line says copy it, and never names the recipient itself', () => {
+    for (const facts of [OFFER, { ...OFFER, state: 'invoice_unavailable' }, { state: 'not_offered', invoiceId: null, invoiceNumber: null, recipient: null }]) {
+      const l = line(facts);
+      expect(l).toContain(COPY);
+      expect(l).not.toContain('pay@example.com');
+      expect(l.startsWith('- Payment options:')).toBe(true); // the sealed-eval marker line is unchanged
+    }
+    // the offer itself is a sentence in the block, with the live recipient
+    expect(factsFor(OFFER)).toContain('  - You can pay invoice WPC-2026-0001 by Zelle to pay@example.com, with your name or the invoice number in the Zelle memo.');
   });
-  test('no recipient configured: the "no Zelle configured" wording wins even if the target is ambiguous', () => {
-    process.env[GATE] = 'true';
-    delete process.env.ZELLE_RECIPIENT;
-    try {
-      const l = buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), zelleTargetAmbiguous: true })
-        .split('\n').find((x) => x.startsWith('- Payment options:'));
-      expect(l).toContain('no Zelle recipient is configured right now');
-    } finally { delete process.env[GATE]; }
+  test('an ambiguous target (several open invoices): ask which invoice, mention no Zelle', () => {
+    const ambiguous = line(null, { zelleTargetAmbiguous: true });
+    expect(ambiguous).toContain('SEVERAL open invoices');
+    expect(ambiguous).toContain('ask which invoice they want to pay (its number or amount); do not mention Zelle');
+    expect(ambiguous).not.toContain(COPY);
+    expect(ambiguous).not.toContain('pay@example.com');
+  });
+  test('no Zelle facts and no ambiguity (an unverifiable state, no target): mention no Zelle, say a teammate will confirm', () => {
+    const l = line({ state: null, invoiceId: 'a', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' });
+    expect(l).toContain('do not mention Zelle; if they ask about it, say a teammate will confirm');
+    expect(l).not.toContain(COPY);
+    expect(factsFor({ state: null, invoiceId: 'a', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' })).not.toContain('by Zelle to');
+  });
+  test('the rendered "not offered" sentence wins even if the target is ambiguous (no recipient configured => nothing to ask about)', () => {
+    const l = line({ state: 'not_offered', invoiceId: null, invoiceNumber: null, recipient: null }, { zelleTargetAmbiguous: true });
+    expect(l).toContain(COPY);
+    expect(l).not.toContain('SEVERAL');
   });
   test('the drafter marks a named-but-not-open invoice and an ambiguous amount as "ask" too; one open invoice and no open invoice are not', async () => {
     const { resolveZelleTargetInvoice: r } = require('../services/zelle-target-invoice');
@@ -216,23 +250,24 @@ describe('conflict vs ambiguity wording (Codex round-27 P2)', () => {
     process.env[GATE] = 'true';
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     try {
-      return buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), zelleEligible: false, ...extras })
+      return buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), ...extras })
         .split('\n').find((l) => l.startsWith('- Payment options:'));
     } finally { delete process.env[GATE]; delete process.env.ZELLE_RECIPIENT; }
   };
-  test('conflict: the named invoice is not open — target-specific, not "SEVERAL", not "unavailable"', () => {
+  test('conflict: the named invoice is not open — target-specific, not "SEVERAL", and no Zelle is mentioned', () => {
     const l = line({ zelleTargetConflict: true });
     expect(l).toContain('does NOT match an open invoice');
-    expect(l).toContain('do not offer Zelle for it and do not say Zelle is unavailable in general');
+    expect(l).toContain('tell them that invoice is not open and that the office can confirm which invoice they mean; do not mention Zelle');
     expect(l).not.toContain('SEVERAL');
     expect(l).not.toContain('ask which invoice');
-    expect(l).not.toContain('or Zelle to');
+    expect(l).not.toContain('pay@example.com');
     expect(l.startsWith('- Payment options:')).toBe(true);
   });
   test('genuine multiple-open ambiguity still asks which invoice', () => {
     const l = line({ zelleTargetAmbiguous: true });
     expect(l).toContain('SEVERAL open invoices');
     expect(l).toContain('ask which invoice');
+    expect(l).toContain('do not mention Zelle');
   });
   test('the drafter classifies the resolver reasons: with ONE open invoice a named-but-different invoice / amount is a conflict, never "several"', async () => {
     const draftFacts = async (inboundMessage, open) => {
@@ -463,17 +498,17 @@ describe('an unmodeled own invoice (legacy unpaid) leaves the Zelle target unres
     expect(r({ openInvoices: [], hasUnmodeledInvoice: true }, 'Can I pay by Zelle?')).toEqual({ invoiceId: null, reason: 'unmodeled_invoice' });
     expect(r({ openInvoices: [] }, 'Can I pay by Zelle?')).toEqual({ invoiceId: null, reason: 'no_open_invoice' });
   });
-  test('the facts neither offer nor deny Zelle for it, and never say "several open invoices"', () => {
+  test('the facts mention no Zelle for it (no sentence, "do not mention Zelle"), and never say "several open invoices"', () => {
     const GATE = 'GATE_SMS_REAL_ANSWERS';
     process.env[GATE] = 'true';
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     try {
       const { buildFactsBlock } = require('../services/sms-shadow-drafter');
-      const l = buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), zelleEligible: false, zelleTargetUnknown: true })
+      const l = buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), zelleTargetUnknown: true })
         .split('\n').find((x) => x.startsWith('- Payment options:'));
-      expect(l).toContain('needs the office to confirm');
+      expect(l).toContain('do not mention Zelle; if they ask about it, say a teammate will confirm');
       expect(l).not.toContain('or Zelle to');
-      expect(l).not.toContain('is not available');
+      expect(l).not.toContain('copy the Zelle sentence');
       expect(l).not.toContain('SEVERAL');
     } finally { delete process.env[GATE]; delete process.env.ZELLE_RECIPIENT; }
   });

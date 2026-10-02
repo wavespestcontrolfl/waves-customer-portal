@@ -798,7 +798,7 @@ function reserviceBookedHandoffCheck({ claim, reply, customerId }) {
 }
 
 /** The lane-specific sendCustomerMessage input for a claimed reply. */
-function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint = undefined, zelleDenial = null }) {
+function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint = undefined, zelle = null }) {
   const parkedIds = claim.parkedIds || [];
   const laneFields = gratitudeLane ? {
     providerPreSendCheck: checkHandoff,
@@ -840,7 +840,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
         labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply }),
         // Codex round-49 P1: a billing reply's rows must be exactly as they were before its recheck (one read on the handoff connection)
         billingFingerprint !== undefined
-          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelleInvoiceId: claim.zelleInvoiceId || null, zelleDenial, getBody: () => reply })
+          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelle })
           : undefined,
         laneFields.providerPreSendCheck,
       );
@@ -875,82 +875,35 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
 // BILLING rechecks of an auto-send reply (PR #5331): Zelle offer, Zelle denial, payment status. Returns null when the reply may go
 // on, else { reason, note } - the caller marks it not sent and reopens the suggestion with that note.
 async function autoSendBillingRecheck({ claim, reply, customerId, inboundMessage }) {
-  // a denial that stands carries its invoice + PaymentIntent baseline to the provider-boundary check (Codex round-51 P2)
-  let zelleDenial = null;
-  // Zelle send-time recheck (pre-push audit P1, finding 2; widened round 3,
-  // finding 1): autoSendReadiness's hasPriceQuote check (3.7) refuses any
-  // reply with a dollar figure before the claim, but a "You can Zelle to X"
-  // — or even a contact-free "Yes, you can use Zelle" — reply carries no
-  // dollar amount at all and would otherwise reach the provider with no
-  // recheck. Checked for any AFFIRMATIVE Zelle mention (hasAffirmativeZelleMention
-  // — a cheap regex, independent of the amount-grounding machinery below it
-  // in sms-amount-recheck.js; negative copy like "we don't take Zelle"
-  // never trips it) — recipient staleness first (outgoingZelleStale, shared
-  // with the other two send seams), then the SAME invoice-eligibility
-  // recheck fetchZelleEligibility ran at draft time (zelleInvoiceStillEligible):
-  // re-runs isZelleTransferEligible against claim.zelleInvoiceId's CURRENT
-  // state. Fails closed on a paid-off invoice, a started saved-card charge/PI,
-  // a missing snapshot, or any error. Same supersede-via-failClaim mechanism
-  // as the OPEN TIMES recheck.
-  const { outgoingZelleStale, hasAffirmativeZelleMention, zelleInvoiceStillEligible } = require('./sms-amount-recheck');
-  if (hasAffirmativeZelleMention(reply)) {
-    // Codex round-13 P1: a THROWING recheck fails closed with its own reason and
-    // releases the claim (notSent + reopenParked below) — never a generic send_error.
-    let zelleEligibility;
-    try {
-      const zelleContact = outgoingZelleStale(reply);
-      zelleEligibility = zelleContact.stale
-        ? { eligible: false, reason: zelleContact.reason }
-        : await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: claim.zelleInvoiceId || null });
-    } catch (err) {
-      logger.warn(`[sms-auto-send] Zelle recheck threw (decision ${claim.decisionId}): ${err.message}`);
-      zelleEligibility = { eligible: false, reason: 'zelle_recheck_failed' };
+  // THE MONEY-SENTENCE CONTRACT (owner 2026-10-01 ~23:58Z): a real-answers reply may state a payment status, a dollar figure or anything
+  // about Zelle only by copying a sentence its snapshot recorded, every copy must still be rendered NOW (a Zelle copy: same recipient,
+  // same live eligibility of its invoice), and an autonomous payment-scoped reply carries nothing but copies and inert text. An older
+  // prompt's reply that names a Zelle contact gets the staff-path check (current recipient, an invoice that still takes Zelle).
+  // A throwing recheck fails closed with its own reason (Codex round-13 P1). Same supersede-via-failClaim mechanism as the rechecks above.
+  const recheck = require('./sms-amount-recheck');
+  const v12 = typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12');
+  try {
+    if (v12) {
+      const verdict = await recheck.paymentStatusVerdict({ customerId, body: reply, snapshot: claim.paymentStatusSnapshot || null, inboundMessage, autoSend: true });
+      if (verdict.reason) {
+        logger.warn(`[sms-auto-send] money content held (decision ${claim.decisionId}): ${verdict.reason}`);
+        return { reason: verdict.reason, note: 'Auto-send held: a payment or price statement is no longer accurate — suggestion reopened.' };
+      }
+      return verdict.zelle ? { zelle: verdict.zelle } : null;
     }
-    if (!zelleEligibility.eligible) {
-      logger.warn(`[sms-auto-send] Zelle recheck failed (decision ${claim.decisionId}): ${zelleEligibility.reason}`);
-      return { reason: zelleEligibility.reason, note: 'Auto-send held: the payment instructions are no longer valid — suggestion reopened.' };
+    if (/\bzelle\b/i.test(String(reply || ''))) {
+      const verdict = await recheck.outgoingAmountsStale({ customerId, body: reply, promptVersion: claim.promptVersion || null, zelleInvoiceId: claim.zelleInvoiceId || null, inboundMessage, trustOwedAmounts: true });
+      if (verdict.stale) {
+        logger.warn(`[sms-auto-send] Zelle recheck failed (decision ${claim.decisionId}): ${verdict.reason}`);
+        return { reason: verdict.reason, note: 'Auto-send held: the payment instructions are no longer valid — suggestion reopened.' };
+      }
+      return verdict.zelle ? { zelle: verdict.zelle } : null;
     }
+  } catch (err) {
+    logger.warn(`[sms-auto-send] money recheck threw (decision ${claim.decisionId}): ${err.message}`);
+    return { reason: 'payment_status_recheck_failed', note: 'Auto-send held: a payment or price statement could not be rechecked — suggestion reopened.' };
   }
-  // Codex round-18 P2: a DENIAL ("Zelle isn't available right now") is a live claim too — if Zelle became
-  // available since the draft, the denial is stale. (Guarded: partial test doubles omit the helper.)
-  const zelleDenialRecheck = require('./sms-amount-recheck');
-  // Independent of the offer branch above (Codex round-32 P2): a reply holding BOTH an offer and a denial rechecks both.
-  if (typeof zelleDenialRecheck.hasNegativeZelleAvailabilityClaim === 'function'
-      && zelleDenialRecheck.hasNegativeZelleAvailabilityClaim(reply)) {
-    let denial;
-    try {
-      const denialBody = typeof zelleDenialRecheck.zelleClauseTexts === 'function' ? zelleDenialRecheck.zelleClauseTexts(reply).denialText : reply;
-      denial = await zelleDenialRecheck.zelleDenialStale({ customerId, inboundMessage, body: denialBody });
-    } catch (err) {
-      logger.warn(`[sms-auto-send] Zelle denial recheck threw (decision ${claim.decisionId}): ${err.message}`);
-      denial = { stale: true, reason: 'zelle_recheck_failed' };
-    }
-    if (denial.stale) {
-      logger.warn(`[sms-auto-send] Zelle denial stale (decision ${claim.decisionId}): ${denial.reason}`);
-      return { reason: denial.reason, note: 'Auto-send held: Zelle availability changed since the draft — suggestion reopened.' };
-    }
-    zelleDenial = denial.zelleDenial || null;
-  }
-  // PAYMENT STATUS recheck (owner ruling 2026-10-01): (3.7) above refuses any DOLLAR-bearing reply before the claim, but a status
-  // sentence with no figure ("Your account has no balance due.") clears that guard and would reach the provider unchecked.
-  // A real-answers reply may state a payment / invoice / refund / balance status only by copying a sentence its snapshot
-  // recorded, and every copied sentence must still be one the records render NOW; anything else is held. Same
-  // supersede-via-failClaim mechanism as the rechecks above.
-  if (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12')) {
-    const { paymentStatusSendBlockReason } = require('./sms-amount-recheck');
-    let statusReason;
-    try {
-      statusReason = await paymentStatusSendBlockReason({ customerId, body: reply, snapshot: claim.paymentStatusSnapshot || null, inboundMessage, autoSend: true });
-    } catch (err) {
-      logger.warn(`[sms-auto-send] payment-status recheck threw (decision ${claim.decisionId}): ${err.message}`);
-      statusReason = 'payment_status_recheck_failed';
-    }
-    if (statusReason) {
-      logger.warn(`[sms-auto-send] payment status held (decision ${claim.decisionId}): ${statusReason}`);
-      return { reason: statusReason, note: 'Auto-send held: a payment status statement is no longer accurate — suggestion reopened.' };
-    }
-  }
-  return zelleDenial ? { zelleDenial } : null;
+  return null;
 }
 
 /**
@@ -1080,7 +1033,7 @@ async function autoSendBillingPhase({ claim, reply, customerId, inboundMessage }
     logger.warn(`[sms-auto-send] billing recheck held (decision ${claim.decisionId}): ${billingHold.reason}`);
     return { refusal: { reason: billingHold.reason, note: billingHold.note } };
   }
-  return { billingFingerprint, zelleDenial: billingHold?.zelleDenial || null };
+  return { billingFingerprint, zelle: billingHold?.zelle || null };
 }
 
 // Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
@@ -1095,7 +1048,7 @@ async function bookedReserviceRefusal({ claim, reply, customerId }) {
 // The recheck sequence before provider entry, in the order that matters: the async live-ETA read comes before billing, and the
 // booked-callback read is LAST (Codex #5334 P2: booking state that changes while the ETA read was in flight is still caught, so the
 // last async read before provider entry is the booked-callback one). Returns { refusal } on the first refusal, else
-// { billingFingerprint, zelleDenial } for the provider-boundary check.
+// { billingFingerprint, zelle } for the provider-boundary check.
 async function autoSendPreSendRechecks({ claim, gratitudeLane, reply, customerId, inboundMessage }) {
   for (const phase of [openTimesRefusal, labelFactsRefusal, liveEtaRefusal]) {
     const refusal = await phase({ claim, reply });
@@ -1159,7 +1112,7 @@ async function dispatchClaimedSend({
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
-    result = await sendCustomerMessage(autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint: rechecks.billingFingerprint, zelleDenial: rechecks.zelleDenial }));
+    result = await sendCustomerMessage(autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff, billingFingerprint: rechecks.billingFingerprint, zelle: rechecks.zelle }));
   } catch (err) {
     if (!isRealProviderSend(err?.providerOutcome) && !isAmbiguousProviderOutcome(err?.providerOutcome)) {
       const outcome = await notSent('send_error', `send threw: ${err.message}`);
