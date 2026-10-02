@@ -48,6 +48,7 @@ const {
 // return value from `v2` and never rides in report_contract or any
 // customer-facing response.
 const { identifyPestV2 } = require('../services/photo-id-v2/pest-engine');
+const { identifyPlantV2 } = require('../services/photo-id-v2/plant-engine');
 const speciesCatalog = require('../services/species-catalog');
 const lawnAssessment = require('../services/lawn-assessment');
 const { loadCustomerGrassContext, grassTypeLabel } = require('../services/lawn-grass-context');
@@ -812,6 +813,45 @@ const LAWN_PARTIAL_RESULT = {
   observations: "We couldn't analyze every photo you sent — send these to our team and we'll take a personal look.",
 };
 
+// Owner 2026-10-02 ("same as pest"): with GATE_PHOTO_ID_V2 on, the app's lawn
+// and tree/shrub/palm Photo ID also read with the plant engine's Gemini-only
+// workup and send its `v2` object, which the app's workup card renders. Palm
+// has no route of its own: the app posts it to /tree_shrub with subject
+// 'palm'. The v1 scores keep being computed and stored (owner 2026-09-28,
+// decision 3), in parallel. A v2 failure answers the same 503 as a v1 miss,
+// never a silent v1-only card.
+function plantSubjectFor(type, body) {
+  if (type === 'lawn') return 'lawn';
+  return body && body.subject === 'palm' ? 'palm' : 'tree_shrub';
+}
+
+function plantChipsFrom(body) {
+  const chips = body && body.chips;
+  return chips && typeof chips === 'object' && !Array.isArray(chips) ? chips : {};
+}
+
+function runPlantV2(req, type, context = {}) {
+  return identifyPlantV2({
+    photos: req._photoInputs,
+    subject: plantSubjectFor(type, req.body),
+    chips: plantChipsFrom(req.body),
+    context,
+    mode: 'workup',
+    ladder: 'gemini_only',
+  }).catch((err) => {
+    logger.warn(`[photo-id] plant v2 failed: ${err.message}`);
+    return { ok: false, reason: 'engine_error' };
+  });
+}
+
+// A stored plant v2 answer is served back only while the gate is on (the
+// same kill switch as pest): off, every row shows its v1 card again.
+function storedPlantV2(value) {
+  if (!isEnabled('photoIdV2') || value == null) return null;
+  const v2 = parseJsonSafe(value, null);
+  return v2 && v2.answer ? v2 : null;
+}
+
 async function handleLawn(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
   // codex GH r10 P1: loadCustomerGrassContext is account-wide by design —
@@ -832,9 +872,17 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
     ? { grassType: grassContext.grassTypeLabel || undefined, irrigation: grassContext.irrigationSystem || undefined }
     : {};
 
-  const analyses = await Promise.all(photoInputs.map((photo) => lawnAssessment
-    .analyzePhoto(photo.data, photo.mimeType, context)
-    .catch((err) => { logger.warn(`[photo-id] lawn analyzePhoto failed: ${err.message}`); return null; })));
+  const v2Enabled = isEnabled('photoIdV2');
+  const plantContext = grassContext && grassContext.grassType ? { grass_type_on_file: grassContext.grassType } : {};
+  const [analyses, v2Result] = await Promise.all([
+    Promise.all(photoInputs.map((photo) => lawnAssessment
+      .analyzePhoto(photo.data, photo.mimeType, context)
+      .catch((err) => { logger.warn(`[photo-id] lawn analyzePhoto failed: ${err.message}`); return null; }))),
+    v2Enabled ? runPlantV2(req, 'lawn', plantContext) : null,
+  ]);
+  if (v2Result && !v2Result.ok) {
+    return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
+  }
   // codex GH r4+r6 P1: a composite object existing is not the same as it
   // carrying any usable evidence — analyzePhoto's OWN merge defaults a
   // missing numeric field to a real 0 and a missing categorical field to
@@ -843,7 +891,8 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   // instead — see lawnRawResultHasEvidence.
   const withEvidence = analyses.filter((a) => a && (lawnRawResultHasEvidence(a.claude) || lawnRawResultHasEvidence(a.gemini)));
   const composites = withEvidence.map(lawnSanitizeScoreFields).filter(Boolean);
-  if (!composites.length) {
+  // With v2 answering, missing v1 scores only leave the stored scores empty.
+  if (!composites.length && !v2Result) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }
   // codex r3 P1: a trouble-spot photo failing while an overview photo
@@ -852,7 +901,7 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   // partial scores say.
   const partial = composites.length < photoInputs.length;
 
-  const merged = mergeLawnComposites(composites);
+  const merged = composites.length ? mergeLawnComposites(composites) : {};
   const lawnResult = lawnPublicResult(merged);
 
   const [row] = await db('lawn_diagnostics').insert({
@@ -861,8 +910,13 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
     source: 'portal',
     customer_id: req.customer.id,
     property_id: propertyId,
-    ai_analysis: JSON.stringify({ customer_note: note, composite: merged, partial }),
-    report_contract: JSON.stringify({ contract_version: 'lawn_photo_id_v1', result: lawnResult, partial }),
+    // `internal` (models, escalation reasons) stays in this admin-only column.
+    ai_analysis: JSON.stringify({
+      customer_note: note, composite: merged, partial, ...(v2Result ? { engine: 'v2', internal: v2Result.internal } : {}),
+    }),
+    report_contract: JSON.stringify({
+      contract_version: 'lawn_photo_id_v1', result: lawnResult, partial, ...(v2Result ? { v2: v2Result.v2 } : {}),
+    }),
     ai_summary: lawnResult.observations ? String(lawnResult.observations).slice(0, 2000) : null,
     note,
     location,
@@ -898,6 +952,7 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
 
   return res.status(200).json({
     id: row.id, type: 'lawn', created_at: row.created_at, result: finalLawnResult, next_step: nextStep,
+    ...(v2Result ? { v2: v2Result.v2 } : {}),
   });
 }
 
@@ -1007,12 +1062,21 @@ async function previewTreeShrubWithEvidence(photoInputs) {
 
 async function handleTreeShrub(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
-  const preview = await previewTreeShrubWithEvidence(photoInputs)
-    .catch((err) => { logger.warn(`[photo-id] tree-shrub preview failed: ${err.message}`); return null; });
+  const v2Enabled = isEnabled('photoIdV2');
+  const [scoredPreview, v2Result] = await Promise.all([
+    previewTreeShrubWithEvidence(photoInputs)
+      .catch((err) => { logger.warn(`[photo-id] tree-shrub preview failed: ${err.message}`); return null; }),
+    v2Enabled ? runPlantV2(req, 'tree_shrub') : null,
+  ]);
 
-  if (!preview) {
+  if ((v2Result && !v2Result.ok) || (!scoredPreview && !v2Result)) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }
+  // With v2 answering, missing v1 scores only leave the stored scores empty
+  // (and the v1 twin unreliable).
+  const preview = scoredPreview || {
+    scores: {}, observations: null, plantGroups: [], scoredCount: 0, photoCount: photoInputs.length, trackingCount: 0,
+  };
 
   const treeResult = buildCustomerTreeShrubReport(preview);
   // codex r3 P1: a photo that failed to score (scoredCount < photoCount)
@@ -1062,6 +1126,7 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
     confirmed_by_tech: false,
     note,
     location,
+    ...(v2Result ? { result_v2: JSON.stringify(v2Result.v2), v2_internal: JSON.stringify(v2Result.internal) } : {}),
   }).returning(['id', 'created_at']);
 
   await storeTreeShrubCustomerPhotos({
@@ -1089,6 +1154,7 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
 
   return res.status(200).json({
     id: row.id, type: 'tree_shrub', created_at: row.created_at, result: finalTreeResult, next_step: nextStep,
+    ...(v2Result ? { v2: v2Result.v2 } : {}),
   });
 }
 
@@ -1228,9 +1294,16 @@ function pestHeadline(row) {
   }
 }
 
+function treeHeadline(row) {
+  const v2 = storedPlantV2(row.result_v2);
+  return (v2 && v2.answer.headline) || 'Tree & shrub check';
+}
+
 function lawnHeadline(row) {
   try {
     const contract = parseJsonSafe(row.report_contract);
+    const v2 = storedPlantV2(contract.v2);
+    if (v2) return v2.answer.headline || 'Lawn check';
     const grass = contract?.result?.grass_type;
     return grass ? `Lawn check — ${grass}` : 'Lawn check';
   } catch {
@@ -1314,7 +1387,7 @@ router.get('/', async (req, res, next) => {
         ...(issuesEnabled ? ['issue_id', 'observed_on'] : []),
       ),
       lawnQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract'),
-      treeQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'overall_score', 'composite_scores'),
+      treeQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'overall_score', 'composite_scores', 'result_v2'),
     ]);
 
     const access = await reserviceStreamlineAccess(customerId);
@@ -1329,7 +1402,7 @@ router.get('/', async (req, res, next) => {
         next_step_kind: lawnNextStepKindFromRow(row, access, scope.isSecondary),
       })),
       ...treeRows.map((row) => ({
-        id: row.id, type: 'tree_shrub', created_at: row.created_at, headline: 'Tree & shrub check',
+        id: row.id, type: 'tree_shrub', created_at: row.created_at, headline: treeHeadline(row),
         next_step_kind: treeNextStepKindFromRow(row, access, scope.isSecondary),
       })),
     ];
@@ -1386,8 +1459,10 @@ router.get('/:type/:id', async (req, res, next) => {
         prefill: prefillFor('lawn', kind, { location: row.location, note: row.note }),
       });
       const { result: finalLawnResult } = finalizeCustomerResult('lawn', { complete: !lawnUnreliable, build: () => lawnResult });
+      const v2 = storedPlantV2(contract.v2);
       return res.status(200).json({
         id: row.id, type: 'lawn', created_at: row.created_at, result: finalLawnResult, next_step: nextStep, photos,
+        ...(v2 ? { v2 } : {}),
       });
     }
 
@@ -1407,8 +1482,10 @@ router.get('/:type/:id', async (req, res, next) => {
       complete: !treeShrubIsUnreliable(row),
       build: () => treeResult,
     });
+    const treeV2 = storedPlantV2(row.result_v2);
     return res.status(200).json({
       id: row.id, type: 'tree_shrub', created_at: row.created_at, result: finalTreeResult, next_step: nextStep, photos,
+      ...(treeV2 ? { v2: treeV2 } : {}),
     });
   } catch (err) {
     return next(err);
