@@ -26,7 +26,7 @@
 
 const path = require('path');
 const {
-  OVERDUE_SOURCES, OVERDUE_PURPOSES, isOverdueReminderRow, collapseDunningReminderEvents,
+  OVERDUE_SOURCES, OVERDUE_PURPOSES, isOverdueReminderRow, countsAsSent, collapseDunningReminderEvents,
 } = require(path.join(__dirname, '..', 'services', 'collections', 'dunning-spacing'));
 
 const TAG = '[dunning-customer-timeline]';
@@ -156,30 +156,56 @@ const compareRows = (a, b) => {
   return String(a.id ?? '').localeCompare(String(b.id ?? ''));
 };
 
+// dunning-spacing.js's own event key and keyless sibling key (collapseDunningReminderEvents), so a
+// touch here is the same set of rows the spacing rule collapses into one event.
+const eventKeyOf = (row) => {
+  const raw = metadataOf(row).notificationEventKey;
+  return typeof raw === 'string' && raw.trim() ? raw : null;
+};
+const siblingKeyOf = (row) => {
+  const ids = parseJson(row?.invoice_ids, null);
+  return JSON.stringify([row.source, Array.isArray(ids) ? ids.map(String).sort() : []]);
+};
+
 /**
- * Group ledger rows into TOUCHES the way the spacing rule does: the legs of one
- * touch share a notificationEventKey; a keyless row joins the earlier keyless
- * touch of the same source and invoice set that began within 15 minutes.
+ * Group ledger rows into TOUCHES exactly as the spacing rule groups its events
+ * (Codex #5599 r2 P1): the counted rows first, by the rule's own grouping (one
+ * notificationEventKey is one touch; a keyless row joins the touch of the same
+ * source and invoice set whose first counted leg began within 15 minutes).
+ * A failed row then joins the touch it belongs to (same key, or a keyless
+ * sibling within 15 minutes), else a touch of failed rows of its own.
  */
 function groupTouches(sortedRows) {
   const byKey = new Map();
-  const keyless = new Map();
+  const keyless = new Map(); // sibling key -> touches, in start order
   const touches = [];
-  for (const row of sortedRows) {
-    const rawKey = metadataOf(row).notificationEventKey;
-    const key = typeof rawKey === 'string' && rawKey.trim() ? rawKey.trim() : null;
+  const open = (startedAt) => { const touch = { rows: [], startedAt }; touches.push(touch); return touch; };
+  const keylessTouch = (row, at, { counted }) => {
+    const list = keyless.get(siblingKeyOf(row)) || [];
+    keyless.set(siblingKeyOf(row), list);
+    const near = counted
+      ? (list.length && at - list[list.length - 1].startedAt <= SIBLING_WINDOW_MS ? list[list.length - 1] : null)
+      : list.find((t) => Math.abs(at - t.startedAt) <= SIBLING_WINDOW_MS) || null;
+    if (near) return near;
+    const touch = open(at);
+    list.push(touch);
+    return touch;
+  };
+  const place = (row, { counted }) => {
+    const at = new Date(row.occurred_at).getTime();
+    const key = eventKeyOf(row);
     let touch;
     if (key) {
-      touch = byKey.get(key);
-      if (!touch) { touch = { rows: [] }; byKey.set(key, touch); touches.push(touch); }
+      touch = byKey.get(key) || open(at);
+      byKey.set(key, touch);
     } else {
-      const siblingKey = JSON.stringify([row.source, invoiceIdsOf(row)]);
-      const open = keyless.get(siblingKey);
-      if (open && new Date(row.occurred_at).getTime() - new Date(open.rows[0].occurred_at).getTime() <= SIBLING_WINDOW_MS) touch = open;
-      else { touch = { rows: [] }; keyless.set(siblingKey, touch); touches.push(touch); }
+      touch = keylessTouch(row, at, { counted });
     }
     touch.rows.push(row);
-  }
+  };
+  for (const row of sortedRows) if (countsAsSent(row)) place(row, { counted: true });
+  for (const row of sortedRows) if (!countsAsSent(row)) place(row, { counted: false });
+  for (const touch of touches) touch.rows.sort(compareRows);
   return touches;
 }
 
@@ -196,18 +222,22 @@ function annotateAttempts(rows) {
   const sorted = [...(rows || [])].filter((row) => validDate(row.occurred_at) && isOverdueReminderRow(row)).sort(compareRows);
   const touches = groupTouches(sorted);
   const touchOf = new Map();
-  for (const [index, touch] of touches.entries()) {
-    touch.number = index + 1;
-    for (const row of touch.rows) touchOf.set(row, touch);
-  }
+  for (const touch of touches) for (const row of touch.rows) touchOf.set(row, touch);
   const gapByLead = new Map();
   let previousAt = null;
   for (const event of collapseDunningReminderEvents(sorted)) {
     const eventAt = new Date(event.occurred_at);
     gapByLead.set(event, previousAt ? (eventAt.getTime() - previousAt.getTime()) / DAY_MS : null);
     previousAt = eventAt;
+    touchOf.get(event).at = eventAt;
   }
   const countedTouches = new Set([...gapByLead.keys()].map((row) => touchOf.get(row)));
+  // Touch numbers follow the rule's event order (a counted touch is placed at its counted time); a touch
+  // with no counted leg is placed at its first attempt.
+  const placedAt = (touch) => (touch.at || new Date(touch.rows[0].occurred_at)).getTime();
+  [...touches]
+    .sort((x, y) => placedAt(x) - placedAt(y) || compareRows(x.rows[0], y.rows[0]))
+    .forEach((touch, index) => { touch.number = index + 1; });
   return sorted.map((row) => {
     const isLead = gapByLead.has(row);
     const gapDays = isLead ? gapByLead.get(row) : null;

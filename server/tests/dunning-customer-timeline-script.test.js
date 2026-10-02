@@ -118,6 +118,25 @@ describe('annotateAttempts: the gap since the previous reminder the spacing rule
     expect(out.map((a) => a.gapDays)).toEqual([null, null, 5]);
     expect(out.map((a) => a.underSpacing)).toEqual([false, false, true]);
     expect(out.every((a) => a.gapDays == null || a.gapDays >= 0)).toBe(true);
+    // Codex #5599 r2 P1: touch numbers follow the rule's event order. B is the first touch the rule
+    // counts; A's failed first leg and its later delivered leg are both touch 2, never a touch#1 that
+    // runs backward past touch#2.
+    expect(out.map((a) => a.touch)).toEqual([2, 1, 2]);
+    expect(out.map((a) => a.sameTouch)).toEqual([true, false, false]);
+  });
+
+  test('keyless: a failed leg joins its counted sibling; a lone failed touch is numbered at its attempt', () => {
+    const rows = [
+      ledger({ when: '2026-07-01T14:00:00Z', source: 'late_payment_checker', channel: 'sms', meta: { send_failed: true } }),
+      ledger({ when: '2026-07-01T14:02:00Z', source: 'late_payment_checker', channel: 'email', meta: { delivered: true } }),
+      ledger({ when: '2026-07-04T14:00:00Z', source: 'late_payment_checker', channel: 'email', meta: { send_failed: true } }),
+      ledger({ when: '2026-07-20T14:00:00Z', source: 'late_payment_checker', channel: 'email', meta: { delivered: true } }),
+    ];
+    const out = Timeline.annotateAttempts(rows);
+    expect(out.map((a) => a.touch)).toEqual([1, 1, 2, 3]);
+    expect(out.map((a) => a.sameTouch)).toEqual([true, false, false, false]);
+    expect(out.map((a) => a.counted)).toEqual([false, true, false, true]);
+    expect(out[3].gapDays).toBeCloseTo(19 - 2 / 1440, 5);
   });
 
   test('the legs of one touch are one touch: the gap is on the latest leg, as the spacing rule times it, and the other leg says same touch', () => {
