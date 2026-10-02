@@ -1078,3 +1078,18 @@ describe('a contradicted "same as last time" is no flag', () => {
     expect(out.products[0].sameAsLast).toBe(false);
   });
 });
+
+describe('spoken numbers past a hundred', () => {
+  test.each([['one hundred ten', 110], ['a hundred and twelve', 112], ['one hundred nineteen', 119], ['one hundred five', 105]])('"%s" is %p, never its tail', (words, value) => {
+    const t = `Used ${words} ounces of Taurus.`;
+    const run = (amount) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t).products[0].amount;
+    expect(run(value)).toBe(value);
+    expect(run(value - 100)).toBeNull();
+  });
+});
+
+test('"same as last time" does not cross a "but" to another product', () => {
+  const t = 'Taurus same as last time, but Talstar was a new product today.';
+  const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Talstar was a new product today' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+});

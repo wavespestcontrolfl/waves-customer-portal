@@ -392,7 +392,9 @@ function readWholeWords(tokens, i) {
   const tens = value >= 100 ? own(TENS, tokens[j]) : undefined;
   if (tens !== undefined) { value += tens; j += 1; }
   const ones = own(ONES, tokens[j]);
-  if (ones > 0 && ones < 10 && value % 10 === 0 && value > 0) { value += ones; j += 1; }
+  // "one hundred ten" is 110, never 100 then 10
+  const teen = tens === undefined && value >= 100 && value % 100 === 0 && ones >= 10;
+  if (teen || (ones > 0 && ones < 10 && value % 10 === 0 && value > 0)) { value += ones; j += 1; }
   return { value, next: j };
 }
 
@@ -534,10 +536,12 @@ function pushUnclear(unclear, heard, reason) {
 // time, Taurus, Talstar and the surfactant" covers every product it lists, so
 // the same-as-last words are looked for in the whole sentence, never across
 // sentences.
+// A contrast ("Taurus same as last time, but Talstar was new") ends the span.
 function sentenceOf(transcript, heard) {
   const first = norm(String(heard).split(/\.{3}|…/)[0]);
   if (!first) return '';
-  return String(transcript || '').split(/(?<=[.!?])\s+/).find((sentence) => ` ${norm(sentence)} `.includes(` ${first} `)) || '';
+  return String(transcript || '').split(/(?<=[.!?])\s+|\b(?:but|except|however|whereas)\b/i)
+    .find((part) => part && ` ${norm(part)} `.includes(` ${first} `)) || '';
 }
 
 // The amount as the schema carries it: 0 / '' / missing is "not spoken" (nothing
