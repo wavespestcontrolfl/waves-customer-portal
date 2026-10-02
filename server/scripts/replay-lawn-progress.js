@@ -34,6 +34,7 @@ const fs = require('fs');
 const {
   buildLawnProgress, deriveAssessmentConfidence, scoresFromAssessmentRow, STATES, CATEGORY_BAND, OVERALL_BAND,
 } = require('../services/service-report/lawn-progress');
+const { selectPriorVisit } = require('../services/service-report/lawn-visit-memory');
 const { createAuditKnex } = require('./audit-lawn-expectation-products');
 
 const BEHIND_WARN_SHARE = 0.25; // W5: re-check calibration above about 25 percent
@@ -342,9 +343,14 @@ async function loadReplayRows(db) {
     for (const a of assessments) {
       const h = await historyForAssessment({ id: a.id, customer_id: a.customer_id }, { knex: trx });
       const installed = h.current && String(h.current.id) === String(a.id);
+      // The prior exactly as the report picks it: history rows dated by their
+      // visit (report-data resolveLawnAssessmentAndHistory), then
+      // selectPriorVisit (strictly earlier day, has a service record).
+      const historyRows = (h.rows || []).map((row) => ({ ...row, service_date: row.visit_date }));
+      const priorVisit = installed ? selectPriorVisit(historyRows, a.id) : null;
       canonicalBy.set(a.id, {
         superseded: !installed,
-        priorId: installed && h.previous ? String(h.previous.id) : null,
+        priorId: priorVisit ? priorVisit.assessmentId : null,
         isBaseline: installed ? h.isBaseline : false,
         date: installed && h.current.visit_date ? h.current.visit_date : a.date,
       });

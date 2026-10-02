@@ -226,7 +226,7 @@ describe('loadReplayRows', () => {
     };
     const db = { transaction: jest.fn(async (fn, opts) => fn(trx, opts)) };
     historyForAssessment.mockReset();
-    historyForAssessment.mockResolvedValue({ current: { id: 'a1', visit_date: '2026-05-01' }, previous: null, isBaseline: false });
+    historyForAssessment.mockResolvedValue({ current: { id: 'a1', visit_date: '2026-05-01' }, rows: [{ id: 'a1', visit_date: '2026-05-01', service_record_id: 'r1' }], previous: null, isBaseline: false });
     const rows = await loadReplayRows(db);
     expect(historyForAssessment).toHaveBeenCalledWith({ id: 'a1', customer_id: 'c1' }, { knex: trx });
     expect(db.transaction.mock.calls[0][1]).toEqual({ readOnly: true });
@@ -259,15 +259,21 @@ describe('loadReplayRows', () => {
     const db = { transaction: jest.fn(async (fn, opts) => fn(trx, opts)) };
     historyForAssessment.mockReset();
     // v2a and v2b are two attempts of one visit (appointment 2026-06-01); v2b is installed.
+    // v0 is a same-day visit before v1 (never a prior); v1x has no service record (never a prior).
+    const H1 = { id: 'v1', visit_date: '2026-05-01', service_record_id: 'r-v1' };
+    const H2 = { id: 'v2b', visit_date: '2026-06-01', service_record_id: 'r-v2' };
+    const SAME_DAY = { id: 'v2-same', visit_date: '2026-06-01', service_record_id: 'r-same' };
+    const NO_RECORD = { id: 'v1x', visit_date: '2026-05-15', service_record_id: null };
     historyForAssessment.mockImplementation(async ({ id }) => ({
-      v1: { current: { id: 'v1', visit_date: '2026-05-01' }, previous: null, isBaseline: true },
-      v2a: { current: { id: 'v2b', visit_date: '2026-06-01' }, previous: { id: 'v1' }, isBaseline: false },
-      v2b: { current: { id: 'v2b', visit_date: '2026-06-01' }, previous: { id: 'v1' }, isBaseline: false },
+      v1: { current: H1, rows: [H1], previous: null, isBaseline: true },
+      v2a: { current: H2, rows: [H1, NO_RECORD, SAME_DAY, H2], previous: SAME_DAY, isBaseline: false },
+      v2b: { current: H2, rows: [H1, NO_RECORD, SAME_DAY, H2], previous: SAME_DAY, isBaseline: false },
     }[id]));
     const rows = await loadReplayRows(db);
     const by = Object.fromEntries(rows.map((r) => [r.id, r]));
     expect(by.v1).toMatchObject({ isBaseline: true, priorId: null, superseded: false });
     expect(by.v2a).toMatchObject({ superseded: true, priorId: null });
+    // The report's selector: not the same-day row, not the row with no record.
     expect(by.v2b).toMatchObject({ superseded: false, priorId: 'v1', date: '2026-06-01' });
     const pairs = pairAssessments(rows);
     expect(pairs.map((p) => [p.current.id, p.prior?.id || null])).toEqual([['v1', null], ['v2b', 'v1']]);
