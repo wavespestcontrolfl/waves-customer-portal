@@ -133,7 +133,7 @@ class Cast {
   /** The one-time pest catalog row the booking requests name; seeded only when the migrated catalog has none. */
   async oneTimePestService(price = 149) {
     const existing = await this.db('services').where({ is_active: true }).whereRaw("lower(name) = 'one-time pest control service'").first();
-    if (existing) { this.restoreService = this.restoreService || { id: existing.id, base_price: existing.base_price }; await this.db('services').where({ id: existing.id }).update({ base_price: price, price_range_min: null }); return existing; }
+    if (existing) { this.restoreService = this.restoreService || { id: existing.id, base_price: existing.base_price, price_range_min: existing.price_range_min }; await this.db('services').where({ id: existing.id }).update({ base_price: price, price_range_min: null }); return existing; }
     const row = { id: uuid(), service_key: `pest_one_time_${uuid().slice(0, 6)}`, name: 'One-Time Pest Control Service', category: 'pest_control', billing_type: 'one_time', base_price: price, is_active: true, customer_visible: true, booking_enabled: true };
     await this.db('services').insert(row);
     this.insertedServiceId = row.id;
@@ -184,7 +184,8 @@ class Cast {
     if (this.leads.length) await this.db('leads').whereIn('id', this.leads).update({ deleted_at: now });
     if ((this.commitmentIds || []).length) await this.db('call_commitments').whereIn('id', this.commitmentIds).update({ status: 'dismissed' }).catch(() => {});
     if (this.insertedServiceId) await this.db('services').where({ id: this.insertedServiceId }).update({ is_active: false }).catch(() => {});
-    if (this.restoreService) await this.db('services').where({ id: this.restoreService.id }).update({ base_price: this.restoreService.base_price }).catch(() => {});
+    if (this.restoreService) await this.db('services').where({ id: this.restoreService.id })
+      .update({ base_price: this.restoreService.base_price, price_range_min: this.restoreService.price_range_min }).catch(() => {});
     if (this.notificationIds.length) await this.db('notifications').whereIn('id', this.notificationIds).update({ done_at: now, done_by: MARK });
     if (this.technicians.length) await this.db('technicians').whereIn('id', this.technicians).update({ active: false, employment_status: 'inactive' }).catch(() => {});
   }

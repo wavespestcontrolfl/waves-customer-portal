@@ -39,7 +39,9 @@ async function snapshotState(h, cast) {
   const ids = cast.notificationIds;
   const rows = ids.length ? await h.db('notifications').whereIn('id', ids).select('id', 'done_at', 'read_at', 'resolution') : [];
   const total = Number((await h.db('notifications').count('* as n').first()).n);
-  return { open: rows.filter((r) => !r.done_at).length, read: rows.filter((r) => r.read_at).length, total };
+  // Every column of each seeded row, by id: a title, link, metadata or done_by edited in place changes no count.
+  const values = ids.length ? await h.db('notifications').whereIn('id', ids).select('*') : [];
+  return { open: rows.filter((r) => !r.done_at).length, read: rows.filter((r) => r.read_at).length, total, rows: Object.fromEntries(values.map((r) => [r.id, JSON.stringify(r)])) };
 }
 
 async function ambient(opts = {}) {
@@ -57,6 +59,8 @@ function checkNothingResolved(ctx, before, after, label = '') {
   ctx.check(after.open === before.open, 'side_effect', 'alert_resolved_by_read', `${label} open seeded alerts ${before.open} -> ${after.open}`);
   ctx.check(after.read === before.read, 'side_effect', 'alert_acknowledged_by_read', `${label} read-marked seeded alerts ${before.read} -> ${after.read}`);
   ctx.check(after.total === before.total, 'side_effect', 'notification_raised_by_read', `${label} notification rows ${before.total} -> ${after.total}`);
+  const edited = Object.keys(before.rows).filter((id) => before.rows[id] !== after.rows[id]);
+  ctx.check(edited.length === 0, 'side_effect', 'alert_row_changed_by_read', `${label} ${edited.length} seeded notification row(s) changed value`);
 }
 
 function checkMixedFacts(ctx, result, seeded, base) {
@@ -256,6 +260,7 @@ CASES['W1-dev-10'] = async (ctx, h, cast) => {
   }
   const after = await snapshotState(h, cast);
   ctx.check(after.open === before.open + 1 && after.read === before.read, 'side_effect', 'alert_state_changed_by_read', `open ${before.open} -> ${after.open} (one arrival expected)`);
+  ctx.check(Object.keys(before.rows).every((id) => before.rows[id] === after.rows[id]), 'side_effect', 'alert_row_changed_by_read', 'a seeded notification row changed value across the two reads');
   ctx.markCompleted();
 };
 

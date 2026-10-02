@@ -69,6 +69,8 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     const ciDatabase = process.env.CI === 'true' && parsed.hostname === 'localhost' && parsed.pathname === '/waves_test';
     if (!ciDatabase && !/^\/waves_ib_(platform|workflow)_[a-z0-9_]+$/.test(parsed.pathname)) throw new Error('An isolated IB development database is required');
     h = await bootHarness({ databaseUrl, mockModel, providers: { sms: mockSendViaTwilio, sendgrid: mockSendgrid } });
+    // The Gmail client loads the database, so it is required only after the harness has pointed the environment at the isolated one.
+    h.providers.gmail = require('../services/email/gmail-client').sendMessage;
     mockSendgrid.sendOne.mockImplementation(async () => ({ messageId: 'stub-message' }));
     await sweepStale(h.db);
     mockSendViaTwilio.mockImplementation(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'b'.repeat(32)}` }));
@@ -90,6 +92,7 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     ctx.probe = probe;
     mockSendViaTwilio.mockClear();
     mockSendgrid.sendOne.mockClear();
+    h.providers.gmail.mockClear();
     mockSendgrid.on = false;
     try {
       await CASES[c.id](ctx, h, cast, c);

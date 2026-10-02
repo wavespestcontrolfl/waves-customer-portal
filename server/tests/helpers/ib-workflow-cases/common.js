@@ -4,6 +4,7 @@
 // load time: the database environment is configured when the harness boots.
 
 const { nextWeekdayET, plusDaysET } = require('../ib-workflow-fixtures');
+const { rowState, noWrites, noSends, sendState } = require('../ib-workflow-state');
 
 /** A date value from a reader (a plain YYYY-MM-DD or a JS Date instant) as the set of YYYY-MM-DD days it can denote. */
 function ymdSet(value) {
@@ -36,4 +37,4 @@ const ymdAdd = (ymd, days) => new Date(Date.parse(`${ymd}T12:00:00Z`) + days * 8
 const errorCode = (result) => (result && typeof result === 'object' ? result.code || null : null);
 const has = (haystack, needle) => JSON.stringify(haystack || '').includes(needle);
 
-module.exports = { ymdSet, sameDay, pick, picks, lookupThen, errorCode, has, ymdAdd, nextWeekdayET, plusDaysET };
+module.exports = { rowState, noWrites, noSends, sendState, ymdSet, sameDay, pick, picks, lookupThen, errorCode, has, ymdAdd, nextWeekdayET, plusDaysET };

@@ -5,7 +5,7 @@
 // the rows this case seeded, and nothing may be written.
 
 const { phone, uuid, nextWeekdayET, plusDaysET } = require('../ib-workflow-fixtures');
-const { sameDay, pick, picks, lookupThen, has } = require('./common');
+const { sameDay, pick, picks, lookupThen, has, rowState, noWrites } = require('./common');
 
 async function seedBriefSet(cast) {
   const set = {};
@@ -70,22 +70,8 @@ function checkCommitments(ctx, result, expected) {
   }
 }
 
-async function noWrites(ctx, h, cast, before) {
-  const counts = async () => ({
-    customers: Number((await h.db('customers').whereIn('id', cast.customers).count('* as n').first()).n),
-    visits: Number((await h.db('scheduled_services').whereIn('customer_id', cast.customers).count('* as n').first()).n),
-    sms: Number((await h.db('sms_log').whereIn('customer_id', cast.customers).count('* as n').first()).n),
-    commitments: Number((await h.db('call_commitments').whereIn('id', cast.commitmentIds || []).where('status', 'open').count('* as n').first()).n),
-  });
-  const after = await counts();
-  ctx.check(JSON.stringify(after) === JSON.stringify(before), 'side_effect', 'read_changed_rows', `rows before ${JSON.stringify(before)} after ${JSON.stringify(after)}`);
-}
-const snapshot = async (h, cast) => ({
-  customers: Number((await h.db('customers').whereIn('id', cast.customers).count('* as n').first()).n),
-  visits: Number((await h.db('scheduled_services').whereIn('customer_id', cast.customers).count('* as n').first()).n),
-  sms: Number((await h.db('sms_log').whereIn('customer_id', cast.customers).count('* as n').first()).n),
-  commitments: Number((await h.db('call_commitments').whereIn('id', cast.commitmentIds || []).where('status', 'open').count('* as n').first()).n),
-});
+// Row VALUES, not counts: a status flipped, a message marked read or a promise edited in place must fail a read.
+const snapshot = (h, cast) => rowState(h, cast);
 
 const CASES = {};
 
@@ -214,12 +200,13 @@ CASES['W2-dev-10'] = async (ctx, h, cast, c) => {
   const recovered = taskId ? await h.task(h.actors.owner, taskId, first.sessionId) : { status: 0 };
   ctx.check(recovered.status === 200 && recovered.body && recovered.body.taskId === taskId, 'recovery', 'task_not_recoverable', `GET task status ${recovered.status}`);
   // A new inbound text arrives, then the operator asks again.
+  await noWrites(ctx, h, cast, before);
   const arrived = await cast.sms(set.fennimore.id, { direction: 'inbound', from_phone: set.fennimore.phone, to_phone: '+19413335555', message_body: 'Also the gate is open now.', created_at: new Date() });
+  const afterArrival = await snapshot(h, cast); // the arrival is the one legitimate new row; the second ask may not change anything
   const again = await ctx.turn(h.actors.owner, { prompt, rounds: lookupThen('Fennimore', briefTools), sessionKey: 'second' });
   const thread = pick(again, 'get_conversation_thread');
   ctx.check(thread && (thread.messages || []).some((m) => m.body === arrived.message_body && m.direction === 'inbound' && Math.abs(new Date(m.time) - new Date(arrived.created_at)) < 2000), 'tool_result', 'new_inbound_text_missing', 'the second ask does not include the text that arrived after the first');
-  const after = await snapshot(h, cast);
-  ctx.check(after.customers === before.customers && after.visits === before.visits && after.commitments === before.commitments, 'side_effect', 'read_changed_rows', `rows ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+  await noWrites(ctx, h, cast, afterArrival);
   ctx.markCompleted();
 };
 

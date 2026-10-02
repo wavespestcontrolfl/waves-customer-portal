@@ -7,7 +7,7 @@
 // draft without a card are reported not_runnable and only probed.
 
 const { phone } = require('../ib-workflow-fixtures');
-const { pick } = require('./common');
+const { pick, noSends: sharedNoSends } = require('./common');
 
 async function ensurePricing(db) {
   // Canonical code defaults seed the isolated database; the same seeding the platform estimate suite uses.
@@ -81,7 +81,7 @@ async function confirmSave(ctx, h, proposed) {
 }
 
 /** The saved draft against the contract: one draft, draft status, the cadence, the engine price, never sent, no deposit. */
-async function checkDraft(ctx, h, f, { apps, count = 1 }) {
+async function checkDraft(ctx, h, f, { apps, count = 1, sqft = 5000 }) {
   const rows = await draftsOf(h, f);
   ctx.check(rows.length === count, 'read_back', 'draft_count_wrong', `${rows.length} estimates for the customer and property, expected ${count}`);
   const row = rows[rows.length - 1];
@@ -89,16 +89,21 @@ async function checkDraft(ctx, h, f, { apps, count = 1 }) {
   ctx.check(row.status === 'draft' && !row.sent_at, 'read_back', 'draft_not_unsent', `status ${row.status}, sent_at ${row.sent_at}`);
   ctx.check(freqOf(row) === apps, 'read_back', 'cadence_wrong', `saved cadence ${freqOf(row)}, expected ${apps}`);
   ctx.check(Number(row.annual_total) > 0 && Number(row.annual_total) === Number(engineAnnual(row)), 'read_back', 'price_is_not_the_engine_output', `annual_total ${row.annual_total} vs engine ${engineAnnual(row)}`);
+  // The measurement the price was built from, as persisted: the saved front-lawn area, taken as measured. Both the derived
+  // total and the engine result in the same row can be consistently wrong when the wrong area is used.
+  const data = parse(row.estimate_data) || {};
+  const inputs = data.engineInputs || {};
+  ctx.check(Number(inputs.measuredTurfSf) === sqft, 'read_back', 'measured_turf_not_the_saved_measurement', `engineInputs.measuredTurfSf ${inputs.measuredTurfSf}, the saved front lawn measures ${sqft}`);
+  ctx.check(inputs.turfSource === 'measured', 'read_back', 'turf_basis_not_measured', `engineInputs.turfSource ${inputs.turfSource}; a lot-based or estimated area must route to review, not into a saved price`);
+  const fact = (data.propertyFacts || {}).treatable_lawn_sqft;
+  ctx.check(!!fact && Number(fact.value) === sqft && fact.property_id === f.property.id, 'read_back', 'property_fact_not_the_saved_measurement', `propertyFacts.treatable_lawn_sqft ${JSON.stringify(fact)}`);
+  ctx.check(Number((data.inputs || {}).measuredTurfSf) === sqft, 'read_back', 'inputs_measurement_not_the_saved_measurement', `inputs.measuredTurfSf ${(data.inputs || {}).measuredTurfSf}`);
   ctx.check(!/deposit/i.test(JSON.stringify(((parse(row.estimate_data) || {}).engineResult || {}).lineItems || [])), 'side_effect', 'deposit_line_present', 'a deposit line is on the estimate');
   return row;
 }
 
-async function noSends(ctx, h, f) {
-  const sent = await h.settle();
-  ctx.check(sent === 0, 'side_effect', 'estimate_save_sent_a_text', `${sent} provider submissions for an estimate save`);
-  const rows = await h.db('sms_log').where({ customer_id: f.customer.id, direction: 'outbound' }).count('* as n').first();
-  ctx.check(Number(rows.n) === 0, 'side_effect', 'estimate_save_logged_an_outbound_text', `${rows.n} outbound sms_log rows`);
-}
+/** An estimate save sends nothing: no text, no email (SendGrid, Gmail or an unstubbed sender), no outbound or email row. */
+const noSends = (ctx, h, cast) => sharedNoSends(ctx, h, cast, { what: 'an estimate save', codes: { sms: 'estimate_save_sent_a_text', smsRows: 'estimate_save_logged_an_outbound_text', email: 'estimate_save_sent_an_email', emailRows: 'estimate_save_logged_an_email' } });
 
 const CASES = {};
 
@@ -107,7 +112,7 @@ async function plainSave(ctx, h, cast, c, apps, { prompt } = {}) {
   const proposed = await proposeSave(ctx, h, s.thistle, { apps, prompt: prompt || c.request });
   await confirmSave(ctx, h, proposed);
   await checkDraft(ctx, h, s.thistle, { apps: apps || 9 });
-  await noSends(ctx, h, s.thistle);
+  await noSends(ctx, h, cast);
   return { s, proposed };
 }
 
@@ -127,7 +132,7 @@ CASES['W8-dev-03'] = async (ctx, h, cast, c) => {
   const row = await checkDraft(ctx, h, s.thistle, { apps: 12 });
   ctx.check(!!draft && !!row && row.id === draft.id, 'read_back', 'revision_made_a_second_draft', `draft ${draft && draft.id.slice(0, 8)} became ${row && row.id.slice(0, 8)}`);
   ctx.check(!!row && Number(row.annual_total) !== nineAnnual, 'read_back', 'revised_price_not_recomputed', `annual stayed ${nineAnnual}`);
-  await noSends(ctx, h, s.thistle);
+  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 
@@ -182,7 +187,7 @@ CASES['W8-dev-06'] = async (ctx, h, cast, c) => {
   ctx.check((await draftsOf(h, s.thistle)).length === 0, 'side_effect', 'draft_saved_at_the_stale_price', 'a draft exists after the refused confirm');
   const redo = await proposeSave(ctx, h, s.thistle, { apps: 12, prompt: c.request, sessionKey: 'redo' });
   await confirmSave(ctx, h, redo);
-  const row = await checkDraft(ctx, h, s.thistle, { apps: 12 });
+  const row = await checkDraft(ctx, h, s.thistle, { apps: 12, sqft: 12000 });
   const stalePrice = first.turn.card && JSON.stringify(first.turn.card).match(/\$[\d,]+(?:\.\d\d)?/g);
   const freshPrice = redo.turn.card && JSON.stringify(redo.turn.card).match(/\$[\d,]+(?:\.\d\d)?/g);
   ctx.check(!!row && JSON.stringify(stalePrice) !== JSON.stringify(freshPrice), 'proposal', 'recomputed_card_shows_the_old_price', `old ${JSON.stringify(stalePrice)} new ${JSON.stringify(freshPrice)}`);
@@ -214,7 +219,7 @@ CASES['W8-dev-08'] = async (ctx, h, cast, c) => {
   await confirmSave(ctx, h, proposed);
   const row = await checkDraft(ctx, h, s.thistle, { apps: 9 });
   ctx.check(!!row && !JSON.stringify(parse(row.estimate_data).engineResult || {}).includes('"perApplication":50'), 'side_effect', 'operator_typed_price_on_estimate', 'a 50 dollar line is on the estimate');
-  await noSends(ctx, h, s.thistle);
+  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 
@@ -235,7 +240,7 @@ CASES['W8-dev-10'] = async (ctx, h, cast, c) => {
   const proposed = await proposeSave(ctx, h, s.thistle, { apps: 12, prompt: c.request });
   await confirmSave(ctx, h, proposed);
   await checkDraft(ctx, h, s.thistle, { apps: 12 });
-  await noSends(ctx, h, s.thistle);
+  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 

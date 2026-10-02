@@ -42,7 +42,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -59,7 +61,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -83,7 +85,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -100,7 +104,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -111,7 +115,9 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].status"
+              "notifications[*].done_at",
+              "notifications[*].read_at",
+              "notifications[*].resolution"
             ],
             "sends": 0,
             "card": false,
@@ -140,7 +146,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -157,7 +165,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -180,7 +188,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -197,7 +207,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -220,7 +230,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -237,7 +249,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -248,7 +260,9 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].status"
+              "notifications[*].done_at",
+              "notifications[*].read_at",
+              "notifications[*].resolution"
             ],
             "sends": 0,
             "card": false,
@@ -277,7 +291,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -294,7 +310,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -305,7 +321,9 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].status"
+              "notifications[*].done_at",
+              "notifications[*].read_at",
+              "notifications[*].resolution"
             ],
             "sends": 0,
             "card": false,
@@ -334,7 +352,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -351,7 +371,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -376,7 +396,9 @@
         "outcome": "unsupported",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -393,7 +415,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -416,7 +438,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -433,7 +457,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -457,7 +481,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -474,7 +500,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -485,7 +511,9 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].status"
+              "notifications[*].done_at",
+              "notifications[*].read_at",
+              "notifications[*].resolution"
             ],
             "sends": 0,
             "card": false,
@@ -516,7 +544,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -533,7 +563,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -556,7 +586,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -573,7 +605,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -597,7 +629,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -614,7 +648,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -625,7 +659,9 @@
             "outcome": "completed",
             "changes": [],
             "unchanged": [
-              "admin_alerts[*].status"
+              "notifications[*].done_at",
+              "notifications[*].read_at",
+              "notifications[*].resolution"
             ],
             "sends": 0,
             "card": false,
@@ -657,7 +693,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -674,7 +712,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -699,7 +737,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -716,7 +756,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -741,7 +781,9 @@
         "outcome": "unsupported",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -758,7 +800,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -781,7 +823,9 @@
         "outcome": "blocked_by_rule",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -798,7 +842,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -823,7 +867,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -840,7 +886,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -863,7 +909,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -880,7 +928,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],
@@ -904,7 +952,9 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "admin_alerts[*].status"
+          "notifications[*].done_at",
+          "notifications[*].read_at",
+          "notifications[*].resolution"
         ],
         "sends": 0,
         "card": false,
@@ -921,7 +971,7 @@
           "page": "/admin/dashboard (Needs Me list)"
         },
         {
-          "db": "admin_alerts_state_unchanged",
+          "db": "notifications_state_unchanged",
           "page": "/admin/dashboard (Needs Me list)"
         }
       ],

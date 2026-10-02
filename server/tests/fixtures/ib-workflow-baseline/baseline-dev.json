@@ -149,7 +149,12 @@
       "outcome": "pass"
     },
     "W5-dev-03": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "half_hour_request_carded",
+      "failures": [
+        "proposal:half_hour_request_carded"
+      ]
     },
     "W5-dev-04": {
       "outcome": "pass"
@@ -159,9 +164,10 @@
     },
     "W5-dev-06": {
       "outcome": "fail",
-      "point": "domain_rule",
-      "code": "commercial_account_booked_on_price",
+      "point": "proposal",
+      "code": "commercial_booking_carded",
       "failures": [
+        "proposal:commercial_booking_carded",
         "domain_rule:commercial_account_booked_on_price"
       ]
     },
@@ -183,7 +189,9 @@
       "point": "domain_rule",
       "code": "taken_slot_double_booked",
       "failures": [
-        "domain_rule:taken_slot_double_booked"
+        "domain_rule:taken_slot_double_booked",
+        "side_effect:confirmation_text_for_refused_booking",
+        "side_effect:outbound_audit_row_for_refused_booking"
       ]
     },
     "W5-dev-10": {

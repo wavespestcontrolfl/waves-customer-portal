@@ -8,7 +8,7 @@
 
 const crypto = require('crypto');
 const { phone, plusDaysET } = require('../ib-workflow-fixtures');
-const { pick, picks, ymdAdd } = require('./common');
+const { pick, picks, ymdAdd, rowState, noWrites, noSends: sharedNoSends } = require('./common');
 
 const hex = () => crypto.randomBytes(8).toString('hex');
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -76,20 +76,11 @@ async function seedPaySet(cast, h) {
   return s;
 }
 
-/** Everything a read must leave alone, as one comparable string. */
-async function ledgerState(h, s) {
-  const ids = s.customers.map((c) => c.id);
-  const inv = await h.db('invoices').whereIn('customer_id', ids).orderBy('id').select('id', 'status', 'total', 'credit_applied', 'paid_at');
-  const pay = await h.db('payments').whereIn('customer_id', ids).orderBy('id').select('id', 'status', 'amount', 'refund_amount');
-  const led = await h.db('customer_credit_ledger').whereIn('customer_id', ids).orderBy('id').select('id', 'delta');
-  const sms = await h.db('sms_log').whereIn('customer_id', ids).count('* as n').first();
-  const aud = await h.db('messaging_audit_log').whereIn('customer_id', ids).count('* as n').first();
-  const flags = await h.db('collections_flags').whereIn('customer_id', ids).orderBy('id').select('id', 'flag', 'released_at');
-  return JSON.stringify({ inv, pay, led, sms: sms.n, aud: aud.n, flags });
-}
+/** Everything a read must leave alone, as one comparable string of row VALUES (the shared snapshot over the case's customers). */
+const ledgerState = (h, s) => rowState(h, { customers: s.customers.map((c) => c.id), commitmentIds: [], leads: [] });
 
-const sameState = async (ctx, h, s, before, code = 'a_read_changed_a_record') => ctx.check(before === await ledgerState(h, s), 'side_effect', code, 'invoices, payments, credits, flags or message rows changed during a read');
-const noSends = async (ctx, h) => { const sent = await h.settle(); ctx.check(sent === 0, 'side_effect', 'read_sent_a_text', `${sent} provider submissions for a read`); };
+const sameState = (ctx, h, s, before, code = 'a_read_changed_a_record') => noWrites(ctx, h, { customers: s.customers.map((c) => c.id) }, before, { code, what: 'a read' });
+const noSends = (ctx, h, cast) => sharedNoSends(ctx, h, cast, { what: 'a read', codes: { sms: 'read_sent_a_text', email: 'read_sent_an_email' } });
 
 /** One read turn: the operator's own wording must establish the customer (control wording otherwise), then the scripted reads run. */
 async function ask(ctx, h, customer, prompt, rounds, { sessionId, sessionKey } = {}) {
@@ -126,7 +117,7 @@ CASES['W9-dev-01'] = async (ctx, h, cast, c) => {
   const again = await askGlobal(ctx, h, c.request, 'Ostrander', [{ tools: [['get_outstanding_balances', {}]] }], { sessionId: first.sessionId });
   ctx.check(sum(balanceRows(again, s.ostrander)) === sum(rows), 'recovery', 'answer_changed_on_repeat', `second read ${sum(balanceRows(again, s.ostrander))} vs first ${sum(rows)}`);
   await sameState(ctx, h, s, before);
-  await noSends(ctx, h);
+  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 
@@ -155,7 +146,7 @@ CASES['W9-dev-03'] = async (ctx, h, cast, c) => {
   // The processor row carries only Stripe's own customer id; the customer reader must expose it for the two to be joined.
   ctx.check(text(detailOf(detail)).includes(s.wexcombe.stripe_customer_id), 'tool_result', 'intent_not_linkable_to_customer', 'the customer reader does not expose the processor customer id, so an intent cannot be tied to this customer except by amount');
   await sameState(ctx, h, s, before);
-  await noSends(ctx, h);
+  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 
@@ -190,7 +181,7 @@ CASES['W9-dev-06'] = async (ctx, h, cast, c) => {
   const balances = await askGlobal(ctx, h, 'Who owes us money?', 'Fennimore', [{ tools: [['get_outstanding_balances', {}]] }], { sessionKey: 'balances' });
   ctx.check(/hold|dispute/i.test(JSON.stringify([...turn.toolCalls, ...balances.toolCalls].map((t) => t.result))), 'tool_result', 'dispute_hold_not_readable', 'neither reader says the invoice is under a dispute hold');
   await sameState(ctx, h, s, before);
-  await noSends(ctx, h);
+  await noSends(ctx, h, cast);
   ctx.markCompleted();
 };
 
@@ -212,7 +203,7 @@ async function unsupportedMoneyMove(ctx, h, cast, c, customer, query) {
   ctx.check(bad.length === 0, 'capability', 'money_moving_tool_offered', `tools offered: ${bad.join(', ')}`);
   ctx.check(turn.cards.length === 0, 'proposal', 'card_for_a_charge_or_refund', `cards ${turn.cards.length}`);
   await sameState(ctx, h, s, before, 'money_request_changed_a_record');
-  await noSends(ctx, h);
+  await noSends(ctx, h, cast);
   ctx.markCompleted();
 }
 CASES['W9-dev-07'] = (ctx, h, cast, c) => unsupportedMoneyMove(ctx, h, cast, c, 'ostrander', 'charge the customer card for the invoice balance');

@@ -109,9 +109,12 @@ CASES['W5-dev-03'] = async (ctx, h, cast, c) => {
   ctx.check(turn.cards.length === 0 && (await newRows(h, s.pellham.id, s.existing.id)).length === 0, 'side_effect', 'half_hour_booked', 'a row or card exists for an unsupported :30 request');
   // And the tool itself must refuse a :30 start if a model passes one.
   const forced = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, sessionKey: 'forced', rounds: bookRounds(s.pellham.id, date, '2:30 PM') });
+  // The contract: no card and no new row. A tool that rounds 2:30 to the hour and books it is as wrong as one that books 2:30.
+  ctx.check(forced.cards.length === 0, 'proposal', 'half_hour_request_carded', `${forced.cards.length} card(s) offered for a 2:30 PM start: ${JSON.stringify(forced.toolCalls.slice(-1).map((t) => t.result)).slice(0, 200)}`);
   if (forced.card) await h.confirm(h.actors.owner, forced.card);
+  await h.settle();
   const rows = await newRows(h, s.pellham.id, s.existing.id);
-  ctx.check(rows.every((r) => !/:(15|30|45)/.test(hhmm(r.window_start))), 'domain_rule', 'half_hour_window_accepted', `a visit was saved with a window starting ${rows.map((r) => hhmm(r.window_start)).join(',')}`);
+  ctx.check(rows.length === 0, 'domain_rule', 'half_hour_window_accepted', `${rows.length} visit(s) saved after a 2:30 PM request, windows ${rows.map((r) => hhmm(r.window_start)).join(',')}`);
   ctx.markCompleted();
 };
 
@@ -145,6 +148,8 @@ CASES['W5-dev-06'] = async (ctx, h, cast, c) => {
   const est = await ctx.establish({ prompt: c.request, page, customer: s.commercial });
   // A naive model asks the tool to book it; the domain must stop a commercial account being auto-booked.
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: [{ tools: [['create_appointment', { customer_id: s.commercial.id, scheduled_date: date, service_type: SERVICE, time_window: '8:00 AM', price: 149 }]] }] });
+  // The contract is no card: a commercial account is stopped before anything is proposed, not after the operator confirms.
+  ctx.check(turn.cards.length === 0, 'proposal', 'commercial_booking_carded', `${turn.cards.length} card(s) offered to book a commercial account: ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 200)}`);
   let confirmed;
   if (turn.card) confirmed = await h.confirm(h.actors.owner, turn.card);
   await h.settle();
@@ -231,7 +236,12 @@ CASES['W5-dev-09'] = async (ctx, h, cast, c) => {
   const refused = !confirmed || confirmed.status !== 200 || !(confirmed.body && confirmed.body.success === true);
   ctx.check(refused && rows.length === 0, 'domain_rule', 'taken_slot_double_booked', `the confirm ${confirmed && confirmed.status} ${String(JSON.stringify(confirmed && confirmed.body)).slice(0, 220)}; ${rows.length} row(s) saved on the taken slot`);
   if (rows.length) ctx.check(!!(confirmed && confirmed.body && confirmed.body.result && confirmed.body.result.warning), 'receipt', 'overlap_not_told_to_operator', 'the booking landed on a taken slot without a warning in its result');
-  await h.settle();
+  // A refused booking tells the customer nothing: no provider submission and no outbound audit row.
+  const sent = await h.settle();
+  ctx.check(sent === 0, 'side_effect', 'confirmation_text_for_refused_booking', `${sent} provider submissions after the confirm was refused on a taken slot`);
+  const audit = await h.db('messaging_audit_log').where({ customer_id: s.pellham.id }).count('* as n').first();
+  const outbound = await h.db('sms_log').where({ customer_id: s.pellham.id, direction: 'outbound' }).count('* as n').first();
+  ctx.check(Number(audit.n) === 0 && Number(outbound.n) === 0, 'side_effect', 'outbound_audit_row_for_refused_booking', `${audit.n} messaging audit rows and ${outbound.n} outbound sms rows for a booking that did not happen`);
   ctx.markCompleted();
 };
 

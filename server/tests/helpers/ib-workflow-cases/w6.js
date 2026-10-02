@@ -197,6 +197,11 @@ CASES['W6-dev-07'] = async (ctx, h, cast, c) => {
     const pest = await rowOf(h, s.friPest.id);
     ctx.check(String(lawn.scheduled_date) === String(pest.scheduled_date), 'domain_rule', 'grouped_pair_split_by_move', `lawn ${lawn.scheduled_date}, pest ${pest.scheduled_date}`);
   }
+  // The contract is "unsupported, unchanged": whatever path was taken, no row of the customer or the series may differ from
+  // the seed. Moving the pair together to Monday is still a committed move the case forbids.
+  const after = await snapshotRows(h, ids);
+  const moved = ids.filter((id) => after[id] !== before[id]);
+  ctx.check(moved.length === 0, 'domain_rule', 'grouped_move_committed', `${moved.length} visit row(s) differ from the seed after the request (lawn ${(await rowOf(h, s.friLawn.id)).scheduled_date}, pest ${(await rowOf(h, s.friPest.id)).scheduled_date})`);
   ctx.markCompleted();
 };
 

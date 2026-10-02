@@ -75,6 +75,7 @@ class CaseContext {
     this.issued = [];   // every tool call the scripted model made, in order, without discovery
     this.contract = null;
     this.confirms = []; // every card the case confirmed through the route
+    this.sendBaseline = null; // outbound/email row counts at the first turn (see ib-workflow-state)
   }
 
   /** Record a divergence. `code` is stable and machine-comparable; `detail` is human evidence. */
@@ -305,6 +306,8 @@ async function bootHarness({ databaseUrl, mockModel, providers = {} }) {
      */
     async turn(actor, options, ctx) {
       const { prompt, rounds = [], page = {}, sessionKey = 'default', requestKey, context = 'estimates', discover = true, conversationHistory } = options;
+      // The row baseline noSends compares against: taken at the case's first turn, after its seed rows exist.
+      if (ctx && ctx.cast && !ctx.sendBaseline) ctx.sendBaseline = await require('./ib-workflow-state').sendState(harness, ctx.cast);
       const key = `${actor.id}:${sessionKey}`;
       if (!harness.sessions.has(key)) harness.sessions.set(key, crypto.randomUUID());
       const sessionId = options.sessionId || harness.sessions.get(key);

@@ -5,8 +5,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 24,
-        "verified_completion_ms": 80
+        "first_tool_result_ms": 34,
+        "verified_completion_ms": 112
       },
       "notes": [],
       "strength": null,
@@ -16,8 +16,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 25
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 35
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -29,8 +29,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 12
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 16
       },
       "notes": [],
       "strength": null,
@@ -40,8 +40,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 11
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 22
       },
       "notes": [],
       "strength": null,
@@ -51,91 +51,14 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 31
+        "first_tool_result_ms": 20,
+        "verified_completion_ms": 78
       },
       "notes": [],
       "strength": null,
       "contract_calls": 0
     },
     "W1-dev-06": {
-      "outcome": "pass",
-      "failures": [],
-      "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 18
-      },
-      "notes": [],
-      "strength": null,
-      "contract_calls": 0
-    },
-    "W1-dev-07": {
-      "outcome": "pass",
-      "failures": [],
-      "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 15
-      },
-      "notes": [],
-      "strength": null,
-      "contract_calls": 0
-    },
-    "W1-dev-08": {
-      "outcome": "pass",
-      "failures": [],
-      "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 11
-      },
-      "notes": [],
-      "strength": null,
-      "contract_calls": 0
-    },
-    "W1-dev-09": {
-      "outcome": "pass",
-      "failures": [],
-      "timings": {
-        "first_tool_result_ms": 5,
-        "verified_completion_ms": 10
-      },
-      "notes": [],
-      "strength": null,
-      "contract_calls": 0
-    },
-    "W1-dev-10": {
-      "outcome": "pass",
-      "failures": [],
-      "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 19
-      },
-      "notes": [],
-      "strength": null,
-      "contract_calls": 0
-    },
-    "W2-dev-01": {
-      "outcome": "pass",
-      "failures": [],
-      "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 36
-      },
-      "notes": [],
-      "strength": null,
-      "contract_calls": 0
-    },
-    "W2-dev-02": {
-      "outcome": "pass",
-      "failures": [],
-      "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 23
-      },
-      "notes": [],
-      "strength": null,
-      "contract_calls": 0
-    },
-    "W2-dev-03": {
       "outcome": "pass",
       "failures": [],
       "timings": {
@@ -146,12 +69,89 @@
       "strength": null,
       "contract_calls": 0
     },
+    "W1-dev-07": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 22
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 14
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-09": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 18
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-10": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 28
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-01": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 70
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 47
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-03": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 55
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
     "W2-dev-04": {
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 17
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 26
       },
       "notes": [],
       "strength": null,
@@ -169,8 +169,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 19
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 32
       },
       "notes": [],
       "strength": null,
@@ -180,8 +180,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 25
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 79
       },
       "notes": [],
       "strength": null,
@@ -191,8 +191,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 13
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 31
       },
       "notes": [],
       "strength": null,
@@ -202,8 +202,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 14
+        "first_tool_result_ms": 13,
+        "verified_completion_ms": 31
       },
       "notes": [],
       "strength": null,
@@ -221,8 +221,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 26
+        "first_tool_result_ms": 19,
+        "verified_completion_ms": 54
       },
       "notes": [],
       "strength": null,
@@ -232,8 +232,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 42
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 73
       },
       "notes": [],
       "strength": null,
@@ -243,8 +243,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 22
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 32
       },
       "notes": [],
       "strength": null,
@@ -254,8 +254,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 5,
-        "verified_completion_ms": 18
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 21
       },
       "notes": [],
       "strength": null,
@@ -265,8 +265,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 5,
-        "verified_completion_ms": 17
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 19
       },
       "notes": [],
       "strength": null,
@@ -276,8 +276,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 18
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 22
       },
       "notes": [],
       "strength": null,
@@ -287,8 +287,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 1920
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 1567
       },
       "notes": [],
       "strength": null,
@@ -316,8 +316,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 75
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 47
       },
       "notes": [],
       "strength": null,
@@ -327,8 +327,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 29
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 17
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -340,8 +340,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 34
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 16
       },
       "notes": [],
       "strength": null,
@@ -352,7 +352,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 9
+        "verified_completion_ms": 8
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -365,7 +365,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 2,
-        "verified_completion_ms": 7
+        "verified_completion_ms": 6
       },
       "notes": [
         "update_lead_contact: error: This action is not available to your role"
@@ -377,8 +377,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 31
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 35
       },
       "notes": [],
       "strength": null,
@@ -388,8 +388,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 25
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 21
       },
       "notes": [],
       "strength": null,
@@ -399,8 +399,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 31
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 28
       },
       "notes": [
         "add_customer_property: property_exists: A property with that street already exists for this customer"
@@ -412,8 +412,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 66
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 64
       },
       "notes": [],
       "strength": null,
@@ -424,7 +424,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 7,
-        "verified_completion_ms": 34
+        "verified_completion_ms": 35
       },
       "notes": [],
       "strength": null,
@@ -442,8 +442,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 22
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 19
       },
       "notes": [],
       "strength": null,
@@ -453,8 +453,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 15
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 23
       },
       "notes": [
         "add_customer_property: property_exists: A property with that street already exists for this customer"
@@ -467,7 +467,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 7,
-        "verified_completion_ms": 24
+        "verified_completion_ms": 22
       },
       "notes": [],
       "strength": null,
@@ -490,8 +490,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 29
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 28
       },
       "notes": [],
       "strength": null,
@@ -501,8 +501,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 136,
-        "verified_completion_ms": 1113
+        "first_tool_result_ms": 142,
+        "verified_completion_ms": 1124
       },
       "notes": [],
       "strength": null,
@@ -512,19 +512,27 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 30,
-        "verified_completion_ms": 992
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 955
       },
       "notes": [],
       "strength": null,
       "contract_calls": 1
     },
     "W5-dev-03": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "half_hour_request_carded",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "half_hour_request_carded",
+          "detail": "1 card(s) offered for a 2:30 PM start: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"6580f183-9c3e-49a3-8b23-2d1795a5adef\",\"scheduled_date\":\"2026-10-09\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 46
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 1551
       },
       "notes": [
         "find_available_slots returned 0 slots; the fixture seeds no technician capacity"
@@ -536,8 +544,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 13
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 12
       },
       "notes": [],
       "strength": "no_mutation_attempted",
@@ -547,8 +555,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 12
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 11
       },
       "notes": [],
       "strength": "no_mutation_attempted",
@@ -556,9 +564,14 @@
     },
     "W5-dev-06": {
       "outcome": "fail",
-      "point": "domain_rule",
-      "code": "commercial_account_booked_on_price",
+      "point": "proposal",
+      "code": "commercial_booking_carded",
       "failures": [
+        {
+          "point": "proposal",
+          "code": "commercial_booking_carded",
+          "detail": "1 card(s) offered to book a commercial account: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"8dfc62b6-cdf1-4b43-b4b9-5bee7c3fa734\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
+        },
         {
           "point": "domain_rule",
           "code": "commercial_account_booked_on_price",
@@ -567,7 +580,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 7,
-        "verified_completion_ms": 1652
+        "verified_completion_ms": 1648
       },
       "notes": [],
       "strength": null,
@@ -595,8 +608,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 963
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 945
       },
       "notes": [],
       "strength": null,
@@ -606,8 +619,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 31,
-        "verified_completion_ms": 1017
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 983
       },
       "notes": [],
       "strength": null,
@@ -622,11 +635,21 @@
           "point": "domain_rule",
           "code": "taken_slot_double_booked",
           "detail": "the confirm 200 {\"success\":true,\"outcome\":\"partially_completed\",\"tool\":\"create_appointment\",\"result\":{\"success\":true,\"warning\":\"Heads up: this booking overlaps another appointment on the schedule on 2026-10-07 — both are kept on the cal; 1 row(s) saved on the taken slot"
+        },
+        {
+          "point": "side_effect",
+          "code": "confirmation_text_for_refused_booking",
+          "detail": "1 provider submissions after the confirm was refused on a taken slot"
+        },
+        {
+          "point": "side_effect",
+          "code": "outbound_audit_row_for_refused_booking",
+          "detail": "1 messaging audit rows and 0 outbound sms rows for a booking that did not happen"
         }
       ],
       "timings": {
-        "first_tool_result_ms": 20,
-        "verified_completion_ms": 1678
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 1654
       },
       "notes": [],
       "strength": null,
@@ -636,8 +659,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 17,
-        "verified_completion_ms": 961
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 938
       },
       "notes": [],
       "strength": null,
@@ -656,8 +679,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 18,
-          "verified_completion_ms": 863
+          "first_tool_result_ms": 11,
+          "verified_completion_ms": 849
         },
         "notes": [],
         "strength": null,
@@ -668,8 +691,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 17
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 14
       },
       "notes": [],
       "strength": "no_mutation_attempted",
@@ -688,8 +711,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 11,
-          "verified_completion_ms": 1720
+          "first_tool_result_ms": 9,
+          "verified_completion_ms": 1696
         },
         "notes": [],
         "strength": null,
@@ -709,8 +732,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 19,
-          "verified_completion_ms": 880
+          "first_tool_result_ms": 10,
+          "verified_completion_ms": 847
         },
         "notes": [
           "turn status 409 not_resumable This task has no interrupted step to continue.; no tool call reached; answer: "
@@ -723,8 +746,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 20,
-        "verified_completion_ms": 1570
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 1547
       },
       "notes": [],
       "strength": null,
@@ -756,11 +779,11 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 20,
-          "verified_completion_ms": 871
+          "first_tool_result_ms": 10,
+          "verified_completion_ms": 845
         },
         "notes": [
-          "series move attempt produced 0 card(s): [{\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"appointment_id\":\"93a32d5c-0ae8-404d-b47c-48cb9ef9673f\",\"customer_name\":\"Wren Wexcombe\",\"old_date\":\"2027-01-04T05:00:00.000Z\",\"new_date"
+          "series move attempt produced 0 card(s): [{\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"appointment_id\":\"e6c46a9f-4bd0-4819-bd4e-dcc4f6d90ae2\",\"customer_name\":\"Wren Wexcombe\",\"old_date\":\"2027-01-04T05:00:00.000Z\",\"new_date"
         ],
         "strength": null,
         "contract_calls": 1
@@ -770,8 +793,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 24
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 17
       },
       "notes": [
         "reschedule_appointment: error: This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or sep"
@@ -791,8 +814,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 1555
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 1564
       },
       "notes": [],
       "strength": null,
@@ -810,8 +833,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 19,
-        "verified_completion_ms": 1585
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 1564
       },
       "notes": [],
       "strength": null,
@@ -830,8 +853,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 18,
-          "verified_completion_ms": 876
+          "first_tool_result_ms": 9,
+          "verified_completion_ms": 849
         },
         "notes": [],
         "strength": null,
@@ -842,8 +865,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 37
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 24
       },
       "notes": [],
       "strength": null,
@@ -853,8 +876,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 44
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 32
       },
       "notes": [],
       "strength": null,
@@ -891,8 +914,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 7,
-          "verified_completion_ms": 17
+          "first_tool_result_ms": 5,
+          "verified_completion_ms": 18
         },
         "notes": [
           "send_sms: target_relationship_mismatch: The message recipient does not match the selected customer"
@@ -905,11 +928,11 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 20
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 22
       },
       "notes": [
-        "queued listing {\"customer_id\":\"63ffbbad-93dd-4acc-975d-c1171330deb7\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"a5a9e50a-58d0-4f51-b288-a3e627e4e143\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"a5a9e50a-58d0-4f51-b288-a3e627e4e143\",\"customer_id\":\"63ffbbad-93dd-4a"
+        "queued listing {\"customer_id\":\"617abb64-98cd-4995-9c22-4e6c7d04a908\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"e98c0567-b512-4302-8a91-2d6629d53a71\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"e98c0567-b512-4302-8a91-2d6629d53a71\",\"customer_id\":\"617abb64-98cd-49"
       ],
       "strength": null,
       "contract_calls": 1
@@ -927,7 +950,7 @@
         {
           "point": "receipt",
           "code": "unknown_outcome_retry_allowed",
-          "detail": "receipt {\"id\":\"d72e8d74-b73f-4faa-b3dc-06c9e8f76b9e\",\"tool\":\"send_sms\",\"outcome\":\"blocked\",\"summary\":\"send_sms — customer_id: 16f5ccef-7b7f-4798-a03d-77506dd1f700, message: We will be there Tuesday at 9., mes"
+          "detail": "receipt {\"id\":\"f393d2cb-18c2-465b-b572-3c32cb227184\",\"tool\":\"send_sms\",\"outcome\":\"blocked\",\"summary\":\"send_sms — customer_id: 5957f3c8-7f34-44ab-96ed-6a751e68706b, message: We will be there Tuesday at 9., mes"
         },
         {
           "point": "recovery",
@@ -936,7 +959,7 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 6,
+        "first_tool_result_ms": 8,
         "verified_completion_ms": 29
       },
       "notes": [],
@@ -956,7 +979,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 6,
-        "verified_completion_ms": 13
+        "verified_completion_ms": 11
       },
       "notes": [],
       "strength": null,
@@ -966,8 +989,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 9
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 8
       },
       "notes": [],
       "strength": null,
@@ -977,8 +1000,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 15
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 14
       },
       "notes": [],
       "strength": null,
@@ -988,7 +1011,7 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 5,
+        "first_tool_result_ms": 6,
         "verified_completion_ms": 13
       },
       "notes": [
@@ -1013,7 +1036,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 16,
-        "verified_completion_ms": 1902
+        "verified_completion_ms": 2060
       },
       "notes": [],
       "strength": null,
@@ -1023,8 +1046,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 26,
-        "verified_completion_ms": 1695
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 1683
       },
       "notes": [],
       "strength": null,
@@ -1034,8 +1057,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 25,
-        "verified_completion_ms": 1840
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 1893
       },
       "notes": [],
       "strength": null,
@@ -1045,8 +1068,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 30,
-        "verified_completion_ms": 174
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 143
       },
       "notes": [
         "save_customer_estimate: invalid_input: Tool arguments do not match the required inputs"
@@ -1068,7 +1091,7 @@
         "failures": [],
         "timings": {
           "first_tool_result_ms": 14,
-          "verified_completion_ms": 280
+          "verified_completion_ms": 287
         },
         "notes": [
           "measurement choice: one saved measurement per property, no selector on save_customer_estimate"
@@ -1082,7 +1105,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 14,
-        "verified_completion_ms": 188
+        "verified_completion_ms": 200
       },
       "notes": [],
       "strength": null,
@@ -1096,7 +1119,7 @@
         {
           "point": "domain_rule",
           "code": "sent_quote_revision_offered",
-          "detail": "a card to revise the sent quote in place was offered; [{\"preview\":true,\"customer\":{\"id\":\"bbb562ca-eefb-44a7-b078-006a3e23f365\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"bbb562ca@example.invalid\"},\"property\":{\"id\":\"75863d5c-f29b-4948-9d04-daa"
+          "detail": "a card to revise the sent quote in place was offered; [{\"preview\":true,\"customer\":{\"id\":\"ffdc5b11-2f6a-425d-abc2-5956dead053e\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"ffdc5b11@example.invalid\"},\"property\":{\"id\":\"2986655a-599a-4275-9523-538"
         },
         {
           "point": "side_effect",
@@ -1105,8 +1128,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 41,
-        "verified_completion_ms": 281
+        "first_tool_result_ms": 46,
+        "verified_completion_ms": 407
       },
       "notes": [],
       "strength": null,
@@ -1116,8 +1139,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 1668
+        "first_tool_result_ms": 24,
+        "verified_completion_ms": 1821
       },
       "notes": [],
       "strength": null,
@@ -1127,8 +1150,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 32,
-        "verified_completion_ms": 58
+        "first_tool_result_ms": 25,
+        "verified_completion_ms": 53
       },
       "notes": [
         "save_customer_estimate: missing_information: A saved service address, treatable lawn area and identified grass type are required. Update the missing property facts before pricing."
@@ -1148,8 +1171,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 19,
-        "verified_completion_ms": 1676
+        "first_tool_result_ms": 33,
+        "verified_completion_ms": 1796
       },
       "notes": [],
       "strength": null,
@@ -1168,8 +1191,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 12,
-          "verified_completion_ms": 1582
+          "first_tool_result_ms": 6,
+          "verified_completion_ms": 1561
         },
         "notes": [],
         "strength": null,
@@ -1197,8 +1220,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 12,
-          "verified_completion_ms": 30
+          "first_tool_result_ms": 7,
+          "verified_completion_ms": 17
         },
         "notes": [],
         "strength": null,
@@ -1217,8 +1240,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 1557
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 1556
       },
       "notes": [],
       "strength": null,
@@ -1245,8 +1268,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 13,
-          "verified_completion_ms": 33
+          "first_tool_result_ms": 7,
+          "verified_completion_ms": 16
         },
         "notes": [],
         "strength": null,
@@ -1279,8 +1302,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 8,
-          "verified_completion_ms": 31
+          "first_tool_result_ms": 5,
+          "verified_completion_ms": 25
         },
         "notes": [],
         "strength": null,
@@ -1308,7 +1331,7 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 8,
+          "first_tool_result_ms": 5,
           "verified_completion_ms": 1552
         },
         "notes": [],
@@ -1321,7 +1344,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 1553
+        "verified_completion_ms": 1540
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -1334,7 +1357,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 1561
+        "verified_completion_ms": 1548
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -1363,8 +1386,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 17,
-          "verified_completion_ms": 38
+          "first_tool_result_ms": 7,
+          "verified_completion_ms": 17
         },
         "notes": [],
         "strength": null,
@@ -1375,8 +1398,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 36
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 27
       },
       "notes": [],
       "strength": null,
@@ -1395,7 +1418,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 8,
-        "verified_completion_ms": 52
+        "verified_completion_ms": 46
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action."
@@ -1415,8 +1438,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 31
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 27
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action."
@@ -1442,7 +1465,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 7,
-        "verified_completion_ms": 58
+        "verified_completion_ms": 55
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",
@@ -1456,7 +1479,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 6,
-        "verified_completion_ms": 13
+        "verified_completion_ms": 11
       },
       "notes": [
         "adjust_stock: error: Multiple products match \"sample granule\" — retry with product_id"
@@ -1468,7 +1491,7 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
+        "first_tool_result_ms": 7,
         "verified_completion_ms": 13
       },
       "notes": [
@@ -1481,8 +1504,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 13
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 17
       },
       "notes": [
         "adjust_stock: target_clarification_required: Choose the exact product or restock request for this action."
@@ -1528,8 +1551,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 58
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 89
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",
@@ -1543,7 +1566,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 2,
-        "verified_completion_ms": 5
+        "verified_completion_ms": 6
       },
       "notes": [
         "adjust_stock: error: This action is not available to your role"
@@ -1563,8 +1586,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 36
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 45
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",

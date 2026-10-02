@@ -235,8 +235,13 @@ CASES['W10-dev-08'] = async (ctx, h, cast, c) => {
     final = (await stockOf(h, s.taurus)).onHand;
   }
   ctx.check(final === TAURUS_BASE + 30 + 2 * GAL, 'read_back', 'on_hand_not_recomputed_from_the_live_count', `on hand ${final}, expected ${TAURUS_BASE + 30 + 2 * GAL}`);
-  const restocks = (await movesOf(h, s.taurus)).filter((m) => Number(m.quantity) === 2 * GAL);
+  const moves = await movesOf(h, s.taurus);
+  const restocks = moves.filter((m) => Number(m.quantity) === 2 * GAL);
   ctx.check(restocks.length === 1, 'side_effect', 'receipt_recorded_twice', `${restocks.length} movements of 2 gal`);
+  // Whichever path committed (the original card or the recomputed one), the receipt is the same as the plain receipt case:
+  // one 256 fl oz movement carrying the entered 2 gal, and the request closed. The fixture's own +30 movement is not the receipt.
+  checkReceiptMovement(ctx, moves.filter((m) => !JSON.stringify(m.metadata || '').includes('fixture_concurrent_movement')), { quantity: 2 * GAL, entered: { quantity: 2, unit: 'gal' } });
+  ctx.check((await reqOf(h, s.taurusReq)).status === 'received', 'read_back', 'request_not_marked_received', `request status ${(await reqOf(h, s.taurusReq)).status} after the receipt`);
   ctx.markCompleted();
 };
 
