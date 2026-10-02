@@ -76,6 +76,7 @@ node server/scripts/evaluate-pest-forecast.js --input /path/to/export.json
 For an explicitly selected, authorized database, set
 `PEST_FORECAST_EVAL_DATABASE_URL` and pass `--from YYYY-MM-DD --to YYYY-MM-DD`
 (past range, at most 90 days). The script uses a READ ONLY transaction and
+gives both source reads a five-second transaction-local statement timeout. It
 does not load an application `.env` or default to `DATABASE_URL`. Keep input
 exports private; only the aggregate result is intended for review.
 
@@ -106,8 +107,16 @@ local cluster contained only test fixtures and was stopped afterward. This
 does not validate real-world prediction accuracy. The expanded five-test
 PostgreSQL suite also passed against Railway codex-dev PostgreSQL 16.15,
 including queued-acquisition cleanup and blocked-query cancellation. No extra
-test schemas remained. Railway PR preview migration and deployment succeeded;
-production rollout remains a separate step.
+test schemas remained. Railway PR preview migration and deployment succeeded.
+
+The parent portal change (`b0171d5484`) deployed successfully on 2026-10-02,
+and migration batch 1160 ran once. Both `cronJobs` and
+`GATE_PEST_FORECAST_HISTORY` are enabled at runtime. Live default-location,
+named-city and invalid-location API probes returned HTTP 200 with the new
+evidence/comparison fields and `week_over_week: null`, as expected before
+history exists. The first scheduled capture is 08:15 ET; this rollout receipt
+does not claim that capture has already occurred. Verification used deployment
+and live API evidence without direct production database access.
 
 The portal production build and domain-rule checks passed. The companion
 Astro worktree completed its production build (686 pages), article publishing

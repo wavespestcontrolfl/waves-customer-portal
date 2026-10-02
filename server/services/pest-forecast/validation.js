@@ -9,6 +9,7 @@ const { dateOnlyString } = require('../../utils/date-only');
 const { parseJsonObject, serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
 
 const OBSERVATION_RULE_VERSION = 'typed-live-pest-v1';
+const EVALUATION_QUERY_TIMEOUT_MS = 5000;
 // Exact controlled form choices only. No substring matching, AI species IDs,
 // findings titles, customer ratings, or prose summaries become observations.
 const PEST_MAP = {
@@ -147,6 +148,9 @@ async function loadEvaluationData(knex, { from, to }) {
   const since = etDateString(addETDays(new Date(`${from}T12:00:00Z`), -7));
   return knex.transaction(async trx => {
     await trx.raw('SET TRANSACTION READ ONLY');
+    // READ ONLY prevents mutations but does not bound a lock wait. Keep both
+    // source reads server-cancellable so an abandoned lock cannot hang the CLI.
+    await trx.raw("SELECT set_config('statement_timeout', ?, true)", [`${EVALUATION_QUERY_TIMEOUT_MS}ms`]);
     const records = await trx('service_records as sr')
       .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
       .whereBetween('sr.service_date', [from, to]).where('sr.status', 'completed')

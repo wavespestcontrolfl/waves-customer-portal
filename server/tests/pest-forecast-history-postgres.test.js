@@ -85,7 +85,7 @@ jest.setTimeout(30000);
     expect((await readPreviousForecast(make('2026-10-02'), db)).as_of_date).toBe('2026-09-25');
   });
 
-  test('read-only evaluator loads real JSON/date columns without changing source rows', async () => {
+  test('read-only evaluator preserves source rows and bounds blocked reads', async () => {
     await saveSnapshot(make('2026-10-01'), db);
     await db('service_records').insert({ id: randomUUID(), customer_id: randomUUID(), technician_id: randomUUID(),
       status: 'completed', service_date: '2026-10-02', service_data: JSON.stringify({
@@ -96,5 +96,17 @@ jest.setTimeout(30000);
     expect(evaluateForecasts(input).coverage.matchedObservations).toBe(1);
     expect((await db('service_records').count('* as n').first()).n).toBe('1');
     expect((await db('pest_forecast_snapshots').count('* as n').first()).n).toBe('1');
+
+    for (const table of ['service_records', 'pest_forecast_snapshots']) {
+      const blocker = await db.transaction();
+      try {
+        await blocker.raw('LOCK TABLE ?? IN ACCESS EXCLUSIVE MODE', [table]);
+        const started = Date.now();
+        await expect(loadEvaluationData(db, { from: '2026-10-01', to: '2026-10-03' }))
+          .rejects.toThrow(/canceling statement due to statement timeout/);
+        expect(Date.now() - started).toBeLessThan(8000);
+      } finally { await blocker.rollback(); }
+    }
+    expect(evaluateForecasts(await loadEvaluationData(db, { from: '2026-10-01', to: '2026-10-03' })).coverage.matchedObservations).toBe(1);
   });
 });
