@@ -1985,7 +1985,8 @@ separate customer text right after the lawn completion text, rendered from the
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
-key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` to
+key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
+optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to
 LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
 (null falls back to the status label), `why` the root cause or score
 explanation, `applied` the treatment summary (never filtered), `yourPart` at most two
@@ -2077,9 +2078,37 @@ row and prior check, and an overall direction, from `sinceLast` plus both visits
 scores and this render's photo confidence). It adds NO public key: it rides the
 in-process report object as a non-enumerable `reportV2.progress`, so JSON, spread
 and `Object.keys` never see it and the `/api/reports/:token/data` payload is what
-it was (a test pins that), until P14 writes guarded copy from it and this section
-is updated with the key it then exposes. Pure, no read, no write, and a failure
-cannot break a render.
+it was (a test pins that). The block itself never reaches the payload; the only
+thing a customer sees of it is the sentences below. Pure, no read, no write, and
+a failure cannot break a render.
+`GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
+`GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
+unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
+`{ priorDate: 'YYYY-MM-DD', lines: string[] }` and the web report prints it in
+the lead as "Since your last visit, <Mon D>" above "What we applied today" (the
+PDF does not print the lead, so its content and cache signature are unchanged).
+Every line is a fixed sentence selected by key in
+`server/services/service-report/lawn-since-last-copy.js`; no model writes it and
+it carries no product name, active ingredient, number, date or timing word. In
+order, at most 40 words (whole lines are dropped from the end): what the prior
+visit applied, by product kind ("Last visit we applied weed control and
+fertilizer."); the overall direction when the engine compared the two visits
+(up / down / holding steady; nothing when the photos cannot support a
+comparison); at most two per-treatment states (ahead of schedule, on track,
+holding steady, too early, behind, or seasonal for color), spoken ONLY for an
+expectation row the owner has approved (`server/config/lawn-expectations.js`
+`approved: true`) and never for an `unclear` item; and "Still on our watch
+list: …" naming the prior visit's watched topics (weeds, stressed areas, mowing
+height, watering, sprinkler coverage) that today's report still carries as a
+watch or needs-attention finding. A topic today's report no longer carries is
+not called cleared, and no better / same / worse wording exists: that verdict
+comes only from a same-spot recheck record, which nothing writes yet. Under a
+watering banner the block names neither watering nor sprinkler coverage (the
+banner owns them). The key is absent when there is nothing to say, when there
+is no prior visit, or when the prior visit froze no memory. The sentences are
+selected at render from the frozen memory and the two visits' scores, so a
+permanent token repeats them while those inputs stand; approving an expectation
+row later adds that row's line to reports already delivered.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
