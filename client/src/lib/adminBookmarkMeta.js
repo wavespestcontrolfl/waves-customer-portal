@@ -46,8 +46,10 @@ export const FIELD_BOOKMARK_META = {
 
 const FIELD_MANIFESTS = [FIELD_BOOKMARK_META.manifest, "/tech-manifest.json"];
 
+// Case-insensitive, as React Router matches /ADMIN/TODAY too (pre-push P1).
 export function isFieldPath(pathname) {
-  return pathname === "/admin/today" || pathname.startsWith("/admin/today/");
+  const path = String(pathname || "").toLowerCase();
+  return path === "/admin/today" || path.startsWith("/admin/today/");
 }
 
 export function isAdminPath(pathname) {

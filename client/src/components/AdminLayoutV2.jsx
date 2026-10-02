@@ -357,7 +357,7 @@ export default function AdminLayoutV2() {
   // tech-field-workspace flag off, /admin/today shows the legacy route UI,
   // which has no navigation of its own, so the admin chrome must stay.
   const fieldWorkspaceFlag = useFeatureFlagReady("tech-field-workspace", false);
-  const fieldChrome = isMobile && fieldWorkspaceFlag.enabled && /^\/admin\/today(\/|$)/.test(location.pathname);
+  const fieldChrome = isMobile && fieldWorkspaceFlag.enabled && isFieldPath(location.pathname);
   // The redirect effect runs after render. Apply its existing role policy to
   // the outlet too, so a restricted child's effects cannot run for one frame.
   const canRenderRoute = authStatus === "ready"

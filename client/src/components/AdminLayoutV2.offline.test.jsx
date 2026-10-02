@@ -100,6 +100,24 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(await screen.findByText("Saved route content")).toBeInTheDocument();
   });
 
+  it("an uppercase /ADMIN/TODAY bookmark gets the same offline fallback (pre-push P1)", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN);
+    vi.stubGlobal("fetch", offline());
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/ADMIN/TODAY"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/today" element={<div>Saved route content</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText("Saved route content")).toBeInTheDocument();
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);
