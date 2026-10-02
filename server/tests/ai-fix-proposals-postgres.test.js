@@ -34,9 +34,9 @@ test('the service and the migration name the same statuses, fix kinds and open s
     disposition: 'confirmed_mistake', ...CELL, prompt_version: V12,
     summary: 'Gave an arrival time the facts did not carry.', adjudicated_at: new Date('2026-10-03T08:30:00Z'), ...over,
   });
-  // Fixed keys whose hash split is known (8 dev, 4 holdout), so the split
-  // assertions never depend on random uuids.
-  const FIXED_KEYS = Array.from({ length: 12 }, (_, i) => `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`);
+  // Fixed keys, each with its own 8-character prefix (the proposal prints
+  // that prefix), whose hash split is known: 10 dev, 2 holdout.
+  const FIXED_KEYS = Array.from({ length: 12 }, (_, i) => `${String(i + 1).padStart(8, '0')}-0000-4000-8000-000000000000`);
   const seed = async (n, over = {}) => {
     const rows = Array.from({ length: n }, () => incident(over));
     await database('ai_incidents').insert(rows);
@@ -79,15 +79,18 @@ test('the service and the migration name the same statuses, fix kinds and open s
   });
 
   test('the proposal describes dev incidents only; a held-out incident is counted, never summarized', async () => {
-    const rows = FIXED_KEYS.map((k, i) => incident({ incident_key: k, summary: `incident number ${i}` }));
+    const rows = FIXED_KEYS.map((k, i) => incident({ incident_key: k, summary: `summary-${String.fromCharCode(97 + i)}` }));
     await database('ai_incidents').insert(rows);
     await propose();
     const p = await database('ai_fix_proposals').first();
-    expect(p.holdout_incident_keys).toHaveLength(4);
+    expect(p.holdout_incident_keys).toHaveLength(2);
+    expect(p.dev_incident_keys).toHaveLength(10);
     const summaryOf = new Map(rows.map((r) => [r.incident_key, r.summary]));
-    for (const key of p.holdout_incident_keys) expect(p.proposal).not.toContain(`${summaryOf.get(key)}\n`);
-    for (const key of p.holdout_incident_keys) expect(p.proposal).not.toContain(String(key).slice(0, 8));
-    for (const key of p.dev_incident_keys.slice(0, 10)) expect(p.proposal).toContain(summaryOf.get(key));
+    for (const key of p.holdout_incident_keys) {
+      expect(p.proposal).not.toContain(summaryOf.get(key));
+      expect(p.proposal).not.toContain(String(key).slice(0, 8));
+    }
+    for (const key of p.dev_incident_keys) expect(p.proposal).toContain(`- ${String(key).slice(0, 8)}: ${summaryOf.get(key)}`);
     expect(p.proposal).toContain(`${p.holdout_incident_keys.length} held out`);
   });
 
