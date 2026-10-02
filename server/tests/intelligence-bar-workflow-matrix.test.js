@@ -184,6 +184,26 @@ describe('request tally script', () => {
     expect(src).not.toMatch(/SET TRANSACTION READ ONLY'/);
   });
 
+  // created_at is timestamptz (knex t.timestamp() on PostgreSQL), so AT TIME ZONE
+  // 'America/New_York' converts the instant to Eastern wall time. Pin both facts.
+  (predicateDb ? test : test.skip)('created_at is timestamptz and the day bucket is the Eastern calendar day (PostgreSQL)', async () => {
+    const { Client } = require('pg');
+    const client = new Client({ connectionString: predicateDb });
+    await client.connect();
+    try {
+      const type = await client.query("select data_type from information_schema.columns where table_name = 'intelligence_bar_queries' and column_name = 'created_at'");
+      expect(type.rows[0].data_type).toBe('timestamp with time zone');
+      await client.query("set timezone = 'UTC'");
+      const { rows } = await client.query(`
+        select to_char((q.created_at at time zone 'America/New_York')::date, 'YYYY-MM-DD') as day
+        from (values ('2026-10-02 01:00:00+00'::timestamptz), ('2026-10-02 05:00:00+00'::timestamptz)) as q(created_at)`);
+      // 01:00 UTC is 21:00 the evening before in Eastern daylight time; 05:00 UTC is 01:00 the same day
+      expect(rows.map((r) => r.day)).toEqual(['2026-10-01', '2026-10-02']);
+    } finally {
+      await client.end();
+    }
+  });
+
   test('arguments: default window, --days and --json, bad input refused', () => {
     expect(tally.parseArgs([])).toEqual({ days: 14, json: false, help: false });
     expect(tally.parseArgs(['--days', '30', '--json'])).toEqual({ days: 30, json: true, help: false });
