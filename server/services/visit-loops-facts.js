@@ -310,6 +310,8 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
     const endMin = customerWindowEndMinutes({ window_start: occ.startHms });
     const nowOnDay = occ.date === today ? nowMin : nowMin + 1440;
     if (endMin == null || endMin >= nowOnDay) continue;
+    // yesterday's occurrence counts only when its window ran past midnight into today
+    if (occ.date !== today && endMin <= 1440) continue;
     passed.push({ row, occ, minutesPast: nowOnDay - endMin });
   }
   if (!passed.length) return null;

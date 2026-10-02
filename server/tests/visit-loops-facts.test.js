@@ -355,6 +355,18 @@ describe('pastWindow', () => {
     expect(out.pastWindow).toMatchObject({ visitId: 'visit-1', passedKeys: ['visit-1@2026-10-01T09:00:00', 'v-late@2026-10-01T10:00:00'] });
   });
 
+  test('an ordinary unfinished visit from YESTERDAY is not today\'s passed window; today\'s is', async () => {
+    const conn = fakeConn({ scheduled_services: (ops) => (isCandidateQuery(ops)
+      ? [todayRow({ id: 'v-yday', scheduled_date: '2026-09-30', status: 'confirmed' }), todayRow({ window_start: '10:00:00', status: 'confirmed' })]
+      : []) });
+    const out = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T17:00:00Z'), deriveWindow, conn }); // 13:00 ET
+    expect(out.pastWindow).toMatchObject({ visitId: 'visit-1', passedKeys: ['visit-1@2026-10-01T10:00:00'] });
+    // yesterday's 23:00 window (ends 01:00 today) has passed by 13:00 today
+    const late = fakeConn({ scheduled_services: (ops) => (isCandidateQuery(ops)
+      ? [todayRow({ id: 'v-yday', scheduled_date: '2026-09-30', window_start: '23:00:00', status: 'confirmed' })] : []) });
+    expect((await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T17:00:00Z'), deriveWindow, conn: late })).pastWindow).toMatchObject({ visitId: 'v-yday' });
+  });
+
   test('a window that crosses midnight (23:00-01:00) is not passed in the evening', async () => {
     const out = await run({ status: 'confirmed', window_start: '23:00:00', window_end: '23:30:00' }, new Date('2026-10-02T02:00:00Z')); // 22:00 ET
     expect(out.pastWindow).toBeNull();
