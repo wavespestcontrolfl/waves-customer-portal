@@ -28,14 +28,17 @@ Roll out the portal/API correction and the companion website embed/page copy
 together. The history gate can stay off while the immediate wording fix ships;
 both consumers tolerate legacy payloads during that transition.
 
-The existing scheduler captures curated cities at 08:15 ET, with a 14:15 retry
+The existing scheduler captures curated cities and the default Southwest Florida region
+at 08:15 ET, with a 14:15 retry
 for weather/DB gaps. Unique city/date/model keys preserve the first successful
 prediction. Weather outages do not become history. A model-version change
 starts a new comparable series; bump `MODEL_VERSION` when scoring, weather
 interpretation or location coordinates change. Historical weather is never
 reconstructed to pretend a prediction was captured earlier.
 
-Public GETs only read history, under a bounded timeout. Missing migration,
+Public GETs only read history, under a 750 ms overall timeout. Expired pool
+acquisitions are removed before returning; in-flight reads use the remaining
+query budget and keep their connection until query cancellation finishes. Missing migration,
 missing dates, a model/location mismatch, or changed weather-data coverage
 leave the temporal comparison unavailable. Seven days of actual collection
 must elapse before the first comparison is possible. The immediate baseline
@@ -46,16 +49,19 @@ wording correction does not depend on the history gate.
 Unit tests cover baseline-versus-time semantics, exact-date/model/city matching,
 outages, gate changes and bounded reads during pool exhaustion. `pest-forecast-history-postgres.test.js` applies the
 migration in a random isolated schema, exercises concurrent immutable saves,
-date/JSON reads and the overall read timeout. It requires the explicit
+date/JSON reads, cancellation of exhausted-pool reads, and blocked SQL cleanup. It requires the explicit
 `PEST_FORECAST_TEST_DATABASE_URL`; the CI PostgreSQL job runs it. A skipped
 suite is not migration/DB verification.
 
-Local verification on 2026-10-02: 143 backend unit/regression checks, three
-PostgreSQL integration checks in a disposable local PostgreSQL 16 cluster,
+Local verification on 2026-10-02: 146 backend unit/regression checks, three
+initial PostgreSQL integration checks in a disposable local PostgreSQL 16 cluster,
 101 React comparison/report checks and four standalone embed checks passed. The
 local cluster contained only test fixtures and was stopped afterward. This
-does not establish Railway preview compatibility or validate real-world
-prediction accuracy; those remain rollout/evidence steps above.
+does not validate real-world prediction accuracy. The expanded four-test
+PostgreSQL suite also passed against Railway codex-dev PostgreSQL 16.15,
+including queued-acquisition cleanup and blocked-query cancellation. No extra
+test schemas remained. Railway PR preview migration and deployment succeeded;
+production rollout remains a separate step.
 
 The portal production build and domain-rule checks passed. The companion
 Astro worktree completed its production build (686 pages), article publishing

@@ -3,14 +3,18 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
 const { computeForecast, getForecastWithFreshness, _clearCache } = require('../services/pest-forecast/forecast');
-const { compareForecasts, weekBefore, saveSnapshot, collectDailyForecasts } = require('../services/pest-forecast/history');
+const { compareForecasts, weekBefore, saveSnapshot, collectDailyForecasts, readPreviousForecast } = require('../services/pest-forecast/history');
 const { getWeatherSignals } = require('../services/pest-forecast/weather');
 const db = require('../models/db');
-const { BY_SLUG, LOCATIONS } = require('../services/pest-forecast/locations');
+const { BY_SLUG, LOCATIONS, DEFAULT_LOCATION } = require('../services/pest-forecast/locations');
 const location = BY_SLUG.get('bradenton-fl');
 const signals = { hasWeather: true, source: 'nws', warm: true, wet: true, tempHighF: 88, precipChance: 70, recentRainIn: null };
 const make = (date, overrides = {}) => computeForecast(location, { ...signals, ...overrides }, new Date(`${date}T16:00:00Z`));
 const pest = f => f.pests.find(p => p.key === 'ants');
+
+beforeEach(() => {
+  db.client = { pool: { acquire: () => ({ promise: Promise.resolve({}), abort: jest.fn() }) }, releaseConnection: jest.fn().mockResolvedValue() };
+});
 
 afterEach(() => { delete process.env.GATE_PEST_FORECAST_HISTORY; _clearCache(); jest.clearAllMocks(); });
 
@@ -69,7 +73,7 @@ test('collector saves only missing cities, preserves the ET date, and retries un
   const missing = LOCATIONS.slice(0, 2);
   const inserted = [];
   const knex = jest.fn(() => ({
-    where: () => ({ pluck: async () => LOCATIONS.slice(2).map(l => l.slug) }),
+    where: () => ({ pluck: async () => [...LOCATIONS.slice(2), DEFAULT_LOCATION].map(l => l.slug) }),
     insert: row => {
       inserted.push(row);
       return { onConflict: () => ({ ignore: () => ({ returning: async () => [row.location_slug] }) }) };
@@ -87,7 +91,7 @@ test('collector saves only missing cities, preserves the ET date, and retries un
 test('collector continues to other cities after a failed weather request and reports the gap', async () => {
   process.env.GATE_PEST_FORECAST_HISTORY = 'true';
   const knex = jest.fn(() => ({
-    where: () => ({ pluck: async () => LOCATIONS.slice(2).map(l => l.slug) }),
+    where: () => ({ pluck: async () => [...LOCATIONS.slice(2), DEFAULT_LOCATION].map(l => l.slug) }),
     insert: () => ({ onConflict: () => ({ ignore: () => ({ returning: async () => ['saved'] }) }) }),
   }));
   getWeatherSignals.mockRejectedValueOnce(new Error('upstream')).mockResolvedValueOnce(signals);
@@ -99,7 +103,7 @@ test('history read failure leaves the public forecast usable and unknown; public
   process.env.GATE_PEST_FORECAST_HISTORY = 'true';
   const first = jest.fn(() => ({ timeout: jest.fn().mockRejectedValue(new Error('table not migrated')) }));
   const where = jest.fn(() => ({ first }));
-  db.mockReturnValue({ where });
+  db.mockReturnValue({ connection: () => ({ where }) });
   getWeatherSignals.mockResolvedValue({ ...signals, freshUntil: Date.now() + 60000 });
   const out = await getForecastWithFreshness({ location: location.slug });
   expect(out.forecast.weather.available).toBe(true);
@@ -111,10 +115,61 @@ test('history read failure leaves the public forecast usable and unknown; public
 test('turning history off cannot replay a history-enriched cache entry', async () => {
   process.env.GATE_PEST_FORECAST_HISTORY = 'true';
   const now = new Date('2026-10-02T16:00:00Z');
-  db.mockReturnValue({ where: () => ({ first: () => ({ timeout: async () => ({ forecast: make('2026-09-25') }) }) }) });
+  db.mockReturnValue({ connection: () => ({ where: () => ({ first: () => ({ timeout: async () => ({ forecast: make('2026-09-25') }) }) }) }) });
   getWeatherSignals.mockResolvedValue({ ...signals, freshUntil: Date.now() + 60000 });
   expect(pest((await getForecastWithFreshness({ location: location.slug }, { now })).forecast).week_over_week).not.toBeNull();
   delete process.env.GATE_PEST_FORECAST_HISTORY;
   expect(pest((await getForecastWithFreshness({ location: location.slug }, { now })).forecast).week_over_week).toBeNull();
   expect(db).toHaveBeenCalledTimes(1);
+});
+
+
+test('collector captures the default region used by requests without a location', async () => {
+  process.env.GATE_PEST_FORECAST_HISTORY = 'true';
+  const snapshots = new Map();
+  const knex = jest.fn(() => ({
+    where: () => ({ pluck: async () => LOCATIONS.map(l => l.slug) }),
+    insert: row => {
+      snapshots.set(row.location_slug, JSON.parse(row.forecast));
+      return { onConflict: () => ({ ignore: () => ({ returning: async () => [row.location_slug] }) }) };
+    },
+  }));
+  getWeatherSignals.mockResolvedValue({ ...signals, freshUntil: Date.now() + 60000 });
+  await collectDailyForecasts({ knex, now: new Date('2026-09-25T16:00:00Z') });
+  expect([...snapshots.keys()]).toEqual([DEFAULT_LOCATION.slug]);
+  db.mockReturnValue({ connection: () => ({ where: () => ({ first: () => ({ timeout: async () => ({ forecast: snapshots.get(DEFAULT_LOCATION.slug) }) }) }) }) });
+  const current = await getForecastWithFreshness({}, { now: new Date('2026-10-02T16:00:00Z') });
+  expect(current.forecast.location.slug).toBe(DEFAULT_LOCATION.slug);
+  expect(pest(current.forecast).week_over_week).not.toBeNull();
+});
+
+
+test('a connection granted at the deadline is released without issuing late SQL', async () => {
+  jest.useFakeTimers();
+  let grant;
+  const promise = new Promise(resolve => { grant = resolve; });
+  db.client.pool.acquire = () => ({ promise, abort: () => grant({}) });
+  try {
+    const read = expect(readPreviousForecast(make('2026-10-02'), db)).rejects.toThrow('History read timed out');
+    await jest.advanceTimersByTimeAsync(750);
+    await read;
+    expect(db).not.toHaveBeenCalled();
+    expect(db.client.releaseConnection).toHaveBeenCalledTimes(1);
+  } finally { jest.useRealTimers(); }
+});
+
+test('a timed-out in-flight query retains its connection until cancellation finishes', async () => {
+  jest.useFakeTimers();
+  let finish;
+  const query = new Promise(resolve => { finish = resolve; });
+  db.mockReturnValue({ connection: () => ({ where: () => ({ first: () => ({ timeout: () => query }) }) }) });
+  try {
+    const read = expect(readPreviousForecast(make('2026-10-02'), db)).rejects.toThrow('History read timed out');
+    await jest.advanceTimersByTimeAsync(750);
+    await read;
+    expect(db.client.releaseConnection).not.toHaveBeenCalled();
+    finish(null);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(db.client.releaseConnection).toHaveBeenCalledTimes(1);
+  } finally { jest.useRealTimers(); }
 });

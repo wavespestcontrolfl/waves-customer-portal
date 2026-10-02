@@ -46,15 +46,37 @@ jest.setTimeout(30000);
 
   test('an exhausted pool cannot stall the optional public history read', async () => {
     const connections = await Promise.all(Array.from({ length: 3 }, () => db.client.acquireConnection()));
+    const queries = [];
+    const record = query => queries.push(query.sql);
+    db.on('query', record);
     try {
       // All pool connections are held, so Knex cannot reach its SQL timeout.
       // This must fail within the overall read budget, not its 60s pool wait.
       const started = Date.now();
-      await expect(readPreviousForecast(make('2026-10-02'), db)).rejects.toThrow('History read timed out');
+      const reads = Array.from({ length: 12 }, () => readPreviousForecast(make('2026-10-02'), db));
+      const results = await Promise.allSettled(reads);
+      expect(results.every(r => r.status === 'rejected' && r.reason.message === 'History read timed out')).toBe(true);
+      expect(db.client.pool.numPendingAcquires()).toBe(0);
       expect(Date.now() - started).toBeLessThan(3000);
     } finally {
       await Promise.all(connections.map(connection => db.client.releaseConnection(connection)));
+      await new Promise(resolve => setTimeout(resolve, 50));
+      db.removeListener('query', record);
     }
+    expect(queries).toEqual([]);
+  });
+
+  test('a blocked SQL read is cancelled and the pool remains usable', async () => {
+    await saveSnapshot(make('2026-09-25'), db);
+    const blocker = await db.transaction();
+    try {
+      await blocker.raw('LOCK TABLE pest_forecast_snapshots IN ACCESS EXCLUSIVE MODE');
+      const started = Date.now();
+      await expect(readPreviousForecast(make('2026-10-02'), db))
+        .rejects.toThrow(/History read timed out|Defined query timeout/);
+      expect(Date.now() - started).toBeLessThan(3000);
+    } finally { await blocker.rollback(); }
+    expect((await readPreviousForecast(make('2026-10-02'), db)).as_of_date).toBe('2026-09-25');
   });
 
 });

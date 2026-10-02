@@ -40,21 +40,43 @@ function compareForecasts(current, previous) {
 }
 
 async function readPreviousForecast(forecast, knex = require('../../models/db')) {
+  const deadline = Date.now() + 750;
+  const expired = () => new Error('History read timed out');
+  // Tarn exposes cancellation of a queued acquisition; Knex's wrapper does not.
+  const acquisition = knex.client.pool.acquire();
+  let timedOut = false;
   let timer;
   try {
-    // Knex's query timeout starts AFTER pool acquisition. Bound the entire
-    // optional read so a saturated pool cannot stall the public weather feed.
+    const read = (async () => {
+      const connection = await acquisition.promise;
+      try {
+        const remaining = deadline - Date.now();
+        if (timedOut || remaining <= 0) throw expired();
+        return await knex(TABLE).connection(connection).where({
+          location_slug: forecast.location.slug,
+          forecast_date: weekBefore(forecast.as_of_date),
+          model_version: forecast.model_version,
+        }).first('forecast').timeout(remaining, { cancel: true });
+      } finally {
+        // Query cancellation may finish after the public deadline. Keep the
+        // connection out of the pool until Knex has completed that cleanup.
+        await knex.client.releaseConnection(connection);
+      }
+    })();
     const row = await Promise.race([
-      knex(TABLE).where({
-        location_slug: forecast.location.slug,
-        forecast_date: weekBefore(forecast.as_of_date),
-        model_version: forecast.model_version,
-      }).first('forecast').timeout(750, { cancel: true }),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('History read timed out')), 750); }),
+      read,
+      new Promise((_, reject) => { timer = setTimeout(() => {
+        timedOut = true;
+        acquisition.abort();
+        reject(expired());
+      }, Math.max(0, deadline - Date.now())); }),
     ]);
     return row?.forecast || null;
   } finally {
     clearTimeout(timer);
+    // abort() rejects immediately, but Tarn removes the queued acquisition in
+    // its promise handler. Finish that cleanup before returning to the caller.
+    await acquisition.promise.catch(() => {});
   }
 }
 
@@ -76,14 +98,14 @@ async function saveSnapshot(forecast, knex = require('../../models/db')) {
 async function collectDailyForecasts({ now = new Date(), knex } = {}) {
   if (!historyEnabled()) return { skipped: 'gated' };
   knex ||= require('../../models/db');
-  const { LOCATIONS } = require('./locations');
+  const { LOCATIONS, DEFAULT_LOCATION } = require('./locations');
   const { getWeatherSignals } = require('./weather');
   const { computeForecast } = require('./forecast');
   const day = etDateString(now);
   const existing = await knex(TABLE).where({ forecast_date: day, model_version: MODEL_VERSION }).pluck('location_slug');
   const seen = new Set(existing);
   const result = { saved: 0, existing: seen.size, unavailable: 0, errors: 0 };
-  for (const location of LOCATIONS) {
+  for (const location of [...LOCATIONS, DEFAULT_LOCATION]) {
     if (seen.has(location.slug)) continue;
     try {
       const signals = await getWeatherSignals(location);
