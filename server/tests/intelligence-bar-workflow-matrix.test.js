@@ -157,11 +157,14 @@ describe('request tally script', () => {
     expect(tally.TURNS_SQL).toMatch(/case when jsonb_typeof\(q\.tool_calls\) = 'array' then jsonb_array_length\(q\.tool_calls\) = 0 else true end/);
   });
 
-  // The same predicate, evaluated by PostgreSQL over the rows that matter. Runs in the
-  // DB-gated CI step or against a private QA database; skipped when DATABASE_URL is unset.
-  (process.env.DATABASE_URL ? test : test.skip)('the predicate keeps NULL, empty, non-array and ordinary rows and drops only public estimate Q&A (PostgreSQL)', async () => {
+  // The same predicate, evaluated by PostgreSQL over the rows that matter. Runs in
+  // CI's "Intelligence Bar operational transaction tests" step (IB_TEST_DATABASE_URL)
+  // or against a private QA database; skipped when neither variable is set. It reads
+  // a VALUES list only and touches no table.
+  const predicateDb = process.env.IB_TEST_DATABASE_URL || process.env.DATABASE_URL;
+  (predicateDb ? test : test.skip)('the predicate keeps NULL, empty, non-array and ordinary rows and drops only public estimate Q&A (PostgreSQL)', async () => {
     const { Client } = require('pg');
-    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    const client = new Client({ connectionString: predicateDb });
     await client.connect();
     try {
       const { rows } = await client.query(`

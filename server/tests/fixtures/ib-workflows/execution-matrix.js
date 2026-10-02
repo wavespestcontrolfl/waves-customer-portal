@@ -28,7 +28,7 @@
 const MATRIX = [
   { workflow: 'W1', tool: 'needs_me', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W1', tool: 'get_today_briefing', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
-  { workflow: 'W2', tool: 'get_customer_detail', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
+  { workflow: 'W2/W9', tool: 'get_customer_detail', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W2', tool: 'get_schedule_view', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W2', tool: 'get_conversation_thread', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W2', tool: 'get_open_commitments', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
@@ -50,6 +50,7 @@ const MATRIX = [
   { workflow: 'W8', tool: 'save_customer_estimate', cls: 'two_step_card', owner: 'direct', admin: 'card', tech: 'refused' },
   { workflow: 'W8', tool: 'get_estimate_detail', cls: 'read', owner: 'direct', admin: 'direct', tech: 'refused' },
   { workflow: 'W9', tool: 'get_outstanding_balances', cls: 'read', owner: 'direct', admin: 'direct', tech: 'refused' },
+  { workflow: 'W9', tool: 'query_revenue', cls: 'read', owner: 'direct', admin: 'direct', tech: 'refused' },
   { workflow: 'W9', tool: 'get_stripe_payment_intents', cls: 'read', owner: 'direct', admin: 'direct', tech: 'refused' },
   { workflow: 'W10', tool: 'query_stock', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W10', tool: 'get_stock_movements', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },

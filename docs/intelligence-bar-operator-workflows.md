@@ -144,7 +144,7 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | W1 | `needs_me` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W1 | `get_today_briefing` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
-| W2 | `get_customer_detail` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W2/W9 | `get_customer_detail` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_schedule_view` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_conversation_thread` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_open_commitments` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
@@ -166,6 +166,7 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | W8 | `save_customer_estimate` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
 | W8 | `get_estimate_detail` | read | direct | direct | direct | direct | direct | refused | refused |
 | W9 | `get_outstanding_balances` | read | direct | direct | direct | direct | direct | refused | refused |
+| W9 | `query_revenue` | read | direct | direct | direct | direct | direct | refused | refused |
 | W9 | `get_stripe_payment_intents` | read | direct | direct | direct | direct | direct | refused | refused |
 | W10 | `query_stock` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W10 | `get_stock_movements` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
