@@ -272,14 +272,16 @@ function validateVoiceFacts(json, note) {
 
 // What a quote must say for the method it is read as (Codex #5538): a spray
 // around the house says so in the prompt's own words (around the house or
-// the outside, the perimeter, the foundation, all the way around); a quote
-// that also calls itself spot spraying, or a spot quote that says around the
-// house, contradicts itself and is unclear.
+// the outside, the perimeter, the foundation, all the way around) and does
+// not call itself spot spraying; a spot spray either says "spot" ("spot
+// sprayed around the house where ants trailed" names where the spots were)
+// or does not claim the way around the house. Anything else contradicts
+// itself and is unclear.
 const PERIMETER_WORDS_RE = /\b(?:perimeter|foundation|all\s+(?:the\s+way\s+)?around|around\s+(?:the\s+)?(?:outside|exterior|house|home|building|structure)|outside\s+of\s+the\s+(?:house|home))\b/;
 const SPOT_WORDS_RE = /\bspot(?:s|ted|ting)?\b/;
 const METHOD_SUPPORTED = {
   perimeter: (quote) => PERIMETER_WORDS_RE.test(quote) && !SPOT_WORDS_RE.test(quote),
-  spot: (quote) => !PERIMETER_WORDS_RE.test(quote),
+  spot: (quote) => SPOT_WORDS_RE.test(quote) || !PERIMETER_WORDS_RE.test(quote),
 };
 
 // How the sprays went down: only a grounded quote the note does not deny. A

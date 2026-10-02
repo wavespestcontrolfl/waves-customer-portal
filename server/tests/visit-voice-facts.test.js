@@ -356,6 +356,8 @@ describe('validateVoiceFacts', () => {
     expect(read({ method: 'perimeter', quote: 'Spot sprayed around the house where ants trailed' })).toMatchObject({ spray: null, unclearSpray: true });
     expect(read({ method: 'perimeter', quote: 'Sprayed all the way around the house' }).spray).toMatchObject({ method: 'perimeter' });
     expect(read({ method: 'spot', quote: 'Spot sprayed the garage door frames' }).spray).toMatchObject({ method: 'spot' });
+    // "Spot" with where the spots were is a spot spray (pre-push P1).
+    expect(read({ method: 'spot', quote: 'Spot sprayed around the house where ants trailed' })).toMatchObject({ spray: { method: 'spot' }, unclearSpray: false });
   });
 
   test('a fact said twice stands when one saying is not denied', () => {
