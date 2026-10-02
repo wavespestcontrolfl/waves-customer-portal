@@ -1222,9 +1222,28 @@ function validJson(result, kind) {
 
 /** The dispatcher's result stamped with the route's provider/model, keeping
  * the dispatcher's own object on `raw` for ledger rejection. */
+// Owner 2026-10-02 ("same as pest"): the customer app's lawn and tree/shrub/
+// palm Photo ID reads with Gemini alone — Call A and Call C, no verify leg,
+// no OpenAI second opinion, no referee; OpenAI stands in only when Gemini
+// returns nothing usable. That read uses its own policy
+// (`MODELS.TEXT_POLICIES.photoIdPlantV2`),
+// ledger lane (plant_id_app) and LOW thinking; every other caller (visit
+// prep) keeps the full plantIdVision ladder. A missing policy is a no_route
+// miss, never a silent swap.
+const GEMINI_THINKING_LEVEL = 'LOW';
+function plantPolicy(singleRead) {
+  return singleRead ? MODELS.TEXT_POLICIES?.photoIdPlantV2 : MODELS.TEXT_POLICIES?.plantIdVision;
+}
+// thinkingLevel is a Gemini 3.x setting; any other route never receives it.
+function supportsThinkingLevel(route) {
+  return route.provider === 'gemini' && /^gemini-3/.test(String(route.model));
+}
+
 async function callWithProvider(route, payload) {
   if (!route || !route.provider || !route.model) return { ok: false, reason: 'no_route', provider: route?.provider || null, model: route?.model || null };
-  const result = await dispatch(route, payload);
+  const { thinkingLevel, ...rest } = payload;
+  const sent = thinkingLevel && supportsThinkingLevel(route) ? { ...rest, thinkingLevel } : rest;
+  const result = await dispatch(route, sent);
   if (!result) return { ok: false, reason: 'no_response', provider: route.provider, model: route.model };
   return {
     ...result, provider: route.provider, model: result.model || route.model, raw: result,
@@ -1245,8 +1264,8 @@ function escalateBelow() {
   return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.80;
 }
 
-async function callIdentityCandidates(images, subject, indexTexts, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.plantIdVision?.primary;
+async function callIdentityCandidates(images, subject, indexTexts, timeoutMs, singleRead = false) {
+  const route = plantPolicy(singleRead)?.primary;
   return callWithProvider(route, {
     system: buildIdentityCandidatesPrompt(subject, indexTexts),
     text: `These ${images.length} photo(s) show the same subject from different angles. Identify it.`,
@@ -1255,7 +1274,8 @@ async function callIdentityCandidates(images, subject, indexTexts, timeoutMs) {
     jsonSchema: CANDIDATES_A_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'plant_id',
+    ...(singleRead ? { thinkingLevel: GEMINI_THINKING_LEVEL } : {}),
+    laneId: singleRead ? 'plant_id_app' : 'plant_id',
     promptVersion: `${PROMPT_VERSION}:candidates`,
   });
 }
@@ -1275,8 +1295,8 @@ async function callIdentityVerify(images, candidateContext, timeoutMs) {
   });
 }
 
-async function callConditionSelection(images, promptArgs, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.plantIdVision?.primary;
+async function callConditionSelection(images, promptArgs, timeoutMs, singleRead = false) {
+  const route = plantPolicy(singleRead)?.primary;
   return callWithProvider(route, {
     system: buildConditionSelectionPrompt(promptArgs),
     text: 'Assess these photos against the list above.',
@@ -1285,13 +1305,14 @@ async function callConditionSelection(images, promptArgs, timeoutMs) {
     jsonSchema: CONDITIONS_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'plant_id',
+    ...(singleRead ? { thinkingLevel: GEMINI_THINKING_LEVEL } : {}),
+    laneId: singleRead ? 'plant_id_app' : 'plant_id',
     promptVersion: `${PROMPT_VERSION}:conditions`,
   });
 }
 
-async function callEscalation(images, promptArgs, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.plantIdVision?.fallback;
+async function callEscalation(images, promptArgs, timeoutMs, singleRead = false) {
+  const route = plantPolicy(singleRead)?.fallback;
   return callWithProvider(route, {
     system: buildEscalationPrompt(promptArgs),
     text: 'Identify and assess these photos fresh.',
@@ -1300,7 +1321,7 @@ async function callEscalation(images, promptArgs, timeoutMs) {
     jsonSchema: ESCALATION_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'plant_id',
+    laneId: singleRead ? 'plant_id_app' : 'plant_id',
     promptVersion: `${PROMPT_VERSION}:escalation`,
   });
 }
@@ -1492,7 +1513,7 @@ function contractContext(context) {
 }
 
 function runContextFor({
-  images, subject, chips, context, now, mode,
+  images, subject, chips, context, now, mode, singleRead = false,
 }) {
   const deadline = Date.now() + totalBudgetMs();
   const indexes = slotIndexesFor(subject);
@@ -1502,6 +1523,7 @@ function runContextFor({
     chips: pickPrimitives(chips, CHIP_KEYS),
     context: contractContext(context),
     mode,
+    singleRead,
     currentMonth: etParts(now).month,
     deadline,
     legTimeoutMs: (legsRemaining) => Math.max(MIN_LEG_TIMEOUT_MS, Math.ceil((deadline - Date.now()) / legsRemaining)),
@@ -1534,14 +1556,14 @@ function slotFlipped(call1Slot, verifiedSlot) {
  * higher-confidence weeds discard every turf candidate, and a merged index
  * let a weed slug become the turf identity). */
 async function runIdentityLadder(run) {
-  const candidatesResult = await callIdentityCandidates(run.images, run.subject, run.indexTexts, run.legTimeoutMs(4));
+  const candidatesResult = await callIdentityCandidates(run.images, run.subject, run.indexTexts, run.legTimeoutMs(4), run.singleRead);
   const candidatesJson = validJson(candidatesResult, 'candidatesA');
   const call1 = mapSlots((slot) => dedupeCandidates((candidatesJson?.[slot] || []).map((r) => resolveIdentityCandidate(r, run.indexes[slot]))));
   const catalogCandidates = IDENTITY_SLOTS.flatMap((slot) => call1[slot].filter((c) => c.entry));
   const identity = {
     candidatesResult, candidatesJson, verifyResult: null, slots: call1, catalogCandidates, verifyMissedSlots: mapSlots(() => false), flippedSlots: mapSlots(() => false),
   };
-  if (!catalogCandidates.length || irrevocablyUnusable(candidatesJson)) return identity;
+  if (!catalogCandidates.length || irrevocablyUnusable(candidatesJson) || run.singleRead) return identity;
   const verifyResult = await callIdentityVerify(run.images, identityContextFor(catalogCandidates), run.legTimeoutMs(3));
   // Codex pre-push P1: Ajv-validated before merging (schema rejection = a
   // miss, contract §5); Codex #5186 r1 P1: an answered verify leg that
@@ -1614,7 +1636,7 @@ async function runConditionLadder(run, identity) {
   const hostUnion = viableHostSlugs(run, identity.slots.host);
   const index = conditionIndexForHosts(run.subject, hostUnion);
   if (!index.length) return { ...NO_CONDITIONS, hostUnion };
-  const result = await callConditionSelection(run.images, conditionPromptArgs(run, index), run.legTimeoutMs(2));
+  const result = await callConditionSelection(run.images, conditionPromptArgs(run, index), run.legTimeoutMs(2), run.singleRead);
   const json = validJson(result, 'conditions');
   return {
     index, hostUnion, result, json, possibilities: resolvePossibilities(json?.candidates, index), observedTerms: json?.observed_terms || [],
@@ -1667,6 +1689,13 @@ function identitySlotTriggers(identity, run) {
   const laneSlots = identifyLaneSlotsFor(run.subject);
   const noLaneAnswer = run.mode === 'identify' && !!identity.candidatesJson
     && laneSlots.every((slot) => identitySlotAnswer(identity.slots[slot]).answer.level === 'unknown');
+  // Gemini-only: escalate only when Gemini gave nothing usable for the slot.
+  if (run.singleRead) {
+    return mapSlots((slot) => reasonsFrom([
+      [!identity.candidatesJson, 'gemini_missed'],
+      [noLaneAnswer && laneSlots.includes(slot), 'no_identity_candidate'],
+    ]));
+  }
   return mapSlots((slot) => reasonsFrom([
     [!identity.candidatesJson || identity.verifyMissedSlots[slot], 'gemini_missed'],
     [noLaneAnswer && laneSlots.includes(slot), 'no_identity_candidate'],
@@ -1682,8 +1711,17 @@ function identitySlotTriggers(identity, run) {
  * Call C with no possibility in the index (an empty selection, or only slugs
  * the index does not list) reads as confidence 0, so the second opinion
  * still runs — the pest engine's rule for an empty read (Codex #5186 r5 P1). */
-function conditionTriggerReasons(conditions) {
+function conditionTriggerReasons(conditions, singleRead = false) {
   const [first, second] = conditions.possibilities;
+  // Gemini-only: escalate only when Call C gave nothing usable — a failed
+  // leg, or a read with no possibility in the index (an empty selection, or
+  // only slugs the index does not list), the same rule as above (Codex
+  // #5596 r2 P1). The scoped merge keeps the identity Gemini read.
+  if (singleRead) {
+    return reasonsFrom([
+      [conditions.index.length > 0 && (!conditions.json || !first), 'gemini_missed'],
+    ]);
+  }
   return reasonsFrom([
     [conditions.index.length > 0 && !conditions.json, 'gemini_missed'],
     [!!conditions.json && (first?.confidence ?? 0) < escalateBelow(), 'low_confidence'],
@@ -1733,7 +1771,7 @@ async function reconcileCorrectedHost(run, conditions, hostCombined, escalationJ
   if (run.mode === 'identify' || !correctedHost || conditions.hostUnion.includes(correctedHost)) return { ...combined, rerun: null };
   const index = conditionIndexForHosts(run.subject, [...conditions.hostUnion, correctedHost]);
   const remainingMs = run.deadline - Date.now();
-  const result = remainingMs >= MIN_LEG_TIMEOUT_MS ? await callConditionSelection(run.images, conditionPromptArgs(run, index), remainingMs) : null;
+  const result = remainingMs >= MIN_LEG_TIMEOUT_MS ? await callConditionSelection(run.images, conditionPromptArgs(run, index), remainingMs, run.singleRead) : null;
   const json = validJson(result, 'conditions');
   const rerun = { host: correctedHost, result, quality: json?.quality || null };
   if (!json) {
@@ -1753,11 +1791,30 @@ async function reconcileCorrectedHost(run, conditions, hostCombined, escalationJ
  * entirely: Gemini stands, but no TRIGGERED scope may read `pretty_sure`.
  * `skip` (an irrevocably unusable read) runs nothing and records no
  * trigger. */
+/** Gemini-only workup: a valid Call A with no candidate in any of the
+ * subject's identity lanes AND no condition possibility is a read with
+ * nothing usable, so OpenAI stands in (Codex #5596 r1 P1). */
+function singleReadEmptyWorkup(run, identity, conditions) {
+  return run.singleRead && run.mode !== 'identify' && !!identity.candidatesJson
+    && identifyLaneSlotsFor(run.subject).every((slot) => identity.slots[slot].length === 0)
+    && conditions.possibilities.length === 0;
+}
+
+// An empty Gemini-only workup needs the stand-in's conditions too, not only
+// its identity, so the conditions scope counts as triggered.
+function conditionsReasonsFor(reasons, emptyWorkup) {
+  return emptyWorkup && !reasons.includes('gemini_missed') ? [...reasons, 'gemini_missed'] : reasons;
+}
+
 async function runEscalation(run, identity, conditions, { skip = false } = {}) {
-  const slotReasons = skip ? mapSlots(() => []) : identitySlotTriggers(identity, run);
+  const triggers = skip ? mapSlots(() => []) : identitySlotTriggers(identity, run);
+  const emptyWorkup = !skip && singleReadEmptyWorkup(run, identity, conditions);
+  const laneSlots = identifyLaneSlotsFor(run.subject);
+  const slotReasons = mapSlots((slot) => (emptyWorkup && laneSlots.includes(slot) && !triggers[slot].includes('no_identity_candidate')
+    ? [...triggers[slot], 'no_identity_candidate'] : triggers[slot]));
   const reasons = {
     identity: REASON_ORDER.filter((r) => IDENTITY_SLOTS.some((slot) => slotReasons[slot].includes(r))),
-    conditions: skip ? [] : conditionTriggerReasons(conditions),
+    conditions: skip ? [] : conditionsReasonsFor(conditionTriggerReasons(conditions, run.singleRead), emptyWorkup),
   };
   const slotTriggered = mapSlots((slot) => slotReasons[slot].length > 0);
   const conditionsTriggered = reasons.conditions.length > 0;
@@ -1774,13 +1831,22 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
     conditionFlags: scopeFlags(conditionsTriggered),
   };
   if (!base.all.length) return base;
-  const result = await callEscalation(run.images, escalationPromptArgs(run, identity, conditions), run.legTimeoutMs(1));
+  const result = await callEscalation(run.images, escalationPromptArgs(run, identity, conditions), run.legTimeoutMs(1), run.singleRead);
   const json = validJson(result, 'escalation');
   if (!json) return { ...base, result };
   const contextSlugs = new Set(identity.catalogCandidates.map((c) => c.slug));
-  const combined = mapSlots((slot) => combineIdentity(identity.slots[slot], json[slot], run.indexes[slot], contextSlugs));
-  const conditionCombined = await reconcileCorrectedHost(run, conditions, combined.host, json,
-    combinePossibilities(conditions.possibilities, json.conditions, conditions.index));
+  // Gemini-only: OpenAI is a stand-in, not a second opinion, so its answer
+  // fills only the scopes whose Gemini leg triggered it; a scope Gemini read
+  // fine keeps Gemini's read untouched (Codex #5596 r1 P1).
+  const keepSlot = (slot) => run.singleRead && !slotTriggered[slot];
+  const keepConditions = run.singleRead && !conditionsTriggered;
+  const combined = mapSlots((slot) => (keepSlot(slot)
+    ? { candidates: identity.slots[slot] }
+    : combineIdentity(identity.slots[slot], json[slot], run.indexes[slot], contextSlugs)));
+  const conditionCombined = keepConditions
+    ? { possibilities: conditions.possibilities, observedTerms: conditions.observedTerms, rerun: null }
+    : await reconcileCorrectedHost(run, conditions, combined.host, json,
+      combinePossibilities(conditions.possibilities, json.conditions, conditions.index));
   return {
     ...base,
     result,
@@ -1790,7 +1856,9 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
     identityFlags: mapSlots((slot) => scopeFlags(slotTriggered[slot], combined[slot])),
     conditionFlags: scopeFlags(conditionsTriggered, conditionCombined),
     possibilities: conditionCombined.possibilities,
-    observedTerms: [json.observed_terms, conditionCombined.observedTerms, conditions.observedTerms].find((t) => t?.length) || [],
+    observedTerms: keepConditions
+      ? conditions.observedTerms
+      : [json.observed_terms, conditionCombined.observedTerms, conditions.observedTerms].find((t) => t?.length) || [],
   };
 }
 
@@ -1905,7 +1973,7 @@ function refereeCandidateScopes(run) {
  * candidate, so the referee's vote could never surface). */
 async function runReferee(run, identity, conditions, escalation, { skip = false } = {}) {
   const unchanged = { ...escalation, refereeInfo: NO_REFEREE_INFO };
-  if (skip || !plantIdRefereeLive()) return unchanged;
+  if (skip || run.singleRead || !plantIdRefereeLive()) return unchanged;
   const remainingMs = run.deadline - Date.now();
   if (remainingMs < MIN_LEG_TIMEOUT_MS) return unchanged;
 
@@ -2096,6 +2164,7 @@ function internalFor(run, { identity, conditions, escalation }, lane) {
       condition_rerun: legInfo(escalation.rerun?.result),
       referee: legInfo(refereeInfo.result),
     },
+    ladder: run.singleRead ? 'gemini_only' : 'full',
     escalation_triggered: escalation.all.length > 0,
     escalation_reasons: escalation.all,
     // Admin-only, never merged into `v2` (owner ruling 2026-09-29):
@@ -2132,14 +2201,14 @@ function internalFor(run, { identity, conditions, escalation }, lane) {
  * the customer — L4 stores it admin-only, separately from `v2`.
  */
 async function identifyPlantV2({
-  photos = [], subject, chips = {}, context = {}, now = new Date(), mode = 'workup',
+  photos = [], subject, chips = {}, context = {}, now = new Date(), mode = 'workup', ladder = 'full',
 } = {}) {
   const images = toImages(photos);
   if (!images.length) return { ok: false, reason: 'no_photos' };
   if (!SUBJECTS.includes(subject)) return { ok: false, reason: 'invalid_subject' };
 
   const run = runContextFor({
-    images, subject, chips, context, now, mode,
+    images, subject, chips, context, now, mode, singleRead: ladder === 'gemini_only',
   });
   const identity = await runIdentityLadder(run);
   // An irrevocably unusable Call A read ends the ladder (`irrevocablyUnusable`).
