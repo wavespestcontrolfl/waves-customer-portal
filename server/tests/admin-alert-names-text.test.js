@@ -100,7 +100,19 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     await ring({}, { first_name: 'Bartholomew-Alexander', last_name: 'Montgomery-Featherstonehaugh' });
     const title = lastCall()[1];
     expect(title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
-    expect(title.startsWith('Comms — send Bartholomew')).toBe(true);
+    // Shortened at a word with a visible ellipsis, never shaved mid-word.
+    expect(title).toBe('Comms — send Bartholomew-Alexander… the estimate');
+  });
+
+  test('every Waves commitment kind has its own wording, none falls through to the generic one', async () => {
+    const { COMMITMENT_KINDS, kindBelongsToParty } = require('../services/call-commitments');
+    for (const kind of COMMITMENT_KINDS.filter((k) => k !== 'other' && kindBelongsToParty('waves', k))) {
+      await ring({ row: { kind } });
+      expect(lastCall()[1]).not.toBe('Comms — follow up with Albert Clark');
+    }
+    await ring({ row: { kind: 'send_reschedule_link', evidence: [{ quote: 'send me a link to move my appointment' }] } });
+    expect(lastCall()[1]).toBe('Schedule — send Albert Clark the reschedule link');
+    expect(lastCall()[2]).toBe('“send me a link to move my appointment” (Sep 29) — no reschedule link sent yet.');
   });
 
   test('no customer on file still rings, with a generic name', async () => {
@@ -127,12 +139,28 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   });
 });
 
+describe('fitAction name shortening', () => {
+  const { fitAction } = require('../services/admin-alert-names');
+  const send = [(n) => `send ${n} the estimate`];
+  test('a long name is cut at a word with an ellipsis', () => {
+    expect(fitAction('Comms', 'Bartholomew-Alexander Montgomery-Featherstonehaugh', send)).toBe('send Bartholomew-Alexander… the estimate');
+  });
+  test('when even the first word does not fit it is cut and gets the ellipsis', () => {
+    const action = fitAction('Comms', 'Bartholomew-Alexander-Montgomery-Featherstonehaugh-Smythe', send);
+    expect(action).toMatch(/^send Bartholomew\S*… the estimate$/);
+    expect(`Comms — ${action}`.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
+  });
+  test('a name that fits is left alone', () => {
+    expect(fitAction('Comms', 'Albert Clark', send)).toBe('send Albert Clark the estimate');
+  });
+});
+
 describe('payment_failed bell', () => {
   const { build } = TRIGGER_REGISTRY.payment_failed;
 
   test('the customer leads the headline and the link opens the invoice', () => {
     const built = build({ amount: 104.98, customerName: 'Albert Clark', customerId: 'c1', invoiceId: 'inv1', reason: 'Your card was declined.' });
-    expect(built).toEqual({ title: "Billing — Albert Clark's $104.98 payment failed", body: 'Your card was declined.', link: '/admin/invoices?invoice=inv1' });
+    expect(built).toEqual({ title: "Billing — Albert Clark's $104.98 payment failed", body: 'Your card was declined.', detail: 'Your card was declined.', link: '/admin/invoices?invoice=inv1' });
     expect(built.title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
   });
 
@@ -144,6 +172,16 @@ describe('payment_failed bell', () => {
   test('an unnamed customer reads "a customer"; a long name is cut to fit', () => {
     expect(build({ amount: 85, customerName: 'customer', customerId: 'c1' }).title).toBe("Billing — a customer's $85.00 payment failed");
     expect(build({ amount: 1234.5, customerName: 'Bartholomew-Alexander Montgomery-Featherstonehaugh' }).title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
+  });
+
+  test('a two-sentence reason gives a one-sentence why; the whole reason rides in detail', () => {
+    const reason = 'Your card was declined. Please try a different card or contact your bank.';
+    const built = build({ amount: 85, customerName: 'Albert Clark', customerId: 'c1', invoiceId: 'inv1', reason });
+    expect(built.body).toBe('Your card was declined.');
+    expect(built.detail).toBe(reason);
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    expect(() => composeAdminAlert({ area: 'Billing', action: 'x', why: built.body, severity: 'needs-you', link: built.link,
+      subject: { type: 'invoice', id: 'inv1' }, doneWhen: 'invoice_followed_up', who: 'person' })).not.toThrow();
   });
 });
 
@@ -164,6 +202,15 @@ describe('prepaid coverage bell', () => {
       const copy = prepayCoverageCopy(visit, issue, 'Albert Clark');
       expect(copy.why.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
     }
+  });
+
+  test('copy the rule refuses keeps the structured fields; only the wording falls back', () => {
+    const copy = prepayCoverageCopy(visit, 'manual_series_stamp_missing', 'Albert [Clark]');
+    expect(copy.title).toBe('Prepaid coverage needs review for Albert [Clark] on Oct 6');
+    expect(copy.link).toBe('/admin/dispatch?tab=schedule&date=2026-10-06&appointment=visit-1');
+    expect(copy.metadata).toMatchObject({ area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'visit-1' },
+      doneWhen: 'coverage_reconciled', who: 'person' });
+    expect(copy.metadata.ruleViolations).toEqual(expect.arrayContaining([expect.stringContaining('bracket_tag')]));
   });
 
   test('an unknown customer still gets a usable headline', () => {

@@ -744,6 +744,7 @@ const KIND_ALERT = {
   technician_follow_up: { area: 'Comms', action: (n) => `have a tech follow up with ${n}`, open: 'no tech follow-up on record yet' },
   schedule_visit: { area: 'Schedule', action: (n) => `schedule ${n}'s visit`, open: 'no visit scheduled yet' },
   send_appointment_confirmation: { area: 'Schedule', action: (n) => `confirm ${n}'s appointment`, open: 'no confirmation sent yet' },
+  send_reschedule_link: { area: 'Schedule', action: (n) => `send ${n} the reschedule link`, open: 'no reschedule link sent yet' },
   other: { area: 'Comms', action: (n) => `follow up with ${n}`, open: 'nothing on record shows it done' },
 };
 

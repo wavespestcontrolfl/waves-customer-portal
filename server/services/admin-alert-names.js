@@ -36,10 +36,18 @@ function fitAction(area, name, templates) {
     const action = template(who);
     if (action.length <= room) return action;
   }
+  // Too long even with the last template: shorten the NAME at a word boundary with a visible
+  // ellipsis (room is reserved for the action around it). If not even the first word fits,
+  // that word is cut and gets the ellipsis.
   const last = templates[templates.length - 1];
-  let cut = who;
-  while (cut.length > 1 && last(cut).length > room) cut = cut.slice(0, -1).trimEnd();
-  return cutAtWord(last(cut), room);
+  const words = who.split(' ');
+  for (let n = words.length - 1; n >= 1; n -= 1) {
+    const action = last(`${words.slice(0, n).join(' ')}…`);
+    if (action.length <= room) return action;
+  }
+  let first = words[0];
+  while (first.length > 1 && last(`${first}…`).length > room) first = first.slice(0, -1);
+  return last(`${first}…`);
 }
 
 // A short ET date a person would say ("Sep 29").

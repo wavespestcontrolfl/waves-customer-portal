@@ -621,7 +621,10 @@ const TRIGGER_REGISTRY = {
       const reason = String(p.reason || '').replace(/\s+/g, ' ').trim();
       return {
         title: `Billing — ${names.fitAction('Billing', named, [(n) => `${n}'s ${amount} payment failed`])}`,
-        body: require('./admin-alert-compose').cutAtWord(reason || 'The processor gave no reason.', 110),
+        // One sentence for the why (the friendly processor message can run to two); the whole
+        // reason rides in the detail.
+        body: require('./admin-alert-compose').cutAtWord(require('./admin-alert-compose').firstSentence(reason) || 'The processor gave no reason.', 110),
+        ...(reason ? { detail: reason } : {}),
         link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}`
           : (p.customerId ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}` : '/admin/revenue'),
       };

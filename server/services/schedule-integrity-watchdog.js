@@ -549,28 +549,34 @@ async function prepayCustomerNames(customerIds) {
 // violation (an odd name) never costs the alert: it falls back to the plain wording.
 function prepayCoverageCopy(row, issue, customerName) {
   const names = require('./admin-alert-names');
+  const compose = require('./admin-alert-compose');
   const dayWords = names.shortDateET(new Date(`${row.service_date}T12:00:00Z`));
   const link = `/admin/dispatch?tab=schedule&date=${encodeURIComponent(row.service_date)}&appointment=${encodeURIComponent(row.id)}`;
   const detail = PREPAY_ISSUE_DETAIL[issue];
-  const plain = { title: `Prepaid coverage needs review for ${customerName || 'a customer'}${dayWords ? ` on ${dayWords}` : ''}`,
-    why: detail, link, metadata: {} };
+  const spec = {
+    area: 'Schedule',
+    action: names.fitAction('Schedule', customerName || 'a customer', dayWords
+      ? [(n) => `check ${n}'s prepaid visit on ${dayWords}`, (n) => `check ${n}'s prepaid visit`]
+      : [(n) => `check ${n}'s prepaid visit`]),
+    why: PREPAY_ISSUE_WHY[issue] ? `${PREPAY_ISSUE_WHY[issue]}.` : 'Prepaid coverage for this visit needs a review before billing.',
+    severity: 'needs-you',
+    link,
+    subject: { type: 'visit', id: row.id },
+    doneWhen: 'coverage_reconciled',
+    who: 'person',
+  };
   try {
-    const composed = require('./admin-alert-compose').composeAdminAlert({
-      area: 'Schedule',
-      action: names.fitAction('Schedule', customerName || 'a customer', dayWords
-        ? [(n) => `check ${n}'s prepaid visit on ${dayWords}`, (n) => `check ${n}'s prepaid visit`]
-        : [(n) => `check ${n}'s prepaid visit`]),
-      why: PREPAY_ISSUE_WHY[issue] ? `${PREPAY_ISSUE_WHY[issue]}.` : 'Prepaid coverage for this visit needs a review before billing.',
-      severity: 'needs-you',
-      link,
-      subject: { type: 'visit', id: row.id },
-      doneWhen: 'coverage_reconciled',
-      who: 'person',
-    });
+    const composed = compose.composeAdminAlert(spec);
     return { title: composed.headline, why: composed.why, link: composed.link, detail, metadata: composed.metadata };
   } catch (err) {
     if (err.code !== 'ADMIN_ALERT_RULE') throw err;
-    return { ...plain, detail };
+    // Only the COPY is refused (an emoji or brackets in a customer's name, say): the plain
+    // wording rings, and the valid structured parts stay so needs-me still sorts the row.
+    return {
+      title: `Prepaid coverage needs review for ${customerName || 'a customer'}${dayWords ? ` on ${dayWords}` : ''}`,
+      why: spec.why, link, detail,
+      metadata: { ...compose.validStructuredFields(spec), ruleViolations: err.violations },
+    };
   }
 }
 
