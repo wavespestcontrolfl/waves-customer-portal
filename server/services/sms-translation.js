@@ -111,6 +111,8 @@ async function translateInbound(inbound) {
   const languageCode = typeof j.language_code === 'string' ? j.language_code.trim().toLowerCase().slice(0, 12) : '';
   if (j.is_english === true || languageCode === 'en' || /^english$/i.test(language)) return { ok: true, isEnglish: true, model: out.model };
   if (!english) return { ok: false, reason: 'inbound_translation_empty' };
+  // the "translation" must itself be English, or no English check would read it (an echoed original)
+  if (needsTranslation(english)) return { ok: false, reason: 'translation_not_english' };
   const code = languageCodeOf(languageCode);
   const name = code && !/^en(?:-|$)/.test(code) ? languageNameOf(code) : null;
   if (!name) return { ok: false, reason: 'language_not_supported' };
@@ -359,7 +361,7 @@ function pairTwentyFourHour(missing, added, en, tr) {
 // A street number and its unit ("123 Main St, Apt 4") keep their order: the
 // translation must name the street number before the unit number. Other
 // separate numbers may move with the sentence's word order.
-const ADDRESS_UNIT_RE = /\b(\d{1,6})\b[^\n.;]{0,40}?\b(?:apt|apartment|unit|suite|ste|lot|#)\s*#?\s*(\d{1,5})\b/gi;
+const ADDRESS_UNIT_RE = /\b(\d{1,6})\b[^\n.;#]{0,40}?(?:\b(?:apt|apartment|unit|suite|ste|lot)\b\.?\s*#?|#)\s*(\d{1,5})\b/gi;
 
 function addressOrderFaults(englishReply, translated) {
   const faults = [];
@@ -456,12 +458,23 @@ function postDraftFault(englishReply, context) {
 // the translator wrote in). Judged as a difference, so an approved LABEL FACTS
 // timing the English carried is never held for being carried over. The SMS
 // length rule is the translated text's own (checked above), not its read-back's.
+// Banned product-safety copy counted per pattern, match by match (after the
+// sanctioned "safe once dry" wording is set aside): a count is compared, not
+// a yes/no, so a "pet-safe" the translator adds is caught even when the
+// approved English already carried a LABEL FACTS timing the same guard flags.
+function bannedCopyCounts(text) {
+  const { BANNED_CUSTOMER_COPY } = require('./service-report/activity-indicators');
+  const { SMS_COMPLIANCE_CLAIM_RE } = require('./sms-shadow-drafter');
+  const t = require('./sms-label-facts').sanctionSafeOnceDry(String(text || ''));
+  return [...BANNED_CUSTOMER_COPY, SMS_COMPLIANCE_CLAIM_RE].map((rx) => (t.match(new RegExp(rx.source, rx.flags.includes('g') ? rx.flags : `${rx.flags}g`)) || []).length);
+}
+
 function translationAddedFault(englishReply, backTranslation, context) {
-  const { hasBannedCustomerCopy } = require('./sms-shadow-drafter');
-  if (hasBannedCustomerCopy(backTranslation) && !hasBannedCustomerCopy(englishReply)) return 'banned_copy';
+  const before = bannedCopyCounts(englishReply);
+  if (bannedCopyCounts(backTranslation).some((n, i) => n > before[i])) return 'banned_copy';
   // the customer's billing lane arms the plan-total rule (a translation adding "per month" to a balance)
-  const before = new Set(lintFailures(englishReply, context));
-  const added = lintFailures(backTranslation, context).filter((r) => r !== 'sms-segment-limit' && !before.has(r));
+  const rulesBefore = new Set(lintFailures(englishReply, context));
+  const added = lintFailures(backTranslation, context).filter((r) => r !== 'sms-segment-limit' && !rulesBefore.has(r));
   return added.length ? 'failed_comms_lint' : null;
 }
 

@@ -1004,6 +1004,20 @@ router.post('/sms', async (req, res) => {
     // notifications or any auto-reply. This also covers tracking/tech lines.
     if (solicitationEnforced) return res.type('text/xml').send('<Response></Response>');
 
+    // Test answer in the customer's language (GATE_SMS_ANY_LANGUAGE_TRIAL, read inside; its own
+    // gate): registered here, right after the source row is kept and before any consuming branch
+    // (reschedule reply, lead intake) returns, so those texts are sampled too. Stored for the
+    // owner to read, never sent; nothing below waits on it.
+    if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location') {
+      void require('../services/sms-translation').runTranslationTrial({
+        inboundMessage: Body,
+        fromPhone: From,
+        customer,
+        smsLogId: smsLogEntry?.id || null,
+        hasMedia: inboundMedia.length > 0,
+      }).catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.code || err.name || 'error'}`));
+    }
+
     // The same post-ack kick covers both consumed replies and the ordinary
     // path. A failed or interrupted kick is recovered from the persisted row.
     if (Body && customer && !isAiNumber) {
@@ -1562,17 +1576,6 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
 
-    // Test answer in the customer's language (GATE_SMS_ANY_LANGUAGE_TRIAL, read inside; its
-    // own gate, independent of the shadow drafter's): stored for the owner to read, never sent.
-    if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location') {
-      void require('../services/sms-translation').runTranslationTrial({
-        inboundMessage: Body,
-        fromPhone: From,
-        customer,
-        smsLogId: smsLogEntry?.id || null,
-        hasMedia: inboundMedia.length > 0,
-      }).catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.code || err.name || 'error'}`));
-    }
 
      } catch (sideErr) {
        logger.error(`[twilio-webhook] async inbound side-effects failed: ${sideErr.message}`);

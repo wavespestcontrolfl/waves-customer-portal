@@ -6044,6 +6044,7 @@ module.exports = {
   PRE_DEPLOY_PROMPT_IDENTITIES,
   validateComplianceCopy,
   hasBannedCustomerCopy,
+  SMS_COMPLIANCE_CLAIM_RE,
   PEST_REPORT_TEXT_RE,
   PRONOUN_RETURN_TEXT_RE,
   customerHasPestRelationship,

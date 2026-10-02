@@ -24,6 +24,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   generateGroundedDraft: (...a) => mockDraft(...a),
   replyQuotesUngroundedAmount: (...a) => mockUngrounded(...a),
   hasBannedCustomerCopy: (t) => /pet[- ]safe/i.test(t),
+  SMS_COMPLIANCE_CLAIM_RE: jest.requireActual('../services/sms-shadow-drafter').SMS_COMPLIANCE_CLAIM_RE,
 }));
 jest.mock('../services/sms-suggest-mode', () => ({ hasRedactionPlaceholder: (t) => /\[(name|phone)\]/i.test(t) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
@@ -138,6 +139,11 @@ describe('tokenParity', () => {
   test('an email\'s local part keeps its case; only the domain may differ in case', () => {
     expect(tokenParity('Email CaseSensitive@custom.example.', 'Escriba a casesensitive@custom.example.')).toMatchObject({ ok: false });
     expect(tokenParity('Email CaseSensitive@custom.example.', 'Escriba a CaseSensitive@Custom.Example.')).toMatchObject({ ok: true });
+  });
+
+  test('a hash-style unit keeps its order behind the street number', () => {
+    expect(tokenParity('We have 123 Main St #4 on file.', 'Tenemos #4, 123 Main St registrado.')).toMatchObject({ ok: false, order: ['123 before 4'] });
+    expect(tokenParity('We have 123 Main St #4 on file.', 'Tenemos 123 Main St #4 registrado.')).toMatchObject({ ok: true });
   });
 
   test('links and emails must come through exactly', () => {
@@ -321,6 +327,19 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready', language_code: 'es' });
     scriptModels({ inbound: { ...SPANISH_INBOUND, language_code: 'zh-TW' }, translated: '謝謝！技術人員到達前約30分鐘會傳訊息。下次：10月14日星期二14:00。', backLang: 'zh' });
     expect(await runTranslationTrial({ inboundMessage: '請問狗狗什麼時候可以出去？', customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_in_other_language', language_code: 'zh-Hant' });
+  });
+
+  test('a translation that adds banned copy is caught even when the English already tripped the same guard', async () => {
+    const english = 'Thanks! Re-entry is 2 hours per the label. Next visit: Tuesday, Oct 14 at 2 PM.';
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Reingreso: 2 horas según la etiqueta; es seguro para mascotas. Próxima visita: martes 14 de octubre, 14:00.', back: `${english} It is pet-safe.` });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: english }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'back_translation_banned_copy' });
+  });
+
+  test('an inbound "translation" that is not English (an echoed original) is held', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: SPANISH } });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'inbound_translation_failed:translation_not_english' });
+    expect(mockDraft).not.toHaveBeenCalled();
   });
 
   test('a failed insert is reported as not saved, never as a stored ready answer', async () => {
