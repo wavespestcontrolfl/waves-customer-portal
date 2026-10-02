@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file rings ONE Customers bell; read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks or monthly + a QUARTERLY rider (pest, tree & shrub, termite bait; table RIDER_PAIRINGS in rider-series-preview.js) seeds the rider follow-ups on lawn visits — every 2nd 6-week visit / every 3rd monthly visit, same stop, so they group — and links the rider series to the lawn series through scheduled_services.rides_parent_id. Series EXTENSION riding the lawn ships in a follow-up PR — do not flip this gate until it lands, or riders drift off the lawn after their first seeded year. Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_KB_SPECIES_QA=true (knowledge Q&A — texting assistant, tech field Q&A, lead agent — also reads the owner-approved species catalog; customer-facing callers get customer copy only, staff also get tech notes; read at call time via kbSpeciesQaLive(), dark by default)
@@ -3898,6 +3899,13 @@ function pestRidesLawnAtAcceptLive() {
   return process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true';
 }
 
+// GATE_NEIGHBORHOOD_ACCESS read at CALL time — strict `=== 'true'`; unset = kill.
+// Files a saved neighborhood gate code under the property's neighborhood
+// (services/neighborhood-access.js fileGateCodeAfterSave).
+function neighborhoodAccessLive() {
+  return process.env.GATE_NEIGHBORHOOD_ACCESS === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -4792,3 +4800,4 @@ module.exports.tsFastCompleteLive = tsFastCompleteLive;
 module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
 // GATE_LLM_COST_TRACKING reader, on its own line.
 module.exports.llmCostTrackingLive = llmCostTrackingLive;
+module.exports.neighborhoodAccessLive = neighborhoodAccessLive;

@@ -1931,6 +1931,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Neighborhood gate-code directory (PR 2): file every saved neighborhood
+  // gate code under its property's neighborhood; dark behind
+  // GATE_NEIGHBORHOOD_ACCESS, read at each tick. Logs counts and error codes
+  // only — never a code.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('neighborhood-gate-codes', () => require('./neighborhood-access').sweepSavedGateCodes());
+      if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, conflicts: result.conflicts })}`);
+    } catch (err) {
+      logger.error(`[neighborhood-access] sweep tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 */5 * * * *', async () => {
     if (require('./reschedule-link-promises').mode() === 'off') return;

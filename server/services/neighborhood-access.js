@@ -7,9 +7,10 @@
  * neighborhood's gate codes are shared by every stop in it (owner ruling
  * 2026-10-01); a customer's own property codes never come here.
  *
- * Only the backfill script calls this today. Runtime writers (the SMS
- * auto-save, Customer 360, call extraction) arrive in PR 2 behind
- * GATE_NEIGHBORHOOD_ACCESS.
+ * Two callers: the one-time backfill (ops/agents/neighborhood-access-backfill.js)
+ * and, behind GATE_NEIGHBORHOOD_ACCESS, the 15-minute filing sweep below,
+ * which picks up a gate code saved by ANY writer (office, customer portal,
+ * call, customer text, Intelligence Bar) without a hook in each one.
  */
 
 const db = require('../models/db');
@@ -303,7 +304,174 @@ function sameStreetLine(a, b) {
   return sameStreet(streetLine(a), streetLine(b));
 }
 
+// ---- runtime filing sweep (gate-code directory PR 2) --------------------------
+// Every 15 minutes, behind GATE_NEIGHBORHOOD_ACCESS: each customer whose
+// preferences changed since the last successful sweep and carry a
+// neighborhood gate code has it filed under their property's neighborhood
+// (the property is linked from the county roll first if it never was). One
+// sweep covers every writer — office, portal, call, text, Intelligence Bar —
+// and any added later, with no hook in each. A new code that differs from
+// the one on file flags both and rings ONE Customers bell per neighborhood.
+const SWEEP_WATERMARK_KEY = 'neighborhood_access.sweep_watermark';
+const SOURCE = 'profile';
+
+async function sweepWatermark(conn) {
+  const row = await conn('system_settings').where({ key: SWEEP_WATERMARK_KEY }).first('value');
+  return row?.value || null;
+}
+
+// The customers to look at: a non-empty neighborhood code, changed since the
+// watermark (every coded customer on the first run), not deleted.
+async function changedGateCodeCustomers(conn, since) {
+  let q = conn('property_preferences as pp')
+    .join('customers as c', 'c.id', 'pp.customer_id')
+    .whereNull('c.deleted_at')
+    .whereRaw("btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''")
+    .orderBy('pp.customer_id')
+    .pluck('pp.customer_id');
+  if (since) q = q.where('pp.updated_at', '>=', conn.raw('?::timestamptz', [since]));
+  return q;
+}
+
+// File one customer's current code. Lock order matches every preference
+// writer (customer preference advisory lock → customer → properties →
+// preferences), then the neighborhood row inside fileNeighborhoodCode.
+async function fileOneSavedCode(customerId, lookup) {
+  // County lookup (network) runs outside any transaction, only for a single
+  // active property that was never checked.
+  const props = await db('customer_properties').where({ customer_id: customerId, active: true })
+    .select('id', 'customer_id', 'address_line1', 'city', 'zip', 'latitude', 'longitude',
+      'neighborhood_id', 'neighborhood_source', 'neighborhood_checked_at');
+  if (props.length !== 1) return { status: props.length ? 'multi_property' : 'no_property' };
+  const snapshot = props[0];
+  const parcel = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office'
+    && Number.isFinite(Number(snapshot.latitude)) && Number.isFinite(Number(snapshot.longitude))
+    ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude))
+    : null;
+
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+    const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate()
+      .first('id', 'first_name');
+    if (!customer) return { status: 'customer_gone' };
+    const active = await trx('customer_properties').where({ customer_id: customerId, active: true }).forUpdate()
+      .select('id', 'neighborhood_id');
+    if (active.length !== 1 || active[0].id !== snapshot.id) return { status: 'property_changed' };
+    const prefs = await trx('property_preferences').where({ customer_id: customerId }).forUpdate()
+      .first('neighborhood_gate_code');
+    const value = String(prefs?.neighborhood_gate_code || '').trim();
+    if (!value) return { status: 'no_code' };
+    let neighborhoodId = active[0].neighborhood_id;
+    if (!neighborhoodId && parcel) {
+      const linked = await resolvePropertyNeighborhood(snapshot, { conn: trx, lookup: async () => parcel, onlyUnchecked: true });
+      neighborhoodId = linked.neighborhood ? linked.neighborhood.id : null;
+    }
+    if (!neighborhoodId) return { status: 'no_neighborhood' };
+    const filed = await fileNeighborhoodCode(trx, { neighborhoodId, value, source: SOURCE, sourceCustomerId: customerId });
+    return { ...filed, neighborhoodId, firstName: customer.first_name || null };
+  });
+}
+
+const CONFLICT_KEY_PREFIX = 'neighborhood-gate-conflict:';
+
+// Two or more live codes in a neighborhood, at least one awaiting the office.
+async function neighborhoodHasCodeConflict(conn, neighborhoodId) {
+  const rows = await conn('neighborhood_access').where({ neighborhood_id: neighborhoodId })
+    .whereNotNull('code').whereNot('status', 'retired').select('status');
+  return rows.length > 1 && rows.some((r) => r.status === 'needs_confirm');
+}
+
+// ONE Customers bell per neighborhood with conflicting live codes (rings
+// again only after a fix and a comeback); the name is the community's, never
+// a code. Opens the customer whose update made the conflict.
+async function raiseConflictBell(neighborhoodId, customerId, firstName) {
+  const n = await db('neighborhoods').where({ id: neighborhoodId }).first('name');
+  const live = await db('neighborhood_access').where({ neighborhood_id: neighborhoodId })
+    .whereNotNull('code').whereNot('status', 'retired').count('* as n').first();
+  const name = String(n?.name || 'A neighborhood').slice(0, 40);
+  const who = firstName ? `${String(firstName).slice(0, 20)}'s update` : 'the latest update';
+  const { composeAdminAlert } = require('./admin-alert-compose');
+  const { raiseAdminAlertWithReopen } = require('./admin-alert-episodes');
+  const composed = composeAdminAlert({
+    area: 'Customers',
+    action: 'confirm a neighborhood gate code',
+    why: `${name} now has ${Number(live?.n) || 2} different gate codes on file after ${who}.`,
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${customerId}`,
+    subject: { type: 'customer', id: String(customerId) },
+    doneWhen: 'gate_code_confirmed',
+    who: 'person',
+  });
+  return raiseAdminAlertWithReopen('customer', composed.headline, composed.why, {
+    dedupeKey: `${CONFLICT_KEY_PREFIX}${neighborhoodId}`,
+    dedupeVersion: 'v1',
+    refreshOnDedupe: true,
+    bellDefault: true,
+    link: composed.link,
+    metadata: { ...composed.metadata, neighborhoodId },
+  });
+}
+
+// The emitter clears its own bells: a neighborhood whose codes no longer
+// conflict (the office confirmed or retired one) has its bell closed done.
+async function closeResolvedConflictBells() {
+  const { openAdminAlertKeys, closeAdminAlertKeys } = require('./admin-alert-episodes');
+  const keys = await openAdminAlertKeys(db, CONFLICT_KEY_PREFIX);
+  const resolved = [];
+  for (const key of keys) {
+    if (!(await neighborhoodHasCodeConflict(db, key.slice(CONFLICT_KEY_PREFIX.length)))) resolved.push(key);
+  }
+  return closeAdminAlertKeys(db, resolved, 'gate_code_confirmed', {
+    resolution: 'Cleared: the neighborhood has one gate code on file again',
+  });
+}
+
+async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) {
+  const { neighborhoodAccessLive } = require('../config/feature-gates');
+  if (!neighborhoodAccessLive()) return { skipped: 'gate_off' };
+  const logger = require('./logger');
+  const { rows } = await db.raw('SELECT now()::text AS t');
+  const startedAt = rows[0].t;
+  const since = await sweepWatermark(db);
+  const customerIds = await changedGateCodeCustomers(db, since);
+  const tally = {};
+  let failed = 0;
+  const conflicts = new Map(); // neighborhoodId → { customerId, firstName } of the newest update
+  for (const customerId of customerIds) {
+    try {
+      const r = await fileOneSavedCode(customerId, lookup);
+      tally[r.status] = (tally[r.status] || 0) + 1;
+      if (r.status === 'filed_conflict') conflicts.set(r.neighborhoodId, { customerId, firstName: r.firstName });
+    } catch (err) {
+      failed += 1;
+      // Never the message: a knex error carries its bindings, which can hold a code.
+      logger.warn(`[neighborhood-access] filing failed for customer ${customerId} (${err.code || err.name || 'error'})`);
+    }
+  }
+  for (const [neighborhoodId, { customerId, firstName }] of conflicts) {
+    try {
+      await raiseConflictBell(neighborhoodId, customerId, firstName);
+    } catch (err) {
+      logger.warn(`[neighborhood-access] conflict bell failed for neighborhood ${neighborhoodId} (${err.code || err.name || 'error'})`);
+    }
+  }
+  try {
+    await closeResolvedConflictBells();
+  } catch (err) {
+    logger.warn(`[neighborhood-access] conflict bell close failed (${err.code || err.name || 'error'})`);
+  }
+  // Advance only after a clean pass, so a failed customer is retried next tick.
+  if (!failed) {
+    await db('system_settings').insert({
+      key: SWEEP_WATERMARK_KEY, value: startedAt, category: 'neighborhood_access',
+      description: 'Start of the last clean neighborhood gate-code filing sweep; the next sweep re-reads preferences changed since.',
+    }).onConflict('key').merge({ value: startedAt, updated_at: db.fn.now() });
+  }
+  return { customers: customerIds.length, tally, failed, conflicts: conflicts.size };
+}
+
 module.exports = {
+  sweepSavedGateCodes,
   sameStreetLine,
   neighborhoodNameFromSubdivision,
   isKeypadCode,
