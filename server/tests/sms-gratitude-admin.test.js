@@ -29,6 +29,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   AUTO_SEND_MODE: 'auto_send',
   isEscalationIntent: jest.fn(() => false),
   listIntentModes: jest.fn(),
+  setIntentMode: jest.fn(),
 }));
 jest.mock('../services/sms-graduation', () => ({
   THRESHOLDS: {},
@@ -36,6 +37,7 @@ jest.mock('../services/sms-graduation', () => ({
   resolveVoiceProfilePin: jest.fn(async () => null),
   rollupSuggestOutcomes: jest.fn(() => new Map()),
   computeReadiness: jest.fn(),
+  evaluateAutoSendEligibility: jest.fn(),
 }));
 
 const db = require('../models/db');
@@ -143,4 +145,26 @@ test('intent modes expose the effective gratitude gate per row and retain the gl
   ]));
   expect(featureGates.isEnabled).toHaveBeenCalledWith('smsAutoSend');
   expect(featureGates.isEnabled).toHaveBeenCalledWith('smsGratitudeReplies');
+});
+
+test('PUT /intent-modes: the ladder refusal from setIntentMode surfaces as 409, not a 500, and nothing is audited (Codex r2 on #5531)', async () => {
+  db.mockImplementation(table => {
+    if (table === 'sms_intent_modes') {
+      return { where() { return this; }, first: async () => ({ intent: 'general_question', mode: 'shadow' }) };
+    }
+    throw new Error(`unexpected table: ${String(table)}`);
+  });
+  graduation.evaluateAutoSendEligibility.mockResolvedValue({ eligible: true, basis: 'judge_graded', blockers: [] });
+  const refusal = new Error('auto_send is earned from suggest — promote this intent to suggest first');
+  refusal.statusCode = 409;
+  suggestMode.setIntentMode.mockRejectedValue(refusal);
+
+  const res = await fetch(base.replace('/gratitude-qualification', '/intent-modes/general_question'), {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', 'x-test-role': 'admin' },
+    body: JSON.stringify({ mode: 'auto_send', reason: 'judge path clear' }),
+  });
+  expect(res.status).toBe(409);
+  expect((await res.json()).error).toMatch(/earned from suggest/);
+  expect(suggestMode.setIntentMode).toHaveBeenCalledWith(expect.objectContaining({ intent: 'general_question', mode: 'auto_send' }));
 });
