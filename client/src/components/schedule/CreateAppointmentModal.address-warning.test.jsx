@@ -724,6 +724,27 @@ describe('CreateAppointmentModal submit cancellation', () => {
     await waitFor(() => expect(state.onCreated).toHaveBeenCalledTimes(1), { timeout: 2000 });
   });
 
+  it('a noticed renewal amount 409 landing after close neither asks nor resends', async () => {
+    const prepayInvoiceRequest = deferred();
+    const confirmMock = vi.spyOn(window, 'confirm').mockImplementation(() => true);
+    const alertMock = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const state = await beginPrepayBooking({ prepayInvoiceRequest });
+    await waitFor(() => expect(prepayInvoicePosts(state.fetcher)).toHaveLength(1));
+    state.view.unmount();
+    await act(async () => {
+      prepayInvoiceRequest.resolve(jsonResponse(
+        { error: 'noticed', code: 'RENEWAL_AMOUNT_NOTICED', noticedAmount: 484, chargedAmount: 900, termId: 't1' },
+        { ok: false, status: 409 },
+      ));
+      await prepayInvoiceRequest.promise;
+    });
+    await waitFor(() => expect(state.onCreated).toHaveBeenCalledTimes(1));
+    expectBackgroundRefresh({ ...state, id: 'appointment-committed' });
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(prepayInvoicePosts(state.fetcher)).toHaveLength(1);
+    expect(alertMock).not.toHaveBeenCalled();
+  });
+
   it('turns the delayed success callback into a background refresh after close', async () => {
     const secondScheduleRequest = deferred();
     const state = await beginBooking({ secondScheduleRequest });

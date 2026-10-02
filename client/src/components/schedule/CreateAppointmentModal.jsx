@@ -4358,10 +4358,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
           assertSubmitCurrent();
           assertManualPrepayMintEligible({ fresh, manualPrepay });
-          const minted = await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
-            method: 'POST',
-            body: JSON.stringify({ ...fresh.mintPayload, ...ack }),
-          }));
+          // A noticed-amount 409 that lands after the modal closed (or the
+          // customer changed) neither asks nor resends: the submit lifetime
+          // is rechecked before the confirm and before the retry.
+          const minted = await sendWithNoticedAmountConfirm((ack) => {
+            if (ack.acknowledgeNoticedAmount) assertSubmitCurrent();
+            return adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
+              method: 'POST',
+              body: JSON.stringify({ ...fresh.mintPayload, ...ack }),
+            });
+          }, (message) => {
+            assertSubmitCurrent();
+            return window.confirm(message);
+          });
           assertSubmitCurrent();
           // Advisory notes from the mint (e.g. the promised first visit overlaps
           // another job) ride the same warnings[] shape as the booking itself
