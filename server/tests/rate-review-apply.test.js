@@ -205,7 +205,7 @@ describe('scheduleNoticeRows — per_application effective date', () => {
     expect(notice.sent_at == null && notice.applied_at == null && notice.email_sent === false && notice.sms_sent === false).toBe(true);
     expect(notice.notice_token).toMatch(/^[0-9a-f]{32}$/);
     const meta = JSON.parse(notice.metadata);
-    expect(meta).toMatchObject({ source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, anniversary_occurrence: '2026-12-05', first_visit_id: VISIT(101), visits_per_year: 4, current_rate_source: 'visit_median' });
+    expect(meta).toMatchObject({ source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, anniversary_occurrence: '2026-12-05', first_visit_id: VISIT(101), series_root_id: VISIT(100), visits_per_year: 4, current_rate_source: 'visit_median' });
     expect(snapshots()[0]).toMatchObject({ status: 'approved', notice_id: notice.id });
     expect(mockDb.store.activity_log.map((a) => a.action)).toEqual(['rate_review_notices_scheduled']);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
@@ -818,6 +818,26 @@ describe('applyDueRateChanges — per_application', () => {
     expect(notices()[0].applied_at == null).toBe(true);
     expect(visits()[1].estimated_price).toBe('117.00');
   });
+  test('the noticed series was replaced (cancelled, a new series of the same line accepted) → hold, the old notice never reprices the new plan', async () => {
+    const book = sentBook();
+    const replacement = fixture.pestSeries(1, ['2026-12-12', '2027-03-12']);
+    replacement.all.forEach((v, i) => { v.id = `${VISIT(900 + i)}`; if (v.recurring_parent_id) v.recurring_parent_id = VISIT(900); });
+    book.scheduled_services = book.scheduled_services.map((v) => (v.status === 'pending' ? { ...v, status: 'cancelled' } : v));
+    book.scheduled_services.push(...replacement.all);
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['plan_replaced']);
+    expect(notices()[0].applied_at == null).toBe(true);
+    expect(mockDb.store.scheduled_services.filter((v) => v.recurring_parent_id === VISIT(900)).map((v) => v.estimated_price)).toEqual(['117.00', '117.00']);
+  });
+  test('a notice that never recorded its series → hold (fail closed), nothing repriced', async () => {
+    const book = sentBook();
+    const meta = { ...book.price_change_notices[0].metadata };
+    delete meta.series_root_id;
+    book.price_change_notices[0] = { ...book.price_change_notices[0], metadata: meta };
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['notice_series_unrecorded']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+  });
   test('a line running as two series → hold for a hand reprice', async () => {
     const book = sentBook();
     const second = fixture.pestSeries(1, ['2026-12-12']);
@@ -1314,6 +1334,27 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(route).toMatch(/req\.body\?\.acknowledgeNoticedAmount !== true\) throw RateReviewApply\.noticedRenewalAmountError\(noticed\)/);
     expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
   });
+  test('a DELIVERED notice not yet applied by the nightly tick still guards the renewal (the term carries no frozen amount yet); a draft notice does not', async () => {
+    const pending = (over = {}) => fixture.noticeRow(1, {
+      billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: null, status: 'sent', sent_at: new Date('2027-03-01T15:00:00Z'), email_sent: true,
+      new_amount_cents: 48400, noticed_new_cents: 48400, current_amount_cents: 46800, noticed_current_cents: 46800, metadata: { term_id: TERM(1), next_term_amount_cents: 48400 }, ...over,
+    });
+    mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })], price_change_notices: [pending()] });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
+    expect(await renew(484)).toBeNull();
+    // the family comes from the notice: a lawn renewal is not blocked by a pest notice
+    expect(await renew(300, { coverageServiceType: 'Lawn Care Program' })).toBeNull();
+    // never delivered → the customer was told nothing yet
+    mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })], price_change_notices: [pending({ status: 'draft', sent_at: null, email_sent: false, sms_sent: false })] });
+    expect(await renew(468)).toBeNull();
+  });
+  test('a $0 renewal is a different amount, not an absent one: it needs the acknowledgement too', async () => {
+    mockDb.reset({ annual_prepay_terms: [term()] });
+    expect(await renew(0)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 0 });
+    expect(await renew(null)).toBeNull();
+    expect(await renew('')).toBeNull();
+    expect(await renew(-5)).toBeNull();
+  });
   test('noticedRenewalAmountError carries the 409 body both route modules return', () => {
     const err = apply.noticedRenewalAmountError({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(err.noticedRenewalAmount).toMatchObject({ code: 'RENEWAL_AMOUNT_NOTICED', noticedAmount: 484, chargedAmount: 468, termId: TERM(1) });
@@ -1339,6 +1380,27 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(row.description).toMatch(/\$468\.00/);
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
     expect(meta).toMatchObject({ noticed_amount: 484, charged_amount: 468, predecessor_term_id: TERM(1), invoice_id: 'inv-1', source: 'customer360_annual_prepay', overridden_by: 'tech-1', overridden_by_name: 'Office User' });
+  });
+  test('the on-site prepay switch (POST /api/admin/schedule/:id/prepay-switch) is a renewal writer too: guarded in its transaction, before the term write, 409 without the acknowledgement, override recorded', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const route = src.slice(src.indexOf("router.post('/:id/prepay-switch',"), src.indexOf("router.post('/:id/prepay-switch/undo'"));
+    const call = route.indexOf('RateReviewApply.noticedRenewalAmountConflict(trx, {');
+    expect(call).toBeGreaterThan(0);
+    expect(route.slice(Math.max(0, call - 600), call)).toMatch(/rateReviewLive\(\)/);
+    expect(route.slice(call, call + 400)).toMatch(/amount: switchTermAmount/);
+    expect(route.slice(call, call + 400)).toMatch(/lock: true/);
+    const check = route.indexOf('if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);', call);
+    expect(check).toBeGreaterThan(call);
+    const record = route.indexOf('RateReviewApply.recordNoticedAmountOverride(trx, {', check);
+    expect(record).toBeGreaterThan(check);
+    expect(route.slice(record, record + 400)).toMatch(/source: 'schedule_prepay_switch'/);
+    expect(route.slice(record, record + 400)).toMatch(/adminUserId: req\.technicianId/);
+    const termWrite = route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay(');
+    expect(record).toBeLessThan(termWrite);
+    expect(route.slice(termWrite, termWrite + 1500)).toMatch(/prepayAmount: switchTermAmount,/);
+    expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
   });
   test('all three renewal writers record the override, inside the write transaction, right after the acknowledgement check', () => {
     const fs = require('fs');

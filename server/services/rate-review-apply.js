@@ -140,6 +140,8 @@ const HOLD_COPY = Object.freeze({
   visit_in_reschedule: 'An upcoming visit is parked in a reschedule request, so the series was not repriced.',
   visit_status_missing: 'An upcoming visit of this plan has no status on file, so the series was not repriced.',
   multiple_series: 'The plan line runs as more than one series, so it needs a hand reprice.',
+  plan_replaced: 'The plan the customer was told about was replaced by a new one, so the noticed rate was not applied.',
+  notice_series_unrecorded: 'The notice does not record which plan series it named, so the rate was not applied.',
   series_template_complex: 'The series template carries add-ons or discounts, so later visits would not spawn at the new price.',
   template_overlay_gate_off: 'Series price overrides are switched off, so later visits would spawn at the old price.',
   series_guard_refused: 'A visit in the series already holds money or is being changed, so the series was not repriced.',
@@ -483,6 +485,10 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
   let term = null;
   if (lane === LANE_PER_APPLICATION) {
     visits = await loadLineOpenVisits(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, fromDate: today });
+    // The series this notice names: the apply reprices only that series,
+    // never a replacement accepted after it (see lockPerApplicationTargets).
+    const roots = [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
+    if (roots.length === 1) metadata.series_root_id = roots[0];
   } else if (lane === LANE_PREPAY) {
     const found = await resolvePrepayTerm(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, today });
     if (!found.term) throw hold(found.reason);
@@ -788,6 +794,12 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   const roots = [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
   if (roots.length > 1) throw hold('multiple_series', { roots });
   const parentId = roots[0];
+  // A series cancelled and replaced since the notice (same line, cadence
+  // and price) is a new plan: the old notice never reprices it. A notice
+  // that did not record its series fails closed.
+  const noticedRoot = parseMetadata(notice.metadata).series_root_id;
+  if (!noticedRoot) throw hold('notice_series_unrecorded');
+  if (String(noticedRoot) !== String(parentId)) throw hold('plan_replaced', { noticedSeries: noticedRoot, liveSeries: parentId });
   let locked;
   try {
     await schedule.acquireRecurringSeriesMaintenanceLock(trx, parentId, false);
@@ -1213,7 +1225,9 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
 // read FOR UPDATE, so a concurrent nightly apply writing
 // next_term_prepay_amount serializes against the renewal that reads it.
 async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType = null, termStart = null, today, lock = false }) {
-  if (!customerId || !(Number(amount) > 0)) return null;
+  // $0 is a price (a different amount than the one noticed), never an
+  // absent one: only a missing or invalid amount skips the check.
+  if (!customerId || amount == null || amount === '' || !Number.isFinite(Number(amount)) || Number(amount) < 0) return null;
   const start = ymd(termStart) || today;
   const family = familyOfCoverage(coverageServiceType);
   // The predecessor's row is locked WHATEVER its noticed amount is right
@@ -1227,19 +1241,31 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'switch_plan']);
   if (lock) query.forUpdate();
   const terms = await query.select('id', 'customer_id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
-  const noticed = terms.filter((t) => t.next_term_prepay_amount != null && t.next_term_prepay_amount !== ''
+  // Family attribution through the notice the apply wrote for the term —
+  // and, before the nightly tick froze its amount, the DELIVERED notice
+  // that names the term: the customer was already told that amount, so it
+  // guards the renewal from delivery, not from the next 03:10 apply.
+  const prepayNotices = await dbh('price_change_notices')
+    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
+    .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents');
+  const familyByTerm = new Map();
+  const deliveredCentsByTerm = new Map();
+  for (const n of prepayNotices) {
+    const termId = parseMetadata(n.metadata).term_id;
+    if (!termId) continue;
+    if (n.applied_at) familyByTerm.set(String(termId), n.family_key);
+    else if (wasDelivered(n)) {
+      const noticedCents = Number(n.noticed_new_cents ?? n.new_amount_cents);
+      if (Number.isFinite(noticedCents) && noticedCents > 0) {
+        familyByTerm.set(String(termId), n.family_key);
+        deliveredCentsByTerm.set(String(termId), noticedCents);
+      }
+    }
+  }
+  const frozen = (t) => t.next_term_prepay_amount != null && t.next_term_prepay_amount !== '';
+  const noticed = terms.filter((t) => (frozen(t) || deliveredCentsByTerm.has(String(t.id)))
     && !['cancel', 'switch_plan'].includes(String(t.renewal_decision || '')));
   if (!noticed.length) return null;
-  // Family attribution through the notice the apply wrote for the term.
-  const applied = await dbh('price_change_notices')
-    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
-    .whereNotNull('applied_at')
-    .select('family_key', 'metadata');
-  const familyByTerm = new Map();
-  for (const n of applied) {
-    const termId = parseMetadata(n.metadata).term_id;
-    if (termId) familyByTerm.set(String(termId), n.family_key);
-  }
   const candidates = noticed
     .filter((t) => {
       const labeled = familyOfCoverage(t.coverage_service_type);
@@ -1256,7 +1282,7 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   // A successor already on the books (whatever its amount) settles the
   // term: the guard protected the renewal that created it.
   if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family)) return null;
-  const noticedCents = cents(term.next_term_prepay_amount);
+  const noticedCents = frozen(term) ? cents(term.next_term_prepay_amount) : deliveredCentsByTerm.get(String(term.id));
   if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
   return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(Math.round(Number(amount) * 100)) };
 }

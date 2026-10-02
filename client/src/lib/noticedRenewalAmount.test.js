@@ -18,6 +18,10 @@ describe('noticedRenewalAmountRefusal', () => {
     expect(noticedRenewalAmountRefusal(noticed409())).toEqual({ noticedAmount: 484, chargedAmount: 468 });
     expect(noticedRenewalAmountRefusal(noticed409({}, 'details'))).toEqual({ noticedAmount: 484, chargedAmount: 468 });
   });
+  it('accepts a $0 charged amount (zero is a price, not a missing one)', () => {
+    expect(noticedRenewalAmountRefusal(noticed409({ chargedAmount: 0 }))).toEqual({ noticedAmount: 484, chargedAmount: 0 });
+    expect(noticedRenewalAmountPrompt({ noticedAmount: 484, chargedAmount: 0 })).toBe('The customer was told $484.00. Charge $0.00 instead?');
+  });
   it('ignores other refusals and a body missing either amount', () => {
     const other = new Error('x'); other.status = 409; other.body = { setupFeeRequired: true };
     expect(noticedRenewalAmountRefusal(other)).toBeNull();

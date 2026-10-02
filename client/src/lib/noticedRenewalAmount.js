@@ -16,7 +16,9 @@ export function noticedRenewalAmountRefusal(err) {
   if (err?.status !== 409 || body?.code !== 'RENEWAL_AMOUNT_NOTICED') return null;
   const noticedAmount = Number(body.noticedAmount);
   const chargedAmount = Number(body.chargedAmount);
-  if (!(noticedAmount > 0) || !(chargedAmount > 0)) return null;
+  // $0 is a real charged amount (never "missing"); a blank one is not.
+  if (body.chargedAmount == null || body.chargedAmount === '') return null;
+  if (!(noticedAmount > 0) || !Number.isFinite(chargedAmount) || chargedAmount < 0) return null;
   return { noticedAmount, chargedAmount };
 }
 

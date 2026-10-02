@@ -381,7 +381,7 @@ function noticeRow(n, overrides = {}) {
   return {
     id: `60000000-0000-4000-8000-00000000000${n}`, batch_id: '70000000-0000-4000-8000-000000000001', customer_id: CUSTOMER(n), current_amount_cents: 11700, new_amount_cents: 12100,
     cadence_label: 'application', effective_date: '2026-12-10', notice_token: `tok${n}`, status: 'sent', email_sent: true, sms_sent: true, sent_at: new Date('2026-11-02T15:00:00Z'),
-    metadata: { source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'application', visits_per_year: 4, current_rate_source: 'visit_median' },
+    metadata: { source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'application', visits_per_year: 4, current_rate_source: 'visit_median', series_root_id: VISIT(n * 100) },
     rate_review_row_id: ROW(n), billing_lane: 'per_application', family_key: 'pest_control', noticed_current_cents: 11700, noticed_new_cents: 12100,
     applies_from_visit_id: null, applied_at: null, apply_hold_reason: null, apply_attempts: 0, ...overrides,
   };
