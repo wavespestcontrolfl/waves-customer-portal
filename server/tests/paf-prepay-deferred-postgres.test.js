@@ -256,6 +256,26 @@ postgres('annual prepay charged after the first visit', () => {
     expect(await release()).toMatchObject({ released: 1 });
   });
 
+  it('a failed deferred-hold read leaves the closeout unfinished, never a per-visit bill', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const renewals = require('../services/annual-prepay-renewals');
+    const spy = jest.spyOn(renewals, 'pafDeferredPrepayCoversVisit').mockRejectedValueOnce(new Error('synthetic read failure'));
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const result = await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } });
+    expect(result.status).toBe(503);
+    expect(result.body.code).toBe('deferred_prepay_lookup_failed');
+    expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toEqual([]);
+    spy.mockRestore();
+  });
+
   describe('releasing the charge after the first performed visit', () => {
     it('leaves the job waiting while no visit is performed, and for an inspection-only visit', async () => {
       const f = await deferredAccept();
@@ -512,6 +532,31 @@ postgres('annual prepay charged after the first visit', () => {
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({ subject: { type: 'visit', id: f.parentId } }),
         { dedupeKey: `paf-prepay-cancelled-after-visit:${f.estimateId}` });
+    });
+
+    it('a bank payment closes the R2 alert even without its raised stamp, and starts one new round', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback' } });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'processing', payment_method: 'us_bank_account' });
+      const episodes = require('../services/admin-alert-episodes');
+      const closeSpy = jest.spyOn(episodes, 'closeAdminAlertKeys');
+      await release();
+      await release();
+      expect(closeSpy).toHaveBeenCalledWith(expect.anything(), [`paf-prepay-charge-failed:${f.estimateId}`], 'resolved', expect.anything());
+      expect(await jobOf(f)).toMatchObject({ charge_alert_round: 1 });
+      closeSpy.mockRestore();
+    });
+
+    it('a released year handed to a payer that then dies unpaid raises the unbilled-visits alert', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'skipped', reason: 'payer_billed' } });
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+      await release();
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.anything(), { dedupeKey: `paf-prepay-cancelled-after-visit:${f.estimateId}` });
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {

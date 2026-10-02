@@ -9338,8 +9338,33 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // EXCLUSIVELY by that gate, so a STALE annual-prepay stamp (left by a
     // best-effort void/refund clear) must NOT suppress here via its amount.
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    // GATE_PAF_PREPAY: an unstamped visit held by a year whose charge waits
+    // for (or failed after) the first visit. Read strictly: a failed read is
+    // UNVERIFIABLE, never "uncovered" — billing the visit here would sit
+    // beside the year's charge. Same not-finalized posture as the setup-fee
+    // check above; the retry decides.
+    let deferredPrepayCovered = false;
+    if (!visitIsPayerBilled && !svc.prepaid_method) {
+      try {
+        deferredPrepayCovered = await AnnualPrepayRenewals.pafDeferredPrepayCoversVisit(svc, db, { throwOnError: true });
+      } catch (lookupErr) {
+        logger.error(`[dispatch] deferred annual-prepay check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+        }
+        return ({ status: 503, body: {
+          error: released
+            ? 'The annual prepay check for this visit failed — the closeout is saved but NOT finalized. Retry the closeout.'
+            : `The annual prepay check for this visit failed — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+          code: 'deferred_prepay_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
+    }
     const annualPrepayCovered = !visitIsPayerBilled
-      && await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db);
+      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db));
     const prepaidCovered = annualPrepayCovered
       || (!visitIsPayerBilled
         && svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD

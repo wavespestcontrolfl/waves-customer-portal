@@ -242,11 +242,13 @@ async function reconcileJobAlerts(estimateId) {
       await close(chargeAlertKey(estimateId, round), 'The annual prepay invoice settled or was closed.');
       await patchJob(estimateId, { charge_alert_closed_at: nowIso });
     } else if (outcome === 'bank_processing') {
-      // A bank payment is under way: close the alert but keep watching — a
-      // returned debit reopens the invoice and the next round rings again.
-      if (job.charge_alert_raised_at) {
-        await close(chargeAlertKey(estimateId, round), 'A bank payment for the annual prepay is processing.');
-        await patchJob(estimateId, { charge_alert_raised_at: null, charge_alert_round: round + 1 });
+      // A bank payment is under way: close the alert (whether or not its
+      // raised stamp landed) and start a new round once per processing
+      // episode; keep watching — a returned debit reopens the invoice and the
+      // new round's alert rings.
+      await close(chargeAlertKey(estimateId, round), 'A bank payment for the annual prepay is processing.');
+      if (job.charge_alert_processing_round !== round) {
+        await patchJob(estimateId, { charge_alert_raised_at: null, charge_alert_round: round + 1, charge_alert_processing_round: round + 1 });
       }
     } else if (outcome === 'unexpected' && !job.charge_alert_raised_at) {
       // Still owed (a card intent parked 'processing' is left alone until
@@ -258,7 +260,27 @@ async function reconcileJobAlerts(estimateId) {
         subject: { type: 'invoice', id: String(job.invoice_id) },
         doneWhen: 'invoice_paid',
       }, chargeAlertKey(estimateId, round));
-      await patchJob(estimateId, { charge_alert_raised_at: nowIso }, whileUnset('charge_alert_raised_at'));
+      await patchJob(estimateId, { charge_alert_raised_at: nowIso, charge_alert_processing_round: null }, whileUnset('charge_alert_raised_at'));
+    }
+  }
+
+  // A released year the sweep resolved 'skipped' (handed to a payer, or found
+  // voided before it charged) still had its first visit held unbilled. If the
+  // year then dies unpaid, that work goes to the unbilled-visits alert below;
+  // once it is paid, the check is done.
+  if (job.status === 'skipped' && job.released_for_visit_id && !job.unbilled_check_done_at) {
+    const invoice = await db('invoices').where({ id: job.invoice_id }).first('status');
+    const invStatus = String(invoice?.status || '').toLowerCase();
+    if (!invoice || DEAD_INVOICE_STATUSES.includes(invStatus)) {
+      await patchJob(estimateId, {
+        status: 'cancelled_after_visit',
+        reason: `invoice_${invStatus || 'missing'}_after_release`,
+        performed_visit_id: job.released_for_visit_id,
+      }, (q) => q.whereRaw(`${JOB} ->> 'status' = 'skipped'`));
+      return;
+    }
+    if (['paid', 'prepaid'].includes(invStatus)) {
+      await patchJob(estimateId, { unbilled_check_done_at: nowIso });
     }
   }
 
@@ -291,6 +313,8 @@ async function reconcileAlerts({ pageSize = 200 } = {}) {
           (${JOB} ->> 'stale_alert_reserved_at' IS NOT NULL AND ${JOB} ->> 'stale_alert_closed_at' IS NULL)
           OR (${JOB} ->> 'status' = 'delivered_fallback' AND ${JOB} ->> 'charge_alert_closed_at' IS NULL)
           OR (${JOB} ->> 'status' = 'cancelled_after_visit' AND ${JOB} ->> 'unbilled_alert_raised_at' IS NULL)
+          OR (${JOB} ->> 'status' = 'skipped' AND ${JOB} ->> 'released_for_visit_id' IS NOT NULL
+              AND ${JOB} ->> 'unbilled_check_done_at' IS NULL)
         )`)
         .modify((q) => { if (afterId) q.where('id', '>', afterId); })
         .orderBy('id', 'asc')
