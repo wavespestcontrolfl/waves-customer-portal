@@ -296,3 +296,39 @@ describe('decision_reviews legacy conflict target (20261002005000; sorts before 
   });
 });
 
+
+describe('decision_reviews contract step (20261002200000; the second writer ships, both five-column keys go)', () => {
+  const contract = require('../models/migrations/20261002200000_decision_reviews_drop_single_provider_keys');
+  const FIVE = '(capability, package_id, subject_type, subject_id, question_id)';
+
+  test('up drops both single-provider keys and nothing else; the provider key stays', async () => {
+    const { knex, state } = buildKnex({ column: true });
+    await contract.up(knex);
+    expect(state.raw).toEqual([
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_question_uniq',
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_question_legacy_uniq',
+    ]);
+    expect(state.raw.join('\n')).not.toMatch(/provider_subject_question_uniq/);
+  });
+
+  test('down restores both while only Jev has rows', async () => {
+    const { knex, state } = buildKnex({ column: true });
+    await contract.down(knex);
+    expect(state.wheres).toEqual([['whereNot', { provider: 'typesafe' }]]);
+    expect(state.raw).toEqual([
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_question_legacy_uniq',
+      `ALTER TABLE decision_reviews ADD CONSTRAINT decision_reviews_subject_question_legacy_uniq UNIQUE ${FIVE}`,
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_question_uniq',
+      `ALTER TABLE decision_reviews ADD CONSTRAINT decision_reviews_subject_question_uniq UNIQUE ${FIVE}`,
+    ]);
+  });
+
+  test('down refuses, touching nothing, while another provider has rows; both directions no-op without the table', async () => {
+    const { knex, state } = buildKnex({ column: true, otherProviderRow: { id: 'r1' } });
+    await expect(contract.down(knex)).rejects.toThrow(/holds rows from a provider other than typesafe/);
+    expect(state.raw).toEqual([]);
+    const none = buildKnex({ table: false });
+    await contract.up(none.knex); await contract.down(none.knex);
+    expect(none.state.raw).toEqual([]);
+  });
+});
