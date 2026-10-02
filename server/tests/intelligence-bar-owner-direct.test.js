@@ -322,6 +322,11 @@ describe('reads for the owner login', () => {
     expect(await Context.prepareReadInput(split, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
     const whole = await Context.prepareReadInput({ customer_name: 'Synthetic Person', customer_id: A, phone: '9415550001' }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
     expect(whole.input.customer_id).toBe(A);
+    // Shared name + A's id while the task targets B: every selector agrees on
+    // A, who is merely outside the task — a scope refusal, bypassed for the owner.
+    const outsideScope = { customer_name: 'Synthetic Person', customer_id: A };
+    expect(await Context.prepareReadInput(outsideScope, strict({ targets: [{ customer_id: B }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.prepareReadInput(outsideScope, direct({ targets: [{ customer_id: B }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toEqual({ input: outsideScope });
     rows.customers[1].first_name = 'Other';
     // The same name with its own id is fine.
     const agree = await Context.prepareReadInput({ customer_name: 'Synthetic Person', customer_id: A }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });

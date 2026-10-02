@@ -831,14 +831,6 @@ async function bindReadAddress(scope, params, input, context, toolName) {
 // pass the immutable id to the reader. A current-request phone may establish
 // a unique read target only: it stays out of the task's write authority and
 // a model substitute is never accepted.
-// The single selected customer must carry the supplied phone and match any
-// supplied id; anything else is a substitute the task never authorised.
-function selectorMismatch(customer, params, digits) {
-  if (!customer) return true;
-  if (params.phone && digits(customer.phone) !== digits(params.phone)) return true;
-  return Boolean(params.customer_id) && String(params.customer_id).toLowerCase() !== customer.id;
-}
-
 async function resolveCustomerSelector(params, input, context, schema) {
   const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
   const permitted = new Set(context.targets.map(target => target.customer_id));
@@ -866,13 +858,15 @@ async function resolveCustomerSelector(params, input, context, schema) {
   // conflict too (Codex r4): the reader would answer about one selector
   // while the operator supplied another it could not reconcile.
   const selectorCount = [params.customer_name, suppliedId, params.phone].filter(Boolean).length;
-  if (selectorCount >= 2 && !matches.some(fitsEverySelector)) {
+  const fitting = matches.filter(fitsEverySelector);
+  if (selectorCount >= 2 && !fitting.length) {
     return { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
   }
-  const conflict = { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
-  const selected = explicitRead ? matches : matches.filter(customer => permitted.has(customer.id));
+  // Task authority narrows the FITTING rows only: a customer every selector
+  // agrees on who sits outside the task is a scope question (bypassable for
+  // the owner login), not a conflict.
+  const selected = explicitRead ? fitting : fitting.filter(customer => permitted.has(customer.id));
   const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
-  if (customer && selectorMismatch(customer, params, digits)) return conflict;
   if (!customer) return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
   input.customer_id = customer.id;
   delete input.customer_name;
