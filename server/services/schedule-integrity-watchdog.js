@@ -17,9 +17,10 @@
  *     carries a price (estimated_price / primary_line_price). A priced
  *     parent counts for its children, so only a series with no price
  *     ANYWHERE pages. Billing never reads the parent's price: children get
- *     it copied onto their own row when they spawn
- *     (recurring-appointment-seeder), and a child whose own row is blank
- *     bills by billing-lane's rules (monthly rate or no charge). One bell
+ *     the parent's estimated_price (not primary_line_price) copied onto
+ *     their own row when they spawn (recurring-appointment-seeder), and a
+ *     child whose own row is blank bills by billing-lane's lane rules (the
+ *     per-application fee, the monthly rate, or no charge). One bell
  *     per series (root id), not per visit. A visit covered by a live combined
  *     first-application invoice never pages — judged by billing-lane's
  *     siblingInvoiceCoverageVerdict, the one determination billing itself uses
@@ -127,12 +128,13 @@ function rowHasPrice(row) {
 
 // An upcoming visit pages when neither it nor its series carries a price.
 // Recurring children (is_recurring=true under a parent) get the parent's
-// price copied onto their own row at spawn, so a priced parent suppresses —
-// a priced series is not this alert's gap. Billing itself never falls back to
-// the parent's price (see the header). A booster/add-on child
-// (is_recurring=false with a recurring_parent_id) bills as its own one-off
-// visit and is judged on its own price only. The query LEFT JOINs the parent and rides its price fields
-// along as parent_estimated_price / parent_primary_line_price.
+// estimated_price copied onto their own row at spawn, so a priced parent
+// suppresses — a priced series is not this alert's gap. Billing itself
+// never falls back to the parent's price (see the header). A booster/add-on
+// child (is_recurring=false with a recurring_parent_id) bills as its own
+// one-off visit and is judged on its own price only. The query LEFT JOINs
+// the parent and rides its price fields along as parent_estimated_price /
+// parent_primary_line_price.
 //
 // PREPAID visits never page — but only through the SAME coverage rules the
 // completion-billing gate applies (admin-dispatch), so the watchdog can't
