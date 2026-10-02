@@ -44,6 +44,7 @@ import { clearEmailDrafts } from "../lib/emailDrafts";
 import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
 import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
 import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
+import { useTechNavigationLock } from "./tech/TechNavigationLock";
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -101,6 +102,18 @@ export default function AdminLayoutV2() {
   const navigate = useNavigate();
   const location = useLocation();
   const isMobile = useIsMobile();
+  // Field navigation lock (TechNavigationLock, mounted in App outside the
+  // router): while a visit action is in flight on /admin/today, the field
+  // shell disables its own links; the admin shell's sidebar, tab bar, palette
+  // and sign-out must hold too, or they navigate away mid-action (pre-push
+  // Codex P1 on the Today page).
+  const fieldLock = useTechNavigationLock();
+  const fieldBusy = Boolean(fieldLock?.navigationBusy);
+  const holdWhileFieldBusy = (event) => {
+    if (!fieldBusy) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
   const [user, setUser] = useState(null);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -207,6 +220,7 @@ export default function AdminLayoutV2() {
   }, [authStatus, location.pathname, location.search]);
 
   const handleLogout = () => {
+    if (fieldBusy) return;
     // Sign-out navigates by calling navigate() from a plain button — no
     // popstate, no <a href> click — so it reaches neither CustomersPageV2's
     // own guardLink/guardHistory nor any other page's in-app draft guard.
@@ -227,8 +241,8 @@ export default function AdminLayoutV2() {
   }, [isMobile, sidebarOpen]);
   // The page-data provider takes this opener as a context value, so it has to
   // be stable across renders that change neither the drawer nor the viewport.
-  const openPalette = useCallback(() => { closeSidebarForPalette(); paletteRef.current?.open(); },
-    [closeSidebarForPalette]);
+  const openPalette = useCallback(() => { if (fieldBusy) return; closeSidebarForPalette(); paletteRef.current?.open(); },
+    [closeSidebarForPalette, fieldBusy]);
 
   const sidebarVisible = !isMobile || sidebarOpen;
   // On a phone the field workspace (/admin/today) supplies its own header and
@@ -342,6 +356,8 @@ export default function AdminLayoutV2() {
       {/* Sidebar */}
       <aside
         id="admin-sidebar"
+        onClickCapture={holdWhileFieldBusy}
+        aria-busy={fieldBusy || undefined}
         ref={drawerRef}
         role={isMobile && sidebarOpen ? "dialog" : undefined}
         aria-modal={isMobile && sidebarOpen ? true : undefined}
@@ -702,6 +718,8 @@ export default function AdminLayoutV2() {
         <nav
           aria-label="Primary"
           className="admin-mobile-tabbar"
+          onClickCapture={holdWhileFieldBusy}
+          aria-busy={fieldBusy || undefined}
           style={{
             position: "fixed",
             bottom: "var(--keyboard-inset, 0px)",

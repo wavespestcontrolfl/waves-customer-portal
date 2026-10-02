@@ -8,6 +8,7 @@ import AdminLayoutV2 from "./AdminLayoutV2";
 import { adminFetch } from "../utils/admin-fetch";
 import { loadEmailDrafts, updateEmailDrafts } from "../lib/emailDrafts";
 import { registerLeaveGuard } from "../lib/navigation-guard";
+import TechNavigationLock, { useTechNavigationLock } from "./tech/TechNavigationLock";
 
 const viewport = vi.hoisted(() => ({ mobile: false }));
 vi.mock("../hooks/useIsMobile", () => ({ default: () => viewport.mobile }));
@@ -248,5 +249,36 @@ describe("AdminLayoutV2", () => {
       "/manifest.json",
     );
     expect(document.title).toBe("Waves Customer Portal");
+  });
+
+  it("holds the sidebar, sign-out and palette while a field action is in flight (TechNavigationLock)", async () => {
+    function BusyChild() {
+      const { setNavigationBusy } = useTechNavigationLock();
+      const location = useLocation();
+      return <>
+        <button type="button" onClick={() => setNavigationBusy(true)}>Start contact</button>
+        <output data-testid="where">{location.pathname}</output>
+      </>;
+    }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/today"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/today" element={<BusyChild />} />
+              <Route path="/admin/customers" element={<div>Customers page</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    await screen.findByRole("button", { name: "Start contact" });
+    fireEvent.click(screen.getByRole("button", { name: "Start contact" }));
+    const sidebar = document.getElementById("admin-sidebar");
+    expect(sidebar).toHaveAttribute("aria-busy", "true");
+    const customersLink = within(sidebar).getAllByRole("link", { name: /Customers/ })[0];
+    fireEvent.click(customersLink);
+    expect(screen.getByTestId("where")).toHaveTextContent("/admin/today");
+    expect(screen.queryByText("Customers page")).not.toBeInTheDocument();
   });
 });
