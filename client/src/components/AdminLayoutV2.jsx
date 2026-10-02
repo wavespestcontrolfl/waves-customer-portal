@@ -1,4 +1,6 @@
-import { clearStaffDeviceData } from "../lib/adminAuth";
+import { clearStaffDeviceData, getAdminAuthToken, loadStaffOfflinePass, saveStaffOfflinePass } from "../lib/adminAuth";
+import { installStaffSessionGuard } from "../lib/staffSessionGuard";
+import { isFieldPath } from "../lib/adminBookmarkMeta";
 import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
 import ScheduleSaveNotice, { clearScheduleSaveNotices } from './schedule/ScheduleSaveNotice';
 /*
@@ -46,6 +48,10 @@ import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
 import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
 import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
 import { useTechNavigationLock } from "./tech/TechNavigationLock";
+
+// Bound on the staff check so a dead zone cannot hold the field workspace on
+// "Verifying staff access" forever (field paths only; see the auth effect).
+export const AUTH_CHECK_TIMEOUT_MS = 15000;
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -156,14 +162,35 @@ export default function AdminLayoutV2() {
     // unknown-rule error).
   }, []);
 
+  // Bumped when the staff check answers for a token that is no longer the
+  // stored one (another tab signed in): the check reruns for the new login
+  // instead of applying the old login's answer. Field workspace only.
+  const [verifyRun, setVerifyRun] = useState(0);
+  const locationRef = useRef(location);
+  locationRef.current = location;
+
   useEffect(() => {
     const token = localStorage.getItem("waves_admin_token");
     if (!token) {
       navigate(adminLoginUrl(location), { replace: true });
-      return;
+      return undefined;
     }
-    adminFetch("/admin/auth/me")
+    // The field workspace (/admin/today) must open with no signal, so only
+    // there is the check bounded and allowed to fall back to the offline pass
+    // a previous successful check left for THIS token. Every other admin
+    // page keeps the plain check and its error state.
+    const field = isFieldPath(location.pathname);
+    let cancelled = false;
+    const abort = field && typeof AbortController === "function" ? new AbortController() : null;
+    const timer = abort ? setTimeout(() => abort.abort(), AUTH_CHECK_TIMEOUT_MS) : null;
+    // Only a failure to REACH the server (or to read a 2xx body) may open from
+    // the offline pass: adminFetch throws those with no HTTP status. A server
+    // answer of any kind carries a status (or is a profile we reject below).
+    const verify = adminFetch("/admin/auth/me", abort ? { signal: abort.signal } : {});
+    verify
       .then((profile) => {
+        if (cancelled) return;
+        if (field && getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
         if (!profile) {
           setAuthStatus("error");
           return;
@@ -181,9 +208,19 @@ export default function AdminLayoutV2() {
         }
         setUser(profile);
         setAuthStatus("ready");
-        localStorage.setItem("waves_admin_user", JSON.stringify(profile));
+        // A failed cache write must not leave a stale copy behind.
+        try {
+          localStorage.setItem("waves_admin_user", JSON.stringify(profile));
+        } catch {
+          try { localStorage.removeItem("waves_admin_user"); } catch { /* storage unavailable */ }
+        }
+        // Every verified check refreshes the pass, so a later offline reopen
+        // of the field workspace has one.
+        saveStaffOfflinePass(token, profile);
       })
       .catch((err) => {
+        if (cancelled) return;
+        if (field && getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
         if (err?.status === 401) {
           localStorage.removeItem("waves_admin_token");
           localStorage.removeItem("waves_admin_user");
@@ -192,9 +229,57 @@ export default function AdminLayoutV2() {
           navigate(adminLoginUrl(location), { replace: true });
           return;
         }
+        const stored = field && err?.status === undefined ? loadStaffOfflinePass(token) : null;
+        if (stored) {
+          setUser(stored);
+          setAuthStatus("ready");
+          return;
+        }
         setAuthStatus("error");
-      });
-  }, [navigate]);
+      })
+      .finally(() => { if (timer) clearTimeout(timer); });
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [navigate, verifyRun]);
+
+  // Field workspace only: another tab signing in or out changes the stored
+  // token under this shell. Drop the identity verified for the old token at
+  // once (the outlet unmounts while "checking") and verify the new one.
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (!isFieldPath(locationRef.current.pathname)) return;
+      if (event.key !== null && event.key !== "waves_admin_token") return;
+      setUser(null);
+      setAuthStatus(getAdminAuthToken() ? "checking" : "error");
+      setVerifyRun((n) => n + 1);
+      refetchFlags().catch(() => {});
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // Field workspace only: a 401 from ANY staff API call for the current token
+  // ends the session here (token, stored profile and saved route go), so an
+  // offline reopen cannot unlock from a session the server already refused.
+  const onFieldPath = isFieldPath(location.pathname);
+  useEffect(() => {
+    if (!onFieldPath) return undefined;
+    return installStaffSessionGuard({
+      getToken: getAdminAuthToken,
+      onRejected: () => {
+        localStorage.removeItem("waves_admin_token");
+        localStorage.removeItem("adminToken");
+        localStorage.removeItem("waves_admin_user");
+        clearStaffDeviceData();
+        setUser(null);
+        setAuthStatus("checking");
+        refetchFlags().catch(() => {});
+        navigate(adminLoginUrl(locationRef.current), { replace: true });
+      },
+    });
+  }, [navigate, onFieldPath]);
 
   // Role scoping on deep links: the sidebar/More page hide adminOnly
   // destinations from non-admin roles, but a typed URL bypasses nav.
