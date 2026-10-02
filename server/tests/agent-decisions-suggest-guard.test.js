@@ -121,13 +121,20 @@ describe('one-tap correction reason (AI acceleration scope idea D, PR 2)', () =>
     expect(body.decision.correctionReason).toBe('wrong_fact');
   });
 
-  test('an accepted review never stores a reason, even when one is sent', async () => {
+  test('a reason on an accepted review is 400 before any read: accepted decisions carry none', async () => {
+    const { status, body } = await postReview('d-lead', { verdict: 'accepted', reason: 'other' });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/corrected or dismissed only/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a dismissed review stores the reason too', async () => {
     const lookup = firstBuilder({ id: 'd-lead', workflow: 'lead_response_workflow' });
-    const update = updateBuilder({ id: 'd-lead', workflow: 'lead_response_workflow', status: 'accepted', human_verdict: 'accepted', correction_reason: null });
+    const update = updateBuilder({ id: 'd-lead', workflow: 'lead_response_workflow', status: 'dismissed', human_verdict: 'dismissed', correction_reason: 'should_have_escalated' });
     db.mockImplementationOnce(() => lookup).mockImplementationOnce(() => update);
-    const { status } = await postReview('d-lead', { verdict: 'accepted', reason: 'other' });
+    const { status } = await postReview('d-lead', { verdict: 'dismissed', reason: 'should_have_escalated' });
     expect(status).toBe(200);
-    expect(update.update.mock.calls[0][0].correction_reason).toBeNull();
+    expect(update.update.mock.calls[0][0].correction_reason).toBe('should_have_escalated');
   });
 
   test('an unknown reason is 400 before any read or write', async () => {

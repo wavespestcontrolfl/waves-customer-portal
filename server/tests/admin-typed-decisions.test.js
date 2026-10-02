@@ -231,6 +231,8 @@ describe('POST /reviews/:id/label', () => {
     ['jev_wrong with free text', { verdict: 'jev_wrong', correct_value: 'x'.repeat(3000) }],
     ['jev_wrong whose correct_value repeats Jev\'s answer', { verdict: 'jev_wrong', correct_value: true, seen_answer: SEEN }],
     ['an unknown one-tap reason', { verdict: 'jev_right', seen_answer: SEEN, reason: 'bad_vibes' }],
+    ['a reason on a verdict other than jev_wrong', { verdict: 'jev_right', seen_answer: SEEN, reason: 'wrong_fact' }],
+    ['a reason on unclear', { verdict: 'unclear', seen_answer: SEEN, reason: 'other' }],
   ])('%s is 400 and writes nothing', async (_name, payload) => {
     const log = installDb({ decision_reviews: { first: [baseRow()] } });
     expect((await post(`/reviews/${ID}/label`, payload)).status).toBe(400);

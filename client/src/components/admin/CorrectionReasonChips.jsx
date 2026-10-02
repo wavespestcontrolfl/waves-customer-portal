@@ -7,7 +7,7 @@ import { CORRECTION_REASONS } from "../../constants/correctionReasons";
 export default function CorrectionReasonChips({ value = null, onChange, disabled = false, label = "Why?" }) {
   return (
     <div role="group" aria-label={label} className="flex flex-wrap items-center gap-2">
-      <span className="text-12 text-ink-secondary">{label}</span>
+      <span className="text-14 text-ink-secondary">{label}</span>
       {CORRECTION_REASONS.map((reason) => {
         const selected = value === reason.value;
         return (

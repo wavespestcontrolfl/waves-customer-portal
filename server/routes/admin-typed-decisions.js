@@ -198,6 +198,7 @@ function readLabelRequest(body) {
   // The one-tap reason (five values), kept inside the label beside the note.
   const reasonRead = readCorrectionReason(body.reason);
   if (reasonRead.error) return { error: reasonRead.error };
+  if (reasonRead.reason && verdict !== 'jev_wrong') return { error: 'reason applies to jev_wrong only' };
   return { verdict, seen, seenSubject, note, reason: reasonRead.reason, force: body.force === true };
 }
 

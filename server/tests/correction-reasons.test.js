@@ -3,7 +3,7 @@
 // pinned by the migration's CHECK, and projected by the corrections view.
 const fs = require('fs');
 const path = require('path');
-const { CORRECTION_REASONS, CORRECTION_REASON_LABELS, readCorrectionReason } = require('../services/correction-reasons');
+const { CORRECTION_REASONS, readCorrectionReason } = require('../services/correction-reasons');
 const migration = require('../models/migrations/20261002140000_correction_reason');
 
 describe('readCorrectionReason', () => {
@@ -18,8 +18,9 @@ describe('readCorrectionReason', () => {
     expect(out.error).toMatch(/reason must be one of wrong_fact, wrong_tone, missing_promise, should_have_escalated, other/);
     expect(readCorrectionReason({ x: 1 }).error).toBeTruthy();
   });
-  test('every reason has a label', () => {
-    expect(Object.keys(CORRECTION_REASON_LABELS).sort()).toEqual([...CORRECTION_REASONS].sort());
+  test('the client mirror gives every reason a label', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'constants', 'correctionReasons.js'), 'utf8');
+    for (const r of CORRECTION_REASONS) expect(src).toMatch(new RegExp(`value: "${r}", label: "[A-Z][^"]+"`));
   });
 });
 

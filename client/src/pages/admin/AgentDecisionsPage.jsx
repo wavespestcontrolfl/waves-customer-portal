@@ -296,11 +296,15 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
         && selectionEpochRef.current === submittedSelectionEpoch
         && editEpochRef.current === submittedEditEpoch
         && currentLoadRef.current === load) {
+        // The server stores no reason for an accepted decision; an accepted row
+        // that stays selected must not keep a pressed chip for a later verdict.
+        const keptReason = verdict === "accepted" ? null : correctionReason;
+        setCorrectionReason(keptReason);
         draftBaselineRef.current = {
           ...draftBaselineRef.current,
           correctionNote,
           correctedActions,
-          correctionReason,
+          correctionReason: keptReason,
         };
         setNotice(`Decision ${statusLabel(verdict).toLowerCase()}.`);
         await load();

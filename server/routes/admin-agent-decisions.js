@@ -571,6 +571,7 @@ router.post('/:id/review', async (req, res, next) => {
     const correctionNote = String(req.body?.correctionNote || req.body?.note || '').trim().slice(0, 4000);
     const reasonRead = readCorrectionReason(req.body?.reason);
     if (reasonRead.error) return res.status(400).json({ error: reasonRead.error });
+    if (reasonRead.reason && verdict === 'accepted') return res.status(400).json({ error: 'reason applies to corrected or dismissed only' });
 
     if (verdict === 'corrected' && !correctedActions.length && !correctionNote) {
       return res.status(400).json({ error: 'corrected decisions require correctedActions or a correctionNote' });
@@ -595,7 +596,7 @@ router.post('/:id/review', async (req, res, next) => {
         corrected_actions: verdict === 'corrected' ? JSON.stringify(correctedActions) : null,
         correction_note: correctionNote || null,
         // The one-tap reason (five values); an accepted decision carries none.
-        correction_reason: verdict === 'accepted' ? null : reasonRead.reason,
+        correction_reason: reasonRead.reason,
         reviewed_by: actorName(req),
         reviewed_at: new Date(),
         updated_at: new Date(),
