@@ -1035,3 +1035,15 @@ describe('customer note = the tech\'s own clauses, word for word', () => {
     expect(out.customerNote).toBe('');
   });
 });
+
+describe('internal matters never reach the customer note, labeled or not', () => {
+  test.each([
+    'Customer is disputing the invoice.',
+    'Gate was locked so I could not get in the back.',
+    'Dog was loose in the yard.',
+  ])('"%s" goes to the office note', (said) => {
+    const out = validateFill(answer({ customerNote: `Treated the garage. ${said}` }), ctx, `Treated the garage. ${said}`);
+    expect(out.customerNote).toBe('Treated the garage.');
+    expect(out.officeNote).toBe(said);
+  });
+});

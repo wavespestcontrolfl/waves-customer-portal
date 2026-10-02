@@ -1094,12 +1094,15 @@ function validateFill(raw, ctx, transcript) {
 // the transcript, word for word ("Treated the kitchen for roaches" from "Treated
 // the kitchen for roaches, light activity"). A reworded or invented sentence
 // ("Used forty gallons of Taurus", "Treated inside and outside") is a Check. A
-// clause the tech said in a sentence addressed to the office, or one naming an
-// entry code (the same rule /complete refuses on customer-visible text,
+// clause the tech said in a sentence addressed to the office, one about billing,
+// access, dogs or locks, or one naming an entry code (the same rule /complete refuses on customer-visible text,
 // COMPLETION_ACCESS_CODE_RE), goes to the office note however the model labeled it.
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b|\bfor\s+(the\s+)?(office|dispatch)(\s+only)?\b/i;
+// Internal matters the prompt keeps out of the customer note (billing, access,
+// dogs and locks) are office-only even when the tech did not label them.
+const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid|pay|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|dogs?|access|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
-const isOfficeSentence = (sentence, accessCodeRe) => OFFICE_ADDRESSED_RE.test(sentence) || accessCodeRe.test(sentence);
+const isOfficeSentence = (sentence, accessCodeRe) => OFFICE_ADDRESSED_RE.test(sentence) || INTERNAL_MATTER_RE.test(sentence) || accessCodeRe.test(sentence);
 
 // Where the note sentence was said, as 'customer' | 'office', or null when it is
 // not a whole clause of any transcript sentence.

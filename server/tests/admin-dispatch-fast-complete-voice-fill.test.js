@@ -92,7 +92,7 @@ const TRANSCRIPT = 'Did the perimeter outside for ants, 4 ounces of Taurus, ligh
 const MODEL_ANSWER = {
   products: [{ productId: 'p-taurus', amount: 4, unit: 'oz', sameAsLast: false, method: 'perimeter_spray', heard: '4 ounces of Taurus' }],
   visit: { pests: ['Ants'], otherPest: '', areas: ['Outside'], method: 'perimeter_spray', linearFt: 0, activity: 'light', heard: 'perimeter outside for ants' },
-  customerNote: 'Treated the perimeter outside for ants.',
+  customerNote: 'Did the perimeter outside for ants.',
   officeNote: 'Gate code is 7731.',
   unclear: [],
 };
@@ -193,7 +193,7 @@ describe('POST fast-complete/voice-fill', () => {
       enabled: true,
       products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: 'perimeter_spray', heard: '4 ounces of Taurus' }],
       visit: { pests: ['Ants'], otherPest: '', areas: ['Outside'], method: 'perimeter_spray', linearFt: null, activity: 'light', heard: 'perimeter outside for ants' },
-      customerNote: 'Treated the perimeter outside for ants.',
+      customerNote: 'Did the perimeter outside for ants.',
       officeNote: 'Gate code is 7731.',
       unclear: [],
     });
