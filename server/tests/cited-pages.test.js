@@ -150,6 +150,10 @@ describe('rankCitedPages', () => {
       'https://patch.com/florida/sarasota/news/local-pest-control-company-owner-retires', // a news story → not
       'https://floridist.com/what-are-the-best-pest-control-companies-in-sarasota', // explicit roundup despite "what" → list
       'https://localsite.example/best-pest-control-businesses-in-sarasota', // explicit roundup despite "businesses" → list
+      'https://localsite.example/best-pest-control-services-cost', // a cost article even with best + services → not
+      'https://floridist.com/pest-control-company-identifies-common-pests', // identifies → not
+      'https://floridist.com/pest-control-tip', // tip → not
+      'https://floridist.com/early-sign-of-termites-pest-control', // sign → not
     ];
     const byKey = Object.fromEntries(rankCitedPages([row({ query: Q1, urls })], []).map((p) => [p.key, p.listPage]));
     expect(byKey).toEqual({
@@ -162,6 +166,10 @@ describe('rankCitedPages', () => {
       'patch.com/florida/sarasota/news/local-pest-control-company-owner-retires': false,
       'floridist.com/what-are-the-best-pest-control-companies-in-sarasota': true,
       'localsite.example/best-pest-control-businesses-in-sarasota': true,
+      'localsite.example/best-pest-control-services-cost': false,
+      'floridist.com/pest-control-company-identifies-common-pests': false,
+      'floridist.com/pest-control-tip': false,
+      'floridist.com/early-sign-of-termites-pest-control': false,
     });
   });
 

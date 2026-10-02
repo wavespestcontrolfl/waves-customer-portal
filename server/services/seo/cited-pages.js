@@ -76,12 +76,14 @@ const PROVIDER_LIST_PATH_RE = /\b(compan(y|ies)|exterminators?|pros|contractors|
 // …and never a product roundup, even one naming a service ("best lawn care
 // products", "top pest control sprays").
 const PRODUCT_PATH_RE = /\b(products?|killers?|sprays?|repellents?|traps?|baits?|granules|fertilizers?|herbicides?|insecticides?|pesticides?|seeds?|mowers?|spreaders?|tools|equipment|devices?|gear|kits?|brands?|reviews?)\b/;
-// …and never a how-to, cost or identification article ("pest control cost",
-// "how to choose a pest control company", "signs of termites").
-const ARTICLE_PATH_RE = /\b(costs?|prices?|pricing|how|what|why|when|diy|signs|identif(y|ying|ication|ied)|tips|vs|versus)\b/;
-// …and never a directory route on an editorial host (patch.com/…/business/
-// listing/…): a directory is joined by signing up, not by a pitch.
-const DIRECTORY_PATH_RE = /\b(business|businesses|listing|listings|directory|biz|profile|profiles|claim)\b/;
+// Never an informational article or a directory route, by words that always
+// mean one (every inflection): cost, price, DIY, identification, signs, tips,
+// a "vs" comparison, a listing / directory / profile / claim route.
+const NOT_A_ROUNDUP_RE = /\b(costs?|pric(e|es|ing)|diy|identif\w*|signs?|tips?|vs|versus|listings?|director(y|ies)|biz|profiles?|claim\w*)\b/;
+// Words that only USUALLY mean an article or a directory route ("what-are-the-
+// best-…-companies", "best-…-businesses-in-sarasota"): explicit roundup
+// evidence (best/top + providers in the plural) outranks them.
+const AMBIGUOUS_RE = /\b(how|what|why|when|business|businesses)\b/;
 
 // Sites that publish local provider roundups as their pages (not news): a
 // provider path on them is a roundup without a best/top word in the address
@@ -95,9 +97,10 @@ const PLURAL_PROVIDERS_RE = /\b(companies|businesses|exterminators|services|pros
  * isListPage(page, url) → whether the cited-page pitch fits this page: an
  * editorial page about service providers, read with tracking parameters
  * stripped, never a product roundup. Then, first match wins:
- *   1. best/top/near-me + providers in the plural → a roundup;
- *   2. a cost / how-to / identification article or a directory route → not;
- *   3. a best/top/near-me word, or a ROUNDUP_SITES host → a roundup.
+ *   1. a word that always means an article or directory (NOT_A_ROUNDUP_RE) → not;
+ *   2. best/top/near-me + providers in the plural → a roundup;
+ *   3. a word that usually means an article or directory (AMBIGUOUS_RE) → not;
+ *   4. a best/top/near-me word, or a ROUNDUP_SITES host → a roundup.
  * Anything else — a news story, a company's own service-area page
  * (greenteampest.com/service-areas/parrish) — is not. A /biz/ profile is one
  * company, and a directory is joined by signing up, not by a pitch.
@@ -105,9 +108,10 @@ const PLURAL_PROVIDERS_RE = /\b(companies|businesses|exterminators|services|pros
 function isListPage(page, url) {
   const words = pathWords(url);
   if (page.category !== 'editorial' || !PROVIDER_LIST_PATH_RE.test(words) || PRODUCT_PATH_RE.test(words)) return false;
+  if (NOT_A_ROUNDUP_RE.test(words)) return false;
   const best = hasBestToken(displayUrl(url));
   if (best && PLURAL_PROVIDERS_RE.test(words)) return true;
-  if (ARTICLE_PATH_RE.test(words) || DIRECTORY_PATH_RE.test(words)) return false;
+  if (AMBIGUOUS_RE.test(words)) return false;
   return best || ROUNDUP_SITES.some((d) => page.host === d || page.host.endsWith(`.${d}`));
 }
 function pathWords(urlString) {
