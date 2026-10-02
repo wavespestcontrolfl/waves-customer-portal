@@ -6695,10 +6695,12 @@ function hasUsablePhone(value) {
 // validate the street/unit being booked, not just some address V2 heard).
 // Returns the advisory fields that put the booking on hold; [] = no hold. Pure.
 function advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking } = {}) {
-  if (enforceModeActive || !customerValidation?.ok) return [];
+  if (!customerValidation?.ok) return [];
   const advisory = customerValidation.advisory || [];
   return [
-    ...(advisory.includes('email') && !avPositiveForBooking ? ['email'] : []),
+    // Enforce mode exempts only the email advisory (canAutoRoute owns that address trust);
+    // the first-name waiver's exact-match rule applies in EVERY mode.
+    ...(advisory.includes('email') && !enforceModeActive && !avPositiveForBooking ? ['email'] : []),
     ...(advisory.includes('first_name') && !exactAddressForBooking ? ['first_name'] : []),
   ];
 }

@@ -99,9 +99,12 @@ describe('FIX 1: a first-name-less booking needs the BOOKED address validated (s
     // an email on file does NOT lift the hold for a first-name-less booking
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name', 'last_name']), avPositiveForBooking: true })).toEqual(['first_name']);
   });
-  test('no hold when the verdict validates the booked address, in enforce mode (canAutoRoute owns it), for a named caller, or when the customer is already not ok', () => {
+  test('no hold when the verdict validates the booked address, for a named caller, or when the customer is already not ok', () => {
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name']), avPositiveForBooking: false, exactAddressForBooking: true })).toEqual([]);
-    expect(advisoryBookingAddressHoldFields({ enforceModeActive: true, customerValidation: ok(['first_name']), avPositiveForBooking: false })).toEqual([]);
+    // enforce mode exempts only the EMAIL advisory; the first-name exact-match rule holds in every mode
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: true, customerValidation: ok(['email']), avPositiveForBooking: false })).toEqual([]);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: true, customerValidation: ok(['email', 'first_name']), avPositiveForBooking: false, exactAddressForBooking: false })).toEqual(['first_name']);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: true, customerValidation: ok(['first_name']), exactAddressForBooking: true })).toEqual([]);
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['last_name']), avPositiveForBooking: false })).toEqual([]);
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: { ok: false, missing: ['phone'], advisory: ['first_name'] }, avPositiveForBooking: false })).toEqual([]);
     expect(advisoryBookingAddressHoldFields({})).toEqual([]);
