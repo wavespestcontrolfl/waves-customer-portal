@@ -96,6 +96,15 @@ describe('classifyListing', () => {
     expect(Date.now() - started).toBeLessThan(500);
   });
 
+  test('many Waves nodes sharing one long @id address parse it once', () => {
+    const addr = { '@id': '_:a', streetAddress: `${'9'.repeat(5)} ${'Palm '.repeat(20000)}Terrace`, addressLocality: 'Tampa' };
+    const nodes = [addr];
+    for (let i = 0; i < 3000; i += 1) nodes.push({ '@type': 'LocalBusiness', name: 'Waves Pest Control', address: { '@id': '_:a' } });
+    const started = Date.now();
+    classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(nodes)}`), expected);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   test('many blocks repeating one @id merge in linear time', () => {
     const blocks = [];
     for (let i = 0; i < 3000; i += 1) blocks.push({ '@id': '_:a', [`p${i}`]: 'x' });

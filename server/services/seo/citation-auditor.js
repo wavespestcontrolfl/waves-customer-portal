@@ -229,13 +229,13 @@ function jsonLdNodes(html) {
       const node = stack.pop();
       if (!node || typeof node !== 'object') continue;
       if (Array.isArray(node)) { for (let i = node.length - 1; i >= 0; i -= 1) stack.push(node[i]); continue; }
-      // A node split across blocks under one @id is one node: merge its properties (the first
-    // value of a property stands), so no block's stated field is dropped.
-    if (typeof node['@id'] === 'string' && !isLdRef(node)) {
-      const prev = byId.get(node['@id']);
-      if (!prev) byId.set(node['@id'], node);
-      else for (const k of Object.keys(node)) if (!(k in prev)) prev[k] = node[k]; // in place: each property copied once
-    }
+      // A node split across blocks under one @id is one node: its properties merge into the first
+      // (in place, each copied once; the first value of a property stands), so no block's stated
+      // field is dropped.
+      const id = typeof node['@id'] === 'string' && !isLdRef(node) ? node['@id'] : null;
+      const first = id === null ? node : byId.get(id) || node;
+      if (id !== null) byId.set(id, first);
+      Object.keys(node).forEach((k) => { if (!(k in first)) first[k] = node[k]; });
       if (node.name || node.telephone || node.address) out.push(node);
       if (node.mainEntity) stack.push(node.mainEntity);
       if (node['@graph']) stack.push(node['@graph']);
@@ -261,9 +261,15 @@ const isWavesNode = (n) => alnum(n.name).includes(alnum(BRAND_NAME))
 // address-bearing one is judged (a stated mismatch). Name, phone and address come from that one node.
 function wavesEntity(html, candidates = []) {
   const mine = jsonLdNodes(html).filter(isWavesNode);
+  // Many nodes can share one address (an @id reference): parse each address value once.
+  const parsedAddress = new Map();
+  const parseOnce = (address) => {
+    if (!parsedAddress.has(address)) parsedAddress.set(address, (addressStrings(address, candidates) || {}).parsed || null);
+    return parsedAddress.get(address);
+  };
   const score = (node) => {
     const phones = [].concat(node.telephone ?? []).map(phoneKey);
-    const addr = node.address ? (addressStrings(node.address, candidates) || {}).parsed || null : null;
+    const addr = node.address ? parseOnce(node.address) : null;
     const best = candidates.reduce((max, c) => Math.max(max,
       (phones.includes(c.phoneKey) ? 100 : 0) + (addr && addr.street === c.street ? 10 : 0) + (addr && addr.city && c.cities.includes(addr.city) ? 1 : 0)), 0);
     return best + (node.address ? 0.5 : 0);
