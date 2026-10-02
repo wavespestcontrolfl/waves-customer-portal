@@ -630,7 +630,18 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     vars: payload,
     templateKey: TEMPLATE_KEY,
     categories: ['billing', 'rate_review_notice'],
-    expectedContentHash: templateHash,
+    sendOptions: {
+      expectedContentHash: templateHash,
+      // The email leg's provider call runs under the customer-comms fence,
+      // with notice ownership re-read inside it: a merge undo can never
+      // repoint a notice between that check and the dispatch.
+      withProviderHandoff: (dispatch) => dbh.transaction(async (trx) => {
+        await lockCustomerComms(trx, entry.customerId);
+        if (!(await stillOwned(trx, claimed, entry.customerId))) return { ok: false, reason: 'notice_repointed' };
+        await dispatch();
+        return { ok: true };
+      }),
+    },
   });
   const sms = !(await stillOwned(dbh, claimed, entry.customerId)) ? { sent: false, attempted: false } : await PriceChangeNotices.sendNoticeSms({
     customer,
@@ -853,11 +864,20 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
 async function declinedPrepayTermIds(dbh, rows) {
   const termIds = rows.filter((n) => n.billing_lane === 'annual_prepay').map((n) => parseJson(n.metadata, {}).term_id).filter(Boolean);
   if (!termIds.length) return new Set();
-  const terms = await dbh('annual_prepay_terms').whereIn('id', termIds).select('id', 'status', 'renewal_decision');
+  const terms = await dbh('annual_prepay_terms').whereIn('id', termIds).select('id', 'customer_id', 'status', 'renewal_decision', 'term_end', 'coverage_service_type');
   // Any recorded renewal decision (cancel, switch_plan, …) means the term
   // does not renew at the noticed amount — the apply holds on it too
   // (term_not_live).
-  return new Set(terms.filter((t) => (t.renewal_decision != null && String(t.renewal_decision) !== '') || String(t.status) === 'cancelled').map((t) => String(t.id)));
+  const { successorTermExists } = require('./rate-review-apply')._private;
+  const out = new Set();
+  for (const t of terms) {
+    // A successor term already on the books (a renewal recorded — at the
+    // noticed amount or, through the staff override, another) is the
+    // renewal: the notice is history, not an upcoming rate.
+    if ((t.renewal_decision != null && String(t.renewal_decision) !== '') || String(t.status) === 'cancelled'
+      || await successorTermExists(dbh, t)) out.add(String(t.id));
+  }
+  return out;
 }
 
 module.exports = {

@@ -342,7 +342,7 @@ describe('sendBatch', () => {
   test('the email leg is pinned to the reviewed template content', async () => {
     mockDb.reset(book());
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-    expect(emailLeg.mock.calls[0][0].expectedContentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(emailLeg.mock.calls[0][0].sendOptions.expectedContentHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test('a prepaid renewal the customer declined is held back, never sent', async () => {
@@ -486,6 +486,36 @@ describe('customer surfaces', () => {
     // a change the nightly apply is holding is not a guaranteed rate
     notices()[0].applied_at = null;
     notices()[0].apply_hold_reason = 'rate_moved_since_notice';
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+  });
+
+  test('send: the email provider call runs under the comms fence and refuses a notice repointed before dispatch', async () => {
+    mockDb.reset(book());
+    let handoff = null;
+    emailLeg.mockImplementation(async (args) => { handoff = args.sendOptions.withProviderHandoff; return { sent: true, attempted: true }; });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    const dispatch = jest.fn(async () => {});
+    expect(await handoff(dispatch)).toEqual({ ok: true });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
+    const late = jest.fn(async () => {});
+    expect(await handoff(late)).toEqual({ ok: false, reason: 'notice_repointed' });
+    expect(late).not.toHaveBeenCalled();
+  });
+
+  test('portal: a prepaid change whose renewal is already recorded (a successor term) is not upcoming', async () => {
+    const prepay = draft(1, {
+      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', status: 'sent', sent_at: NOW, applied_at: NOW,
+      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1' },
+    });
+    const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
+    b.annual_prepay_terms = [
+      { id: 'term-1', customer_id: CUSTOMER(1), status: 'active', renewal_decision: null, term_end: '2027-05-14', coverage_service_type: 'Quarterly Pest Control' },
+    ];
+    mockDb.reset(b);
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
+    mockDb.store.annual_prepay_terms.push({ id: 'term-2', customer_id: CUSTOMER(1), status: 'pending', renewed_from_term_id: 'term-1', term_start: '2027-05-15', coverage_service_type: 'Quarterly Pest Control' });
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
   });
 
