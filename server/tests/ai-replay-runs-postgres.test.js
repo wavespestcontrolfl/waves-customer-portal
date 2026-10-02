@@ -48,8 +48,14 @@ test('run status: a reproduction fails, an unjudged case is inconclusive, a smal
   expect(replay.runStatus({ split: 'dev', fixed: 1, reproduces: 0, inconclusive: 0 })).toBe('passed');
 });
 
-test('export refuses a directory inside the repository', () => {
+test('export refuses a directory inside the repository, however it is spelled', () => {
   expect(() => cli.assertOutsideRepo(path.join(__dirname, 'replay-out'))).toThrow(/outside the repository/);
+  expect(() => cli.assertOutsideRepo(path.join(__dirname, '..replay'))).toThrow(/outside the repository/);
+  expect(() => cli.assertOutsideRepo(path.join(__dirname, '..', '..'))).toThrow(/outside the repository/);
+  // A symlink outside the repo that points into it.
+  const link = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'replay-link-')), 'into-repo');
+  fs.symlinkSync(__dirname, link);
+  expect(() => cli.assertOutsideRepo(path.join(link, 'out'))).toThrow(/outside the repository/);
   expect(cli.assertOutsideRepo(path.join(os.tmpdir(), 'replay-out'))).toBe(path.join(os.tmpdir(), 'replay-out'));
   expect(() => cli.parseArgs(['record', '--file=x', '--execute=false'])).toThrow(/takes no value/);
 });
@@ -194,6 +200,14 @@ test('export refuses a directory inside the repository', () => {
     const done = await cli.run({ dbi: database, argv: ['record', `--file=${file}`, '--execute'], log: () => {} });
     expect(done.run).toMatchObject({ status: 'passed', case_count: 10 });
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('an empty split exports nothing and writes no files', async () => {
+    await database('ai_fix_proposals').where({ id: proposal.id }).update({ holdout_incident_keys: JSON.stringify([]) });
+    const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'replay-')), 'out');
+    await expect(cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=holdout', `--out=${dir}`], log: () => {}, drafter: {} }))
+      .rejects.toMatchObject({ exitCode: 1 });
+    expect(fs.existsSync(dir)).toBe(false);
   });
 
   test('the brief reads incidents, proposals, runs and recurrence without message text', async () => {

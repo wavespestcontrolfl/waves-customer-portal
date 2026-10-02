@@ -55,7 +55,7 @@ async function exportCases({ dbi, proposalId, split }) {
   if (!proposal) throw new TransitionError('not_found', `no proposal ${proposalId}`);
   if (proposal.area !== 'sms') throw new TransitionError('unsupported_area', `export supports sms only, not ${proposal.area}`);
   const keys = splitKeys(proposal, split);
-  if (!keys.length) return { proposal, cases: [] };
+  if (!keys.length) return { proposal, cases: [], missing: [] };
   const rows = await dbi({ i: 'ai_incidents' })
     .join({ md: 'message_drafts' }, dbi.raw('md.id::text'), 'i.incident_key')
     .leftJoin({ j: 'shadow_draft_judgments' }, function judgmentJoin() {

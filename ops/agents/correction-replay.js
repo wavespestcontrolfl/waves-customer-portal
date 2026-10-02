@@ -74,11 +74,27 @@ function parseArgs(argv) {
   return out;
 }
 
-// Customer text never lands inside the repository.
+// The real path of `p`: its deepest existing ancestor resolved through any
+// symlink, plus the parts that do not exist yet.
+function canonical(p) {
+  let head = path.resolve(p);
+  const tail = [];
+  while (!fs.existsSync(head)) {
+    tail.unshift(path.basename(head));
+    const parent = path.dirname(head);
+    if (parent === head) break;
+    head = parent;
+  }
+  return path.join(fs.realpathSync(head), ...tail);
+}
+
+// Customer text never lands inside the repository: compared on real paths,
+// by whole path components (a folder named "..replay" is still inside).
 function assertOutsideRepo(dir) {
   const resolved = path.resolve(dir);
-  const rel = path.relative(REPO_ROOT, resolved);
-  if (!rel.startsWith('..') && !path.isAbsolute(rel)) throw usageError('--out must be outside the repository (use the session scratchpad)');
+  const rel = path.relative(canonical(REPO_ROOT), canonical(resolved));
+  const inside = rel === '' || (!path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..');
+  if (inside) throw usageError('--out must be outside the repository (use the session scratchpad)');
   return resolved;
 }
 
@@ -87,6 +103,7 @@ async function runExport({ dbi, args, log, drafter }) {
   const dir = assertOutsideRepo(args.out);
   const id = await resolveId(dbi, args.proposal);
   const { proposal, cases, missing } = await exportCases({ dbi, proposalId: id, split: args.split });
+  if (!cases.length) throw usageError(`the proposal has no ${args.split} cases to export${missing.length ? ` (${missing.length} without a stored draft)` : ''}`, 1);
   const d = drafter || require(path.join(REPO_ROOT, 'server', 'services', 'sms-shadow-drafter'));
   fs.mkdirSync(dir, { recursive: true });
   const lines = cases.map((c) => JSON.stringify({
