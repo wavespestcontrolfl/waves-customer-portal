@@ -216,6 +216,8 @@ async function customerScheduleSummary(customerId, { now = new Date(), countTime
   const stepIndex = Number(schedule.step_index);
   return {
     id: schedule.id,
+    // The panel's pause / resume / release buttons post to the customer's own schedule routes.
+    customerId: schedule.customer_id,
     status: schedule.status,
     stepIndex,
     stepLabel: Schedule.STEPS[stepIndex]?.label || null,

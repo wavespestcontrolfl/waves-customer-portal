@@ -706,7 +706,7 @@ describe('send-now and staff controls', () => {
     openFor.mockResolvedValueOnce({ ...openRow, step_index: 4, next_touch_at: next });
     resolve.mockResolvedValueOnce(setOf(['active', 'active', 'active']));
     expect(await Wiring.customerScheduleSummary(CUST)).toEqual({
-      id: 'sched-1', status: 'active', stepIndex: 4, stepLabel: Schedule.STEPS[4].label, invoiceCount: 3, nextTouchAt: next,
+      id: 'sched-1', customerId: CUST, status: 'active', stepIndex: 4, stepLabel: Schedule.STEPS[4].label, invoiceCount: 3, nextTouchAt: next,
     });
     expect(Schedule.STEPS[4].label).toBe('60-day reminder');
     expect(resolve).toHaveBeenCalledWith(CUST, { now: expect.any(Date) });
