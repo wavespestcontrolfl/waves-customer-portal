@@ -45,11 +45,18 @@
 //
 // Output: a summary table by stop point (rows, commercial rows) on stdout and
 // a per-row TSV at --out (default under os.tmpdir()). Rows print the
-// normalized ADDRESS only — never names, phones or emails (the query does not
-// select them).
+// normalized ADDRESS and its stored lat/lng only — never names, phones or
+// emails (the query does not select them). The TSV's address, lat, lng and
+// county_used columns are what a --cases entry needs.
 //
-// Usage (repo root):
-//   railway run --service Postgres node server/scripts/property-lookup-replay.js \
+// Usage (repo root), NESTED like ops/agents/agents-report.js: the outer run
+// supplies DATABASE_PUBLIC_URL (the public proxy; the portal service only
+// has the internal URL), the inner run the portal's GATE_* variables. The
+// parcel guards read GATE_CONDO_UNIT_FOLIO at call time, so under the
+// Postgres service alone an ON gate would replay as OFF; the script prints
+// each guard gate's on/off at startup so that is visible.
+//   railway run --service Postgres -- railway run --service waves-customer-portal \
+//     node server/scripts/property-lookup-replay.js \
 //     [--since=90d] [--status=no_parcel|all-failed|sample-clean=N] \
 //     [--address-like='%FL 70%'] [--limit=500] [--out=/tmp/replay.tsv]
 //   node server/scripts/property-lookup-replay.js --cases=cases.json   # no DB
@@ -78,7 +85,58 @@ const MAX_CONCURRENCY = 3;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_DELAY_MS = 250;
 
+// Gates the replayed parcel guards read at call time (feature-gates.js
+// condoUnitFolioLive: on only when exactly 'true'). A new gate a guard starts
+// reading belongs here so a run without it is visible.
+const GUARD_GATES = ['GATE_CONDO_UNIT_FOLIO'];
+
 class UsageError extends Error {}
+
+function formatGuardGates(env) {
+  return GUARD_GATES.map((name) => `${name}=${env[name] === 'true' ? 'on' : 'off'}`).join(' ');
+}
+
+const POSITIVE_INT = /^[1-9]\d*$/;
+
+const textFlag = (flag, field, what) => (value) => {
+  if (!value) throw new UsageError(`${flag} needs ${what}`);
+  return { [field]: value };
+};
+
+const intFlag = (flag, field, pattern, what, clamp = (n) => n) => (value) => {
+  if (!pattern.test(value)) throw new UsageError(`${flag} needs ${what}`);
+  return { [field]: clamp(Number(value)) };
+};
+
+// flag -> parser returning the args fields it sets (throws UsageError).
+const FLAG_PARSERS = new Map([
+  ['since', (value) => {
+    const m = /^(\d+)([dh])$/.exec(value);
+    if (!m || Number(m[1]) < 1) throw new UsageError('--since needs Nd or Nh, e.g. --since=90d');
+    const n = Number(m[1]);
+    return m[2] === 'd' ? { sinceDays: n, sinceHours: null } : { sinceHours: n, sinceDays: null };
+  }],
+  ['status', (value) => {
+    const sample = /^sample-clean=(\d+)$/.exec(value);
+    if (sample) {
+      if (Number(sample[1]) < 1) throw new UsageError('--status=sample-clean=N needs N >= 1');
+      return { status: 'sample-clean', sampleSize: Number(sample[1]) };
+    }
+    if (value === 'no_parcel' || value === 'all-failed') return { status: value };
+    throw new UsageError(`--status must be one of no_parcel, all-failed, sample-clean=N (got ${JSON.stringify(value)})`);
+  }],
+  ['address-like', textFlag('--address-like', 'addressLike', 'a pattern')],
+  ['limit', intFlag('--limit', 'limit', POSITIVE_INT, 'a positive integer')],
+  ['cases', textFlag('--cases', 'cases', 'a json file path')],
+  ['out', textFlag('--out', 'out', 'a path')],
+  ['precision', (value) => {
+    if (value !== 'rooftop' && value !== 'interpolated') throw new UsageError('--precision must be rooftop or interpolated');
+    return { precision: value };
+  }],
+  // Manatee's WAF rejects bursts as readily as OR/AND clauses: hard cap.
+  ['concurrency', intFlag('--concurrency', 'concurrency', POSITIVE_INT, 'a positive integer', (n) => Math.min(n, MAX_CONCURRENCY))],
+  ['delay-ms', intFlag('--delay-ms', 'delayMs', /^\d+$/, 'a non-negative integer')],
+]);
 
 function parseArgs(argv) {
   const args = {
@@ -96,61 +154,9 @@ function parseArgs(argv) {
   };
   for (const raw of argv) {
     if (!raw.startsWith('--')) throw new UsageError(`unexpected argument ${JSON.stringify(raw)}`);
-    const eq = raw.indexOf('=');
-    const key = eq === -1 ? raw.slice(2) : raw.slice(2, eq);
-    const value = eq === -1 ? '' : raw.slice(eq + 1);
-    switch (key) {
-      case 'since': {
-        const m = /^(\d+)([dh])$/.exec(value);
-        if (!m || Number(m[1]) < 1) throw new UsageError('--since needs Nd or Nh, e.g. --since=90d');
-        if (m[2] === 'd') { args.sinceDays = Number(m[1]); args.sinceHours = null; } else { args.sinceHours = Number(m[1]); args.sinceDays = null; }
-        break;
-      }
-      case 'status': {
-        const sample = /^sample-clean=(\d+)$/.exec(value);
-        if (sample) {
-          if (Number(sample[1]) < 1) throw new UsageError('--status=sample-clean=N needs N >= 1');
-          args.status = 'sample-clean';
-          args.sampleSize = Number(sample[1]);
-        } else if (value === 'no_parcel' || value === 'all-failed') {
-          args.status = value;
-        } else {
-          throw new UsageError(`--status must be one of no_parcel, all-failed, sample-clean=N (got ${JSON.stringify(value)})`);
-        }
-        break;
-      }
-      case 'address-like':
-        if (!value) throw new UsageError('--address-like needs a pattern');
-        args.addressLike = value;
-        break;
-      case 'limit':
-        if (!/^[1-9]\d*$/.test(value)) throw new UsageError('--limit needs a positive integer');
-        args.limit = Number(value);
-        break;
-      case 'cases':
-        if (!value) throw new UsageError('--cases needs a json file path');
-        args.cases = value;
-        break;
-      case 'out':
-        if (!value) throw new UsageError('--out needs a path');
-        args.out = value;
-        break;
-      case 'precision':
-        if (value !== 'rooftop' && value !== 'interpolated') throw new UsageError('--precision must be rooftop or interpolated');
-        args.precision = value;
-        break;
-      case 'concurrency':
-        if (!/^[1-9]\d*$/.test(value)) throw new UsageError('--concurrency needs a positive integer');
-        // Manatee's WAF rejects bursts as readily as OR/AND clauses: hard cap.
-        args.concurrency = Math.min(Number(value), MAX_CONCURRENCY);
-        break;
-      case 'delay-ms':
-        if (!/^\d+$/.test(value)) throw new UsageError('--delay-ms needs a non-negative integer');
-        args.delayMs = Number(value);
-        break;
-      default:
-        throw new UsageError(`unknown flag --${key}`);
-    }
+    const [key, ...rest] = raw.slice(2).split('=');
+    if (!FLAG_PARSERS.has(key)) throw new UsageError(`unknown flag --${key}`);
+    Object.assign(args, FLAG_PARSERS.get(key)(rest.join('=')));
   }
   return args;
 }
@@ -216,7 +222,7 @@ LIMIT ${bind(limit)}`;
 async function fetchRowsFromDb(args, { Client = require('pg').Client, env = process.env } = {}) {
   const url = env.DATABASE_PUBLIC_URL;
   if (!url || url === 'undefined' || url === 'null') {
-    throw new UsageError('DATABASE_PUBLIC_URL not set — run via: railway run --service Postgres node server/scripts/property-lookup-replay.js ... (or use --cases)');
+    throw new UsageError('DATABASE_PUBLIC_URL not set — run via: railway run --service Postgres -- railway run --service waves-customer-portal node server/scripts/property-lookup-replay.js ... (or use --cases)');
   }
   const client = new Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
   await client.connect();
@@ -295,109 +301,116 @@ function summarizeAudit(audit, errors) {
   };
 }
 
+function errText(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// The row's own identity fields, carried on every result (the replay ones and
+// the "this row threw" fallback). lat/lng ride along so a DB row can be turned
+// into a --cases entry from the TSV.
+function rowIdentity(row) {
+  return {
+    address: String(row.normalized_address || '').trim(),
+    lat: numOrNull(row.lat),
+    lng: numOrNull(row.lng),
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    storedStatus: row.last_attempt_status,
+    storedParcelId: row.parcel_id,
+    storedCounty: row.county,
+    caseName: row.case_name,
+    expect: row.expect,
+    snapshot: row.snapshot,
+  };
+}
+
+// Step 1: street / number on the roll.
+async function auditStep(address, geo, deps) {
+  const diag = { errors: [] };
+  let audit = null;
+  try {
+    audit = await deps.auditAddressHouseNumber(address, geo, { typedAddress: address, diag });
+  } catch (err) {
+    diag.errors.push({ county: null, aborted: false, error: errText(err) });
+  }
+  return summarizeAudit(audit, diag.errors);
+}
+
+// Step 2: the parcel at the stored point, then the live guards.
+async function pointStep(address, geo, countyHint, deps) {
+  if (geo.lat === null || geo.lng === null) return { status: 'skipped', reason: 'no_coordinates', errors: [] };
+  // The county module answers situs searches only for a county with a point
+  // layer (none for Hillsborough): no point query is made, so it is
+  // inconclusive — never a "no parcel at the point" miss.
+  if (countyHint && !deps.pointLookupCounties.has(deps.normalizeCountyName(countyHint))) {
+    return { status: 'skipped', reason: 'point_lookup_unsupported_county', errors: [] };
+  }
+  const diag = { errors: [] };
+  let parcel = null;
+  try {
+    parcel = await deps.lookupCountyParcelByPoint(geo.lat, geo.lng, { county: countyHint ?? undefined, diag });
+  } catch (err) {
+    diag.errors.push({ county: countyHint, aborted: false, error: errText(err) });
+  }
+  if (!parcel) return { status: diag.errors.length ? 'error' : 'none', errors: diag.errors };
+
+  const guarded = deps.applyGisParcelGuards(parcel, {
+    searchAddress: address,
+    address,
+    gisPrecision: deps.parcelGisPrecision(geo),
+    diag: null,
+  });
+  // A kept parcel may be a unit parcel resolved out of an aggregate; a dropped
+  // one is reported as the parcel the point found.
+  const shown = guarded.parcel || parcel;
+  return {
+    status: guarded.parcel ? 'kept' : 'dropped',
+    ...(guarded.parcel ? {} : { dropReason: guarded.dropReason || 'unknown' }),
+    parcelId: shown.parcelId || null,
+    situs: shown.situsAddress || null,
+    county: shown.county || null,
+    errors: [],
+  };
+}
+
 // Run the three free steps for ONE row. `deps` carries the lookup functions
 // (injected in tests; the real modules in main) so nothing here touches the
 // network on its own.
 async function replayRow(row, deps, opts = {}) {
-  const address = String(row.normalized_address || '').trim();
+  const identity = rowIdentity(row);
   const geo = buildGeoContext(row, opts);
-  const out = {
-    address,
-    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
-    storedStatus: row.last_attempt_status || null,
-    storedParcelId: row.parcel_id || null,
-    storedCounty: row.county || null,
-    caseName: row.case_name || null,
-    expect: row.expect || null,
-    snapshot: row.snapshot || {},
-  };
-
-  // Step 1: street / number on the roll.
-  const auditDiag = { errors: [] };
-  let audit = null;
-  try {
-    audit = await deps.auditAddressHouseNumber(address, geo, { typedAddress: address, diag: auditDiag });
-  } catch (err) {
-    auditDiag.errors.push({ county: null, aborted: false, error: err?.message || String(err) });
-  }
-  out.audit = summarizeAudit(audit, auditDiag.errors);
-
-  // Step 2: parcel at the stored point, then the live guards.
+  const audit = await auditStep(identity.address, geo, deps);
   // The audit's county is evidence only when the street was FOUND there: a
   // negative audit reports counties[0] as a placeholder, and hinting the
   // point query with it would skip the county the point is really in
   // (a Sarasota-side Longboat Key row with a typo would read Manatee).
-  const countyHint = row.county || (audit && audit.streetExists === true ? audit.county : null) || null;
-  out.countyUsed = countyHint;
-  if (geo.lat === null || geo.lng === null) {
-    out.point = { status: 'skipped', reason: 'no_coordinates', errors: [] };
-  } else if (countyHint && deps.pointLookupCounties
-    && !deps.pointLookupCounties.has((deps.normalizeCountyName || ((c) => c))(countyHint))) {
-    // The county module answers situs searches only for this county (no
-    // point layer): no point query is made, so it is inconclusive — never a
-    // "no parcel at the point" miss.
-    out.point = { status: 'skipped', reason: 'point_lookup_unsupported_county', errors: [] };
-  } else {
-    const pointDiag = { errors: [] };
-    let parcel = null;
-    try {
-      parcel = await deps.lookupCountyParcelByPoint(geo.lat, geo.lng, {
-        county: countyHint || undefined,
-        diag: pointDiag,
-      });
-    } catch (err) {
-      pointDiag.errors.push({ county: countyHint, aborted: false, error: err?.message || String(err) });
-    }
-    if (!parcel) {
-      out.point = { status: pointDiag.errors.length ? 'error' : 'none', errors: pointDiag.errors };
-    } else {
-      const gisPrecision = deps.parcelGisPrecision(geo);
-      const guarded = deps.applyGisParcelGuards(parcel, {
-        searchAddress: address,
-        address,
-        gisPrecision,
-        diag: null,
-      });
-      out.point = guarded.parcel
-        ? { status: 'kept', parcelId: guarded.parcel.parcelId || null, situs: guarded.parcel.situsAddress || null, county: guarded.parcel.county || null, errors: [] }
-        : {
-          status: 'dropped',
-          dropReason: guarded.dropReason || 'unknown',
-          parcelId: parcel.parcelId || null,
-          situs: parcel.situsAddress || null,
-          county: parcel.county || null,
-          errors: [],
-        };
-    }
-  }
-  return out;
+  const countyUsed = row.county || (audit.streetExists ? audit.county : null);
+  const point = await pointStep(identity.address, geo, countyUsed, deps);
+  return { ...identity, countyUsed, audit, point };
 }
 
-// Pure: replay result -> stop point. See the header for the order and why.
+// Pure: replay result -> stop point. The FIRST rule that matches wins, so the
+// order is the contract (see the header for why each stage ranks where it does).
+const auditRan = (r) => r.audit.status === 'ran';
+const pointDropped = (r) => r.point.status === 'dropped';
+// A point parcel that a guard dropped is a verdict against that parcel; the
+// roll having the number elsewhere does not make the match.
+const parcelFound = (r) => r.point.status === 'kept' || (auditRan(r) && r.audit.hasExactMatch && !pointDropped(r));
+
+const STOP_RULES = [
+  { stop: 'commercial_no_suite_path', when: (r) => parcelFound(r) && r.snapshot.isCommercial === true && r.snapshot.unitScopedLookup !== true },
+  { stop: 'matched_now', when: parcelFound },
+  { stop: 'gis_error', when: (r) => (r.point.status === 'error' || r.audit.status === 'error') && !pointDropped(r) },
+  { stop: 'address_text_miss', when: (r) => auditRan(r) && !r.audit.streetExists },
+  { stop: 'number_not_on_roll', when: (r) => auditRan(r) && r.audit.streetExists && !r.audit.hasExactMatch },
+  { stop: 'point_parcel_dropped', detail: (r) => r.point.dropReason, when: pointDropped },
+  { stop: 'point_lookup_unsupported', when: (r) => r.point.reason === 'point_lookup_unsupported_county' },
+  { stop: 'county_unknown', when: (r) => !r.countyUsed },
+  { stop: 'no_parcel_at_point', when: () => true },
+];
+
 function classifyReplay(r) {
-  const snap = r.snapshot || {};
-  const isCommercial = snap.isCommercial === true;
-  const unitScoped = snap.unitScopedLookup === true;
-  const audit = r.audit || { status: 'no_signal', errors: [] };
-  const point = r.point || { status: 'skipped', errors: [] };
-
-  const pointKept = point.status === 'kept';
-  const numberOnRoll = audit.status === 'ran' && audit.hasExactMatch === true;
-  // A point parcel that a guard dropped is a verdict against that parcel; the
-  // roll having the number elsewhere does not make the match.
-  const parcelFound = pointKept || (numberOnRoll && point.status !== 'dropped');
-
-  if (parcelFound) {
-    return isCommercial && !unitScoped ? 'commercial_no_suite_path' : 'matched_now';
-  }
-  const hadError = point.status === 'error' || audit.status === 'error';
-  if (hadError && point.status !== 'dropped') return 'gis_error';
-  if (audit.status === 'ran' && audit.streetExists === false) return 'address_text_miss';
-  if (audit.status === 'ran' && audit.streetExists === true && audit.hasExactMatch === false) return 'number_not_on_roll';
-  if (point.status === 'dropped') return `point_parcel_dropped:${point.dropReason || 'unknown'}`;
-  if (point.status === 'skipped' && point.reason === 'point_lookup_unsupported_county') return 'point_lookup_unsupported';
-  if (!r.countyUsed) return 'county_unknown';
-  return 'no_parcel_at_point';
+  const rule = STOP_RULES.find((candidate) => candidate.when(r));
+  return rule.detail ? `${rule.stop}:${rule.detail(r)}` : rule.stop;
 }
 
 function normalizeParcelId(id) {
@@ -444,14 +457,9 @@ async function runReplay(rows, deps, opts = {}) {
       } catch (err) {
         // Whatever goes wrong inside one row must not sink the batch.
         replayed = {
-          address: String(rows[i].normalized_address || ''),
-          storedParcelId: rows[i].parcel_id || null,
-          storedStatus: rows[i].last_attempt_status || null,
-          snapshot: rows[i].snapshot || {},
-          caseName: rows[i].case_name || null,
-          expect: rows[i].expect || null,
-          audit: { status: 'error', errors: [{ error: err?.message || String(err) }] },
-          point: { status: 'error', errors: [{ error: err?.message || String(err) }] },
+          ...rowIdentity(rows[i]),
+          audit: { status: 'error', errors: [{ error: errText(err) }] },
+          point: { status: 'error', errors: [{ error: errText(err) }] },
         };
       }
       results[i] = finalizeResult(replayed);
@@ -507,7 +515,7 @@ function formatSummary(summary) {
 }
 
 const TSV_COLUMNS = [
-  'address', 'stop', 'parcel_recovered', 'regression', 'stored_status', 'stored_parcel_id', 'county_used',
+  'address', 'lat', 'lng', 'stop', 'parcel_recovered', 'regression', 'stored_status', 'stored_parcel_id', 'county_used',
   'audit_status', 'street_exists', 'exact_number', 'nearest_numbers', 'audit_county',
   'point_status', 'point_drop_reason', 'point_parcel_id', 'point_situs',
   'is_commercial', 'commercial_source', 'commercial_subtype', 'unit_scoped', 'category', 'field_verify_flags',
@@ -531,6 +539,8 @@ function resultToTsvRow(r) {
     .join(' | ');
   const cells = {
     address: r.address,
+    lat: r.lat,
+    lng: r.lng,
     stop: r.stop,
     parcel_recovered: r.parcelRecovered,
     regression: r.regression,
@@ -601,6 +611,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   }
   rows = rows.map((row) => ({ ...row, snapshot: row.snapshot || {} }));
   console.log(`[property-lookup-replay] ${rows.length} row(s) from ${args.cases ? `cases file` : `property_lookups (${args.status})`}`);
+  console.log(`[property-lookup-replay] parcel-guard gates in this environment: ${formatGuardGates(env)} (off = unset here; run nested under the portal service to replay production's gates)`);
 
   // Required here, not at the top: the pure helpers above load without the
   // service layer (the unit tests rely on that), and a checkout's own lookup
@@ -651,6 +662,8 @@ module.exports = {
   fetchRowsFromDb,
   loadCases,
   buildGeoContext,
+  formatGuardGates,
+  main,
   replayRow,
   classifyReplay,
   finalizeResult,

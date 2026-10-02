@@ -1,6 +1,6 @@
 [
   {
-    "_comment": "Template only. Addresses and coordinates are synthetic placeholders: replace with a real address + lat/lng pulled from property_lookups (a DB run with --address-like prints them) before relying on a result. Add an optional \"expect\" (a stop point, or its prefix before ':') to make a case assert; any mismatch exits 1.",
+    "_comment": "Template only. Addresses and coordinates are synthetic placeholders. To replay a real row, take its address, lat, lng and county_used from the per-row TSV of a DB run (columns address, lat, lng, county_used) into a copy kept OUTSIDE the repo, and run that copy with --cases. Add an optional \"expect\" (a stop point, or its prefix before ':') to make a case assert; any mismatch exits 1.",
     "name": "plaza storefront, no suite number",
     "address": "100 EXAMPLE RD, BRADENTON, FL 34202",
     "lat": 27.4,

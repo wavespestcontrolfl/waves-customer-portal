@@ -19,6 +19,11 @@ const { _private } = require('../services/property-lookup/ai-property-lookup');
 const { lookupCountyParcelByPoint, queryStreetSitusAddresses } = require('../services/property-lookup/county-parcel-gis');
 
 const { applyGisParcelGuards, parcelGisPrecision } = _private;
+const { normalizeCountyName } = require('../services/property-lookup/county-parcel-gis');
+
+// What main() passes: the counties that have a point layer, and the same
+// county-name canonicalizer the live lookup uses.
+const countyDeps = { pointLookupCounties: new Set(['Manatee', 'Sarasota', 'Charlotte']), normalizeCountyName };
 
 describe('parseArgs', () => {
   test('defaults', () => {
@@ -192,7 +197,7 @@ describe('unsupported point-lookup county', () => {
       lookupCountyParcelByPoint: jest.fn(),
       parcelGisPrecision: () => 'rooftop',
       applyGisParcelGuards: jest.fn(),
-      pointLookupCounties: new Set(['Manatee', 'Sarasota', 'Charlotte']),
+      ...countyDeps,
     };
     const row = { normalized_address: '100 EXAMPLE ST, TAMPA, FL 33610', lat: '27.9', lng: '-82.4', county: 'Hillsborough', parcel_id: null, last_attempt_status: 'no_parcel', snapshot: {} };
     const r = replay.finalizeResult(await replay.replayRow(row, deps, {}));
@@ -202,15 +207,13 @@ describe('unsupported point-lookup county', () => {
   });
 
   test('county name variants of a supported county still run the point query', async () => {
-    const { normalizeCountyName } = require('../services/property-lookup/county-parcel-gis');
     for (const county of ['MANATEE', 'Manatee County', 'manatee']) {
       const deps = {
         auditAddressHouseNumber: jest.fn().mockResolvedValue(null),
         lookupCountyParcelByPoint: jest.fn().mockResolvedValue(null),
         parcelGisPrecision: () => 'rooftop',
         applyGisParcelGuards: jest.fn(),
-        pointLookupCounties: new Set(['Manatee', 'Sarasota', 'Charlotte']),
-        normalizeCountyName,
+        ...countyDeps,
       };
       const row = { normalized_address: '100 EXAMPLE ST, BRADENTON, FL 34203', lat: '27.4', lng: '-82.5', county, parcel_id: null, last_attempt_status: 'no_parcel', snapshot: {} };
       await replay.replayRow(row, deps, {});
@@ -248,6 +251,7 @@ describe('replayRow', () => {
     lookupCountyParcelByPoint: jest.fn().mockResolvedValue(parcel),
     parcelGisPrecision,
     applyGisParcelGuards,
+    ...countyDeps,
     ...over,
   });
   const row = { normalized_address: '9117 SR 99, BRADENTON, FL 34203', lat: '27.40000', lng: '-82.40000', county: null, parcel_id: null, last_attempt_status: 'no_parcel', snapshot: { isCommercial: true, unitScopedLookup: false } };
@@ -264,6 +268,8 @@ describe('replayRow', () => {
     const deps = makeDeps();
     const r = replay.finalizeResult(await replay.replayRow(row, deps, {}));
     expect(r.stop).toBe('number_not_on_roll');
+    // the stored point rides on the result so a DB row can become a --cases entry
+    expect(r).toMatchObject({ lat: 27.4, lng: -82.4 });
     expect(r.point).toMatchObject({ status: 'dropped', dropReason: 'situs_house_number_mismatch', parcelId: '500000001', situs: '6000 SAMPLE RD' });
     // county for the point query comes from the audit when the row has none
     expect(deps.lookupCountyParcelByPoint).toHaveBeenCalledWith(27.40000, -82.40000, expect.objectContaining({ county: 'Manatee' }));
@@ -332,6 +338,7 @@ describe('runReplay', () => {
       lookupCountyParcelByPoint: jest.fn().mockResolvedValue(null),
       parcelGisPrecision,
       applyGisParcelGuards,
+      ...countyDeps,
     };
     const rows = ['A 1', 'BOOM 2', 'C 3', 'D 4', 'E 5', 'F 6'].map((a) => ({ normalized_address: a, lat: 1, lng: 1, county: 'Manatee', snapshot: {} }));
     const results = await replay.runReplay(rows, deps, { concurrency: 50, delayMs: 5, sleep: async (ms) => { sleeps.push(ms); } });
@@ -364,7 +371,7 @@ describe('summary and TSV', () => {
 
   test('TSV has one header, tab-safe cells, the address and no contact fields', () => {
     const r = replay.finalizeResult({
-      address: '1 TEST\tST\nBRADENTON FL', countyUsed: 'Manatee', storedParcelId: null, storedStatus: 'no_parcel', createdAt: '2026-10-01T00:00:00.000Z',
+      address: '1 TEST\tST\nBRADENTON FL', lat: 27.4, lng: -82.5, countyUsed: 'Manatee', storedParcelId: null, storedStatus: 'no_parcel', createdAt: '2026-10-01T00:00:00.000Z',
       snapshot: { isCommercial: true, commercialDetectionSource: 'satellite_ai_property_use', commercialSubtype: 'office_retail', unitScopedLookup: false, fieldVerifyFlags: [{ field: 'address' }, { field: 'propertyType' }], addressAudit: { streetExists: false } },
       audit: { status: 'ran', streetExists: false, hasExactMatch: false, nearestNumbers: [], county: 'Manatee', errors: [] },
       point: { status: 'none', errors: [] },
@@ -377,11 +384,60 @@ describe('summary and TSV', () => {
     expect(cells).toHaveLength(header.length);
     const get = (name) => cells[header.indexOf(name)];
     expect(get('address')).toBe('1 TEST ST BRADENTON FL');
+    expect(get('lat')).toBe('27.4');
+    expect(get('lng')).toBe('-82.5');
     expect(get('stop')).toBe('address_text_miss');
     expect(get('commercial_source')).toBe('satellite_ai_property_use');
     expect(get('field_verify_flags')).toBe('address,propertyType');
     expect(get('stored_audit_street_exists')).toBe('false');
     expect(header.join(' ')).not.toMatch(/customer|owner|phone|email/i);
+  });
+});
+
+describe('guard gates at startup', () => {
+  test('names and on/off only, on exactly when the reader is (=== "true")', () => {
+    expect(replay.formatGuardGates({})).toBe('GATE_CONDO_UNIT_FOLIO=off');
+    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'true', DATABASE_PUBLIC_URL: 'postgres://secret' })).toBe('GATE_CONDO_UNIT_FOLIO=on');
+    // feature-gates condoUnitFolioLive() is strict: 'TRUE' / '1' read OFF
+    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'TRUE' })).toBe('GATE_CONDO_UNIT_FOLIO=off');
+  });
+
+  test('main prints the gate line and writes lat/lng to the TSV, without touching the network', async () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lookup-replay-test-'));
+    const casesFile = path.join(dir, 'cases.json');
+    const outFile = path.join(dir, 'out.tsv');
+    fs.writeFileSync(casesFile, JSON.stringify([{ name: 'synthetic', address: '100 EXAMPLE RD, BRADENTON, FL 34202', lat: 27.4, lng: -82.5, county: 'Manatee' }]));
+    let isolated;
+    jest.isolateModules(() => {
+      jest.doMock('../services/property-lookup/ai-property-lookup', () => ({
+        auditAddressHouseNumber: async () => null,
+        _private: { parcelGisPrecision: () => 'rooftop', applyGisParcelGuards: () => ({}) },
+      }));
+      jest.doMock('../services/property-lookup/county-parcel-gis', () => ({
+        lookupCountyParcelByPoint: async () => null,
+        normalizeCountyName: (c) => c,
+        _private: { COUNTY_LAYERS: { Manatee: {} } },
+      }));
+      isolated = require('../scripts/property-lookup-replay');
+    });
+    const logs = [];
+    const spy = jest.spyOn(console, 'log').mockImplementation((line) => { logs.push(String(line)); });
+    try {
+      const code = await isolated.main([`--cases=${casesFile}`, `--out=${outFile}`, '--delay-ms=0'], { GATE_CONDO_UNIT_FOLIO: 'true' });
+      expect(code).toBe(0);
+    } finally {
+      spy.mockRestore();
+      jest.dontMock('../services/property-lookup/ai-property-lookup');
+      jest.dontMock('../services/property-lookup/county-parcel-gis');
+    }
+    expect(logs.find((l) => l.includes('parcel-guard gates'))).toMatch(/GATE_CONDO_UNIT_FOLIO=on/);
+    const [header, row] = fs.readFileSync(outFile, 'utf8').trim().split('\n').map((l) => l.split('\t'));
+    expect(row[header.indexOf('lat')]).toBe('27.4');
+    expect(row[header.indexOf('lng')]).toBe('-82.5');
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 
