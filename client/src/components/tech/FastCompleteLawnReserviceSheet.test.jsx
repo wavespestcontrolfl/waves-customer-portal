@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import FastCompleteLawnReserviceSheet, {
   AREA_OPTIONS, LAWN_CONDITION_OPTIONS, TURF_ISSUE_OPTIONS, WEED_PRESSURE_OPTIONS,
 } from './FastCompleteLawnReserviceSheet';
-import { LAWN_TARGET_SUGGESTIONS } from '../../lib/lawn-targets';
+import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productTargetsNutrition } from '../../lib/lawn-targets';
 import { PROJECT_TYPES } from '../../../../server/services/project-types.js';
 
 // Each test mounts the whole sheet and taps through it: slow on a busy runner.
@@ -96,11 +96,12 @@ const enterAmount = (name, amount) => fireEvent.change(within(editorFor(name)).g
 const issue = (name) => within(screen.getByRole('heading', { name: 'Treating for' }).closest('section')).getByRole('button', { name });
 // What one product was applied against, on its own row.
 const forTarget = (product, name) => fireEvent.click(within(within(editorFor(product)).getByRole('group', { name: 'For' })).getByRole('button', { name }));
-// A Where chip (visit level: the findings' spot_treatment_areas and each row's applicationArea).
-const where = (...names) => {
-  const section = screen.getByRole('heading', { name: 'Where' }).closest('section');
-  for (const name of names.length ? names : ['Front lawn']) fireEvent.click(within(section).getByRole('button', { name }));
+// A product row's own Where chips (default Front lawn).
+const whereGroup = (product) => within(editorFor(product)).getByRole('group', { name: 'Where' });
+const where = (product, ...names) => {
+  for (const name of names.length ? names : ['Front lawn']) fireEvent.click(within(whereGroup(product)).getByRole('button', { name }));
 };
+const wherePressed = (product) => within(whereGroup(product)).getAllByRole('button').filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.textContent);
 const completeButton = () => screen.getByRole('button', { name: 'Complete lawn re-service' });
 const completeBody = async (request) => {
   fireEvent.click(completeButton());
@@ -116,7 +117,7 @@ async function readyVisit(request) {
   forTarget('Celsius WG', 'Dollarweed');
   fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
   fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
-  where();
+  where('Celsius WG');
 }
 
 describe('the typed form\'s option lists', () => {
@@ -394,7 +395,7 @@ describe('targets use the full form\'s vocabulary', () => {
     }
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
-    where();
+    where('Celsius WG');
     const body = await completeBody(request);
     expect(new Set(body.products[0].targets)).toEqual(new Set(Object.values(picks)));
   });
@@ -412,7 +413,7 @@ describe('targets use the full form\'s vocabulary', () => {
     expect(within(chips).getByRole('button', { name: 'Green kyllinga' }).getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
-    where();
+    where('Celsius WG');
     expect(completeButton().disabled).toBe(false);
     // Clearing the Treating-for chip leaves the other target alone.
     fireEvent.click(issue('Crabgrass'));
@@ -434,31 +435,151 @@ describe('targets use the full form\'s vocabulary', () => {
   });
 });
 
-describe('where', () => {
-  test('is required, and goes out as the findings value and as every active row\'s applicationArea, in option order', async () => {
+describe('where (per product)', () => {
+  test('there is no visit-level Where; each active row has its own, and the first row starts empty', async () => {
+    await openSheet();
+    expect(screen.queryByRole('heading', { name: 'Where' })).toBeNull();
+    fireEvent.click(tile('Celsius WG'));
+    expect(wherePressed('Celsius WG')).toEqual([]);
+    expect(whereGroup('Celsius WG')).toBeTruthy();
+  });
+
+  test('a row turned on with no Where copies the first active row\'s areas as editable chips; later edits never sync', async () => {
+    await openSheet();
+    fireEvent.click(tile('Celsius WG'));
+    where('Celsius WG', 'Back lawn', 'Fence line');
+    fireEvent.click(tile('Talak 7.9%'));
+    expect(wherePressed('Talak 7.9%')).toEqual(['Back lawn', 'Fence line']);
+    // Editing one row leaves the other alone, in both directions.
+    where('Talak 7.9%', 'Fence line', 'Along driveway / sidewalk');
+    expect(wherePressed('Talak 7.9%')).toEqual(['Back lawn', 'Along driveway / sidewalk']);
+    expect(wherePressed('Celsius WG')).toEqual(['Back lawn', 'Fence line']);
+    where('Celsius WG', 'Back lawn');
+    expect(wherePressed('Talak 7.9%')).toEqual(['Back lawn', 'Along driveway / sidewalk']);
+    // A third row copies from the FIRST active row that has any.
+    fireEvent.click(tile('Headway G'));
+    expect(wherePressed('Headway G')).toEqual(['Fence line']);
+  });
+
+  test('a product added with + Other product starts from the first active row\'s areas', async () => {
+    await openSheet();
+    fireEvent.click(tile('Celsius WG'));
+    where('Celsius WG', 'Side lawns');
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /Empty Jug Surfactant/ }));
+    expect(wherePressed('Empty Jug Surfactant')).toEqual(['Side lawns']);
+  });
+
+  test('every active row needs one; the reason names the product, and different areas go out per row', async () => {
     const request = makeRequest();
     await readyVisit(request);
     fireEvent.click(tile('Talak 7.9%'));
     forTarget('Talak 7.9%', 'Dollarweed');
-    where('Slope / drainage area', 'Fence line');
+    // Clear the copied chip: Talak has none and Complete waits.
+    where('Talak 7.9%', 'Front lawn');
+    expect(screen.getByText('Pick where Talak 7.9% went.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    where('Talak 7.9%', 'Slope / drainage area', 'Fence line');
+    expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
-    const expected = 'Front lawn, Fence line, Slope / drainage area';
-    expect(body.structuredFindings.values.spot_treatment_areas).toBe(expected);
-    expect(body.products.map((p) => p.applicationArea)).toEqual([expected, expected]);
+    expect(body.products.map((p) => [p.productId, p.applicationArea])).toEqual([
+      ['celsius', 'Front lawn'], ['talak', 'Fence line, Slope / drainage area'],
+    ]);
+    // The findings carry the union, in option order.
+    expect(body.structuredFindings.values.spot_treatment_areas).toBe('Front lawn, Fence line, Slope / drainage area');
   });
 
-  test('without a Where chip Complete is disabled with the reason, and no area is preselected', async () => {
+  test('no area is preselected anywhere before the first product is on', async () => {
     await openSheet();
-    for (const label of AREA_OPTIONS) {
-      expect(within(screen.getByRole('heading', { name: 'Where' }).closest('section')).getByRole('button', { name: label }).getAttribute('aria-pressed')).toBe('false');
-    }
+    expect(screen.queryByRole('button', { name: 'Front lawn' })).toBeNull();
+  });
+});
+
+describe('Treating-for gate', () => {
+  const otherTarget = (product, name) => fireEvent.change(within(editorFor(product)).getByLabelText(`Other target for ${product}`), { target: { value: name } });
+
+  test('a visit whose targets come only from Other target completes with no Treating-for chip, and omits turf_issues', async () => {
+    const request = makeRequest();
+    await openSheet(request);
     fireEvent.click(tile('Celsius WG'));
-    fireEvent.click(issue('Dollarweed'));
-    forTarget('Celsius WG', 'Dollarweed');
+    expect(screen.getByText('Select what you treated for.')).toBeTruthy();
+    otherTarget('Celsius WG', 'Clover');
+    expect(screen.queryByText('Select what you treated for.')).toBeNull();
+    where('Celsius WG');
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
-    expect(screen.getByText('Select where you treated.')).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products[0].targets).toEqual(['Clover']);
+    expect(body.structuredFindings.values).not.toHaveProperty('turf_issues');
+  });
+
+  test('the per-row target requirement stays: a second pesticide row with no target blocks, with or without a chip', async () => {
+    await openSheet();
+    fireEvent.click(tile('Celsius WG'));
+    otherTarget('Celsius WG', 'Clover');
+    where('Celsius WG');
+    fireEvent.click(tile('Talak 7.9%'));
+    expect(screen.getByText('Select what you treated for.')).toBeTruthy();
+    fireEvent.click(issue('Dollarweed'));
+    expect(screen.getByText('Pick what Talak 7.9% was for.')).toBeTruthy();
+  });
+
+  test('the validator accepts findings without turf_issues', async () => {
+    const { validateTypedFindings } = await import('../../../../server/services/service-report/activity-indicators.js');
+    expect(validateTypedFindings({
+      type: 'one_time_lawn_treatment', expectedType: 'one_time_lawn_treatment', enforceRequired: true,
+      values: { lawn_condition: 'Fair', weed_pressure: 'Light', spot_treatment_areas: 'Front lawn' },
+    })).toMatchObject({ ok: true, missing: [] });
+  });
+});
+
+describe('fertilizer purpose', () => {
+  const FERT = [...CATALOG, { id: 'fert', name: 'Turf Fertilizer 16-4-8', category: 'fertilizer' }, { id: 'micro', name: 'Iron Plus', category: 'micronutrient fertilizer' }];
+  const ctxWith = (products) => ({ ...CONTEXT, products: FERT, lastVisit: { ...CONTEXT.lastVisit, products } });
+  const lastFert = [
+    { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment' },
+    { productId: 'fert', name: 'Turf Fertilizer 16-4-8', totalAmount: 10, amountUnit: 'lb', method: 'granular_broadcast', areaValue: 5000, areaUnit: 'sqft' },
+    { productId: 'micro', name: 'Iron Plus', totalAmount: 2, amountUnit: 'fl_oz', method: 'foliar_spray' },
+  ];
+
+  test('fertilizer-family rows get optional Purpose chips from the shared nutrition list, sent as targets', async () => {
+    const request = makeRequest({ context: ctxWith(lastFert) });
+    await openSheet(request);
+    fireEvent.click(tile('Turf Fertilizer 16-4-8'));
+    const purpose = within(editorFor('Turf Fertilizer 16-4-8')).getByRole('group', { name: 'Purpose (optional)' });
+    expect(within(purpose).getAllByRole('button').map((b) => b.textContent)).toEqual(NUTRITION_TARGET_SUGGESTIONS);
+    expect(within(editorFor('Turf Fertilizer 16-4-8')).queryByRole('group', { name: 'For' })).toBeNull();
+    fireEvent.click(within(purpose).getByRole('button', { name: 'Iron chlorosis (yellowing turf)' }));
+    fireEvent.click(within(purpose).getByRole('button', { name: 'Nitrogen green-up' }));
+    where('Turf Fertilizer 16-4-8');
+    fireEvent.click(tile('Iron Plus')); // a micronutrient fertilizer, left with no purpose
+    fireEvent.click(issue('Dollarweed'));
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    const byId = Object.fromEntries(body.products.map((p) => [p.productId, p]));
+    expect(byId.fert.targets).toEqual(['Iron chlorosis (yellowing turf)', 'Nitrogen green-up']);
+    expect(byId.micro.targets).toEqual([]);
+  });
+
+  test('purpose is not required, and a pesticide row keeps its required For targets', async () => {
+    await openSheet(makeRequest({ context: ctxWith(lastFert) }));
+    fireEvent.click(tile('Turf Fertilizer 16-4-8'));
+    fireEvent.click(issue('Dollarweed'));
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    where('Turf Fertilizer 16-4-8');
+    expect(completeButton().disabled).toBe(false);
+    fireEvent.click(tile('Celsius WG'));
+    expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
+  });
+
+  test('the nutrition list and category test are shared with the full form', () => {
+    expect(productTargetsNutrition({ category: 'micronutrient fertilizer' })).toBe(true);
+    expect(productTargetsNutrition({ category: 'herbicide' })).toBe(false);
+    expect(NUTRITION_TARGET_SUGGESTIONS).toContain('Iron chlorosis (yellowing turf)');
   });
 });
 
@@ -591,8 +712,8 @@ describe('required taps', () => {
     fireEvent.click(issue('Sedge'));
     expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
     forTarget('Celsius WG', 'Sedge');
-    expect(screen.getByText('Select where you treated.')).toBeTruthy();
-    where('Back lawn');
+    expect(screen.getByText('Pick where Celsius WG went.')).toBeTruthy();
+    where('Celsius WG', 'Back lawn');
     expect(screen.getByText('Select the weed pressure.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     expect(screen.getByText('Select the lawn condition.')).toBeTruthy();
@@ -717,7 +838,7 @@ describe('the /complete body', () => {
     forTarget('Celsius WG', 'Dollarweed');
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
-    where();
+    where('Celsius WG');
     fireEvent.click(completeButton());
     expect(await screen.findByText('Celsius WG · Dollarweed')).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Lawn re-service complete' })).toBeTruthy();

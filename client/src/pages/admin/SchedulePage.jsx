@@ -145,7 +145,7 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
-import { LAWN_TARGET_SUGGESTIONS } from "../../lib/lawn-targets";
+import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -10625,14 +10625,7 @@ export function productControlsTargets(product) {
   );
 }
 
-// Fertilizer-family products (incl. micros/biostimulants) target nutrition
-// goals rather than pests — their picker swaps to the nutrition suggestions.
-export function productTargetsNutrition(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  return /(fert|micronutrient|biostimulant)/.test(category);
-}
+export { productTargetsNutrition };
 
 function requiresLinearFt(method) {
   return normalizeApplicationMethod(method) === "perimeter_spray";
@@ -24261,24 +24254,6 @@ const ORNAMENTAL_TARGET_SUGGESTIONS = [
   "Sooty mold (sap-feeder cleanup)",
   "Fungal leaf spot",
   "Powdery mildew",
-];
-
-// Fertilizer-family targets are the nutrition goal of the application — what
-// the feeding is meant to correct or stimulate, in customer-report language.
-const NUTRITION_TARGET_SUGGESTIONS = [
-  "Nitrogen green-up",
-  "Deep green color",
-  "Color & density",
-  "Iron chlorosis (yellowing turf)",
-  "Potassium deficiency",
-  "Root strength & stress tolerance",
-  "Balanced feeding",
-  "Micronutrient deficiency",
-  "Slow-release feeding",
-  "Winter hardiness",
-  "Magnesium deficiency (palms)",
-  "Manganese deficiency (palms)",
-  "Potassium deficiency (palms)",
 ];
 
 // Which suggestion list / placeholder noun a product's Targets picker gets:

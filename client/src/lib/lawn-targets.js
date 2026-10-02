@@ -33,3 +33,31 @@ export const LAWN_TARGET_SUGGESTIONS = [
   "Fairy ring",
   "Pythium root rot",
 ];
+
+// Fertilizer-family targets are the nutrition goal of the application — what
+// the feeding is meant to correct or stimulate, in customer-report language.
+export const NUTRITION_TARGET_SUGGESTIONS = [
+  "Nitrogen green-up",
+  "Deep green color",
+  "Color & density",
+  "Iron chlorosis (yellowing turf)",
+  "Potassium deficiency",
+  "Root strength & stress tolerance",
+  "Balanced feeding",
+  "Micronutrient deficiency",
+  "Slow-release feeding",
+  "Winter hardiness",
+  "Magnesium deficiency (palms)",
+  "Manganese deficiency (palms)",
+  "Potassium deficiency (palms)",
+];
+
+// Fertilizer-family products (incl. micros/biostimulants) target nutrition
+// goals rather than pests — their picker swaps to the nutrition suggestions.
+export function productTargetsNutrition(product) {
+  const category = String(
+    product?.category || product?.product_category || "",
+  ).toLowerCase();
+  return /(fert|micronutrient|biostimulant)/.test(category);
+}
+
