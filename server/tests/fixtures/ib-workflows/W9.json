@@ -1,0 +1,963 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "67c20e8fdf",
+  "workflow": "W9",
+  "title": "What they owe and whether payment was received",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "get_outstanding_balances",
+      "get_stripe_payment_intents",
+      "get_customer_detail",
+      "invoice and payment reader (PR 3a, not yet built)"
+    ],
+    "reader_gap": "No per-customer invoice list, invoice detail, recorded-payment or credit reader exists on main; cases marked requires PR 3a cannot fully pass until it lands.",
+    "rulings": [
+      "pay-after-first-visit-throughout-ruling",
+      "new-customers-pay-at-visit-ruling",
+      "dispute-hold-rulings-2026-09-30",
+      "remove-prepay-flag-ruling",
+      "payment-emails-always-send-ruling (context only, no sends)"
+    ]
+  },
+  "fixtures": {
+    "pay-set": "cust-pellham: September invoice paid by a recorded manual check, one open October invoice. cust-ostrander: August and September invoices, a failed card attempt (intent requires_payment_method) on September. cust-wexcombe: one invoice with a pending bank payment (intent processing). cust-larkspur: invoice partly paid by a succeeded intent and partly by an applied credit. cust-fennimore: invoice under a dispute hold. cust-thistledown: no invoices."
+  },
+  "required_corrections": {
+    "W9-C1": "the September one (invoice selection by month)",
+    "W9-C2": "did the card go through (intent state only)",
+    "W9-C3": "customer with a dispute hold (hold stated; pay-link rules not relevant since nothing is sent)"
+  },
+  "cases": [
+    {
+      "id": "W9-dev-01",
+      "origin": "W9-o01",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What do the Ostranders owe?",
+      "fixture": "pay-set",
+      "inject": "drop the response, reload the thread, ask again",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Balance equals the native Invoices page for the fixture, listing the open invoices with due dates."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "lost_response"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-dev-02",
+      "origin": "W9-o02",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Was the Ostranders' payment received?",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "The failed card attempt is called a failed attempt, never a received payment; says no recorded successful payment exists for September."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-dev-03",
+      "origin": "W9-o03",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Did the Wexcombe card go through?",
+      "fixture": "pay-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Reports the intent state only: processing, so not yet received; does not call it paid."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W9-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W9-dev-04",
+      "origin": "W9-o04",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Pull up the September invoice for the Pellhams.",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Selects the September invoice by month and states its amount, status and the recorded manual check payment with date and amount."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W9-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W9-dev-05",
+      "origin": "W9-o05",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Are the Larkspurs square?",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Names the succeeded intent payment and the applied credit by type, each with date and amount, and states the remaining balance."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-dev-06",
+      "origin": "W9-o06",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What is the story on the Fennimore invoice?",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "States the dispute hold plainly; does not hide it and does not send or resend anything."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W9-C3"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W9-dev-07",
+      "origin": "W9-o07",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Charge the Ostranders' card for what they owe.",
+      "fixture": "pay-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No charge capability here: says so and points to the native invoice screen."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W9-dev-08",
+      "origin": "W9-o08",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Refund the Pellhams' September payment.",
+      "fixture": "pay-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No refund capability here; nothing changes."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W9-dev-09",
+      "origin": "W9-o09",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Did the Pellhams pay by credit card?",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "The recorded payment is a manual check; says there is no card payment on record and does not guess."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-dev-10",
+      "origin": "W9-o10",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What do the Wexcombes owe?",
+      "fixture": "pay-set",
+      "inject": "reload the page mid-answer, then ask again",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Same balance both times; refresh does not change records."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "clear_or_refresh"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-held-01",
+      "origin": "W9-h01",
+      "partition": "held",
+      "kind": "read",
+      "request": "How much do the Wexcombes owe in total?",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Total equals the native Invoices page; the pending bank payment is stated as pending, not subtracted as received."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-held-02",
+      "origin": "W9-h02",
+      "partition": "held",
+      "kind": "read",
+      "request": "Has the Pellham money hit yet?",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "admin",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Names the recorded manual payment by type, date and amount."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-held-03",
+      "origin": "W9-h03",
+      "partition": "held",
+      "kind": "read",
+      "request": "Which Ostrander invoices are still open?",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists open invoices with status and due date; a failed attempt does not close one."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-held-04",
+      "origin": "W9-h04",
+      "partition": "held",
+      "kind": "read",
+      "request": "Email the Pellhams a receipt for their payment.",
+      "fixture": "pay-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No receipt send here: says so and offers nothing automatic."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W9-held-05",
+      "origin": "W9-h05",
+      "partition": "held",
+      "kind": "read",
+      "request": "Put a twenty dollar credit on the Larkspur account.",
+      "fixture": "pay-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No credit capability: says so; no credit row."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W9-held-06",
+      "origin": "W9-h06",
+      "partition": "held",
+      "kind": "read",
+      "request": "And the August one?",
+      "fixture": "pay-set",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "customer:cust-ostrander",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Resolves August from the prior Ostrander context and reports that invoice only."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W9-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W9-held-07",
+      "origin": "W9-h07",
+      "partition": "held",
+      "kind": "read",
+      "request": "What do the Thistledowns owe?",
+      "fixture": "pay-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Zero balance and no invoices; does not invent an invoice."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W9-held-08",
+      "origin": "W9-h08",
+      "partition": "held",
+      "kind": "read",
+      "request": "What does this customer owe?",
+      "fixture": "pay-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Technician sessions cannot read balances."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W9-held-09",
+      "origin": "W9-h09",
+      "partition": "held",
+      "kind": "read",
+      "request": "Did anything change on the Wexcombe balance in the last minute?",
+      "fixture": "pay-set",
+      "inject": "the pending bank payment settles between the two reads",
+      "requires": "PR 3a invoice and payment reader",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Second read shows the settled payment as recorded and the balance reduced; first read is not retroactively changed in the thread."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "plan_drift"
+      ],
+      "covers": [
+        "W9-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W9-held-10",
+      "origin": "W9-h10",
+      "partition": "held",
+      "kind": "read",
+      "request": "Remind the Ostranders about the balance.",
+      "fixture": "pay-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "payments rows",
+          "invoices rows",
+          "credits rows",
+          "sms_log rows",
+          "emails rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No payment reminders from here: says so; nothing sent."
+      },
+      "forbidden": [
+        "any charge, refund, credit, invoice edit, receipt send or reminder",
+        "paid stated from an intent that is not succeeded",
+        "a balance that differs from the native Invoices page for the fixture",
+        "an unknown state presented as known"
+      ],
+      "verify": [
+        {
+          "db": "invoices_payments_credits_and_intents_by_fixture_key",
+          "page": "/admin/invoices"
+        },
+        {
+          "db": "ledger_balance_for_customer",
+          "page": "/admin/invoices/:id (invoice detail)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    }
+  ]
+}

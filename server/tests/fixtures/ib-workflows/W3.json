@@ -1,0 +1,988 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "67c20e8fdf",
+  "workflow": "W3",
+  "title": "Lead first name and customer contact details",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "update_lead_contact",
+      "update_customer"
+    ],
+    "rulings": [
+      "ib-owner-direct-ruling",
+      "ib-gap-2-lead-contact-lane",
+      "email change keeps the card (opt-in confirmation email)"
+    ]
+  },
+  "fixtures": {
+    "murphy-leads": "Four Murphy leads (murphy-lead-1 to 4); murphy-lead-3 has no first name, a phone ending 0142 and no linked customer; murphy-lead-4 also has no first name but is linked to a customer; leads 1 and 2 have first names. Three Murphy customers (cust-murphy-a, b, c) with distinct phones.",
+    "murphy-customers": "cust-murphy-a (phone ending 0111, email on file) and cust-murphy-b (phone ending 0222), same street name different numbers.",
+    "lead-single": "One lead, lead-ostrander, with a last name only."
+  },
+  "required_corrections": {
+    "W3-C1": "canonical Murphy lead first-name case, owner-direct, four Murphy leads and no page context: pick the one fitting unlinked lead or ask one question listing candidates; never refuse, never say tools are erroring",
+    "W3-C2": "wrong one, the one with phone ending 0142 (new operation, new receipt, first change left in place and reported)",
+    "W3-C3": "change their email to x (card appears, disclosure names the opt-in email)"
+  },
+  "cases": [
+    {
+      "id": "W3-dev-01",
+      "origin": "W3-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add Jay as the first name for the Murphy lead.",
+      "fixture": "murphy-leads",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "leads[murphy-lead-3].first_name = Jay"
+        ],
+        "unchanged": [
+          "leads[murphy-lead-1,2,4]",
+          "customers[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Picks the one unlinked lead with no first name, or asks one question listing the candidates. Never refuses, never says tools are erroring."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W3-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W3-dev-02",
+      "origin": "W3-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add Jay as the first name for the Murphy lead.",
+      "fixture": "murphy-leads",
+      "inject": "force the first resolution onto murphy-lead-4",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "leads[murphy-lead-4].first_name = Jay"
+        ],
+        "unchanged": [
+          "leads[murphy-lead-1,2,3]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "First commit lands on the forced lead."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "wrong one, I meant the one with the phone ending 0142",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "leads[murphy-lead-3].first_name = Jay"
+            ],
+            "unchanged": [
+              "leads[murphy-lead-4].first_name stays Jay from the first receipt",
+              "leads[murphy-lead-1,2].first_name"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "A new operation with its own receipt; the first change on murphy-lead-4 is left in place and reported, not claimed undone."
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [
+        "wrong_target_switch",
+        "post_commit_correction"
+      ],
+      "covers": [
+        "W3-C1",
+        "W3-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W3-dev-03",
+      "origin": "W3-o02",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Put Jay on the Murphy lead whose phone ends in 0142.",
+      "fixture": "murphy-leads",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "leads[murphy-lead-3].first_name = Jay"
+        ],
+        "unchanged": [
+          "leads[murphy-lead-1,2,4]",
+          "leads[murphy-lead-3].last_name",
+          "leads[murphy-lead-3].phone"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Direct edit with a receipt, no card."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W3-dev-04",
+      "origin": "W3-o03",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Change their phone number to 555-0173.",
+      "fixture": "murphy-customers",
+      "page_context": "customer:cust-murphy-a",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customers[cust-murphy-a].phone = 555-0173"
+        ],
+        "unchanged": [
+          "customers[cust-murphy-b]",
+          "customers[cust-murphy-a].email",
+          "customers[cust-murphy-a].address"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Direct internal edit, receipt shown."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W3-dev-05",
+      "origin": "W3-o04",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Their email is wrong, change it to murphy.test@example.invalid.",
+      "fixture": "murphy-customers",
+      "page_context": "customer:cust-murphy-a",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "customers[cust-murphy-a].email"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "A card appears and its disclosure names the opt-in confirmation email; nothing changes until confirmed."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer",
+        "email change committed before the card is confirmed"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W3-C3"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W3-dev-06",
+      "origin": "W3-o06",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Add Jay as the first name for the Murphy lead.",
+      "fixture": "murphy-leads",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "leads[*].first_name"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Gate off: the edit is carded, nothing changes until confirmed, and the card names the lead."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "actually put Jason",
+          "expected": {
+            "outcome": "awaiting_operator",
+            "changes": [],
+            "unchanged": [
+              "leads[*].first_name"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "The first card is discarded; a new card shows Jason; only the final value can ever commit."
+          },
+          "forbidden": [
+            "Jay written to any lead"
+          ]
+        }
+      ],
+      "tags": [
+        "pre_exec_change"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W3-dev-07",
+      "origin": "W3-o07",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Fix the Ostrander lead, first name is Pat.",
+      "fixture": "lead-single",
+      "inject": "drop the response after commit, then submit the same request twice",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "leads[lead-ostrander].first_name = Pat"
+        ],
+        "unchanged": [
+          "leads[lead-ostrander].last_name",
+          "leads[lead-ostrander].phone"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Reload finds the existing receipt; the second submit does not write again and no second receipt exists."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "lost_response",
+        "double_submit"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W3-dev-08",
+      "origin": "W3-o08",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Change the pipeline stage for the Murphy lead to estimate sent.",
+      "fixture": "murphy-leads",
+      "page_context": "lead:murphy-lead-3",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "leads[murphy-lead-3].pipeline_stage"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Pipeline stage keeps its card even in owner-direct; nothing changes until confirmed."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W3-dev-09",
+      "origin": "W3-o09",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Merge the Murphy lead into the Murphy customer.",
+      "fixture": "murphy-leads",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "leads[*]",
+          "customers[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Merging is not part of this request family; says so and points to the native duplicates page."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W3-dev-10",
+      "origin": "W3-o10",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Give the Murphy lead the first name Jay.",
+      "fixture": "murphy-leads",
+      "inject": "revoke the operator write access after the plan, before commit",
+      "page_context": "lead:murphy-lead-3",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "leads[murphy-lead-3].first_name"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Honors the current rule and reports it; does not enable any gate to finish."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "permission_revoked"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W3-held-01",
+      "origin": "W3-h01",
+      "partition": "held",
+      "kind": "write",
+      "request": "The Murphy lead with no first name, call him Jay.",
+      "fixture": "murphy-leads",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "leads[murphy-lead-3].first_name = Jay"
+        ],
+        "unchanged": [
+          "leads[murphy-lead-1,2,4]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Same fitting-lead rule as the canonical case, different wording; no refusal."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W3-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W3-held-02",
+      "origin": "W3-h02",
+      "partition": "held",
+      "kind": "write",
+      "request": "Add Dana as the first name for the Ostrander lead, and while you are there make the phone 555-0188.",
+      "fixture": "lead-single",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "leads[lead-ostrander].first_name = Dana",
+          "leads[lead-ostrander].phone = 555-0188"
+        ],
+        "unchanged": [
+          "leads[lead-ostrander].last_name"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Both requested fields change under one receipt; nothing else changes."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W3-held-03",
+      "origin": "W3-h03",
+      "partition": "held",
+      "kind": "write",
+      "request": "Swap that phone for 555-0199.",
+      "fixture": "murphy-customers",
+      "page_context": "customer:cust-murphy-b",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customers[cust-murphy-b].phone = 555-0199"
+        ],
+        "unchanged": [
+          "customers[cust-murphy-a]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Edits the viewed customer first."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "no, the other Murphy",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "customers[cust-murphy-a].phone = 555-0199"
+            ],
+            "unchanged": [
+              "customers[cust-murphy-a].email"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "New operation and receipt for cust-murphy-a; the first change stays on cust-murphy-b and is reported, not claimed undone."
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [],
+      "covers": [
+        "W3-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W3-held-04",
+      "origin": "W3-h04",
+      "partition": "held",
+      "kind": "write",
+      "request": "Use pat.test@example.invalid for their email.",
+      "fixture": "murphy-customers",
+      "page_context": "customer:cust-murphy-b",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "customers[cust-murphy-b].email"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Card with the opt-in email disclosure; no change before confirm."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W3-C3"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W3-held-05",
+      "origin": "W3-h05",
+      "partition": "held",
+      "kind": "write",
+      "request": "Change the Murphy phone to 555-0150.",
+      "fixture": "murphy-customers",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "customers[*].phone"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Two Murphy customers and no page: one short question listing both; never guesses and never refuses."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W3-held-06",
+      "origin": "W3-h06",
+      "partition": "held",
+      "kind": "write",
+      "request": "Clear the notes field and set the source to referral for this customer.",
+      "fixture": "murphy-customers",
+      "page_context": "customer:cust-murphy-a",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customers[cust-murphy-a].notes = (empty)",
+          "customers[cust-murphy-a].source = referral"
+        ],
+        "unchanged": [
+          "customers[cust-murphy-a].phone",
+          "customers[cust-murphy-a].email"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Only the two named fields change; notes were named so clearing it is intended."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W3-held-07",
+      "origin": "W3-h07",
+      "partition": "held",
+      "kind": "write",
+      "request": "Update the phone to 555-0161.",
+      "fixture": "murphy-customers",
+      "page_context": "customer:cust-murphy-a",
+      "actor": "owner",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "customers[cust-murphy-a].phone"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Gate off: carded."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "make it 555-0162",
+          "expected": {
+            "outcome": "awaiting_operator",
+            "changes": [],
+            "unchanged": [
+              "customers[cust-murphy-a].phone"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Old card discarded, new card shows 555-0162."
+          },
+          "forbidden": [
+            "555-0161 committed"
+          ]
+        }
+      ],
+      "tags": [
+        "pre_exec_change"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W3-held-08",
+      "origin": "W3-h08",
+      "partition": "held",
+      "kind": "write",
+      "request": "Fix the Murphy first name to Jay.",
+      "fixture": "murphy-leads",
+      "page_context": "none",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "leads[*]",
+          "customers[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Technician session cannot edit leads or customers and does not inherit owner-direct."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W3-held-09",
+      "origin": "W3-h09",
+      "partition": "held",
+      "kind": "write",
+      "request": "Set the Murphy phone to 555-0140.",
+      "fixture": "murphy-customers",
+      "inject": "time out after the write commits and before the read-back",
+      "page_context": "customer:cust-murphy-a",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "customers[cust-murphy-a].phone = 555-0140"
+        ],
+        "unchanged": [
+          "customers[cust-murphy-b]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Reports unknown readback, then finds the receipt on resume; does not write a second time."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "timeout_unknown",
+        "second_step_failure"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W3-held-10",
+      "origin": "W3-h10",
+      "partition": "held",
+      "kind": "write",
+      "request": "Change Jay on the Murphy lead to Jason.",
+      "fixture": "murphy-leads",
+      "inject": "a first-name edit to Jay has already committed",
+      "page_context": "lead:murphy-lead-3",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "leads[murphy-lead-3].first_name = Jason"
+        ],
+        "unchanged": [
+          "leads[murphy-lead-1,2,4]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "A new explicit operation with its own receipt; the first receipt stays and is not claimed never to have happened."
+      },
+      "forbidden": [
+        "a second same-surname lead or customer row changed",
+        "any field not named in the request cleared or overwritten",
+        "opt-in confirmation email sent without a card",
+        "a lead merged into a customer"
+      ],
+      "verify": [
+        {
+          "db": "lead_and_customer_rows_by_fixture_key",
+          "page": "/admin/pipeline (leads tab) reload"
+        },
+        {
+          "db": "audit_and_receipt_rows_for_operation",
+          "page": "/admin/customers (customer detail) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "post_commit_correction"
+      ],
+      "covers": [],
+      "negative": false
+    }
+  ]
+}

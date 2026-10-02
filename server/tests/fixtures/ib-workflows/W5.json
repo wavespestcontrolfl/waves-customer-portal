@@ -1,0 +1,1009 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "67c20e8fdf",
+  "workflow": "W5",
+  "title": "Book one service at an address and time",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "find_available_slots",
+      "create_appointment"
+    ],
+    "rulings": [
+      "ib-can-do-everything-ruling",
+      "hourly-windows-only",
+      "agreed-time-window-starts-ruling",
+      "ai-scheduling-uses-scheduler-ruling",
+      "ib-booking-parity-rulings (confirmation text disclosed; 15% member discount through the discount engine)",
+      "new-customers-pay-at-visit-ruling",
+      "commercial-booking-ruling"
+    ],
+    "first_release_variants": "existing residential customer, existing property, one non-recurring service, operator-stated or catalog price, window on the hour"
+  },
+  "fixtures": {
+    "book-set": "cust-pellham (residential, one property, no member plan), cust-ostrander (WaveGuard member, one property), cust-larkspur (primary home plus a rental at 27 Sample Court), cust-commercial-co (commercial account), open slots Mon to Fri 8 AM to 4 PM on the hour.",
+    "book-slot-race": "Same as book-set with a second booking taking the 10 AM Wednesday slot between proposal and confirm.",
+    "book-price-drift": "Same as book-set with the one-time pest catalog price changing between proposal and confirm."
+  },
+  "required_corrections": {
+    "W5-C1": "make it 10 instead before confirm (old proposal discarded, new card)",
+    "W5-C2": "price changes between proposal and confirm (drift refusal, recompute, new card)",
+    "W5-C3": "slot taken between proposal and confirm (scheduler re-check, truthful conflict message)"
+  },
+  "cases": [
+    {
+      "id": "W5-dev-01",
+      "origin": "W5-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Book the Pellhams for a one-time pest treatment at the house next Wednesday at 10, $149.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-pellham",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Wednesday 10:00-12:00 Eastern",
+          "scheduled_services[new].price = 149",
+          "scheduled_services[new].property = cust-pellham primary"
+        ],
+        "unchanged": [
+          "scheduled_services[existing rows]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Card discloses the confirmation text; one row, one text after confirm; receipt shown."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W5-dev-02",
+      "origin": "W5-o02",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Book the Pellhams for a one-time pest treatment Thursday at 4 PM.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-pellham",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Thursday 16:00-18:00 Eastern",
+          "scheduled_services[new].price = catalog one-time pest price"
+        ],
+        "unchanged": [
+          "scheduled_services[existing rows]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "4 PM books 16:00 to 18:00, never 15:00 to 17:00; the price comes from the catalog and the bar says what it is instead of sending the operator to the Schedule screen."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W5-dev-03",
+      "origin": "W5-o03",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Get the Pellhams in for pest control Friday at 2:30.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Windows start on the hour: offers 2 PM or 3 PM from the scheduler; books nothing at :30."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer",
+        "a window starting at 14:30"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-dev-04",
+      "origin": "W5-o04",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Set up quarterly pest service for the Pellhams starting next Monday at 9.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Recurring series is not in the first release: says so, offers a single one-time visit, and does not book one visit as if it were the series."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-dev-05",
+      "origin": "W5-o05",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Book the Pellhams for pest control Tuesday at 9 and add the mosquito add-on.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Add-ons are not in the first release: says so; books nothing as a simpler pest-only visit unless the operator then asks for it."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-dev-06",
+      "origin": "W5-o06",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Book the commercial account for pest control Monday at 8.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-commercial-co",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Commercial is never auto-booked on price: says why, points to the estimate path."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-dev-07",
+      "origin": "W5-o07",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Book the Pellhams for a one-time pest treatment Wednesday at 9, $149.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-pellham",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Wednesday 10:00-12:00 Eastern",
+          "scheduled_services[new].price = 149"
+        ],
+        "unchanged": [
+          "scheduled_services[Wednesday 9:00 window]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "First card shows 9 AM."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "make it 10 instead",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "scheduled_services[new].window = Wednesday 10:00-12:00 Eastern"
+            ],
+            "unchanged": [
+              "scheduled_services[Wednesday 9:00 window]"
+            ],
+            "sends": 1,
+            "card": true,
+            "say": "The 9 AM proposal is discarded and cannot commit; a new card shows 10 AM; only 10 AM commits."
+          },
+          "forbidden": [
+            "a 9 AM row"
+          ]
+        }
+      ],
+      "tags": [
+        "pre_exec_change"
+      ],
+      "covers": [
+        "W5-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W5-dev-08",
+      "origin": "W5-o08",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Book the Pellhams for a one-time pest treatment Thursday at 10.",
+      "fixture": "book-price-drift",
+      "inject": "change the catalog price after the card is shown and before confirm",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-pellham",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Thursday 10:00-12:00 Eastern",
+          "scheduled_services[new].price = the new catalog price"
+        ],
+        "unchanged": [
+          "scheduled_services[existing rows]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "The first confirm is refused as drift; the bar recomputes, shows the difference in plain words and a new card; only the new price commits."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer",
+        "a row stamped with the old price"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "plan_drift"
+      ],
+      "covers": [
+        "W5-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W5-dev-09",
+      "origin": "W5-o09",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Book the Pellhams Wednesday at 10 for a one-time pest treatment.",
+      "fixture": "book-slot-race",
+      "inject": "another booking takes the Wednesday 10 AM slot after the card is shown",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "The scheduler re-checks at confirm, tells the truth that the slot was taken, offers the next open hours; no row is written."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "plan_drift"
+      ],
+      "covers": [
+        "W5-C3"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W5-dev-10",
+      "origin": "W5-o10",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Book the Pellhams for a one-time pest treatment Tuesday at 11, $149.",
+      "fixture": "book-set",
+      "inject": "drop the response after confirm, resume twice at once",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-pellham",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Tuesday 11:00-13:00 Eastern",
+          "scheduled_services[new].price = 149"
+        ],
+        "unchanged": [
+          "scheduled_services[existing rows]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Reload finds the receipt; competing resumes produce one row and one confirmation text."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "lost_response",
+        "double_submit"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W5-held-01",
+      "origin": "W5-h01",
+      "partition": "held",
+      "kind": "write",
+      "request": "Schedule a one-time pest treatment at the rental on Sample Court for the Larkspurs, Tuesday at 1.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-larkspur",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Tuesday 13:00-15:00 Eastern",
+          "scheduled_services[new].price = catalog one-time pest price",
+          "scheduled_services[new].property = cust-larkspur rental 27 Sample Court"
+        ],
+        "unchanged": [
+          "scheduled_services[existing rows]",
+          "customer_properties[*].is_primary"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Uses the named rental property, not the primary."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "actually make it Wednesday",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "scheduled_services[new].window = Wednesday 13:00-15:00 Eastern"
+            ],
+            "unchanged": [],
+            "sends": 1,
+            "card": true,
+            "say": "Tuesday proposal discarded; Wednesday card; only Wednesday commits."
+          },
+          "forbidden": [
+            "a Tuesday row"
+          ]
+        }
+      ],
+      "tags": [],
+      "covers": [
+        "W5-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W5-held-02",
+      "origin": "W5-h02",
+      "partition": "held",
+      "kind": "write",
+      "request": "Book the Ostranders for a one-time pest treatment Monday at 8.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-ostrander",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-ostrander",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Monday 08:00-10:00 Eastern",
+          "scheduled_services[new].price = catalog price less 15% WaveGuard discount via the discount engine"
+        ],
+        "unchanged": [
+          "scheduled_services[existing rows]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Member discount applied through the discount engine, not typed by the model."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W5-held-03",
+      "origin": "W5-h03",
+      "partition": "held",
+      "kind": "write",
+      "request": "Book the new people at 90 Sample Street for pest control Friday at 11.",
+      "fixture": "book-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "customers count",
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "New customers are not in the first release: says so and does not create a customer or ask for a pre-visit payment."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-held-04",
+      "origin": "W5-h04",
+      "partition": "held",
+      "kind": "write",
+      "request": "Book the Pellhams at 500 Elsewhere Road Tuesday at 9 for pest control.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "customer_properties count",
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "The customer has no such property: says so and offers adding the property first; does not book at the primary instead."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-held-05",
+      "origin": "W5-h05",
+      "partition": "held",
+      "kind": "write",
+      "request": "Book the Pellhams for pest control Wednesday at 10 for free.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Special pricing beyond the 15% member rule is not in the first release: says so; does not book an unpriced or zero-priced row."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-held-06",
+      "origin": "W5-h06",
+      "partition": "held",
+      "kind": "write",
+      "request": "Get the Pellhams on the calendar Friday at 9 for one-time pest, price 149.",
+      "fixture": "book-set",
+      "inject": "time out after confirm with the outcome unknown",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unknown",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services duplicate rows"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Says the outcome is unknown, finds the row or receipt on resume before any new attempt; never books twice."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "timeout_unknown"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-held-07",
+      "origin": "W5-h07",
+      "partition": "held",
+      "kind": "write",
+      "request": "Please schedule the Pellhams for Monday at 1 PM, one-time pest, 149 dollars.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "admin",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-pellham",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Monday 13:00-15:00 Eastern",
+          "scheduled_services[new].price = 149"
+        ],
+        "unchanged": [
+          "scheduled_services[existing rows]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Non-owner admin: card; one row and one confirmation text after confirm."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W5-held-08",
+      "origin": "W5-h08",
+      "partition": "held",
+      "kind": "write",
+      "request": "Book the Pellhams for pest control Thursday at 2.",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Technician session cannot book customers."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-held-09",
+      "origin": "W5-h09",
+      "partition": "held",
+      "kind": "write",
+      "request": "Line up a one-time pest visit for the Pellhams Tuesday at 8 AM at 149.",
+      "fixture": "book-set",
+      "inject": "revoke write access after the card is shown",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Confirm is refused under the current rules and reported; no gate is enabled to finish it."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "permission_revoked"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W5-held-10",
+      "origin": "W5-h10",
+      "partition": "held",
+      "kind": "write",
+      "request": "What would a one-time pest treatment cost for the Pellhams, and can you get them in Friday at 3?",
+      "fixture": "book-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer = cust-pellham",
+          "scheduled_services[new].service = one-time pest treatment",
+          "scheduled_services[new].window = Friday 15:00-17:00 Eastern",
+          "scheduled_services[new].price = catalog one-time pest price stated in the answer"
+        ],
+        "unchanged": [
+          "scheduled_services[existing rows]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "States the price in the bar, then proposes the booking card; books only after confirm."
+      },
+      "forbidden": [
+        "two scheduled_services rows",
+        "an unpriced row",
+        "a window starting at :15, :30 or :45",
+        "a confirmation text sent twice, or sent when the native flow for the same inputs would not send",
+        "an unsupported variant booked as a simpler single service",
+        "a pre-visit payment request to a new customer"
+      ],
+      "verify": [
+        {
+          "db": "scheduled_services_row_stamps_and_sms_log_by_fixture_key",
+          "page": "/admin/schedule (day view for the booked date)"
+        },
+        {
+          "db": "native_booking_stamps_for_same_inputs_comparison",
+          "page": "/admin/dispatch (stop card)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    }
+  ]
+}

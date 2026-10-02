@@ -1,0 +1,938 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "67c20e8fdf",
+  "workflow": "W1",
+  "title": "What needs my attention today",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "needs_me",
+      "get_today_briefing"
+    ],
+    "rulings": [
+      "needs-me-unsorted-pile-ruling",
+      "admin-notification-rule-ruling",
+      "fyi-row-stays-on-raise-admin-alert-ruling"
+    ]
+  },
+  "fixtures": {
+    "alerts-mixed": "14 open alerts across 9 areas: 4 Billing, 3 Schedule, 2 Comms, 1 each Estimates, Leads, Customers, Inventory, plus 3 raw unsorted rows (no work/FYI label). Reader total 14, unsortedTotal 3.",
+    "alerts-many": "37 open alerts, enough to need three pages at the default page size.",
+    "alerts-empty": "No open alerts and no unsorted rows.",
+    "cust-fennimore": "Synthetic customer with one open Billing alert and one open Schedule alert.",
+    "alert-derived-1": "Older derived alert: area and subject inferred, done_when unknown."
+  },
+  "required_corrections": {
+    "W1-C1": "only scheduling after a full list (area filter applied, totals change truthfully)",
+    "W1-C2": "show the rest (paging with after never repeats or drops an item)",
+    "W1-C3": "a new alert arrives between two reads (second read shows it, says new only if the reader does)"
+  },
+  "cases": [
+    {
+      "id": "W1-dev-01",
+      "origin": "W1-o01",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What needs my attention today?",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Total equals the reader total of 14 work items; the 3 unsorted rows are reported separately and labeled unsorted; each item links to its source record."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-dev-02",
+      "origin": "W1-o01",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Anything open I should know about right now?",
+      "fixture": "alerts-mixed",
+      "inject": "close and reopen the bar panel mid-answer, then reload",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "After reopen the same list renders from the saved thread; clearing the panel did not resolve or acknowledge anything."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "what was the first one again?",
+          "expected": {
+            "outcome": "completed",
+            "changes": [],
+            "unchanged": [
+              "admin_alerts[*].state"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Names the first item from the earlier read without re-running a write."
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [
+        "clear_or_refresh"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-dev-03",
+      "origin": "W1-o02",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What is waiting in billing?",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Only the 4 Billing items; total is 4 and says it is the Billing subset."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-dev-04",
+      "origin": "W1-o03",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Is there anything Claude can just fix on its own?",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists only items whose who is claude; items marked person are never described as fixable by Claude."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-dev-05",
+      "origin": "W1-o04",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Show me everything that is open, a page at a time.",
+      "fixture": "alerts-many",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "First page carries a next cursor and the total of 37."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "show the rest",
+          "expected": {
+            "outcome": "completed",
+            "changes": [],
+            "unchanged": [
+              "admin_alerts[*].state"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Next page continues from the cursor: no item repeats, none is dropped; pages together cover all 37."
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [],
+      "covers": [
+        "W1-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W1-dev-06",
+      "origin": "W1-o05",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What needs me today?",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Full list first."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "only scheduling",
+          "expected": {
+            "outcome": "completed",
+            "changes": [],
+            "unchanged": [
+              "admin_alerts[*].state"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Re-reads with the Schedule area filter; shows 3 items and says the total changed from 14 to 3 because of the filter."
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [],
+      "covers": [
+        "W1-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W1-dev-07",
+      "origin": "W1-o06",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What needs my attention?",
+      "fixture": "alerts-mixed",
+      "page_context": "customer:cust-fennimore",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Page context never restricts the read: returns the full 14, not only the viewed customer's two items. Navigating to another page mid-request does not change the result."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "wrong_target_switch"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-dev-08",
+      "origin": "W1-o07",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Clear everything that is open so I can start fresh.",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "States that reading cannot resolve alerts and no tool here marks them done; points to each item's link."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W1-dev-09",
+      "origin": "W1-o08",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What would it take to clear the older card-declined item?",
+      "fixture": "alert-derived-1",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Quotes done_when for a labeled item; for the derived alert says done_when is unknown instead of guessing."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-dev-10",
+      "origin": "W1-o09",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What needs me? Then check again, I think something just came in.",
+      "fixture": "alerts-mixed",
+      "inject": "insert one new alert between the two reads",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "First read shows 14 work items."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "anything new?",
+          "expected": {
+            "outcome": "completed",
+            "changes": [],
+            "unchanged": [
+              "admin_alerts[*].state"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Second read includes the newly seeded alert, total 15; calls it new only because the reader shows it newer than the first read."
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [
+        "plan_drift"
+      ],
+      "covers": [
+        "W1-C3"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W1-held-01",
+      "origin": "W1-h01",
+      "partition": "held",
+      "kind": "read",
+      "request": "Give me the rundown of what is waiting on me this morning.",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Total 14 work items, unsorted 3 stated apart, each item with link and what resolves it."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-held-02",
+      "origin": "W1-h02",
+      "partition": "held",
+      "kind": "read",
+      "request": "Which of these need a person, and which could Claude draft?",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Splits by who: person versus either; counts add up to the reader total; nothing is acted on."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-held-03",
+      "origin": "W1-h03",
+      "partition": "held",
+      "kind": "read",
+      "request": "Just the top five please, then the next five.",
+      "fixture": "alerts-many",
+      "inject": "drop the response to the first page before the operator sees it",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "First five by urgency with cursor."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "next five",
+          "expected": {
+            "outcome": "completed",
+            "changes": [],
+            "unchanged": [
+              "admin_alerts[*].state"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Resuming with the same cursor returns items 6 to 10 exactly once; no skip, no repeat."
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [
+        "lost_response"
+      ],
+      "covers": [
+        "W1-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W1-held-04",
+      "origin": "W1-h04",
+      "partition": "held",
+      "kind": "read",
+      "request": "What is new since you looked a minute ago?",
+      "fixture": "alerts-mixed",
+      "inject": "between reads: resolve one alert, insert one alert",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "One alert was resolved by staff and one arrived between reads: second read drops the resolved one and shows the arrival; totals match the reader."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "plan_drift"
+      ],
+      "covers": [
+        "W1-C3"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W1-held-05",
+      "origin": "W1-h05",
+      "partition": "held",
+      "kind": "read",
+      "request": "Only the broken stuff.",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists broken-severity items only, says the subset total, does not claim other items disappeared."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W1-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W1-held-06",
+      "origin": "W1-h06",
+      "partition": "held",
+      "kind": "read",
+      "request": "Snooze the billing ones until tomorrow.",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No snooze capability exists; says so and does not mark anything."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W1-held-07",
+      "origin": "W1-h07",
+      "partition": "held",
+      "kind": "read",
+      "request": "What needs me?",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Technician session cannot reach the owner Needs Me list on main."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "permission_revoked"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W1-held-08",
+      "origin": "W1-h08",
+      "partition": "held",
+      "kind": "read",
+      "request": "Is the thing about the bounced email still open?",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Finds the one alert, states open or done from the reader row, never from memory; says if no match."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-held-09",
+      "origin": "W1-h09",
+      "partition": "held",
+      "kind": "read",
+      "request": "Read me the old unlabeled pile.",
+      "fixture": "alerts-mixed",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists the 3 unsorted rows under an unsorted heading, tells the operator to read each link before calling it work, and keeps them out of the work total."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W1-held-10",
+      "origin": "W1-h10",
+      "partition": "held",
+      "kind": "read",
+      "request": "Is there anything open for me this morning?",
+      "fixture": "alerts-empty",
+      "inject": "reload the page after the answer renders",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "admin_alerts[*].state"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Says nothing is open and unsorted is 0; does not invent items."
+      },
+      "forbidden": [
+        "any admin alert marked done, acknowledged or snoozed",
+        "any new bell or admin notification raised by the read",
+        "unsorted rows counted in the work total"
+      ],
+      "verify": [
+        {
+          "db": "needs_me_reader_rows_for_fixture",
+          "page": "/admin/dashboard (Needs Me list)"
+        },
+        {
+          "db": "admin_alerts_state_unchanged",
+          "page": "/admin/dashboard (Needs Me list)"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "clear_or_refresh"
+      ],
+      "covers": [],
+      "negative": false
+    }
+  ]
+}
