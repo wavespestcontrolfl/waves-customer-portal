@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U;
   const inv = {};
   const tokens = [];
 
@@ -77,7 +77,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       payment_reference: 'CHK-1001', payment_recorded_by: 'Synthetic Operator', payment_recorded_at: new Date() });
     await db('payments').insert({ customer_id: A, payment_date: day(-29), amount: 120, status: 'paid', description: `Invoice ${paid.invoice_number} — check (CHK-1001)` });
     await invoice('voided', A, { total: 77, status: 'void' });
-    await invoice('processing', A, { total: 55, status: 'processing' });
+    await invoice('processing', A, { total: 55, status: 'processing', payment_method: 'us_bank_account' });
     // Ordinary collectible invoices.
     const credited = await invoice('credited', A, { total: 150, credit_applied: 50, due_date: day(15) });
     await db('payment_plans').insert({ customer_id: A, invoice_id: credited.id, total_balance: 100, payment_amount: 25, payment_frequency: 'weekly', plan_start_date: day(0), next_payment_date: day(7) });
@@ -104,19 +104,35 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       superseded_by_payment_id: replacement.id || replacement, metadata: json({ invoice_id: failSup.id, ambiguous_outcome: true }) });
     // A saved-card ambiguity parks the invoice as `processing` and leaves the attempt; an ordinary processing invoice is an ACH in flight.
     Y = await customer(`Parked${run}`, `Processing${run}`);
-    await invoice('y_ach', Y, { total: 90, status: 'processing' });
+    await invoice('y_ach', Y, { total: 90, status: 'processing', payment_method: 'us_bank_account' });
     const parked = await invoice('y_parked', Y, { total: 35, status: 'processing' });
     await db('stripe_invoice_charge_attempts').insert({ invoice_id: parked.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-parked-${run}`, status: 'claimed', amount: 35, submitted_at: new Date() });
     // An ordinary ACH debit in flight: its attempt stays unresolved while the PaymentIntent is processing, and a
     // `processing` payments row records it. A received deposit not yet applied to its invoice (the third pay-path fence).
     X = await customer(`Bank${run}`, `Debit${run}`);
-    for (const [key, status] of [['x_ach_sent', 'sent'], ['x_ach_proc', 'processing']]) {
-      const row = await invoice(key, X, { total: 60, status, stripe_payment_intent_id: `pi_ach_${key}_${run}` });
+    // Bank tender evidence: x_ach_sent from its payments row (metadata.payment_method), x_ach_proc from the invoice's payment_method.
+    for (const [key, status, extra, tender] of [['x_ach_sent', 'sent', {}, { payment_method: 'us_bank_account' }], ['x_ach_proc', 'processing', { payment_method: 'us_bank_account' }, {}]]) {
+      const row = await invoice(key, X, { total: 60, status, stripe_payment_intent_id: `pi_ach_${key}_${run}`, ...extra });
       await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-${key}-${run}`, status: 'ambiguous', amount: 60,
         stripe_payment_intent_id: `pi_ach_${key}_${run}`, submitted_at: new Date() });
       await db('payments').insert({ customer_id: X, payment_date: day(0), amount: 60, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_ach_${key}_${run}`,
-        description: 'ACH in flight', metadata: json({ invoice_id: row.id }) });
+        description: 'ACH in flight', metadata: json({ invoice_id: row.id, ...tender }) });
     }
+    // A processing CARD intent (chargeInvoiceWithSavedCard maps every non-succeeded intent to processing), or a tender nobody recorded, is not an ACH.
+    V = await customer(`Card${run}`, `Incomplete${run}`);
+    const vCard = await invoice('v_card', V, { total: 25, status: 'processing', payment_method: 'card', stripe_payment_intent_id: `pi_v_card_${run}` });
+    await invoice('v_unknown', V, { total: 26, status: 'processing' });
+    const vSent = await invoice('v_sent_card', V, { total: 27, stripe_payment_intent_id: `pi_v_sent_${run}` });
+    for (const [row, pi] of [[vCard, `pi_v_card_${run}`], [vSent, `pi_v_sent_${run}`]]) {
+      await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_card_synth', idempotency_key: `k-${pi}`, status: 'ambiguous', amount: 25, stripe_payment_intent_id: pi, submitted_at: new Date() });
+      await db('payments').insert({ customer_id: V, payment_date: day(0), amount: 25, status: 'processing', processor: 'stripe', payment_method_type: 'card', stripe_payment_intent_id: pi, description: 'Card intent incomplete', metadata: json({ invoice_id: row.id }) });
+    }
+    // Bank tender evidence from the attempt alone: its payment method is a us_bank_account; the processing row records no tender.
+    U = await customer(`Attempt${run}`, `Tender${run}`);
+    await db('payment_methods').insert({ customer_id: U, method_type: 'us_bank_account', stripe_payment_method_id: `pm_bank_${run}` });
+    const uRow = await invoice('u_attempt_tender', U, { total: 33, stripe_payment_intent_id: `pi_u_${run}` });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: uRow.id, stripe_payment_method_id: `pm_bank_${run}`, idempotency_key: `k-u-${run}`, status: 'ambiguous', amount: 33, stripe_payment_intent_id: `pi_u_${run}`, submitted_at: new Date() });
+    await db('payments').insert({ customer_id: U, payment_date: day(0), amount: 33, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_u_${run}`, description: 'In flight', metadata: json({ invoice_id: uRow.id }) });
     // ACH evidence accounts for the attempt only: an unresolved orphan charge, or a failed row flagged ambiguous, still holds.
     W2 = await customer(`Mixed${run}`, `Holds${run}`);
     for (const key of ['w2_orphan', 'w2_failamb', 'w2_dbfail']) {
@@ -419,6 +435,41 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.z_sibling.id });
     expect(detail.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true });
     expect(json(detail)).not.toContain(`pi_attached_${run}`);
+  });
+
+  test('bank_payment_processing needs bank-tender evidence: a processing card intent, or an unknown tender, needs reconciliation ("a card payment did not complete")', async () => {
+    const list = await read('get_customer_invoices', { customer_id: V, limit: 50 });
+    // Fence clear and no bank tender (nothing recorded): the card-incomplete reason. With an unresolved attempt the fence's own reason leads.
+    expect(by(list, 'v_unknown')).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, bank_payment_processing: false, reason: 'a card payment did not complete — check the Invoices page' });
+    expect(by(list, 'v_card')).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, bank_payment_processing: false });
+    expect(by(list, 'v_card').reason).toMatch(/unconfirmed outcome \(Stripe may have charged it\) — needs reconciliation — check the Invoices page/);
+    // A non-processing invoice whose attempt and processing row are a card is no bank debit either.
+    expect(by(list, 'v_sent_card')).toMatchObject({ collectible: false, needs_reconciliation: true, bank_payment_processing: false });
+    expect(list.account_summary.processing).toMatchObject({ count: 2, bank_payment_in_flight: 0, needs_reconciliation: 2 });
+    expect(list.account_summary.needs_reconciliation_count).toBe(3);
+    const byAttempt = await read('get_customer_invoices', { customer_id: U, limit: 50 });
+    expect(by(byAttempt, 'u_attempt_tender')).toMatchObject({ bank_payment_processing: true, needs_reconciliation: false });
+    // The same classifier the pay paths use reads the invoice: a bank-tender processing invoice stays in flight.
+    const rcof = require('../services/recurring-card-on-file');
+    expect(rcof.classifySavedMethodChargeInvoice({ status: 'processing', payment_method: 'us_bank_account' })).toBe('bank_processing');
+    expect(rcof.classifySavedMethodChargeInvoice(inv.v_card)).toBe('card_incomplete');
+    expect(by(await read('get_customer_invoices', { customer_id: Y, limit: 50 }), 'y_ach')).toMatchObject({ bank_payment_processing: true, needs_reconciliation: false });
+  });
+
+  test('every invoice fact comes from the row the fence re-read, so the breakdown agrees with the balance (list and detail)', async () => {
+    const payCombined = require('../services/pay-combined');
+    const base = await db('invoices').where({ id: inv.credited.id }).first();
+    const original = payCombined.memberCollectionPending;
+    const spy = jest.spyOn(payCombined, 'memberCollectionPending').mockImplementation(async (invoice, options) => (
+      String(invoice.id) === String(base.id) ? { row: { ...base, credit_applied: 0, total: 150, title: 'Refreshed title' } } : original(invoice, options)));
+    try {
+      const item = by(await read('get_customer_invoices', { customer_id: A, limit: 50 }), 'credited');
+      expect(item).toMatchObject({ total: 150, credit_applied: 0, balance_due: 150, amount_due_after_credit: 150, title: 'Refreshed title' });
+      expect(item.payment_plan).toMatchObject({ payment_amount: 25 });
+      const detail = await read('get_invoice_detail', { invoice_id: inv.credited.id });
+      expect(detail.invoice).toMatchObject({ total: 150, credit_applied: 0, balance_due: 150, title: 'Refreshed title' });
+      expect(detail.discounts.account_credit_applied).toBe(0);
+    } finally { spy.mockRestore(); }
   });
 
   test('ACH evidence never clears an unrelated hold: an orphan charge, an ambiguous failed row or a charged-but-unrecorded intent stays needs_reconciliation', async () => {

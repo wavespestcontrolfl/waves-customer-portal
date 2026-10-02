@@ -200,6 +200,7 @@ async function resolveBillingCustomer(input, actionContext) {
 // ─── the payment fences ─────────────────────────────────────────────
 
 const RECONCILE_POINTER = 'needs reconciliation — check the Invoices page';
+const CARD_INCOMPLETE_REASON = 'a card payment did not complete — check the Invoices page';
 const ATTACHED_INTENT_REASON = 'a payment was started on this invoice and its outcome is not confirmed here — check the Invoices page';
 const CHARGE_FENCE_REASONS = {
   STRIPE_AMBIGUOUS_OUTCOME: 'a saved-card charge has an unconfirmed outcome (Stripe may have charged it)',
@@ -219,22 +220,54 @@ const fenceReason = (message) => scrub(String(message || '').replace(/\bpi_[A-Za
 const held = (state, reason) => ({ collectible: false, needs_reconciliation: state === 'needs_reconciliation', state, reason, balance_due: null });
 const needsReconciliation = (reason) => held('needs_reconciliation', `${reason} — ${RECONCILE_POINTER}`);
 
-// Durable evidence of an ordinary bank (ACH) debit in flight: a unresolved attempt row is normal while the
-// PaymentIntent is processing (stripe.js savedCardAttemptOutcome keeps it open), and the payment is recorded
-// beforehand as a `processing` payments row for that PaymentIntent. Every PaymentIntent tied to the invoice (its
-// own and each unresolved attempt's) must be so recorded, and an attempt with no PaymentIntent is never one.
-async function bankPaymentProcessing(invoice, database) {
+// The tender that proves a bank (ACH) debit: only `us_bank_account` (the value the canonical classifier,
+// recurring-card-on-file.js classifySavedMethodChargeInvoice, reads from invoice.payment_method). A processing
+// card intent, or a tender nobody recorded, is never a bank payment.
+const BANK_TENDER = 'us_bank_account';
+const isBankTender = (tender) => String(tender || '') === BANK_TENDER;
+
+// Every PaymentIntent tied to the invoice (its own and each unresolved attempt's) and the processing payments rows
+// that record them, with each row's and attempt's tender. `unpaired` is true when an unresolved attempt has no
+// PaymentIntent (a charge that never produced one is never an ACH in flight).
+async function intentEvidence(invoice, database) {
   const intents = new Set(invoice.stripe_payment_intent_id ? [String(invoice.stripe_payment_intent_id)] : []);
-  const attempts = await database('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id }).whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at')
-    .select('stripe_payment_intent_id');
+  const attempts = await database('stripe_invoice_charge_attempts')
+    .leftJoin('payment_methods as pm', function methodOfAttempt() { this.on('pm.id', 'stripe_invoice_charge_attempts.payment_method_id').orOn('pm.stripe_payment_method_id', 'stripe_invoice_charge_attempts.stripe_payment_method_id'); })
+    .where({ 'stripe_invoice_charge_attempts.invoice_id': invoice.id }).whereIn('stripe_invoice_charge_attempts.status', ['claimed', 'ambiguous']).whereNull('stripe_invoice_charge_attempts.resolved_at')
+    .select('stripe_invoice_charge_attempts.stripe_payment_intent_id', 'pm.method_type as tender');
+  let unpaired = false;
   for (const attempt of attempts) {
-    if (!attempt.stripe_payment_intent_id) return false;
-    intents.add(String(attempt.stripe_payment_intent_id));
+    if (attempt.stripe_payment_intent_id) intents.add(String(attempt.stripe_payment_intent_id));
+    else unpaired = true;
   }
-  if (!intents.size) return false;
-  const rows = await database('payments').where({ customer_id: invoice.customer_id, status: 'processing' }).whereIn('stripe_payment_intent_id', [...intents]).select('stripe_payment_intent_id');
-  const covered = new Set(rows.map((row) => String(row.stripe_payment_intent_id)));
-  if (![...intents].every((intent) => covered.has(intent))) return false;
+  const rows = intents.size
+    ? await database('payments').leftJoin('payment_methods as pm', 'pm.id', 'payments.payment_method_id')
+      .where({ 'payments.customer_id': invoice.customer_id, 'payments.status': 'processing' }).whereIn('payments.stripe_payment_intent_id', [...intents])
+      .select('payments.stripe_payment_intent_id', 'payments.payment_method_type', 'payments.metadata', 'pm.method_type as live_method_type')
+    : [];
+  return { intents, attempts, rows, unpaired };
+}
+
+// Bank-tender evidence from any durable source the pay paths record: the invoice's payment_method, a processing
+// payments row's method (the live payment_methods join, then its snapshot, then metadata.payment_method), or the
+// unresolved attempt's own tender.
+function hasBankTender(invoice, { attempts, rows }) {
+  if (isBankTender(invoice.payment_method)) return true;
+  const rowTender = (row) => row.live_method_type || row.payment_method_type || (parseJson(row.metadata) || {}).payment_method;
+  if (rows.length && rows.every((row) => isBankTender(rowTender(row)))) return true;
+  return attempts.length > 0 && attempts.every((attempt) => isBankTender(attempt.tender));
+}
+
+// Durable evidence of an ordinary bank (ACH) debit in flight: an unresolved attempt is normal while the
+// PaymentIntent is processing (stripe.js savedCardAttemptOutcome keeps it open), recorded beforehand as a
+// `processing` payments row. Every PaymentIntent must be so recorded, the tender must be a bank account, and no
+// other hold may sit behind the attempt.
+async function bankPaymentProcessing(invoice, database) {
+  const evidence = await intentEvidence(invoice, database);
+  if (evidence.unpaired || !evidence.intents.size) return false;
+  const covered = new Set(evidence.rows.map((row) => String(row.stripe_payment_intent_id)));
+  if (![...evidence.intents].every((intent) => covered.has(intent))) return false;
+  if (!hasBankTender(invoice, evidence)) return false;
   // The evidence accounts only for the attempt: the charge fence stops at the first hold it finds, so the two
   // holds behind it (an unresolved orphan charge, a failed row flagged ambiguous: the fence's own later queries)
   // must be absent too before the invoice reads as an ordinary bank payment.
@@ -261,7 +294,12 @@ async function processingStatusOutcome(invoice, database, terminalError) {
     if (!CHARGE_FENCE_REASONS[fenceErr.code]) throw fenceErr;
     return await heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[fenceErr.code], { allowBank: fenceErr.code !== 'STRIPE_CHARGED_DB_FAILED' });
   }
-  return held('bank_payment_processing', fenceReason(terminalError.message));
+  // The charge fence is clear. `processing` is a bank debit only with bank-tender evidence: the canonical
+  // classifier (recurring-card-on-file.js) reads a non-bank processing invoice as an unfinished CARD intent
+  // (chargeInvoiceWithSavedCard maps every non-succeeded intent to processing).
+  const classified = require('../recurring-card-on-file').classifySavedMethodChargeInvoice(invoice);
+  if (classified === 'bank_processing' || hasBankTender(invoice, await intentEvidence(invoice, database))) return held('bank_payment_processing', fenceReason(terminalError.message));
+  return held('needs_reconciliation', CARD_INCOMPLETE_REASON);
 }
 
 /**
@@ -328,8 +366,13 @@ async function fenceAll(invoices) {
 // THE one place a due-style amount leaves the reader. Whatever reads as "owed" (the balance, the amount due after
 // credit, a payment plan's installment and remaining balance) is stated only for a collectible invoice and is
 // null otherwise; total and credit applied are document facts and stay.
-function projectDue(listedRow, fence, today) {
-  const row = fence.row || listedRow;
+// ONE snapshot per invoice: the row the collection fence re-read overrides the listed row field by field (the
+// list's joined columns, such as the active payment plan, are kept), and EVERY invoice fact and the due
+// projection below come from it, so the document breakdown always agrees with the balance.
+function effectiveRow(listedRow, fence) {
+  return fence.row ? { ...listedRow, ...fence.row } : listedRow;
+}
+function projectDue(row, fence, today) {
   return {
     amount_due_after_credit: fence.collectible ? invoiceAmountDue(row) : null,
     collectible: fence.collectible,
@@ -474,7 +517,8 @@ async function accountSummary(InvoiceService, customer, today) {
 }
 
 // `fence` is the invoice's invoiceCollectibility() verdict: the balance is stated only when it is collectible.
-function invoiceItem(row, today, fence, heldIds) {
+function invoiceItem(listedRow, today, fence, heldIds) {
+  const row = effectiveRow(listedRow, fence);
   return {
     id: row.id,
     invoice_number: row.invoice_number,
@@ -673,63 +717,64 @@ async function getInvoiceDetail(input, actionContext) {
 
   const today = etDateString();
   const fence = await invoiceCollectibility(invoice);
+  const facts = effectiveRow(invoice, fence);
   const recorded = await loadRecordedPayments(customer.id, invoice);
   const plans = await db('payment_plans').where({ invoice_id: invoice.id }).orderBy('created_at', 'desc').limit(5)
     .select('id', 'status', 'payment_amount', 'payment_frequency', 'plan_start_date', 'next_payment_date', 'total_balance', 'created_at', 'completed_at', 'cancelled_at');
   const hold = await readDisputeHold(customer.id);
 
   let prepayTerm = null;
-  const termId = invoice.annual_prepay_term_id || invoice.annual_prepay_covered_term_id;
+  const termId = facts.annual_prepay_term_id || facts.annual_prepay_covered_term_id;
   if (termId) {
     prepayTerm = await db('annual_prepay_terms').where({ id: termId }).first('id', 'status', 'term_start', 'term_end', 'prepay_amount');
   }
 
-  const lines = lineItems(invoice.line_items);
+  const lines = lineItems(facts.line_items);
   const unknowns = [];
   if (hold.unknown) unknowns.push(hold.unknown);
   if (recorded.truncated) unknowns.push('More payment rows are tied to this invoice than were read: the newest are shown.');
 
   return {
     invoice: {
-      id: invoice.id,
-      invoice_number: invoice.invoice_number,
-      title: scrub(invoice.title, 160),
-      status: invoice.status,
-      service_type: invoice.service_type || null,
-      service_date: dateOnly(invoice.service_date),
-      created_at: iso(invoice.created_at),
-      sent_at: iso(invoice.sent_at),
-      viewed_at: iso(invoice.viewed_at),
-      due_date: dateOnly(invoice.due_date),
-      paid_at: iso(invoice.paid_at),
-      subtotal: money(invoice.subtotal),
-      discount_amount: money(invoice.discount_amount) || 0,
-      discount_label: scrub(invoice.discount_label, 120),
-      tax_rate: invoice.tax_rate === null || invoice.tax_rate === undefined ? null : Number(invoice.tax_rate),
-      tax_amount: money(invoice.tax_amount) || 0,
-      total: money(invoice.total),
-      credit_applied: money(invoice.credit_applied) || 0,
-      ...projectDue(invoice, fence, today),
-      payer_billed: isPayerBilled(invoice),
-      payment_method: invoice.payment_method || null,
-      payment_reference: scrub(invoice.payment_reference, 120),
-      payment_recorded_by: scrub(invoice.payment_recorded_by, 80),
-      payment_recorded_at: iso(invoice.payment_recorded_at),
-      archived: Boolean(invoice.archived_at),
+      id: facts.id,
+      invoice_number: facts.invoice_number,
+      title: scrub(facts.title, 160),
+      status: facts.status,
+      service_type: facts.service_type || null,
+      service_date: dateOnly(facts.service_date),
+      created_at: iso(facts.created_at),
+      sent_at: iso(facts.sent_at),
+      viewed_at: iso(facts.viewed_at),
+      due_date: dateOnly(facts.due_date),
+      paid_at: iso(facts.paid_at),
+      subtotal: money(facts.subtotal),
+      discount_amount: money(facts.discount_amount) || 0,
+      discount_label: scrub(facts.discount_label, 120),
+      tax_rate: facts.tax_rate === null || facts.tax_rate === undefined ? null : Number(facts.tax_rate),
+      tax_amount: money(facts.tax_amount) || 0,
+      total: money(facts.total),
+      credit_applied: money(facts.credit_applied) || 0,
+      ...projectDue(facts, fence, today),
+      payer_billed: isPayerBilled(facts),
+      payment_method: facts.payment_method || null,
+      payment_reference: scrub(facts.payment_reference, 120),
+      payment_recorded_by: scrub(facts.payment_recorded_by, 80),
+      payment_recorded_at: iso(facts.payment_recorded_at),
+      archived: Boolean(facts.archived_at),
     },
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     line_items: lines,
     discounts: {
-      document_discount: { amount: money(invoice.discount_amount) || 0, label: scrub(invoice.discount_label, 120) },
+      document_discount: { amount: money(facts.discount_amount) || 0, label: scrub(facts.discount_label, 120) },
       discount_lines: lines.filter((line) => line.is_discount),
-      account_credit_applied: money(invoice.credit_applied) || 0,
+      account_credit_applied: money(facts.credit_applied) || 0,
     },
     recorded_payments: recorded.payments,
     recorded_payments_note: 'Informational: the payments-table rows tied to this invoice, with no verdict on whether it was paid or what is owed. collectible and balance_due decide that.',
     payment_plan: paymentPlanDetail(plans, fence),
     dispute_hold: hold,
     annual_prepay: termId ? {
-      role: invoice.annual_prepay_term_id ? 'prepay_invoice' : 'covered_by_prepay_term',
+      role: facts.annual_prepay_term_id ? 'prepay_invoice' : 'covered_by_prepay_term',
       term_id: termId,
       term_status: prepayTerm ? prepayTerm.status : null,
       term_start: prepayTerm ? dateOnly(prepayTerm.term_start) : null,
