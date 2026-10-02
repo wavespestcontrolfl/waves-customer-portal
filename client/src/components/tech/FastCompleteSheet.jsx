@@ -459,7 +459,9 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     routedServiceKey: service?.routedServiceKey,
     reportFlow,
   });
-  const submission = useFastCompleteSubmit({ base, request });
+  // Only the report flow renders the confirmable prompts (the edited-report
+  // heads-up, a promise changed since the report was written).
+  const submission = useFastCompleteSubmit({ base, request, confirmable: reportFlow });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
   // Another dialog a sheet opens over itself (the report flow's spray

@@ -34,10 +34,13 @@ const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_pay
 const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
 // The confirmable 409s and the body flag that sends each one through.
 const CONFIRM_FLAGS = { report_rules_review: 'reportRulesConfirmed', promise_marks_changed: 'promiseMarksConfirmed' };
-function completionFailureOutcome(err) {
+// Only a sheet that renders the prompt (`confirmable`, the report flow) gets
+// the confirm outcome; every other consumer keeps showing the server's
+// message, exactly as before it existed (codex local r19 on #5538).
+function completionFailureOutcome(err, { confirmable = false } = {}) {
   const status = Number(err?.status);
   if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
-  if (status === 409 && CONFIRM_FLAGS[err?.code]) return 'confirm';
+  if (confirmable && status === 409 && CONFIRM_FLAGS[err?.code]) return 'confirm';
   if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
   if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
   return 'terminal';
@@ -61,7 +64,7 @@ function genIdempotencyKey() {
 }
 
 // One completion attempt at a time, settled into the four outcomes above.
-export default function useFastCompleteSubmit({ base, request }) {
+export default function useFastCompleteSubmit({ base, request, confirmable = false }) {
   const keyRef = useRef(null);
   if (!keyRef.current) keyRef.current = genIdempotencyKey();
   const pendingBodyRef = useRef(null);
@@ -90,7 +93,7 @@ export default function useFastCompleteSubmit({ base, request }) {
       setSubmitting(false);
       inFlight.current = false;
     } catch (err) {
-      const outcome = completionFailureOutcome(err);
+      const outcome = completionFailureOutcome(err, { confirmable });
       pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' ? body : null;
       if (outcome === 'correctable') keyRef.current = genIdempotencyKey();
       if (outcome === 'saved') {
@@ -107,7 +110,7 @@ export default function useFastCompleteSubmit({ base, request }) {
       setSubmitting(false);
       inFlight.current = false;
     }
-  }, [base, request]);
+  }, [base, request, confirmable]);
 
   // Send the held body through with the confirmation the prompt asked for.
   const confirm = useCallback((summary) => {
