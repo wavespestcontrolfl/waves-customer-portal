@@ -4618,7 +4618,8 @@ Required details box (GATE_RESERVICE_DETAILS_REQUIRED, owner 2026-10-02:
 any text counts, a pest chip alone does not replace it): with the gate live,
 GET's `base` payload carries `detailsRequired: true` (bookable lanes only)
 and POST answers `400 { code: 'DETAILS_REQUIRED' }` for a missing, empty or
-whitespace-only `details` before any booking work. Gate off: the key is
+whitespace-only `details` once the token resolves (an unknown token stays the
+generic 404) and before any booking work. Gate off: the key is
 omitted and POST is byte-identical.
 Re-service photos (GATE_RESERVICE_PHOTOS, honoured only while
 GATE_VISIT_PREP_PHOTOS is also live): a successful POST's response carries

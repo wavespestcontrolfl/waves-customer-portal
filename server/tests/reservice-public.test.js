@@ -707,6 +707,21 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       }
     });
 
+    test('gate on: an unknown token with a blank box is still the generic 404', async () => {
+      gateState.reserviceDetailsRequired = true;
+      const saved = firstResults.customers;
+      firstResults.customers = null;
+      try {
+        const res = await callHandler(postHandler(), {
+          params: { token: 'a'.repeat(64) },
+          body: { date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest' },
+        });
+        expect(res.status).toHaveBeenCalledWith(404);
+      } finally {
+        firstResults.customers = saved;
+      }
+    });
+
     test('gate on: any text books', async () => {
       gateState.reserviceDetailsRequired = true;
       const arg = await postAndCapture({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' });

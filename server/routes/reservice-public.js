@@ -70,6 +70,7 @@ const { capacityEnabled } = require('../services/scheduling/policy');
 const { noStore } = require('../middleware/no-store');
 const { recordPageView } = require('../services/customer-page-views');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const {
   RESERVICE_LANES,
   reserviceSelfServeEnabled,
@@ -496,13 +497,6 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   const details = typeof req.body?.details === 'string'
     ? req.body.details.trim().slice(0, MAX_DETAILS_LENGTH)
     : '';
-  // Owner 2026-10-02: any text counts; a pest chip alone does not replace it.
-  if (detailsRequired() && !details) {
-    return res.status(400).json({
-      error: 'Tell us what you\'re seeing so your tech comes prepared.',
-      code: 'DETAILS_REQUIRED',
-    });
-  }
   // Gate off: ignored outright, regardless of what a crafted body sends.
   const requestedPests = pestChipsEnabled() ? normalizeRequestPests(req.body?.pests, lane) : null;
   const requestedPestLabels = requestedPests ? pestLabels(requestedPests, lane) : [];
@@ -510,6 +504,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   try {
     const customer = await loadByToken(req.params.token);
     if (!customer) return res.status(404).json({ error: 'Not found' });
+
+    // Owner 2026-10-02: any text counts; a pest chip alone does not replace
+    // it. Checked only after the token resolves, so an unknown token stays
+    // the generic 404 whatever the body holds.
+    if (detailsRequired() && !details) {
+      return res.status(400).json({
+        error: 'Tell us what you\'re seeing so your tech comes prepared.',
+        code: 'DETAILS_REQUIRED',
+      });
+    }
 
     const laneCatalog = await loadLaneCatalog();
     const { lanes, bookableLanes } = await resolveLaneState(customer, laneCatalog);
@@ -794,11 +798,13 @@ async function reloadReservicePhotoVisit(token, visitId, customerId, propertyId,
   );
 }
 
+// Same IPv6-safe key as the appointment page's upload limiter.
 const photosLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 6,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many attempts. Please try again in a minute.' },
 });
 
