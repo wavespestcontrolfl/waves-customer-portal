@@ -675,6 +675,41 @@ describe('complete and send', () => {
     await screen.findByTestId('fast-complete-sent');
   });
 
+  test('the completion carries the trace the report was judged against, for the server to re-check (Codex #5538)', async () => {
+    const zone = { linear_ft: 150, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.123Z' };
+    const traced = makeRequest({ facts: { ...FACTS, spray: 'perimeter' }, trace: { enabled: true, treatmentZone: zone } });
+    await openSheet(traced);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(traced.bodies('/complete')[0].traceSeen).toBe('2026-10-02T05:00:00.123Z');
+    cleanup();
+
+    const untraced = makeRequest();
+    await openSheet(untraced);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(untraced.bodies('/complete')[0]).toHaveProperty('traceSeen', null);
+    cleanup();
+
+    const off = makeRequest({ trace: { enabled: false, treatmentZone: null } });
+    await openSheet(off);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(off.bodies('/complete')[0]).not.toHaveProperty('traceSeen');
+  });
+
+  test('a trace changed on another device stops the send with the reason', async () => {
+    const request = makeRequest({ complete: [conflict('trace_changed', 'The trace changed since you checked it. Close this visit and reopen it to review the trace before completing.')] });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    expect(await screen.findByText('The trace changed since you checked it. Close this visit and reopen it to review the trace before completing.')).toBeTruthy();
+    expect(screen.queryByTestId('fast-complete-sent')).toBeNull();
+  });
+
   test('a refused removal shows why and keeps the hold', async () => {
     const request = makeRequest({
       trace: (path, options) => {

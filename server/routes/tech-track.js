@@ -1483,11 +1483,11 @@ router.post('/:id/treatment-zone', upload.fields([
       // unlocked): a move that commits in between is refused too.
       ...(Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId') ? { expectedPropertyId: payload.expectedPropertyId ?? null } : {}),
     }).catch((err) => {
-      if (err?.code === 'visit_property_changed') return { refused: err };
+      if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') return { refused: err };
       throw err;
     });
     if (row?.refused) {
-      return res.status(409).json({ error: row.refused.message, code: 'visit_property_changed' });
+      return res.status(409).json({ error: row.refused.message, code: row.refused.code });
     }
 
     logger.info(

@@ -20,10 +20,15 @@ const {
 } = require('../services/treatment-zone-maps');
 
 function makeKnex({ existing = null } = {}) {
-  const state = { inserted: null, conflictColumn: null };
+  const state = { inserted: null, conflictColumn: null, visitLocks: 0 };
   const knex = jest.fn(() => ({
     where: jest.fn(() => ({
       first: jest.fn(() => Promise.resolve(existing)),
+      // Every save locks the visit row first (the completion's lock).
+      forUpdate: () => {
+        state.visitLocks += 1;
+        return { first: () => Promise.resolve({ property_id: null, status: 'on_site' }) };
+      },
     })),
     insert: (record) => {
       state.inserted = record;
@@ -40,6 +45,7 @@ function makeKnex({ existing = null } = {}) {
     },
   }));
   knex.fn = { now: () => 'NOW()' };
+  knex.transaction = async (work) => work(knex);
   knex.state = state;
   return knex;
 }
@@ -290,7 +296,7 @@ describe('saveTreatmentZoneMap', () => {
 // Codex #5538: the Fast Complete report flow binds a trace to the property it
 // loaded the visit at, rechecked under the visit row's lock at the write.
 describe('saveTreatmentZoneMap bound to a property', () => {
-  function lockedKnex({ propertyId }) {
+  function lockedKnex({ propertyId, status = 'on_site' }) {
     const knex = makeKnex();
     const locks = [];
     knex.transaction = async (work) => {
@@ -300,7 +306,7 @@ describe('saveTreatmentZoneMap bound to a property', () => {
             where: () => ({
               forUpdate: () => {
                 locks.push(table);
-                return { first: () => Promise.resolve(propertyId === undefined ? null : { property_id: propertyId }) };
+                return { first: () => Promise.resolve(propertyId === undefined ? null : { property_id: propertyId, status }) };
               },
             }),
           };
@@ -335,13 +341,22 @@ describe('saveTreatmentZoneMap bound to a property', () => {
     expect(mockS3Send.mock.calls.some(([cmd]) => cmd.commandType === 'delete' && cmd.input.Key === put)).toBe(true);
   });
 
-  test('the same property writes inside the lock; no property bound writes as before', async () => {
+  test('the same property writes inside the lock; no property bound writes as before, under the same lock', async () => {
     const knex = lockedKnex({ propertyId: 'prop-1' });
     const row = await saveTreatmentZoneMap(args(knex, 'prop-1'));
     expect(knex.locks).toEqual(['scheduled_services']);
     expect(row.id).toBe('row-1');
     const plain = makeKnex();
     expect((await saveTreatmentZoneMap(args(plain, undefined))).id).toBe('row-1');
+    expect(plain.state.visitLocks).toBe(1);
+  });
+
+  test('a bound save on a completed visit is refused under the lock, with the upload removed (Codex #5538)', async () => {
+    const knex = lockedKnex({ propertyId: 'prop-1', status: 'completed' });
+    await expect(saveTreatmentZoneMap(args(knex, 'prop-1'))).rejects.toMatchObject({ code: 'visit_completed', statusCode: 409 });
+    expect(knex.state.inserted).toBeNull();
+    const put = mockS3Send.mock.calls.find(([cmd]) => cmd.commandType === 'put')[0].input.Key;
+    expect(mockS3Send.mock.calls.some(([cmd]) => cmd.commandType === 'delete' && cmd.input.Key === put)).toBe(true);
   });
 });
 

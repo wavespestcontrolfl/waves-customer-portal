@@ -110,6 +110,15 @@ describe('treatment-zone save bound to the loaded property', () => {
     expect(mockSave).toHaveBeenCalledWith(expect.objectContaining({ expectedPropertyId: 'prop-2' }));
   });
 
+  test('a completed visit refuses a bound save at the write (409 visit_completed)', async () => {
+    mockSave.mockRejectedValue(Object.assign(new Error('This visit is complete, so its trace stays on the report.'), { code: 'visit_completed', statusCode: 409 }));
+    await withServer(async (baseUrl) => {
+      const res = await saveTrace(baseUrl, { expectedPropertyId: 'prop-2' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'This visit is complete, so its trace stays on the report.', code: 'visit_completed' });
+    });
+  });
+
   test('a visit with no property matches a sheet that loaded none', async () => {
     mockFirst.mockImplementation(async () => ({
       id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', service_id: 'cat-1', service_type: 'Quarterly Pest Control', property_id: null,
@@ -159,5 +168,34 @@ describe('Remove the trace (DELETE, the report flow)', () => {
         expect(await res.json()).toEqual({ error: `refused: ${code}`, code });
       });
     }
+  });
+});
+
+// The completion re-checks the trace the report flow judged, under the visit
+// row lock every save also takes (pinned by source: the completion function
+// is too large for a unit harness, like the tip and blog freezes).
+describe('the completion re-checks the trace the report was judged against (Codex #5538)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+  const block = source.slice(source.indexOf('async function completeScheduledService('));
+
+  test('traceSeen is compared under the locked visit row, before any record write', () => {
+    const lock = block.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const check = block.indexOf('if (traceSeen !== undefined && lockedSvcRow) {');
+    expect(lock).toBeGreaterThan(0);
+    expect(check).toBeGreaterThan(lock);
+    expect(check).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
+    const body = block.slice(check, check + 700);
+    expect(body).toMatch(/sp\('treatment_zone_maps'\)[\s\S]*\.where\(\{ scheduled_service_id: svc\.id \}\)/);
+    expect(body).toMatch(/code: 'trace_changed'/);
+  });
+
+  test('a changed trace answers 409 trace_changed and marks the attempt failed', () => {
+    const at = block.indexOf("if (err && err.code === 'trace_changed') {");
+    expect(at).toBeGreaterThan(0);
+    const mapped = block.slice(at, at + 500);
+    expect(mapped).toMatch(/markCompletionAttemptFailed\(completionAttempt, err, db\)/);
+    expect(mapped).toMatch(/status: 409[\s\S]*code: 'trace_changed'/);
   });
 });

@@ -61,6 +61,13 @@ function normalizePathPoints(raw) {
   });
 }
 
+function visitCompletedError() {
+  return Object.assign(
+    operationalError('This visit is complete, so its trace stays on the report.', 409),
+    { code: 'visit_completed' },
+  );
+}
+
 function propertyChangedError() {
   return Object.assign(
     operationalError('This visit moved to another property. Close it and reopen it from the schedule.', 409),
@@ -68,17 +75,22 @@ function propertyChangedError() {
   );
 }
 
-// The visit must still be at the property the caller loaded it at, read
-// under its row lock at the write itself, so an office move that commits
-// after the route's own read is refused too (Codex #5538).
-async function assertVisitProperty(conn, scheduledServiceId, expectedPropertyId) {
+// Every save takes the visit row's lock, the one a completion holds while
+// it judges the trace (complete-scheduled-service.js, traceSeen), so a save
+// either lands before that read or waits for the completion (Codex #5538).
+// A caller that loaded the visit at a property (the Fast Complete report
+// flow) is refused, at the write itself, when the office has moved the visit
+// since or it is already completed: its trace was judged with the report.
+async function lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId) {
   const visit = await conn('scheduled_services')
     .where({ id: scheduledServiceId })
     .forUpdate()
-    .first('property_id');
+    .first('property_id', 'status');
+  if (expectedPropertyId === undefined) return;
   if (!visit || String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
     throw propertyChangedError();
   }
+  if (visit.status === 'completed') throw visitCompletedError();
 }
 
 // One visit's row: the keys it replaces, then the upsert.
@@ -114,7 +126,8 @@ async function saveTreatmentZoneMap({
   // Optional: the property the caller loaded the visit at (the Fast Complete
   // report flow). Checked under the visit row's lock at the write itself, so
   // an office move that commits after the route's read still refuses the
-  // save. Undefined (every other caller) writes exactly as before.
+  // save, and so does a completion. Undefined (every other caller) writes as
+  // before, under the same lock.
   expectedPropertyId,
   knex = db,
 }) {
@@ -201,16 +214,16 @@ async function saveTreatmentZoneMap({
     updated_at: knex.fn.now(),
   });
   const persist = async (conn) => {
-    if (expectedPropertyId !== undefined) await assertVisitProperty(conn, scheduledServiceId, expectedPropertyId);
+    await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId);
     return upsertZoneRow(conn, scheduledServiceId, buildRecord);
   };
 
   let saved;
   try {
-    saved = expectedPropertyId !== undefined ? await knex.transaction(persist) : await persist(knex);
+    saved = await knex.transaction(persist);
   } catch (err) {
     // A refused save leaves no orphaned upload behind (best effort).
-    if (err?.code === 'visit_property_changed') {
+    if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') {
       for (const key of [snapshotKey, maskKey].filter(Boolean)) {
         try {
           await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
@@ -263,12 +276,7 @@ async function deleteTreatmentZoneMap({ scheduledServiceId, actor, expectedPrope
     if (expectedPropertyId !== undefined && String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
       throw propertyChangedError();
     }
-    if (visit.status === 'completed') {
-      throw Object.assign(
-        operationalError('This visit is complete, so its trace stays on the report.', 409),
-        { code: 'visit_completed' },
-      );
-    }
+    if (visit.status === 'completed') throw visitCompletedError();
     const [row] = await trx('treatment_zone_maps')
       .where({ scheduled_service_id: scheduledServiceId })
       .del()

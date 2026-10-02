@@ -769,12 +769,15 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
 // the full form's customer text, pay link and review ask; a re-service never
 // gets a pay link or a review ask.
 function reportCompletionBody({
-  form, rows, draft, perimeterFeet, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
+  form, rows, draft, perimeterFeet, trace, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
 }) {
   const ratingSent = ratingAllowed && Number.isInteger(form.rating);
   return {
     visitOutcome: 'completed',
     ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
+    // The saved trace this report was judged against (null: none), for the
+    // server to re-check under the visit lock; only while tracing is on.
+    ...(trace.enabled ? { traceSeen: trace.zone?.updated_at ?? null } : {}),
     products: rows.filter((row) => row.active).map((row) => {
       const application = recordedApplication(row, draft.facts);
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
@@ -1027,7 +1030,7 @@ function ReportFlowForm({
     if (completeMissing.reason && !submission.hasPendingBody()) return;
     submission.submit(
       () => reportCompletionBody({
-        form, rows, draft, perimeterFeet, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
+        form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
       }),
       summary(),
     );

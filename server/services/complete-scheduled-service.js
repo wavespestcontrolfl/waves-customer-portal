@@ -2702,6 +2702,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // property, catalog service, type, date, address) — OPTIONAL. Sent by
       // the tech Fast Complete sheet; re-checked on the locked row below.
       expectedVisit = null,
+      // The saved trace the Fast Complete report flow judged the report
+      // against: its updated_at, or null for none — OPTIONAL. Undefined (every
+      // other caller) skips the check. Re-checked under the visit row lock.
+      traceSeen,
     } = completionInput.body;
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -3384,16 +3388,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // aborts the closeout (Codex #5516; waves-db failSoftRead).
         return failSoftRead(db, (k) => VisitPromises.staleVisitPromiseMarks(k, { customerId: svc.customer_id, marks: promiseMarks }), []);
       })().catch(() => []);
-      // Same as the edit heads-up: a same-key retry of a recorded attempt got
-      // past this check before its claim, and the marks it carries are applied
-      // after commit only where they still hold (the rest ring the office), so
-      // asking again would only send the tech back to a request the attempt's
-      // hash refuses (Codex #5538).
+      // Only a committed completion skips it (its report already went out).
+      // An uncommitted retry is asked again, even under the same key: the
+      // promise may have changed since that attempt failed, and its
+      // confirmation is outside the request hash (completion-attempts.js),
+      // so answering never strands the retry (codex local r15 on #5538).
       if (stalePromiseIds.length
-        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))
-        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCompletionAttemptForKey(
-          svc.id, completionInput.idempotencyKey || bodyIdempotencyKey, k,
-        ), true))) {
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: 409, body: {
           error: 'A promise you marked changed after the report was written (the office closed, reopened, reworded or moved it). The report may still mention it.',
           code: 'promise_marks_changed',
@@ -5664,6 +5665,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
           }
+          // The trace the report flow judged (Codex #5538): a trace saved or
+          // replaced since from another tab or device would publish a map the
+          // record was never judged against (a perimeter over spot
+          // treatments). Read under this row lock, which every trace save
+          // takes too (treatment-zone-maps.js), so a save either committed
+          // first and is seen here, or waits for this completion.
+          if (traceSeen !== undefined && lockedSvcRow) {
+            const traceNow = await trx.transaction(async (sp) => sp('treatment_zone_maps')
+              .where({ scheduled_service_id: svc.id })
+              .first('updated_at'));
+            const stamp = (value) => (value == null ? null : new Date(value).getTime());
+            if (stamp(traceSeen) !== stamp(traceNow?.updated_at)) {
+              throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
+            }
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -7783,6 +7799,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit changed since it was opened. Close and reopen it to review the current property before completing.',
             code: 'visit_identity_changed',
+          } });
+        }
+        if (err && err.code === 'trace_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'The trace changed since you checked it. Close this visit and reopen it to review the trace before completing.',
+            code: 'trace_changed',
           } });
         }
         if (err && err.code === 'issued_visit_rescheduled') {
