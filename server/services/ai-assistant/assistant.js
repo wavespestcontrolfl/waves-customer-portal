@@ -99,19 +99,25 @@ function laneExtras(lane) {
   };
 }
 
-function portalLane(channel) {
-  if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null };
+// `secondaryProperty`: the portal session is scoped to a non-primary saved
+// property (the route decides; anything but false withholds the re-service
+// button, which books at the primary address).
+function portalLane(channel, { secondaryProperty = true } = {}) {
+  if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null, context: {} };
   const gates = require('../../config/feature-gates');
-  // Two independent gates: the payment card and the past-visit facts.
+  // Three independent gates: the payment card, the past-visit facts and the
+  // re-service offer.
   const payments = gates.portalChatFactsLive();
   const visits = gates.portalChatVisitFactsLive();
+  const reservice = gates.portalChatReserviceLive();
   return {
-    prompt: PORTAL_PROMPTS[`${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}`],
-    tools: portalToolsFor({ payments, visits }),
+    prompt: portalPrompt({ payments, visits, reservice }),
+    tools: portalToolsFor({ payments, visits, reservice }),
     actions: [],
     cards: payments || visits ? [] : null,
     // Whether the payment card tool is in this lane (its own gate).
     payments,
+    context: { secondaryProperty: secondaryProperty !== false },
   };
 }
 
@@ -257,14 +263,31 @@ ${renderCompanyFactsSection()}
 WHAT YOU MUST ESCALATE (use the escalate tool):`);
 }
 
-// Every portal prompt, built once: the text sent to the model for a gate
-// combination never varies between requests (it carries the cache breakpoint).
-const PORTAL_PROMPTS = {
-  base: PORTAL_SYSTEM_PROMPT,
-  payments: PORTAL_FACTS_PROMPT,
-  'base+visits': withVisitFacts(PORTAL_SYSTEM_PROMPT),
-  'payments+visits': withVisitFacts(PORTAL_FACTS_PROMPT),
-};
+// GATE_PORTAL_CHAT_RESERVICE on top of any portal prompt: pests back between
+// visits go to offer_reservice, which alone decides whether a visit is free.
+function withReservice(prompt) {
+  return prompt
+    .replace('- Hand the conversation to the Waves team (escalate)', '- Offer a free re-service when pests or a lawn problem come back between visits (offer_reservice)\n- Hand the conversation to the Waves team (escalate)')
+    .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PESTS BACK BETWEEN VISITS:
+When the customer reports pests, or a lawn problem, back or still there between scheduled visits, call offer_reservice with the service line (pest or lawn) and follow its instruction. Offer a free visit ONLY when it says the plan covers one and a button is shown. If the same message is a complaint about the service or the technician, or reports damage, escalate instead.
+
+WHAT YOU MUST ESCALATE (use the escalate tool):`);
+}
+
+// Every portal prompt, built once per gate combination: the text sent to the
+// model for a combination never varies between requests (it carries the
+// cache breakpoint).
+const PORTAL_PROMPTS = new Map();
+function portalPrompt({ payments, visits, reservice }) {
+  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}`;
+  if (!PORTAL_PROMPTS.has(key)) {
+    let prompt = payments ? PORTAL_FACTS_PROMPT : PORTAL_SYSTEM_PROMPT;
+    if (visits) prompt = withVisitFacts(prompt);
+    if (reservice) prompt = withReservice(prompt);
+    PORTAL_PROMPTS.set(key, prompt);
+  }
+  return PORTAL_PROMPTS.get(key);
+}
 
 const TOPIC_WORDING = {
   cancellation: 'a cancellation',
@@ -273,6 +296,7 @@ const TOPIC_WORDING = {
   complaint: 'a complaint',
   account_change: 'an account change',
   add_service: 'adding a service',
+  pest_problem: 'pests or a lawn problem back between visits',
   manager: 'reaching a manager',
 };
 const TRIGGER_TOPICS = [
@@ -290,7 +314,7 @@ class WavesAssistant {
    * Process an incoming message from any channel.
    * Returns { reply, conversationId, escalated, escalationId }
    */
-  async processMessage({ message, channel, channelIdentifier, customerId, customerPhone }) {
+  async processMessage({ message, channel, channelIdentifier, customerId, customerPhone, secondaryProperty }) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       logger.warn('[ai-assistant] ANTHROPIC_API_KEY not configured');
       return { reply: "Thanks for reaching out! One of our team members will get back to you shortly. — Waves Pest Control", escalated: false };
@@ -308,7 +332,7 @@ class WavesAssistant {
     // 2. Check for escalation triggers in the raw message
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
-    const lane = portalLane(channel);
+    const lane = portalLane(channel, { secondaryProperty });
     const trigger = this.matchedEscalationTrigger(message, channel);
 
     // 3. Save the user message
@@ -449,7 +473,7 @@ class WavesAssistant {
           return { ...escResult, ...laneExtras(lane) };
         }
 
-        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards);
+        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards, lane.context);
         toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
 
         // Log tool usage

@@ -16217,13 +16217,14 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
 // AI CHAT WIDGET
 // =========================================================================
 // Buttons the assistant may show under a reply. The server builds every label
-// and target; only a self-serve reschedule page or a known portal tab renders.
+// and target; only a self-serve reschedule or re-service page, or a known
+// portal tab, renders.
 const CHAT_ACTION_TABS = ['billing', 'schedule', 'services', 'plan', 'documents', 'refer'];
 const CHAT_ACTION_BUTTON = { ...PORTAL_SECONDARY_ACTION, padding: '11px 18px', fontSize: 14 };
 function chatActionsOf(actions) {
   if (!Array.isArray(actions)) return [];
   return actions.filter((a) => a && typeof a.label === 'string' && a.label && (
-    (a.type === 'link' && typeof a.href === 'string' && /^\/reschedule\/[A-Za-z0-9_-]+$/.test(a.href))
+    (a.type === 'link' && typeof a.href === 'string' && /^\/(reschedule|reservice)\/[A-Za-z0-9_-]+$/.test(a.href))
     || (a.type === 'tab' && CHAT_ACTION_TABS.includes(a.tab))
   )).slice(0, 9);
 }

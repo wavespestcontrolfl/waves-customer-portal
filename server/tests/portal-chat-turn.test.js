@@ -25,6 +25,8 @@ const mockListPayments = jest.fn(async () => ({ payments: [] }));
 jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: (...a) => mockListPayments(...a) }));
 const mockListVisits = jest.fn(async () => ({ services: [], total: 0 }));
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: (...a) => mockListVisits(...a) }));
+const mockLaneState = jest.fn(async () => ({ eligible: ['pest'], open: {}, bookable: ['pest'], verified: true, hasRecurringPlan: true }));
+jest.mock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: (...a) => mockLaneState(...a) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
@@ -50,8 +52,13 @@ beforeEach(() => {
   delete process.env[ENV];
   delete process.env.GATE_PORTAL_CHAT_FACTS;
   delete process.env.GATE_PORTAL_CHAT_VISIT_FACTS;
+  delete process.env.GATE_PORTAL_CHAT_RESERVICE;
 });
-afterAll(() => { delete process.env[ENV]; delete process.env.GATE_PORTAL_CHAT_FACTS; });
+afterAll(() => {
+  delete process.env[ENV];
+  delete process.env.GATE_PORTAL_CHAT_FACTS;
+  delete process.env.GATE_PORTAL_CHAT_RESERVICE;
+});
 
 test('a billing ask in the portal returns the reply with an Open Billing button', async () => {
   wire('portal_chat');
@@ -217,6 +224,64 @@ test('visits gate alone: a billing keyword hand-off shows no payment card (the p
   escalate.mockRestore();
 });
 
+describe('GATE_PORTAL_CHAT_RESERVICE', () => {
+  const gates = require('../config/feature-gates');
+  let isEnabled;
+  beforeEach(() => {
+    process.env.GATE_PORTAL_CHAT_RESERVICE = 'true';
+    isEnabled = jest.spyOn(gates, 'isEnabled').mockImplementation((name) => name === 'reserviceStreamline');
+    wire('portal_chat', 'cust-1');
+    db.__rows = (q) => {
+      if (q.sql.includes('from "agent_sessions"')) return [conversationFor('portal_chat', 'cust-1')];
+      if (q.sql.includes('"reservice_token" from "customers"')) return [{ reservice_token: 'tok_rs' }];
+      return [];
+    };
+  });
+  afterEach(() => isEnabled.mockRestore());
+
+  const pestTurn = (extra = {}) => {
+    mockCreate
+      .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Sorry about the ants. Your plan covers a free visit; tap below to book it.' }] });
+    return assistant.processMessage({ message: 'The ants are back in the kitchen', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', ...extra });
+  };
+
+  test('the tool and the prompt section join the lane, and a primary-property session gets the booking button', async () => {
+    const result = await pestTurn({ secondaryProperty: false });
+
+    const first = mockCreate.mock.calls[0][0];
+    expect(toolNames(first)).toEqual(['get_upcoming_services', 'get_pest_advice', 'offer_reschedule_link', 'open_portal_section', 'offer_reservice', 'escalate']);
+    expect(first.system[0].text).toMatch(/PESTS BACK BETWEEN VISITS:/);
+    expect(first.system[0].text).toMatch(/\(offer_reservice\)/);
+    expect(mockLaneState).toHaveBeenCalledWith('cust-1');
+    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free pest control re-service', href: '/reservice/tok_rs' }]);
+    const toolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0].content;
+    expect(toolResult).not.toMatch(/tok_rs/);
+  });
+
+  test.each([
+    ['a secondary saved-property session', { secondaryProperty: true }],
+    ['a caller that names no property scope', {}],
+  ])('%s gets no button', async (_label, extra) => {
+    const result = await pestTurn(extra);
+
+    expect(mockLaneState).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('actions');
+  });
+
+  test('the gates compose: every portal section in one prompt', async () => {
+    process.env.GATE_PORTAL_CHAT_FACTS = 'true';
+    process.env.GATE_PORTAL_CHAT_VISIT_FACTS = 'true';
+    mockCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Hi.' }] });
+
+    await assistant.processMessage({ message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(toolNames(call)).toEqual(expect.arrayContaining(['show_recent_payments', 'get_recent_visits', 'offer_reservice']));
+    expect(call.system[0].text).toMatch(/CHARGES AND PAYMENTS:[\s\S]*PAST VISITS:[\s\S]*PESTS BACK BETWEEN VISITS:[\s\S]*WHAT YOU MUST ESCALATE/);
+  });
+});
+
 test('gate off: the portal prompt has no payment card tool', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Hi.' }] });
@@ -225,7 +290,8 @@ test('gate off: the portal prompt has no payment card tool', async () => {
   expect(toolNames(call)).not.toContain('show_recent_payments');
   expect(toolNames(call)).not.toContain('get_recent_visits');
   expect(call.system[0].text).toMatch(/BILLING, PLAN, REPORTS/);
-  expect(call.system[0].text).not.toMatch(/PAST VISITS:|COMPANY FACTS/);
+  expect(call.system[0].text).not.toMatch(/PAST VISITS:|COMPANY FACTS|PESTS BACK BETWEEN VISITS/);
+  expect(toolNames(call)).not.toContain('offer_reservice');
 });
 
 test('a portal reply with no button tool carries no actions field', async () => {

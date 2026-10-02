@@ -55,6 +55,9 @@ describe('assistant reply buttons', () => {
         { type: 'link', label: 'Reschedule Pest Control, Oct 9', href: '/reschedule/tok_one' },
         { type: 'link', label: 'Elsewhere', href: 'https://example.com/reschedule/tok' },
         { type: 'link', label: 'Admin', href: '/admin/customers' },
+        { type: 'link', label: 'Book your free pest control re-service', href: '/reservice/tok_rs' },
+        { type: 'link', label: 'Off-site re-service', href: 'https://example.com/reservice/tok' },
+        { type: 'link', label: 'Traversal', href: '/reservice/../admin' },
         { type: 'tab', label: 'Open Billing', tab: 'billing' },
         { type: 'tab', label: 'Open Admin', tab: 'admin' },
       ],
@@ -63,6 +66,9 @@ describe('assistant reply buttons', () => {
     expect(screen.getByRole('link', { name: 'Reschedule Pest Control, Oct 9' })).toHaveAttribute('href', '/reschedule/tok_one');
     expect(screen.queryByText('Elsewhere')).toBeNull();
     expect(screen.queryByText('Admin')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Book your free pest control re-service' })).toHaveAttribute('href', '/reservice/tok_rs');
+    expect(screen.queryByText('Off-site re-service')).toBeNull();
+    expect(screen.queryByText('Traversal')).toBeNull();
     expect(screen.queryByText('Open Admin')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Open Billing' }));
