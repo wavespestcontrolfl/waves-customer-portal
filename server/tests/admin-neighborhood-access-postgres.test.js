@@ -237,6 +237,33 @@ postgres('admin neighborhood gate-code routes', () => {
     expect(await trx('neighborhood_access').where({ id: guard.body.id }).first()).toMatchObject({ code: null, instructions: 'Give your name at the booth' });
   });
 
+  test("add: the office's new code is confirmed and the neighborhood's other live codes now need confirming", async () => {
+    const n = await neighborhood('Willow Fork');
+    const old = await entry(n, { code: '1111' });
+    const guard = await entry(n, { access_type: 'guard', code: null, instructions: 'Wave at the booth', gate_label: 'Guard' });
+    const added = await call('POST', `/${n}/entries`, { access_type: 'keypad', code: '2222' });
+    expect(added.status).toBe(201);
+    expect((await trx('neighborhood_access').where({ id: old }).first()).status).toBe('needs_confirm');
+    expect((await trx('neighborhood_access').where({ id: guard }).first()).status).toBe('active');
+    expect((await trx('neighborhood_access').where({ id: added.body.id }).first()).status).toBe('active');
+  });
+
+  test('edit: a new value counts as confirmed; a label-only edit keeps the status and date', async () => {
+    const n = await neighborhood('Yaupon Glen');
+    const stale = MONTHS_AGO(9);
+    const a = await entry(n, { code: '3141', status: 'needs_confirm', last_confirmed_at: stale });
+    const relabeled = await call('PATCH', `/entries/${a}`, { gate_label: 'Front gate' });
+    expect(relabeled).toMatchObject({ status: 200, body: { status: 'needs_confirm' } });
+    const kept = await trx('neighborhood_access').where({ id: a }).first();
+    expect(kept.status).toBe('needs_confirm');
+    expect(new Date(kept.last_confirmed_at).getTime()).toBe(stale.getTime());
+    const recoded = await call('PATCH', `/entries/${a}`, { code: '3142' });
+    expect(recoded).toMatchObject({ status: 200, body: { status: 'active' } });
+    const row = await trx('neighborhood_access').where({ id: a }).first();
+    expect(row.status).toBe('active');
+    expect(Date.now() - new Date(row.last_confirmed_at).getTime()).toBeLessThan(60000);
+  });
+
   test('confirm: active again, confirmed now, bell helper called; retire hides it', async () => {
     const n = await neighborhood('Sumac Ridge');
     const id = await entry(n, { code: '9191', status: 'needs_confirm', last_confirmed_at: MONTHS_AGO(9) });

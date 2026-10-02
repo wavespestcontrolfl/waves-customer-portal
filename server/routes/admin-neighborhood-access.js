@@ -4,8 +4,10 @@
  * GET    /                          — neighborhoods with their gate entries
  *                                     (?q= search, ?filter=needs_confirm,
  *                                     ?include_retired=1, ?limit, ?offset)
- * POST   /:neighborhoodId/entries   — office adds an entry (active, confirmed now)
- * PATCH  /entries/:id               — edit an entry, or { action: 'confirm' | 'retire' }
+ * POST   /:neighborhoodId/entries   — office adds an entry (active, confirmed now;
+ *                                     other live codes there then need confirming)
+ * PATCH  /entries/:id               — edit an entry (a new value counts as confirmed),
+ *                                     or { action: 'confirm' | 'retire' }
  *
  * A neighborhood's gate code is shared by every stop in it and is staff-only:
  * the whole router requires full admin (the tech portal is deprecated) and
@@ -230,7 +232,18 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
         source: 'office',
         last_confirmed_at: trx.fn.now(),
       }).returning('id');
-      return { status: 201, body: { id: ins.id ?? ins } };
+      const newId = ins.id ?? ins;
+      // The office's new code is the confirmed one: any other live code in
+      // the neighborhood now needs confirming, as when the filer sees a new
+      // code (the day feed then flags it "confirm on site").
+      if (entry.code) {
+        await trx('neighborhood_access')
+          .where({ neighborhood_id: neighborhoodId, status: 'active' })
+          .whereNotNull('code')
+          .whereNot('id', newId)
+          .update({ status: 'needs_confirm', updated_at: trx.fn.now() });
+      }
+      return { status: 201, body: { id: newId } };
     });
     return res.status(result.status).json(result.body);
   } catch (err) {
@@ -281,8 +294,14 @@ router.patch('/entries/:id', async (req, res) => {
       if (next.code && await liveCodeTaken(trx, row.neighborhood_id, next.code, id)) {
         return { status: 409, body: { error: 'That code is already on file for this neighborhood' } };
       }
-      await trx('neighborhood_access').where({ id }).update({ ...next, updated_at: trx.fn.now() });
-      return { status: 200, body: { id, status: row.status } };
+      // The office changing the value vouches for it: the entry is confirmed.
+      // A label-only edit keeps its status and confirmation date.
+      const valueChanged = next.access_type !== row.access_type
+        || (next.code || null) !== (row.code || null)
+        || (next.instructions || null) !== (row.instructions || null);
+      const confirmation = valueChanged ? { status: 'active', last_confirmed_at: trx.fn.now() } : {};
+      await trx('neighborhood_access').where({ id }).update({ ...next, ...confirmation, updated_at: trx.fn.now() });
+      return { status: 200, body: { id, status: valueChanged ? 'active' : row.status } };
     });
     if (result.status === 200) await closeBellsBestEffort(id);
     return res.status(result.status).json(result.body);
