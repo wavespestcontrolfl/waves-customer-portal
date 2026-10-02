@@ -3755,6 +3755,14 @@ router.post('/rewrite-sms', async (req, res) => {
       }
     }
 
+    // A technician rewrites only for a customer resolved and authorized
+    // above (one of their route's): no customer, an unmatched or ambiguous
+    // phone means no paid model call. Admins keep the context-free path
+    // (codex #5568 r13 P1).
+    if (isTechnicianRequest(req) && !customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
     const rewritePrompt = buildSmsRewritePrompt({
       body: cleanBody,
       customer,

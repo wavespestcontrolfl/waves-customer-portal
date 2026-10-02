@@ -17484,7 +17484,23 @@ router.post('/:id/invoice', async (req, res, next) => {
 
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
-    const applyPrepaidCredit = async (invoice) => {
+    // In-lock ownership recheck: substantial async work happens between the
+    // authorized SELECT at the top of this route and any invoice write —
+    // re-verify (row-locked) that the visit is still this technician's live
+    // job. Shared by the fresh mint and the reuse branch (codex #5568 r13 P1).
+    const assertTechStillOwnsLiveVisit = async (trx) => {
+      if (!isTechnicianRequest(req)) return;
+      const still = await technicianLiveVisitFilter(
+        req,
+        trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
+      ).forUpdate().first('scheduled_services.id');
+      if (!still) {
+        const e = new Error('Scheduled service not found');
+        e.status = 404;
+        throw e;
+      }
+    };
+    const applyPrepaidCredit = async (invoice, { assertInTrx = null } = {}) => {
       // Applying annual-prepay coverage to a Charge-Now invoice is deferred to a
       // dedicated follow-up (it needs non-cash accounting, an idempotency marker,
       // and add-on split-billing). This path only applies out-of-band prepayments
@@ -17499,6 +17515,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       }
 
       return db.transaction(async (trx) => {
+        if (assertInTrx) await assertInTrx(trx);
         // Combined-session reservation (codex #3427 r38 P0): applying a
         // recorded out-of-band prepayment changes the remainder (or
         // settles the invoice) while a combined PI priced from the OLD
@@ -17649,7 +17666,12 @@ router.post('/:id/invoice', async (req, res, next) => {
           error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
         });
       }
-      const applied = await applyPrepaidCredit(existing);
+      // Reuse changes billing state and returns the bearer token: the former
+      // technician of a visit reassigned meanwhile gets neither. Checked
+      // before any reuse effect (the no-credit path returns the token
+      // directly) and again inside the credit transaction itself.
+      if (isTechnicianRequest(req)) await db.transaction((trx) => assertTechStillOwnsLiveVisit(trx));
+      const applied = await applyPrepaidCredit(existing, { assertInTrx: assertTechStillOwnsLiveVisit });
       existing = applied.invoice;
       // Settled = nothing left to collect. A zero amount due counts too
       // (account credit fully covers an invoice that was never marked paid)
@@ -17789,18 +17811,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this
       // technician's live job before an invoice is minted or replayed.
-      assertEligibleInTrx: async (trx) => {
-        if (!isTechnicianRequest(req)) return;
-        const still = await technicianLiveVisitFilter(
-          req,
-          trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
-        ).forUpdate().first('scheduled_services.id');
-        if (!still) {
-          const e = new Error('Scheduled service not found');
-          e.status = 404;
-          throw e;
-        }
-      },
+      assertEligibleInTrx: assertTechStillOwnsLiveVisit,
       buildCreateParams: () => ({
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,

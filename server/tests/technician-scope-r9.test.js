@@ -76,3 +76,23 @@ describe('staged photo changes (main #5590-era routes, #5568 sweep)', () => {
     expect(fn.slice(0, 1200)).not.toMatch(/visit\.technician_id !== actor/);
   });
 });
+
+describe('codex #5568 r13', () => {
+  test('a technician rewrite needs a resolved, authorized customer before the model chain', () => {
+    const src = read('routes/admin-communications.js');
+    const handler = src.slice(src.indexOf("router.post('/rewrite-sms'"));
+    const guardAt = handler.indexOf("if (isTechnicianRequest(req) && !customer) {");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(handler.indexOf('buildSmsRewritePrompt('));
+  });
+
+  test('invoice reuse rechecks the live assignment under lock before any reuse effect, and inside the credit transaction', () => {
+    const src = read('routes/admin-schedule.js');
+    const reuse = src.slice(src.indexOf('if (existing.payer_id) {'));
+    const fenceAt = reuse.indexOf('if (isTechnicianRequest(req)) await db.transaction((trx) => assertTechStillOwnsLiveVisit(trx));');
+    expect(fenceAt).toBeGreaterThan(-1);
+    expect(fenceAt).toBeLessThan(reuse.indexOf('const applied = await applyPrepaidCredit(existing, { assertInTrx: assertTechStillOwnsLiveVisit });'));
+    expect(src).toMatch(/return db\.transaction\(async \(trx\) => \{\s*if \(assertInTrx\) await assertInTrx\(trx\);/);
+    expect(src).toMatch(/assertEligibleInTrx: assertTechStillOwnsLiveVisit,/);
+  });
+});
