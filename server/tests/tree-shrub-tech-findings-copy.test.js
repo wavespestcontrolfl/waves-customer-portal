@@ -184,7 +184,7 @@ describe('palm-crown rule', () => {
     // Prohibited reassurance, ground-level prefix or not.
     expect(stripCrownHealthClaims('From the ground, the palm crown looks healthy.')).toBe('');
     expect(stripCrownHealthClaims('Ground-level photos show the spear leaf is normal.')).toBe('');
-    expect(stripCrownHealthClaims("We couldn't see the crown well, but it looks healthy.")).toBe('');
+    expect(stripCrownHealthClaims("We couldn't see the crown well, but it looks healthy.")).toBe("We couldn't see the crown well.");
     expect(stripCrownHealthClaims('The crown is fine and the newest fronds are green.')).toBe('');
     // Adverse findings are kept.
     expect(stripCrownHealthClaims('The palm crown is not healthy.')).toBe('The palm crown is not healthy.');
@@ -294,6 +294,7 @@ describe('report-writer prompt', () => {
   });
 
   test('gate on: technician-confirmed / edited findings and the ground-level rule reach the prompt', async () => {
+    gateOn();
     const result = await ctx(grounding([
       { key: 'pest_activity', action: 'confirmed', detail: null },
       { key: 'leaf_color_vigor', action: 'edit', detail: 'Iron chlorosis on the oldest fronds.' },
@@ -322,9 +323,11 @@ describe('report-writer prompt', () => {
 
   test('the route strips a crown-health sentence from the generated report before it is cached or returned', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-    expect(src).toContain('const report = techFindingsCopyLive() ? stripCrownHealthClaims(generated.report) : generated.report;');
-    expect(src.indexOf('stripCrownHealthClaims(generated.report)')).toBeLessThan(src.indexOf('reportCopyCacheSet(cacheKey, report);'));
-    expect(src).toContain('const safeFallback = techFindingsCopyLive() ? stripCrownHealthClaims(report) : report;');
+    // The strip runs inside the generator (before the shape check) and ONLY on tree_shrub copy.
+    expect(src).toContain("const crownBackstopOn = techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub';");
+    expect(src).toContain('...(crownBackstopOn ? { postProcess: stripCrownHealthClaims } : {}),');
+    expect(src).toContain('let safeFallback = crownBackstopOn ? stripCrownHealthClaims(report) : report;');
+    expect(src).not.toContain('stripCrownHealthClaims(generated.report)');
   });
 });
 
@@ -474,5 +477,170 @@ describe('later reports\' history honors an earlier visit\'s frozen hides', () =
     const out = await buildTreeShrubAssessmentReportData(service, 'tree_shrub', knex);
     expect(out.trend[0]).toMatchObject({ pestActivity: 30, overallScore: 78 });
     expect(reads).not.toContain('service_records');
+  });
+});
+
+describe('crown backstop works one clause at a time', () => {
+  test('an adverse clause earlier in the sentence does not excuse a later positive crown claim', () => {
+    expect(stripCrownHealthClaims('Older fronds show decline, but the palm crown looks good.')).toBe('Older fronds show decline.');
+    expect(stripCrownHealthClaims('Older fronds show decline; the spear leaf is fine.')).toBe('Older fronds show decline.');
+  });
+
+  test('an unrelated health word in another clause does not drop an adverse crown clause', () => {
+    const s = 'The spear leaf collapsed and is declining, while the hedges look healthy.';
+    expect(stripCrownHealthClaims(s)).toBe(s);
+    const t = 'The hedges look healthy, but the palm crown is not healthy.';
+    expect(stripCrownHealthClaims(t)).toBe(t);
+  });
+
+  test('a hedged claim is still dropped, with its orphaned remainder', () => {
+    expect(stripCrownHealthClaims('The palm crown appears healthy but is not clearly visible.')).toBe('');
+    expect(stripCrownHealthClaims('The crown appears healthy, though it is not clearly visible from the ground. Older fronds are yellowing.'))
+      .toBe('Older fronds are yellowing.');
+  });
+
+  test('wider health words and crown synonyms', () => {
+    for (const claim of [
+      'The palm crown looks excellent.', 'The spear leaf is firm and upright.', 'The newest fronds look vibrant.',
+      'The upper fronds are lush and full.', 'The top of the palm looks robust.', 'The head of the palm looks strong.',
+      'The palm canopy looks thriving.',
+    ]) expect(stripCrownHealthClaims(claim)).toBe('');
+    // A shrub canopy / new growth is not a palm crown.
+    expect(stripCrownHealthClaims('The hedge canopy looks lush.')).toBe('The hedge canopy looks lush.');
+    expect(stripCrownHealthClaims('New growth on the hedge looks great.')).toBe('New growth on the hedge looks great.');
+  });
+
+  test('the splitter never drops fragments: decimals, abbreviations and closing punctuation', () => {
+    const keep = 'The palm is 3.5 m tall, e.g. about 12 ft, measured at 9 a.m. today vs. last visit. Older fronds are yellowing.';
+    expect(stripCrownHealthClaims(keep)).toBe(keep);
+    expect(stripCrownHealthClaims('The ixora is 3.5 m wide. The palm crown looks healthy.) Older fronds are yellowing.'))
+      .toBe('The ixora is 3.5 m wide. Older fronds are yellowing.');
+    expect(stripCrownHealthClaims('The crown looks healthy!! Older fronds are yellowing.')).toBe('Older fronds are yellowing.');
+    expect(stripCrownHealthClaims('The crown looks healthy.** Done.')).toBe('Done.');
+    // Round trip: with nothing to strip every line comes back byte-identical.
+    const plain = 'Treated 3.5 m hedge (see photo). e.g. ok.\n\nNext line vs. last.';
+    expect(stripCrownHealthClaims(plain)).toBe(plain);
+  });
+});
+
+describe('the crown instruction is the primary guard', () => {
+  const ctx = (over = {}) => buildReportCopyContext({
+    customerId: null, serviceType: 'Tree and Shrub Care', serviceLine: 'tree_shrub', ...over,
+  });
+
+  test('gate on: reaches every tree_shrub generation, with no signed review attached', async () => {
+    gateOn();
+    const result = await ctx();
+    expect(result.contextText).toContain("never state or imply that a palm's crown, spear leaf or newest fronds look healthy");
+  });
+
+  test('exactly once when a review is attached, absent for other lines and with the gate off', async () => {
+    gateOn();
+    const withReview = await ctx({
+      treeShrubReviewGrounding: {
+        source: 'reviewed_photo_signals', scores: { foliageFullness: 50 }, scoredCount: 1, photoCount: 1, observations: '', techFindings: [],
+      },
+    });
+    expect(withReview.contextText.split('PHOTO REACH').length - 1).toBe(1);
+    expect((await ctx({ serviceType: 'Lawn Care', serviceLine: 'lawn' })).contextText).not.toContain('PHOTO REACH');
+    expect((await ctx({ serviceType: 'Pest Control', serviceLine: 'pest' })).contextText).not.toContain('PHOTO REACH');
+    gateOff();
+    expect((await ctx()).contextText).not.toContain('PHOTO REACH');
+  });
+});
+
+describe('PDF and gallery surfaces', () => {
+  test('captions: hidden / edited ties and the crown strip apply to gallery captions; a plain label stays', () => {
+    const { filterCaptionsForCustomer, summaryForCustomer } = require('../services/service-report/tree-shrub-tech-findings');
+    const hidden = [decide('pest_activity', 'hidden')];
+    expect(filterCaptionsForCustomer(
+      ['Visible pest-pressure signals on foliage.', 'Sticky residue on the hibiscus', 'Black film on leaves', 'Crawlers on the stems', 'The palm crown looks healthy', 'Front bed'],
+      hidden,
+    )).toEqual(['Front bed']);
+    expect(filterCaptionsForCustomer(['The palm crown looks healthy', 'Back fence'], [])).toEqual(['Back fence']);
+    // The summary: withdrawn by a hide / edit, crown-stripped otherwise.
+    expect(summaryForCustomer('Stippling on shrubs.', hidden)).toBeNull();
+    expect(summaryForCustomer('Hedges look full. The palm crown looks healthy.', [])).toBe('Hedges look full.');
+    expect(summaryForCustomer('', [])).toBeNull();
+  });
+
+  test('report-data feeds gallery captions and the typed photoSummary through the overlay for tree_shrub only', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
+    expect(src).toContain("const tsCopyFindings = (serviceLine === 'tree_shrub' && techFindingsCopyLive())");
+    expect(src).toContain('? (filterCaptionsForCustomer([photo.caption || \'\'], tsCopyFindings)[0] || \'\')');
+    expect(src).toContain('? summaryForCustomer(typedSnapshot.photoSummary, tsCopyFindings)');
+  });
+});
+
+describe('confirmed finding on a clean photo read', () => {
+  test('does not append the contradicting "No visible … today" line; a flagged row keeps its sentence', () => {
+    gateOn();
+    const clean = build(assessment({ scores: { ...SCORES, pestActivity: 95, overallScore: 90 } }), [decide('pest_activity', 'confirmed')]);
+    expect(diagOf(clean, 'pest_activity').customerExplanation).toBe('Your technician confirmed visible pest activity on some foliage during the visit.');
+    expect(diagOf(clean, 'pest_activity').customerExplanation).not.toMatch(/No visible/);
+    const flagged = build(assessment(), [decide('pest_activity', 'confirmed')]);
+    expect(diagOf(flagged, 'pest_activity').customerExplanation).toMatch(/^Confirmed by your technician during the visit\. Light pest-pressure|^Confirmed by your technician during the visit\. /);
+  });
+});
+
+describe('shared color / fullness card', () => {
+  test('hiding one finding keeps the card for the other\'s confirmation or edit; a bare hide drops it', () => {
+    gateOn();
+    const weak = assessment({ scores: { ...SCORES, leafColorVigor: 40, foliageFullness: 40, overallScore: 50 } });
+    const edited = build(weak, [decide('leaf_color_vigor', 'hidden'), decide('foliage_fullness', 'edit', 'Hedge gap from a trimming.')]);
+    expect(insightOf(edited, 'color_vigor').whatWeSaw).toBe('Hedge gap from a trimming.');
+    const confirmed = build(weak, [decide('foliage_fullness', 'hidden'), decide('leaf_color_vigor', 'confirmed')]);
+    expect(insightOf(confirmed, 'color_vigor').whatWeSaw).toBe('Your technician confirmed off-color foliage in places during the visit.');
+    expect(insightOf(build(weak, [decide('leaf_color_vigor', 'hidden'), decide('foliage_fullness', 'hidden')]), 'color_vigor')).toBeUndefined();
+  });
+});
+
+describe('strong foliage row and whitespace-split codes', () => {
+  test('the strong fullness row stops saying "healthy growth" with the palm rule on', () => {
+    const on = buildTreeShrubVisualCategories({ scores: { foliageFullness: 92 }, palmCrownRule: true }).find((c) => c.key === 'foliage_fullness');
+    const off = buildTreeShrubVisualCategories({ scores: { foliageFullness: 92 } }).find((c) => c.key === 'foliage_fullness');
+    expect(off.customerExplanation).toMatch(/healthy growth/);
+    expect(on.customerExplanation).not.toMatch(/healthy|growth|canopy/i);
+  });
+
+  test('a code split across a line break is redacted before it is frozen', () => {
+    gateOn();
+    const frozen = freezeTechFindings({ decisions: [{ key: 'pest_activity', action: 'edit', detail: 'Beside the gate.\nGate:\n4521' }] });
+    expect(JSON.stringify(frozen)).not.toContain('4521');
+  });
+});
+
+describe('property score honors a visit\'s frozen hides', () => {
+  const { _test } = require('../services/property-score');
+  const rows = [
+    { id: 'a2', customer_id: 'c1', service_record_id: 'r2', service_date: '2026-09-01', foliage_fullness: 80, leaf_color_vigor: 80, pest_activity: 30, disease_leaf_spot: 80, water_heat_stress: 80, overall_score: 78, composite_scores: null },
+    { id: 'a1', customer_id: 'c1', service_record_id: 'r1', service_date: '2026-08-01', foliage_fullness: 70, leaf_color_vigor: 70, pest_activity: 70, disease_leaf_spot: 70, water_heat_stress: 70, overall_score: 70, composite_scores: null },
+  ];
+  const notes = { id: 'r2', structured_notes: { treeShrubTechFindings: [{ key: 'pest_activity', action: 'hidden', detail: null, label: 'x' }] } };
+  const knex = (table) => {
+    const data = table === 'service_records' ? [notes] : rows;
+    const q = { where: () => q, whereIn: () => q, select: () => q, orderBy: () => q, limit: () => q, then: (r) => Promise.resolve(data).then(r), catch: async () => data };
+    return q;
+  };
+
+  test('gate on: the hidden visit\'s overall is withheld, so the previous visit is the current score', async () => {
+    gateOn();
+    const out = await _test.treeShrubComponent('c1', knex, new Set(['tree_shrub']));
+    expect(out).toMatchObject({ status: 'scored', score: 70, previousScore: null });
+  });
+
+  test('gate off: the score is read exactly as before', async () => {
+    gateOff();
+    const out = await _test.treeShrubComponent('c1', knex, new Set(['tree_shrub']));
+    expect(out).toMatchObject({ status: 'scored', score: 78, previousScore: 70 });
+  });
+});
+
+describe('photo observations block in the report prompt', () => {
+  test('routes the captions and summary through the overlay for tree_shrub with the gate on', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(src).toContain("if (techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub') {");
+    expect(src).toContain('promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);');
+    expect(src).toContain('const photoObservationsBlock = buildPhotoObservationsBlock(promptPhotoCaptions, promptPhotoSummary);');
   });
 });

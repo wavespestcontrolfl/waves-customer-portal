@@ -225,6 +225,8 @@ function buildTreeShrubInsightCards({
   // let a confirmed / edited finding speak in the technician's voice.
   if (Array.isArray(techFindings) && techFindings.length) {
     for (let i = cards.length - 1; i >= 0; i -= 1) {
+      // A shared card (color + fullness) survives a hide on one finding when the
+      // other carries a confirmation or edit; insightHidden knows that.
       if (insightHidden(cards[i].category, techFindings)) { cards.splice(i, 1); continue; }
       const said = insightOverride(cards[i].category, techFindings);
       if (said) {

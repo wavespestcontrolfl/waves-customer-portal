@@ -66,56 +66,151 @@ function techFindingsCopyLive() {
 }
 
 // ── Palm-crown rule ────────────────────────────────────────────────────────────
+//
+// PRIMARY guard: PALM_CROWN_PROMPT_RULE reaches the vision prompt and the report
+// writer on every tree_shrub generation with the gate on. The strip below is a
+// narrow BACKSTOP for copy that slips past the instruction: it works one CLAUSE
+// at a time and removes only a clause that makes a positive health / normal
+// claim about a palm's crown, spear leaf, upper or newest fronds. It is run on
+// tree_shrub copy only (callers decide), never on lawn or pest copy.
 
-const CROWN_TERM = /\b(?:crown(?:shaft)?s?|spear(?:\s+(?:leaf|leaves|fronds?))?|newest\s+(?:fronds?|growth|leaves)|new\s+fronds?|emerging\s+(?:fronds?|growth|leaves))\b/i;
-// "new growth" alone is fine on a hedge; it is a palm-crown claim only in a palm sentence.
-const NEW_GROWTH_TERM = /\bnew(?:est)?\s+(?:growth|leaves|foliage|shoots)\b/i;
-const PALM_CONTEXT = /\b(?:palms?|fronds?|spear|crown)/i;
-const HEALTH_TERM = /\b(?:healthy|fine|normal|good|great|strong|vigorous|vigor|thriving|green|lush|intact|unaffected|undamaged|clean|okay|ok|looking good|free (?:of|from)|no (?:visible )?(?:signs?|issues?|problems?|concerns?|damage|decline|stress|pests?))\b/gi;
+const CROWN_TERM = /\b(?:crown(?:shaft)?s?|spear(?:\s+(?:leaf|leaves|fronds?))?|newest\s+(?:fronds?|growth|leaves)|new\s+fronds?|emerging\s+(?:fronds?|growth|leaves)|upper\s+(?:fronds?|canopy)|(?:top|head)\s+of\s+(?:the|a|this|that|each)\s+palms?)\b/i;
+// Only a palm-crown claim when the sentence is about a palm: "new growth" or a
+// "canopy" on a hedge is not.
+const PALM_ONLY_TERM = /\b(?:new(?:est)?\s+(?:growth|leaves|foliage|shoots)|canopy)\b/i;
+const PALM_WORD = /\b(?:palms?|fronds?|spear|crown|cabbage|sabal|royal|queen|date|coconut|areca|foxtail|sylvester|washingtonia|pindo|bismarck|livistona)\b/i;
+const HEALTH_TERM = /\b(?:healthy|fine|normal|good|great|excellent|vibrant|full|robust|firm|upright|strong|vigorous|vigor|thriving|green|lush|intact|unaffected|undamaged|clean|okay|ok|looking good|free (?:of|from)|no (?:visible )?(?:signs?|issues?|problems?|concerns?|damage|decline|stress|pests?))\b/gi;
 // A health word is NOT a positive claim when a negator, an adverse word or a
 // can't-assess marker sits in the few words before it ("not healthy", "poor
 // health", "couldn't check ... health") or a not-shown marker right after it.
 const NEGATED_BEFORE = /(?:\b(?:not|no longer|never|hardly|barely|far from|without|poor|poorly|declining|decline|declined|reduced|lack|lacking|loss|compromised|weak|weakened|failing|worsening|unable|cannot|unclear|unknown|uncertain|unsure|out of (?:view|sight|reach)|too (?:high|tall))\b|n['’]t\b|\bcould not\b)/i;
 const NOT_SHOWN_AFTER = /^\W*(?:\w+\W+){0,3}?(?:not\s+(?:shown|visible|possible|clear\w*|assess\w*|check\w*|inspect\w*|in view|able)|out of (?:view|sight)|unknown|unclear)\b/i;
 
-// True when the sentence makes a POSITIVE health / normal claim. A ground-level
+// True when the clause makes a POSITIVE health / normal claim. A ground-level
 // phrase does not excuse it ("From the ground, the crown looks healthy" is the
 // prohibited reassurance); negated or adverse statements and pure can't-assess
 // disclaimers are not positive claims.
-function makesPositiveHealthClaim(sentence) {
-  const s = String(sentence || '');
-  for (const m of s.matchAll(HEALTH_TERM)) {
-    const before = s.slice(0, m.index).split(/\s+/).slice(-5).join(' ');
-    const after = s.slice(m.index + m[0].length, m.index + m[0].length + 60);
+function makesPositiveHealthClaim(clause) {
+  const c = String(clause || '');
+  for (const m of c.matchAll(HEALTH_TERM)) {
+    const before = c.slice(0, m.index).split(/\s+/).slice(-5).join(' ');
+    const after = c.slice(m.index + m[0].length, m.index + m[0].length + 60);
     if (!NEGATED_BEFORE.test(before) && !NOT_SHOWN_AFTER.test(after)) return true;
   }
   return false;
 }
 
-function isCrownHealthClaim(sentence) {
-  const s = String(sentence || '');
-  if (!(CROWN_TERM.test(s) || (NEW_GROWTH_TERM.test(s) && PALM_CONTEXT.test(s)))) return false;
-  return makesPositiveHealthClaim(s);
+// `sentenceHasPalm` lets a bare "canopy" / "new growth" clause count when the
+// palm is named elsewhere in the same sentence.
+function isCrownHealthClaim(clause, sentenceHasPalm = false) {
+  const c = String(clause || '');
+  const crownish = CROWN_TERM.test(c)
+    || (PALM_ONLY_TERM.test(c) && (sentenceHasPalm || PALM_WORD.test(c)));
+  return crownish && makesPositiveHealthClaim(c);
 }
 
-// Remove every sentence that vouches for a palm's crown, spear leaf or newest
-// fronds. Unchanged text (including non-strings) comes back as the same value.
+// Sentence splitting that never loses text: pieces always concatenate back to
+// the input. A terminator is . ! ? (with any closing quote/bracket) followed by
+// whitespace and then a capital, digit or quote, or by the end; decimals
+// ("3.5 m"), abbreviations ("e.g.", "a.m.", "vs.") and lowercase continuations
+// are not boundaries.
+const ABBREVIATION_BEFORE_DOT = /(?:^|[\s(])(?:e\.g|i\.e|a\.m|p\.m|vs|etc|approx|ca|dr|mr|mrs|ms|st|no|ft|in|oz|sq)$/i;
+function splitSentences(line) {
+  const out = [];
+  let start = 0;
+  const re = /[.!?]+["')\]”’*_~]*(?=\s+["'(“‘]?[A-Z0-9]|\s*$)/g;
+  for (let m = re.exec(line); m; m = re.exec(line)) {
+    const end = m.index + m[0].length;
+    if (m[0][0] === '.' && ABBREVIATION_BEFORE_DOT.test(line.slice(0, m.index)) && end < line.length) continue;
+    const ws = /^\s*/.exec(line.slice(end))[0].length;
+    out.push(line.slice(start, end + ws));
+    start = end + ws;
+  }
+  if (start < line.length) out.push(line.slice(start));
+  return out;
+}
+
+// Clause joins inside a sentence. " and " only splits when what follows opens a
+// new clause (a determiner/pronoun) AND what precedes is already a predicate, so
+// a joined subject ("The crown and the spear leaf look healthy") stays whole.
+const CLAUSE_JOIN = /(;\s*|,?\s+(?:but|while|whereas|although|though|yet)\s+|,?\s+and\s+(?=(?:the|a|an|its|their|his|her|these|those|it|they)\b)\s*|,\s+(?=(?:the|its|their|these|those|it|they)\b))/i;
+const HAS_PREDICATE = /\b(?:is|are|was|were|looks?|looked|appears?|appeared|seems?|seemed|shows?|showed|has|have|had|remains?|stays?|collapsed|declin\w*|\w+ed)\b|n['’]t\b/i;
+const PRONOUN_START = /^\s*(?:it|they|this|that|these|those)\b/i;
+const ORPHAN_START = /^\s*(?:(?:it|this|that)\s+(?:is|was|isn['’]t|remains|cannot|can['’]t|couldn['’]t|could\s+not)\b|is|are|was|were|not|isn['’]t|aren['’]t|cannot|can['’]t|couldn['’]t|remains?|has|have|looks?|appears?|seems?)\b/i;
+
+function splitClauses(body) {
+  const parts = body.split(CLAUSE_JOIN);
+  const clauses = [{ text: parts[0], joinBefore: '' }];
+  for (let i = 1; i < parts.length; i += 2) {
+    const sep = parts[i];
+    const text = parts[i + 1] || '';
+    // Soft joins (", the ..." / "and the ...") only split after a full predicate.
+    const isSoft = !/^\s*;|\b(?:but|while|whereas|although|though|yet)\b/i.test(sep);
+    const last = clauses[clauses.length - 1];
+    if (isSoft && !HAS_PREDICATE.test(last.text)) {
+      last.text += sep + text;
+    } else {
+      clauses.push({ text, joinBefore: sep });
+    }
+  }
+  return clauses;
+}
+
+// Strip positive crown claims from ONE sentence (terminator and trailing
+// whitespace included); returns the sentence unchanged when nothing matched.
+function stripSentence(sentence) {
+  const m = /^([\s\S]*?)([.!?]+["')\]”’*_~]*\s*)?$/.exec(sentence);
+  const body = m[1];
+  const tail = m[2] || '';
+  const lead = /^\s*/.exec(body)[0];
+  const core = body.slice(lead.length);
+  const hasPalm = PALM_WORD.test(core);
+  const clauses = splitClauses(core);
+  let dropNext = false;
+  let changed = false;
+  let prevCrownish = false;
+  const kept = [];
+  for (const clause of clauses) {
+    const crownish = CROWN_TERM.test(clause.text) || (PALM_ONLY_TERM.test(clause.text) && (hasPalm || PALM_WORD.test(clause.text)));
+    // "... the crown, but it looks healthy": a bare pronoun clause right after a
+    // crown clause vouches for the crown.
+    const pronounClaim = prevCrownish && PRONOUN_START.test(clause.text) && makesPositiveHealthClaim(clause.text);
+    const claim = isCrownHealthClaim(clause.text, hasPalm) || pronounClaim;
+    prevCrownish = crownish;
+    // An orphaned remainder ("... is not clearly visible") that followed a
+    // dropped clause has lost its subject: it goes with it.
+    if (claim || (dropNext && ORPHAN_START.test(clause.text))) {
+      changed = true;
+      dropNext = true;
+      continue;
+    }
+    dropNext = false;
+    kept.push(clause);
+  }
+  if (!changed) return sentence;
+  if (!kept.length) return '';
+  let out = kept.map((c, i) => (i === 0 ? c.text : c.joinBefore + c.text)).join('').replace(/[,;\s]+$/, '');
+  if (/^[A-Z]/.test(core) && /^[a-z]/.test(out)) out = out[0].toUpperCase() + out.slice(1);
+  return `${lead}${out}${tail}`;
+}
+
+// Remove every positive crown / spear / newest-frond health claim. Unchanged
+// text (including non-strings) comes back as the same value. A line that loses
+// every sentence is removed with them; blank separator lines stay.
 function stripCrownHealthClaims(text) {
   if (typeof text !== 'string' || !text) return text;
   let changed = false;
   const original = text.split('\n');
   const lines = original.map((line) => {
-    const sentences = line.match(/[^.!?]+(?:[.!?]+(?=\s|$)|$)\s*/g);
-    if (!sentences) return line;
-    const kept = sentences.filter((sentence) => {
-      if (isCrownHealthClaim(sentence)) { changed = true; return false; }
-      return true;
+    const sentences = splitSentences(line);
+    const rebuilt = sentences.map((sentence) => {
+      const next = stripSentence(sentence);
+      if (next !== sentence) changed = true;
+      return next;
     });
-    return kept.length === sentences.length ? line : kept.join('').trimEnd();
+    return rebuilt.join('').trimEnd();
   });
   if (!changed) return text;
-  // A line that lost every sentence goes with them; blank lines the writer
-  // already had stay (they separate sections).
   return lines.filter((line, i) => line.trim() !== '' || original[i].trim() === '').join('\n');
 }
 
@@ -131,7 +226,9 @@ function redactCodes(text) {
 function cleanDetail(value) {
   if (typeof value !== 'string') return null;
   // Redacted at the freeze too, so a code typed into an edit is never stored.
-  const t = redactCodes(value).replace(/\s+/g, ' ').trim().slice(0, MAX_DETAIL_CHARS);
+  // Whitespace collapses FIRST so a code split across a line break ("Gate:\n4521")
+  // reads as one phrase to the redactor.
+  const t = redactCodes(value.replace(/\s+/g, ' ').trim()).slice(0, MAX_DETAIL_CHARS);
   return t || null;
 }
 
@@ -222,7 +319,7 @@ async function loadFrozenTechFindingsByRecord(rows, knex) {
 // that finding's words; one with generic assessment wording ("visible signals")
 // cannot be placed reliably and is treated as tied to every replaced finding.
 const CAPTION_WORDS = {
-  pest_activity: /\b(?:pests?|insects?|scale|mites?|aphids?|whiteflies|whitefly|mealybugs?|thrips|caterpillars?|stippl\w*|webbing|sooty|chew\w*|honeydew|infest\w*)\b/i,
+  pest_activity: /\b(?:pests?|insects?|scale|mites?|aphids?|whiteflies|whitefly|mealybugs?|thrips|caterpillars?|crawlers?|stippl\w*|speckl\w*|sticky|residue|black\s+film|webbing|sooty|chew\w*|honeydew|infest\w*)\b/i,
   disease_leaf_spot: /\b(?:leaf[-\s]?spot\w*|fung\w*|disease\w*|mildew|blight|anthracnose|mold|rot|lesions?|spotting)\b/i,
   water_heat_mechanical_stress: /\b(?:dry|wilt\w*|scorch\w*|stress\w*|water\w*|crispy|prun\w*|drought|heat|sunburn|mechanical|damage\w*)\b/i,
   leaf_color_vigor: /\b(?:yellow\w*|chlorosis|pale|bronz\w*|colou?r\w*|discolou?r\w*|deficien\w*|vigor|off-color)\b/i,
@@ -236,6 +333,31 @@ function captionTiedToReplacedFinding(caption, replacedKeys) {
   if (typeof caption !== 'string' || !caption.trim() || !replacedKeys.length) return false;
   if (GENERIC_ASSESSMENT_WORDS.test(caption)) return true;
   return replacedKeys.some((key) => CAPTION_WORDS[key] && CAPTION_WORDS[key].test(caption));
+}
+
+// Customer-facing photo captions under the technician's decisions: a caption on
+// a hidden / edited finding's subject is dropped, then the crown strip runs.
+// Strings in, strings out (empties removed).
+function filterCaptionsForCustomer(captions, findings) {
+  const replaced = (Array.isArray(findings) ? findings : [])
+    .filter((f) => f && (f.action === 'hidden' || (f.action === 'edit' && editText(f))))
+    .map((f) => f.key);
+  return (Array.isArray(captions) ? captions : [])
+    .filter((c) => typeof c === 'string' && !captionTiedToReplacedFinding(c, replaced))
+    .map((c) => stripCrownHealthClaims(c))
+    .filter((c) => typeof c === 'string' && c.trim());
+}
+
+// A photo summary written about the photos as a whole: a hidden or edited
+// finding withdraws it (it could repeat what the technician replaced); the
+// crown strip applies otherwise. Returns null when nothing is left.
+function summaryForCustomer(summary, findings) {
+  if (typeof summary !== 'string' || !summary.trim()) return null;
+  const replacedAny = (Array.isArray(findings) ? findings : [])
+    .some((f) => f && (f.action === 'hidden' || (f.action === 'edit' && editText(f))));
+  if (replacedAny) return null;
+  const out = stripCrownHealthClaims(summary);
+  return typeof out === 'string' && out.trim() ? out : null;
 }
 
 function applyTechFindingsToAssessment(assessment, findings) {
@@ -276,12 +398,15 @@ function applyTechFindingsToAssessment(assessment, findings) {
 
 // The line a diagnosis row (one of the five categories) shows for a decision, or
 // null to keep the system-written explanation.
-function diagnosisOverride(finding, current) {
+// A confirmation on a clean photo read ("No visible … today") would contradict
+// itself, so only a flagged (watch / needs-attention) row keeps its photo sentence.
+function diagnosisOverride(finding, current, status = 'watch') {
   if (!finding) return null;
   const edit = editText(finding);
   if (edit) return edit;
   if (finding.action === 'confirmed') {
-    return current ? `Confirmed by your technician during the visit. ${current}` : CONFIRMED_SENTENCE[finding.key];
+    const flagged = status === 'watch' || status === 'needs_attention';
+    return current && flagged ? `Confirmed by your technician during the visit. ${current}` : CONFIRMED_SENTENCE[finding.key];
   }
   return null;
 }
@@ -300,12 +425,15 @@ function insightOverride(cardCategory, findings) {
   return null;
 }
 
-// True when the card is built on a finding the technician hid.
+// True when the card is built on a finding the technician hid AND the
+// technician said nothing of their own on the card's other finding (a shared
+// color / fullness card survives on the other finding's confirmation or edit).
 function insightHidden(cardCategory, findings) {
-  return (INSIGHT_FINDING_KEYS[cardCategory] || []).some((key) => {
+  const hiddenAny = (INSIGHT_FINDING_KEYS[cardCategory] || []).some((key) => {
     const f = findingFor(findings, key);
     return !!f && f.action === 'hidden';
   });
+  return hiddenAny && !insightOverride(cardCategory, findings);
 }
 
 // ── Report-writer prompt ───────────────────────────────────────────────────────
@@ -332,6 +460,9 @@ function hasTechFindingLines(findings) {
 }
 
 module.exports = {
+  summaryForCustomer,
+  filterCaptionsForCustomer,
+  captionTiedToReplacedFinding,
   hasTechFindingLines,
   hideFrozenFindingsInScores,
   loadFrozenTechFindingsByRecord,

@@ -20,7 +20,9 @@ const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender } = require('./lawn-visit-memory');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
-const { techFindingsCopyLive, normalizeTechFindings } = require('./tree-shrub-tech-findings');
+const {
+  techFindingsCopyLive, normalizeTechFindings, filterCaptionsForCustomer, summaryForCustomer,
+} = require('./tree-shrub-tech-findings');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
@@ -3998,6 +4000,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ? withoutDarkFourSectionBody(serviceData.typedReportSnapshot)
     : null;
 
+  // GATE_TS_TECH_FINDINGS_COPY: the technician's frozen decisions for a tree &
+  // shrub visit (null = gate off or another service line). They govern every
+  // free-text photo surface below: gallery captions, the typed photo summary
+  // and the V2 report, so the PDF and web report agree.
+  const tsCopyFindings = (serviceLine === 'tree_shrub' && techFindingsCopyLive())
+    ? normalizeTechFindings(structured?.treeShrubTechFindings)
+    : null;
+
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
     : Promise.resolve(null);
@@ -4949,7 +4959,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     .map(async (photo) => ({
       id: photo.id,
       url: await photoUrl(photo),
-      caption: photo.caption || '',
+      caption: tsCopyFindings
+        ? (filterCaptionsForCustomer([photo.caption || ''], tsCopyFindings)[0] || '')
+        : (photo.caption || ''),
       stateBadge: photo.state_badge || null,
       zoneId: photo.zone_id || null,
       capturedAt: photo.captured_at || photo.created_at,
@@ -5597,9 +5609,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // GATE_TS_TECH_FINDINGS_COPY: the technician's frozen keep / confirm /
           // hide / edit decisions override the photo read in customer copy
           // (undefined while dark: the builder output is unchanged).
-          ...(techFindingsCopyLive()
-            ? { techFindings: normalizeTechFindings(structured?.treeShrubTechFindings) }
-            : {}),
+          ...(tsCopyFindings ? { techFindings: tsCopyFindings } : {}),
         });
         // AI "What we applied today" narrative (owner 2026-07-21): why each
         // product, what it does, the benefit — cached per input hash; the
@@ -6705,7 +6715,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         findings: !lawnCallbackNarrativeOwns && Array.isArray(typedSnapshot.findings)
           ? typedSnapshot.findings : [],
         nextStepChips: Array.isArray(typedSnapshot.nextStepChips) ? typedSnapshot.nextStepChips : [],
-        photoSummary: typedSnapshot.photoSummary || null,
+        photoSummary: tsCopyFindings
+          ? summaryForCustomer(typedSnapshot.photoSummary, tsCopyFindings)
+          : (typedSnapshot.photoSummary || null),
         schemaVersion: typedSnapshot.schemaVersion || null,
       }
       : null,

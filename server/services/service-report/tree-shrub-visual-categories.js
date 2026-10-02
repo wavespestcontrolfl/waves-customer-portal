@@ -77,9 +77,12 @@ function explain(categoryKey, band, { pestTreatedToday = false, palmCrownRule = 
     },
   };
   // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY): photos are ground level, so the
-  // strong color row may not vouch for new growth (a palm's newest fronds).
+  // strong color and fullness rows may not vouch for growth or canopy (a palm's crown or newest fronds).
   if (palmCrownRule && categoryKey === 'leaf_color_vigor') {
     T.leaf_color_vigor.strong = 'Vibrant, even leaf color across the plants.';
+  }
+  if (palmCrownRule && categoryKey === 'foliage_fullness') {
+    T.foliage_fullness.strong = 'Full, dense foliage with no bare areas.';
   }
   const byBand = T[categoryKey] || {};
   const key = band === 'strong' ? 'strong' : band === 'healthy' ? 'healthy' : band === 'watch' ? 'watch' : 'needs_attention';

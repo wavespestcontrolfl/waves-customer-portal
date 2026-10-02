@@ -462,7 +462,15 @@ writer's output, may state or imply that a palm's crown, spear leaf or newest
 fronds look healthy or normal — `stripCrownHealthClaims` removes any positive
 claim (a ground-level phrase does not excuse it) while keeping adverse
 statements and "could not check from the ground" disclaimers, and the strong
-leaf-color sentence no longer says "healthy new growth". The stored-PDF cache
+leaf-color and fullness sentences no longer say "healthy new growth" or
+"healthy growth". The same overlay governs the other free-text photo surfaces
+of the payload for tree/shrub visits: `data.photos[].caption` (the PDF gallery)
+drops a caption tied to a hidden or edited finding and runs the crown strip, and
+`data.typedReport.photoSummary` is withdrawn when a finding was hidden or edited
+and crown-stripped otherwise. The strip works clause by clause, runs on
+tree/shrub copy only (never lawn or pest), and the instruction not to vouch for
+a palm's crown reaches the AI report writer on every tree/shrub generation. The
+portal Trees & Shrubs score omits an overall whose read the technician hid. The stored-PDF cache
 key carries `-tsfind<revision>` while the gate is on, so flipping it
 re-renders tree/shrub PDFs. Gate off (or unset) is byte-identical to before:
 nothing is frozen, no copy changes and the PDF key is unchanged. Auth, token

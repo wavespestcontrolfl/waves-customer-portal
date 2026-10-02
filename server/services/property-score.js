@@ -297,9 +297,20 @@ async function treeShrubComponent(customerId, knex, activeLines) {
   // formatAssessmentScores computes the category-fallback overall for legacy
   // rows whose overall_score is null — the same formatter the tree/shrub
   // report surface uses.
-  const overallOf = (r) => (formatAssessmentScores
-    ? formatAssessmentScores(r)?.overallScore
-    : (r?.overall_score ?? null));
+  // GATE_TS_TECH_FINDINGS_COPY: a visit's frozen hide decisions (kept only on its
+  // service record when the preview was rejected) withhold its overall here too,
+  // the same chokepoint the report history uses. Gate off = no extra read.
+  const tsFindings = require('./service-report/tree-shrub-tech-findings');
+  const frozenByRecord = tsFindings.techFindingsCopyLive()
+    ? await tsFindings.loadFrozenTechFindingsByRecord(rows, knex)
+    : null;
+  const overallOf = (r) => {
+    const formatted = formatAssessmentScores ? formatAssessmentScores(r) : null;
+    if (!formatted) return r?.overall_score ?? null;
+    return (frozenByRecord
+      ? tsFindings.hideFrozenFindingsInScores(formatted, frozenByRecord.get(String(r.service_record_id)))
+      : formatted)?.overallScore;
+  };
   const scored = rows
     .map((r) => ({ row: r, overall: overallOf(r) }))
     .filter((x) => x.overall != null);
@@ -458,5 +469,5 @@ async function buildPropertyScore(customerId, knex = db) {
 module.exports = {
   buildPropertyScore,
   // exported for tests
-  _test: { composeOverall, pressureToHealth, movementReason, loadActiveLineSet, pestComponent },
+  _test: { composeOverall, pressureToHealth, movementReason, loadActiveLineSet, pestComponent, treeShrubComponent },
 };

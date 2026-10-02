@@ -19,7 +19,9 @@ const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
-const { techFindingsPromptLines, hasTechFindingLines, PALM_CROWN_PROMPT_RULE } = require('./tree-shrub-tech-findings');
+const {
+  techFindingsPromptLines, hasTechFindingLines, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive,
+} = require('./tree-shrub-tech-findings');
 const { redactAccessCodes } = require('../context-aggregator');
 const { buildWriterRecords } = require('./report-writer-records');
 const {
@@ -739,10 +741,14 @@ async function buildReportCopyContext({
       }
       sections.push(
         'TECHNICIAN FINDINGS FOR THIS VISIT (these override the photo signals above; technician-recorded):'
-        + `${techLines ? `\n${techLines}` : ' none beyond the photo signals.'}\n${PALM_CROWN_PROMPT_RULE}`,
+        + `${techLines ? `\n${techLines}` : ' none beyond the photo signals.'}`,
       );
     }
   }
+  // PRIMARY palm-crown guard (GATE_TS_TECH_FINDINGS_COPY, owner 2026-10-01): the
+  // ground-level instruction reaches the writer on EVERY tree & shrub generation,
+  // with or without a signed photo review attached. The strip is only a backstop.
+  if (line === 'tree_shrub' && techFindingsCopyLive()) sections.push(PALM_CROWN_PROMPT_RULE);
 
   // The current visit isn't scored at generate time, so buildPressureTrendContext
   // computes the trend from PRIOR completed visits only (its placeholder "current"
