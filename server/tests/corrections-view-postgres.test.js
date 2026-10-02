@@ -1,5 +1,5 @@
 /**
- * The `corrections` view (migrations 20261002100000 through 20261002140000) on a real PostgreSQL:
+ * The `corrections` view (migrations 20261002100000 through 20261002150000) on a real PostgreSQL:
  * one row per human correction across its five sources, the AI text beside
  * what the person put instead, and nothing for rows that are not corrections
  * (an accepted suggestion, a right typed answer, a draft the system retired,
@@ -97,7 +97,7 @@ jest.setTimeout(60000);
       judgment(ids.humanBetterAlreadyCorrected, 'human_better', ids.shadowDraft3),
       judgment(ids.humanBetterNoSend, 'human_better', ids.shadowDraft4),
       { ...judgment(ids.humanBetterSwept, 'human_better', ids.shadowDraft5), judged_at: at(4.9) },
-      { ...judgment(ids.judgedForTraining, 'human_better', ids.shadowDraft6), human_reply_text: 'Monday at 10 works.', judged_at: at(4.85) },
+      { ...judgment(ids.judgedForTraining, 'human_better', ids.shadowDraft6), human_reply_text: 'Monday at 10\n\nworks — see you.', judged_at: at(4.85) },
     ]);
     // The judged draft's Agent Review decision was corrected by a person: one correction, shown as the decision.
     await trx('agent_decisions').insert([
@@ -154,11 +154,11 @@ jest.setTimeout(60000);
       // its decision was corrected too, but shows a DIFFERENT reply (the settling send): a separate rewrite, kept
       training(ids.trainingOnCorrected, ids.linkedCorrected, 'edited', at(3.4)),
       // its decision already shows this same reply as its human text: one correction, left out
-      { ...training(ids.trainingSameReply, ids.linkedCorrected, 'edited', at(3.3)), outbound_body: '  Tuesday at 2 is fine. See you then. ' },
+      { ...training(ids.trainingSameReply, ids.linkedCorrected, 'edited', at(3.3)), outbound_body: '  Tuesday at 2 is fine.\n\nSee you then. ' },
       // matches the decision's JUDGMENT text, but the decision row displays its newer settling send: this text is nowhere else, so it stays
       { ...training(ids.trainingMatchesJudgment, ids.linkedCorrected, 'edited', at(3.2)), outbound_body: 'Yes, Tuesday works. See you then.' },
       // the judgment row on this decision's draft already shows this reply: one correction, left out
-      { ...training(ids.trainingMatchesEmittedJudgment, ids.uncountedDecision, 'edited', at(3.1)), outbound_body: ' Monday at 10 works.' },
+      { ...training(ids.trainingMatchesEmittedJudgment, ids.uncountedDecision, 'edited', at(3.1)), outbound_body: 'Monday at 10 works - see you.' }, // capture stores the canonical text (folded whitespace, GSM punctuation)
       // a different rewrite beside that judgment is its own correction
       training(ids.trainingDiffersFromJudgment, ids.uncountedDecision, 'edited', at(3.0)),
       // "no reply needed" against a decision that proposed no reply: an agreement, not a correction
@@ -183,7 +183,7 @@ jest.setTimeout(60000);
     expect(byId[ids.recoveredIgnored]).toMatchObject({ kind: 'ignored', human_text: 'Friday morning works, see you then.', corrected_by: reviewer, corrected_at: at(9.7) });
     expect(byId[ids.linkedCorrected].corrected_at).toEqual(at(4.6));
     expect(byId[ids.linkedCorrectedNoSend].corrected_at).toEqual(at(4.4));
-    expect(byId[ids.judgedForTraining]).toMatchObject({ source: 'shadow_judgment', human_text: 'Monday at 10 works.' });
+    expect(byId[ids.judgedForTraining]).toMatchObject({ source: 'shadow_judgment', human_text: 'Monday at 10\n\nworks — see you.' });
     expect(byId[ids.trainingDiffersFromJudgment]).toMatchObject({ source: 'reply_training', human_text: 'Thursday at 9 works, see you then.' });
     // a swept suggestion is not the person's correction, so the judge's verdict on its draft is what shows
     expect(byId[ids.humanBetterSwept]).toMatchObject({ source: 'shadow_judgment', kind: 'human_better', ai_text: `Draft ${ids.shadowDraft5.slice(0, 4)}` });
