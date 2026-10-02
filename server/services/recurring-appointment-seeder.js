@@ -1308,7 +1308,7 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
     require('./logger').warn(`[recurring-seeder] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
     if (resolvedTerm) {
       await require('./annual-prepay-renewals')._private.fileCoverageExceptionAfterCommit(
-        conn, resolvedTerm, 'generator_coverage_failed',
+        commitScope, resolvedTerm, 'generator_coverage_failed',
         'Newly scheduled visits on this annual prepay could not be marked as covered, so completing them will invoice the customer for prepaid work. Re-apply the prepay coverage to those visits, or void the invoices if they have already been issued.',
       ).catch(() => {});
     }

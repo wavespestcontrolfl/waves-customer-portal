@@ -396,6 +396,35 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
+  test('seeding inside a savepoint: a failed prepay re-apply files its alert against the OUTER transaction (commitScope)', async () => {
+    const Seeder = require('../services/recurring-appointment-seeder');
+    const Renewals = require('../services/annual-prepay-renewals');
+    const trx = await mockPg.transaction();
+    const apply = jest.spyOn(Renewals, 'applyPrepaidCoverageForTerm').mockRejectedValue(new Error('coverage boom'));
+    const filed = [];
+    const file = jest.spyOn(Renewals._private, 'fileCoverageExceptionAfterCommit')
+      .mockImplementation(async (scope) => { filed.push(scope); });
+    try {
+      const base = await customerFixture(trx);
+      const [term] = await trx('annual_prepay_terms').insert({
+        customer_id: base.customerId, plan_label: 'Synthetic Prepay', monthly_rate: 30, prepay_amount: 360,
+        term_start: weekdayAhead(1), term_end: addDays(weekdayAhead(1), 365), status: 'active',
+        coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly',
+      }).returning('*');
+      const [parent] = await trx('scheduled_services').insert({
+        customer_id: base.customerId, property_id: base.propertyId, service_type: 'Quarterly Pest Control', status: 'pending',
+        scheduled_date: weekdayAhead(10), is_recurring: true, recurring_pattern: 'quarterly', annual_prepay_term_id: term.id,
+      }).returning('*');
+      const cols = await trx('scheduled_services').columnInfo();
+      await trx.transaction(async (sp) => {
+        await Seeder._internals.applySeededPrepayCoverage(sp, parent, cols, [addDays(weekdayAhead(10), 91)], trx);
+      });
+      expect(apply).toHaveBeenCalled();
+      expect(filed).toHaveLength(1);
+      expect(filed[0]).toBe(trx); // never the savepoint, whose RELEASE precedes the accept's commit
+    } finally { apply.mockRestore(); file.mockRestore(); await trx.rollback(); }
+  });
+
   test('a failing rider link write rolls back to its savepoint and leaves the transaction usable', async () => {
     const RiderAcceptSeeding = require('../services/rider-accept-seeding');
     const trx = await mockPg.transaction();
