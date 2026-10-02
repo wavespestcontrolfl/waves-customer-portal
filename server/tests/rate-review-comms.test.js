@@ -82,7 +82,7 @@ function draft(n, overrides = {}) {
 // synthetic _line / _cadence tags).
 function openVisitsFor(notices) {
   return notices.filter((n) => (n.billing_lane || 'per_application') === 'per_application').map((n, i) => ({
-    id: `70000000-0000-4000-8000-00000000000${i + 1}`, customer_id: n.customer_id, scheduled_date: n.effective_date, status: 'pending', estimated_price: '117.00',
+    id: `70000000-0000-4000-8000-00000000000${i + 1}`, customer_id: n.customer_id, scheduled_date: n.effective_date, status: 'pending', estimated_price: (Number(n.noticed_current_cents ?? 11700) / 100).toFixed(2),
     is_callback: false, is_recurring: true, recurring_parent_id: null, _line: n.family_key, _cadence: 'quarterly',
   }));
 }
@@ -206,6 +206,13 @@ describe('sendPreview', () => {
     mockDb.store.scheduled_services.forEach((v) => { v.status = 'cancelled'; });
     const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
     expect(out.customers[0].suppressedLines[0].reason).toBe('line_gone');
+  });
+
+  test('a later application of the line repriced since the notice holds it too (the apply refuses the whole change)', async () => {
+    const b = book();
+    b.scheduled_services.push({ ...b.scheduled_services[0], id: '70000000-0000-4000-8000-000000000099', scheduled_date: '2027-03-10', estimated_price: '100.00' });
+    mockDb.reset(b);
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).customers[0].suppressedLines[0].reason).toBe('line_gone');
   });
 
   test('a prepaid term whose renewal date moved since the notice is held (rate_moved)', async () => {

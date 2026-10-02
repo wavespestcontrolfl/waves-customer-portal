@@ -81,7 +81,7 @@ const REASONS = Object.freeze({
   renewal_declined: 'Customer declined to renew the prepaid plan',
   lane_changed: 'Billing changed since the notice was prepared — prepare it again',
   rate_moved: 'The rate on file is no longer the one in the notice — prepare it again',
-  line_gone: 'No open application left on this plan line (cancelled since the notice was prepared)',
+  line_gone: 'No open application left on this plan line, or one was repriced since the notice was prepared',
 });
 
 function badInput(message, status = 400) {
@@ -292,11 +292,11 @@ async function liveMonthlyCents(dbh, n, customer) {
   return cents(customer?.monthly_rate);
 }
 
-// Per-application notices whose plan line has no open application on or
-// after the effective date any more (the line was cancelled or emptied
-// since the notice was prepared): nothing would ever bill the new rate, so
-// the letter is not sent and nothing is shown as upcoming. Unreadable =
-// treated as gone (held).
+// Per-application notices the apply could not carry out any more: the plan
+// line has no open application on or after the effective date (cancelled
+// or emptied since the notice was prepared), or one of those applications
+// was repriced away from the noticed current price. The letter is not sent
+// and nothing is shown as upcoming. Unreadable = treated as gone (held).
 async function linesGoneFor(dbh, notices, { snapshots }) {
   const { loadLineOpenVisits } = require('./rate-review-apply')._private;
   const cadenceByNotice = new Map((snapshots || []).map((s) => [String(s.notice_id), s.cadence]));
@@ -304,7 +304,12 @@ async function linesGoneFor(dbh, notices, { snapshots }) {
   for (const n of notices.filter((x) => x.billing_lane === 'per_application')) {
     try {
       const visits = await loadLineOpenVisits(dbh, { customerId: n.customer_id, familyKey: n.family_key, cadence: cadenceByNotice.get(String(n.id)) || null, fromDate: ymd(n.effective_date) });
-      if (!visits.some((v) => !v.is_callback)) gone.add(String(n.id));
+      const targets = visits.filter((v) => !v.is_callback);
+      if (!targets.length) gone.add(String(n.id));
+      // Every application the apply would reprice must still carry the
+      // noticed current price (its assertFlatTargets refuses the whole
+      // change otherwise) — one repriced occurrence makes the notice moot.
+      else if (targets.some((v) => Math.round(Number(v.estimated_price) * 100) !== noticedCurrent(n))) gone.add(String(n.id));
     } catch (err) {
       logger.warn(`[rate-review-comms] open visits unreadable for notice ${n.id}: ${err.message}`);
       gone.add(String(n.id));
