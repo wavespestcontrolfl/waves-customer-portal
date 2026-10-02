@@ -94,12 +94,19 @@ function windowForLabel(label) {
  * window text is still present, an edited one keeps only pairs whose drafted
  * offer span survived verbatim.
  */
-function buildOfferRow({ decision, outgoingBody, providerMessageId = null, to, sentAt = new Date(), drafter = require('./sms-shadow-drafter') }) {
+function buildOfferRow({ decision, outgoingBody, providerMessageId = null, to, sentAt = new Date(), ignoreLinks = false, drafter = require('./sms-shadow-drafter') }) {
   const snapshot = parseJson(decision?.input_snapshot)?.open_times_snapshot || null;
   if (!snapshot?.quotedWindows?.length) return { skip: 'no_offer_snapshot' };
   const phone = phoneLast10(to);
   if (!phone) return { skip: 'no_phone' };
-  const plan = drafter.planOpenTimesRecheck({ snapshot, outgoingBody, originalBody: decision.suggested_message });
+  // The backfill reads the LOGGED body, whose portal links the send step may
+  // have rewritten to short links; offered times never sit inside a link, so
+  // both sides are compared with links removed.
+  const plan = drafter.planOpenTimesRecheck({
+    snapshot,
+    outgoingBody: ignoreLinks ? withoutLinks(outgoingBody) : outgoingBody,
+    originalBody: ignoreLinks ? withoutLinks(decision.suggested_message) : decision.suggested_message,
+  });
   if (plan.action === 'refuse') return { skip: 'offer_text_unverifiable' };
   if (plan.action !== 'recheck' || !plan.quotedWindows?.length) return { skip: 'no_offer_in_sent_text' };
   const sent = new Date(sentAt);
@@ -115,6 +122,13 @@ function buildOfferRow({ decision, outgoingBody, providerMessageId = null, to, s
       status: 'open',
     },
   };
+}
+
+// A body with every link token (with or without a scheme, including /l/
+// short links) removed and spacing collapsed.
+const LINK_RE = /\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/\S*)?/gi;
+function withoutLinks(body) {
+  return String(body || '').replace(LINK_RE, '').replace(/[ \t]+/g, ' ').replace(/ +([.,!?])/g, '$1').trim();
 }
 
 // Which job the offer is for. Only the id its own kind commits through is
@@ -149,14 +163,14 @@ function resolveSlot(pair, sentAt, dayLabel) {
  * offer to the same phone for the same kind supersedes the open one. Returns
  * { recorded: true, id } or { recorded: false, reason } and never throws.
  */
-async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessageId = null, to, sentAt = new Date(), dbh = db } = {}) {
+async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessageId = null, to, sentAt = new Date(), ignoreLinks = false, dbh = db } = {}) {
   if (!offerLedgerLive()) return { recorded: false, reason: 'gate_off' };
   if (!agentDecisionId) return { recorded: false, reason: 'no_decision' };
   try {
     const decision = await dbh('agent_decisions').where({ id: agentDecisionId })
       .first('id', 'customer_id', 'suggested_message', 'input_snapshot');
     if (!decision) return { recorded: false, reason: 'decision_not_found' };
-    const built = buildOfferRow({ decision, outgoingBody, providerMessageId, to, sentAt });
+    const built = buildOfferRow({ decision, outgoingBody, providerMessageId, to, sentAt, ignoreLinks });
     if (built.skip) return { recorded: false, reason: built.skip };
     const { row } = built;
     return await dbh.transaction(async (trx) => {
@@ -211,13 +225,15 @@ const BACKFILL_MAX_PAGES = 10;
  * TIMES and has no ledger row, and hands each to recordOfferForSend with the
  * sent row's body, sid, destination and time; the writer's own checks, its
  * idempotency per decision and its send-order supersede rule all still apply.
- * The logged body may carry rewritten links; only offer spans that survived
- * verbatim count, the same rule as a reviewer-edited reply. Never throws.
+ * The logged body may carry rewritten short links, so links are ignored on
+ * both sides of the edit check (see buildOfferRow).
+ * Never throws; a failed write is counted in `errors` so the cron fails health.
  */
 async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BACKFILL_BATCH, maxPages = BACKFILL_MAX_PAGES } = {}) {
   if (!offerLedgerLive()) return { scanned: 0, recorded: 0, skipped: 0, reason: 'gate_off' };
   const since = new Date(new Date(now).getTime() - BACKFILL_LOOKBACK_HOURS * 3600000);
   let recorded = 0;
+  let errors = 0;
   const seen = new Set();
   // Keyset pages over (created_at, id): a send the writer skips for good (a
   // reviewer edit that dropped every offered time) stays eligible, so each
@@ -243,7 +259,7 @@ async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BA
         .select('sl.id', 'ad.id as agent_decision_id', 'sl.message_body', 'sl.twilio_sid', 'sl.to_phone', 'sl.created_at');
     } catch (err) {
       logger.warn(`[sms-offers] backfill scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
-      return { scanned: seen.size, recorded, skipped: seen.size - recorded, reason: 'error' };
+      return { scanned: seen.size, recorded, errors: errors + 1, skipped: seen.size - recorded - errors, reason: 'error' };
     }
     for (const r of rows) {
       // A decision sent as several rows is one offer: its first accepted row.
@@ -255,14 +271,16 @@ async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BA
         providerMessageId: r.twilio_sid,
         to: r.to_phone,
         sentAt: new Date(r.created_at),
+        ignoreLinks: true,
         dbh,
       });
       if (result.recorded) recorded += 1;
+      else if (result.reason === 'error') errors += 1;
     }
     if (rows.length < batchSize) break;
     cursor = rows[rows.length - 1];
   }
-  return { scanned: seen.size, recorded, skipped: seen.size - recorded };
+  return { scanned: seen.size, recorded, errors, skipped: seen.size - recorded - errors };
 }
 
 module.exports = {
@@ -273,6 +291,7 @@ module.exports = {
   isoDateForLabel,
   windowForLabel,
   phoneLast10,
+  withoutLinks,
   OFFER_TTL_HOURS,
   KIND_BY_SOURCE,
 };

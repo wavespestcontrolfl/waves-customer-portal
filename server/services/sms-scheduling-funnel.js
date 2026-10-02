@@ -1,8 +1,7 @@
 'use strict';
 /**
  * SMS scheduling funnel: how many scheduling texts came in, how many were
- * answered by a person, how many were followed by a real schedule change, and
- * how many offers the ledger recorded (sms_offers, GATE_SMS_OFFER_LEDGER).
+ * followed by a real schedule change, and how many offers the ledger recorded (sms_offers, GATE_SMS_OFFER_LEDGER).
  *
  * Read-only and counts-only: no message text, name, phone or address leaves
  * this module. It measures completed requests, not replies: a scheduling text
@@ -22,11 +21,11 @@ const { hasSchedulingIntent, hasRescheduleOrAwayIntent, isSmsReaction } = requir
 const { parseETDateTime } = require('../utils/datetime-et');
 
 const FOLLOW_WINDOW_MS = 48 * 3600000;
-// A reply a person typed or approved (never a reminder or another automated text).
-const PERSON_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised'];
-// Only a reply the provider took counts: a failed, blocked or still-scheduled
-// row reached nobody (same statuses sms-shadow-judge.js counts as sent).
-const PERSON_REPLY_STATUSES = ['queued', 'sent', 'delivered'];
+// No reply-time metric on purpose: whether an outbound answered a given
+// inbound needs the inbox's own linkage (sms-response-policy outboundIsAnswer,
+// click follow-ups, parallel threads). The before-number for reply time is
+// the 2026-10-02 owner baseline; the after-number this lane needs (accept to
+// committed row) comes from sms_offers once offers are executed.
 
 function isSchedulingText(body) {
   // A tapback ("Liked “Your appointment is tomorrow…”") quotes our own
@@ -66,20 +65,16 @@ function firstWithin(times, from, to) {
   return null;
 }
 
-function median(values) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
 // The ledger's rows by kind and state. An offer still marked open past its
 // expiry is reported as expired.
 function summarizeOffers(offers, { moveTimes, bookingTimes, now }) {
   const nowMs = new Date(now).getTime();
   const out = { sent: offers.length, by_kind: {}, open: 0, expired: 0, superseded: 0, other: 0, with_unresolved_slot: 0, followed_by_change_48h: 0 };
+  // State as of the report's end: a supersede that happened after it (a
+  // later offer) must not rewrite a past report.
   const stateOf = (o) => {
-    if (o.status === 'superseded') return 'superseded';
+    if (o.status === 'superseded' && (!o.closed_at || new Date(o.closed_at).getTime() <= nowMs)) return 'superseded';
+    if (o.status === 'superseded') return new Date(o.expires_at).getTime() <= nowMs ? 'expired' : 'open';
     if (o.status !== 'open') return 'other';
     return new Date(o.expires_at).getTime() <= nowMs ? 'expired' : 'open';
   };
@@ -104,19 +99,16 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now }) {
  *   moves         [{ customer_id, created_at }]            reschedule_log, not system
  *   cancels       [{ customer_id, transitioned_at }]       cancelled / skipped
  *   bookings      [{ customer_id, created_at }]            new scheduled_services
- *   personReplies [{ customer_id, created_at }]            outbound, PERSON_REPLY_TYPES
- *   offers        [{ customer_id, kind, status, sent_at, expires_at, slots }] or null (no table)
+ *   offers        [{ customer_id, kind, status, sent_at, expires_at, closed_at, slots }] or null (no table)
  */
-function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], personReplies = [], offers = null, now = new Date() } = {}) {
+function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, now = new Date() } = {}) {
   const flagged = inbound.filter((r) => r.customer_id && isSchedulingText(r.body));
   const moveTimes = byCustomer(moves, 'created_at');
   const cancelTimes = byCustomer(cancels, 'transitioned_at');
   const bookingTimes = byCustomer(bookings, 'created_at');
-  const replyTimes = byCustomer(personReplies, 'created_at');
 
   const perWeek = {};
   const followed = { any: 0, moves: 0, cancels_or_skips: 0, new_bookings: 0 };
-  const replyMinutes = [];
   for (const r of flagged) {
     const t0 = new Date(r.created_at).getTime();
     const week = weekOf(t0);
@@ -129,23 +121,15 @@ function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = []
     if (cancelled) followed.cancels_or_skips += 1;
     if (booked) followed.new_bookings += 1;
     if (moved || cancelled || booked) followed.any += 1;
-    // Strictly after the text, and inside the same 48h follow window: a reply
-    // days later answers something else, and an unbounded search would let a
-    // past report's numbers drift as new texts arrive.
-    const reply = firstWithin(replyTimes.get(r.customer_id), t0 + 1, until);
-    if (reply !== null) replyMinutes.push((reply - t0) / 60000);
   }
 
   const offerSummary = offers ? summarizeOffers(offers, { moveTimes, bookingTimes, now }) : null;
 
-  const med = median(replyMinutes);
   return {
     inbound_total: inbound.length,
     scheduling_flagged: flagged.length,
     per_week: perWeek,
     followed_within_48h: followed,
-    person_replied: replyMinutes.length,
-    person_reply_median_minutes: med === null ? null : Math.round(med),
     offers: offerSummary,
   };
 }
@@ -177,14 +161,14 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
   const hasOffers = await dbh.schema.hasTable('sms_offers');
   const offers = hasOffers
     ? await dbh('sms_offers').where('sent_at', '>=', from).where('sent_at', '<', to)
-      .select('customer_id', 'kind', 'status', 'sent_at', 'expires_at', 'slots')
+      .select('customer_id', 'kind', 'status', 'sent_at', 'expires_at', 'closed_at', 'slots')
     : null;
   const customerIds = [...new Set([
     ...inbound.filter((r) => isSchedulingText(r.body)).map((r) => r.customer_id),
     ...(offers || []).map((o) => o.customer_id).filter(Boolean),
   ])];
   if (!customerIds.length) return summarizeFunnel({ inbound, offers, now: to });
-  const [moves, cancels, bookings, personReplies] = await Promise.all([
+  const [moves, cancels, bookings] = await Promise.all([
     dbh('reschedule_log').whereIn('customer_id', customerIds).whereNot('initiated_by', 'system')
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
     dbh('job_status_history as h').join('scheduled_services as s', 's.id', 'h.job_id')
@@ -193,10 +177,8 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
       .select('s.customer_id', 'h.transitioned_at'),
     dbh('scheduled_services').whereIn('customer_id', customerIds)
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
-    dbh('sms_log').where({ direction: 'outbound' }).whereIn('customer_id', customerIds).whereIn('message_type', PERSON_REPLY_TYPES)
-      .whereIn('status', PERSON_REPLY_STATUSES).where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
   ]);
-  return summarizeFunnel({ inbound, moves, cancels, bookings, personReplies, offers, now: to });
+  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, now: to });
 }
 
-module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, isSchedulingText, weekOf, PERSON_REPLY_TYPES, PERSON_REPLY_STATUSES, FOLLOW_WINDOW_MS };
+module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };

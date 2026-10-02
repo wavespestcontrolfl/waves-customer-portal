@@ -31,20 +31,13 @@ test('only scheduling texts are counted, and each is tied to what followed it', 
     moves: [{ customer_id: A, created_at: at('2026-09-29T17:00:00Z') }, { customer_id: B, created_at: at('2026-10-03T14:00:00Z') }],
     cancels: [{ customer_id: C, transitioned_at: at('2026-09-30T17:00:00Z') }],
     bookings: [],
-    personReplies: [
-      { customer_id: A, created_at: at('2026-09-29T14:30:00Z') },
-      { customer_id: B, created_at: at('2026-09-30T16:00:00Z') },
-      // A reply BEFORE the text is not an answer to it.
-      { customer_id: C, created_at: at('2026-09-30T15:00:00Z') },
-    ],
   });
 
   expect(summary.inbound_total).toBe(4);
   expect(summary.scheduling_flagged).toBe(3);
   expect(summary.per_week).toEqual({ '2026-09-28': 3 });
   expect(summary.followed_within_48h).toEqual({ any: 2, moves: 1, cancels_or_skips: 1, new_bookings: 0 });
-  expect(summary.person_replied).toBe(2);
-  expect(summary.person_reply_median_minutes).toBe(75); // the mean of the middle two (30, 120)
+  expect(summary).not.toHaveProperty('person_replied');
   expect(summary.offers).toBeNull();
 });
 
@@ -67,7 +60,7 @@ test('offers are counted by kind and state, and an unresolved slot is called out
 });
 
 test('an empty window reports zeros, not errors', () => {
-  expect(summarizeFunnel({})).toMatchObject({ inbound_total: 0, scheduling_flagged: 0, person_replied: 0, person_reply_median_minutes: null, offers: null });
+  expect(summarizeFunnel({})).toMatchObject({ inbound_total: 0, scheduling_flagged: 0, offers: null });
 });
 
 describe('report boundaries', () => {
@@ -84,40 +77,15 @@ describe('report boundaries', () => {
   });
 });
 
-test('a person reply counts only when the provider took it (failed, blocked or scheduled rows reached nobody)', async () => {
-  const { loadFunnel } = require('../services/sms-scheduling-funnel');
-  const queries = [];
-  const rowsFor = { sms_log: [{ customer_id: 'c-1', body: 'Can we move my appointment to Friday?', created_at: new Date('2026-10-01T14:00:00Z') }] };
-  const dbh = (table) => {
-    const q = { table, calls: [] };
-    queries.push(q);
-    const builder = new Proxy({}, {
-      get(_, method) {
-        if (method === 'then') {
-          const rows = q.table === 'sms_log' && q.calls.some(([m, a]) => m === 'where' && a[0]?.direction === 'inbound') ? rowsFor.sms_log : [];
-          return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-        }
-        return (...args) => { q.calls.push([method, args]); return builder; };
-      },
-    });
-    return builder;
-  };
-  dbh.schema = { hasTable: async () => false };
-  await loadFunnel({ since: new Date('2026-09-28T00:00:00Z'), until: new Date('2026-10-02T00:00:00Z'), dbh });
-  const outbound = queries.find((q) => q.calls.some(([m, a]) => m === 'where' && a[0]?.direction === 'outbound'));
-  expect(outbound.calls).toContainEqual(['whereIn', ['status', ['queued', 'sent', 'delivered']]]);
-});
-
 test('a tapback quoting our appointment text is not a scheduling request', () => {
   expect(isSchedulingText('Liked \u201cYour appointment is tomorrow between 10 AM and 12 PM. Reply to reschedule.\u201d')).toBe(false);
   expect(isSchedulingText('Can we reschedule my appointment to Friday?')).toBe(true);
 });
 
-test('a reply counts only inside the 48h follow window', () => {
-  const summary = summarizeFunnel({
-    inbound: [{ customer_id: A, body: 'Can we reschedule my appointment to Friday?', created_at: at('2026-09-29T14:00:00Z') }],
-    personReplies: [{ customer_id: A, created_at: at('2026-10-05T14:00:00Z') }],
-  });
-  expect(summary.person_replied).toBe(0);
-  expect(summary.person_reply_median_minutes).toBeNull();
+test('a supersede after the report end does not rewrite the past report', () => {
+  const offer = (closedAt) => ({ customer_id: A, kind: 'move_visit', status: 'superseded', sent_at: '2026-09-29T14:00:00Z', expires_at: '2026-10-01T14:00:00Z', closed_at: closedAt, slots: [] });
+  const asOf = (closedAt, now) => summarizeFunnel({ offers: [offer(closedAt)], now: at(now) }).offers;
+  expect(asOf('2026-09-30T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ superseded: 1, open: 0 });
+  expect(asOf('2026-10-05T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ superseded: 0, open: 1 });
+  expect(asOf('2026-10-05T10:00:00Z', '2026-10-02T12:00:00Z')).toMatchObject({ superseded: 0, expired: 1 });
 });

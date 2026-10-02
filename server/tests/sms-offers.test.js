@@ -114,6 +114,12 @@ describe('buildOfferRow', () => {
   });
 });
 
+test('withoutLinks drops every link form and keeps the times', () => {
+  expect(offers.withoutLinks('Tuesday 10:00 AM - 12:00 PM works. Details: wvs.example/l/abc123 or https://portal.example.com/prep/tok?x=1.'))
+    .toBe('Tuesday 10:00 AM - 12:00 PM works. Details: or');
+  expect(offers.withoutLinks('See you at 9:30 a.m.')).toBe('See you at 9:30 a.m.');
+});
+
 describe('with the drafter\'s real label and edit-plan functions', () => {
   const real = jest.requireActual('../services/sms-shadow-drafter');
 
@@ -127,6 +133,15 @@ describe('with the drafter\'s real label and edit-plan functions', () => {
     expect(JSON.parse(row.slots).map((s) => `${s.date} ${s.start}`)).toEqual(['2026-10-06 10:00', '2026-10-07 14:00']);
     const rewritten = 'We can do Tuesday 10-12 or Wednesday 2-4. Which works?';
     expect(offers.buildOfferRow({ decision: decision(snapshot, BODY), outgoingBody: rewritten, to: '9415550100', sentAt: SENT_AT }).skip).toBeDefined();
+  });
+
+  test('backfill: an offer sentence whose portal link became a short link still records its slots', () => {
+    const snapshot = { lookup: { source: 'scheduler', scheduledServiceId: VISIT_ID, customerId: CUSTOMER_ID }, quotedWindows: TWO_WINDOWS };
+    const body = (link) => `We can do Tuesday, October 6 10:00 AM - 12:00 PM or Wednesday, October 7 2:00 PM - 4:00 PM, or pick online at ${link}. Which works?`;
+    const args = { decision: decision(snapshot, body('portal.example.com/reschedule/token123')), outgoingBody: body('wvs.example/l/Ab12Cd'), to: '9415550100', sentAt: SENT_AT };
+    // The send-time writer never sees this (it gets the pre-wrap body); read strictly it looks like an edit.
+    expect(offers.buildOfferRow(args)).toEqual({ skip: 'offer_text_unverifiable' });
+    expect(JSON.parse(offers.buildOfferRow({ ...args, ignoreLinks: true }).row.slots).map((x) => x.date)).toEqual(['2026-10-06', '2026-10-07']);
   });
 });
 
@@ -168,7 +183,7 @@ describe('recordOfferForSend', () => {
     process.env[GATE] = 'true';
     const dbh = jest.fn(() => { throw new Error('connection lost'); });
     dbh.raw = jest.fn();
-    await expect(offers.backfillMissedOffers({ dbh })).resolves.toMatchObject({ recorded: 0, reason: 'error' });
+    await expect(offers.backfillMissedOffers({ dbh })).resolves.toMatchObject({ recorded: 0, errors: 1, reason: 'error' });
   });
 
   test('gate on: a send with no decision records nothing', async () => {

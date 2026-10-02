@@ -1557,7 +1557,9 @@ async function sendCustomerMessageCore(input) {
   // the SENT text carried. Every decision send (reviewer, scheduled, auto-send)
   // passes through here with metadata.agentDecisionId. input.body is the text
   // the send checks approved; sendInput.body may have had its links rewritten.
-  await recordSmsOfferAfterSend(input, sendInput, providerOutcome);
+  // Not awaited: the text is already out, and a slow database must not hold
+  // the send result. A lost write is re-recorded by the ledger's backfill sweep.
+  void recordSmsOfferAfterSend(input, sendInput, providerOutcome);
 
   return providerCoordination.attachReservationContext(providerHandoffReservation, {
     sent: true,

@@ -857,6 +857,8 @@ function initScheduledJobs() {
       await runExclusive('sms-offer-ledger-backfill', async () => {
         const result = await require('./sms-offers').backfillMissedOffers();
         if (result.recorded > 0) logger.info(`[sms-offer-ledger-backfill] recorded=${result.recorded} scanned=${result.scanned}`);
+        // A failed scan or write must fail job health, not read as a green tick.
+        if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
       });
     } catch (err) {
       logger.error(`[sms-offer-ledger-backfill] tick failed: ${err.message}`);

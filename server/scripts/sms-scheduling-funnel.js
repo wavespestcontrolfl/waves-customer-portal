@@ -8,9 +8,8 @@
  *   node server/scripts/sms-scheduling-funnel.js --since=2026-09-01 --until=2026-10-01
  *   node server/scripts/sms-scheduling-funnel.js --json
  *
- * Prints how many scheduling texts came in, how many a person replied to and
- * how fast, how many were followed by a real schedule change within 48 hours,
- * and what the offer ledger recorded (sms_offers, GATE_SMS_OFFER_LEDGER). No
+ * Prints how many scheduling texts came in, how many were followed by a real
+ * schedule change within 48 hours, and what the offer ledger recorded (sms_offers, GATE_SMS_OFFER_LEDGER). No
  * message text, names or phone numbers are printed. Writes nothing.
  */
 
@@ -28,8 +27,6 @@ function printReport(since, until, f) {
     `SMS scheduling funnel, ${since.toISOString().slice(0, 10)} to ${until.toISOString().slice(0, 10)}`,
     `  Customer texts received            ${f.inbound_total}`,
     `  About scheduling                   ${f.scheduling_flagged}${pct(f.scheduling_flagged, f.inbound_total)}`,
-    `  Replied to by a person             ${f.person_replied}${pct(f.person_replied, f.scheduling_flagged)}`,
-    `  Median minutes to that reply       ${f.person_reply_median_minutes === null ? 'n/a' : f.person_reply_median_minutes}`,
     `  Followed by a schedule change <48h ${f.followed_within_48h.any}${pct(f.followed_within_48h.any, f.scheduling_flagged)}`,
     `    moves / cancels+skips / bookings ${f.followed_within_48h.moves} / ${f.followed_within_48h.cancels_or_skips} / ${f.followed_within_48h.new_bookings}`,
     '    (moves = logged moves only; a date changed in the admin Edit appointment form is not logged and not counted)',
