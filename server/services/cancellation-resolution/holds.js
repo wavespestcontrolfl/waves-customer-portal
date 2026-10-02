@@ -957,8 +957,10 @@ async function remindDueHolds(out, today) {
 
 }
 
-async function resumeDueHolds(out, today) {
-  const toResume = await db('plan_holds').where({ status: 'active' }).where('resume_on', '<=', today).select('*');
+async function resumeDueHolds(out, today, customerIds = null) {
+  const query = db('plan_holds').where({ status: 'active' }).where('resume_on', '<=', today);
+  if (customerIds) query.whereIn('customer_id', customerIds);
+  const toResume = await query.select('*');
   for (const hold of toResume) {
     try {
       // A hold whose plan was cancelled or reconfigured in the meantime is
@@ -1039,4 +1041,17 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, noteAwayMode, restoreAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+/**
+ * The resume phase alone, for the given customers' holds due by `today` —
+ * the annual rate review's nightly apply (03:10) runs it before applying, so
+ * a rate whose effective date is a hold's return date lands that morning
+ * instead of being restored over at 10:18 and deferred a day. Same CAS and
+ * locks as the daily lifecycle; the 10:18 run finds these already resumed.
+ */
+async function resumeHoldsDueFor(customerIds, { today = etDateString() } = {}) {
+  const out = { reminded: 0, resumed: 0, skipsRecovered: 0, errors: [] };
+  if (Array.isArray(customerIds) && customerIds.length) await resumeDueHolds(out, today, customerIds);
+  return out;
+}
+
+module.exports = { resumeHoldsDueFor, startAwayMode, noteAwayMode, restoreAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

@@ -14,6 +14,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { ActionFeedback, Badge, Button, Card, Input, UiSurface } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import CorrectionReasonChips from "../../components/admin/CorrectionReasonChips";
+import { correctionReasonLabel } from "../../constants/correctionReasons";
 
 const STATUS_OPTIONS = [
   { value: "unreviewed", label: "Unreviewed" },
@@ -95,11 +97,15 @@ function SubjectText({ subject }) {
   );
 }
 
+// Whose answer a row holds, as the reviewer should read it (the server sends
+// providerLabel: Jev, Clef); the server names it on every row.
+const modelName = (review) => review?.providerLabel || review?.provider || "";
+
 function AnswersBlock({ review }) {
   const baselines = Object.entries(review.baselineAnswers || {});
   return (
     <div className="space-y-1 text-ui-body">
-      <div className="font-medium text-zinc-900">Jev: {formatAnswer(review.jevAnswer)}</div>
+      <div className="font-medium text-zinc-900">{modelName(review)}: {formatAnswer(review.jevAnswer)}</div>
       {baselines.map(([name, value]) => (
         <div key={name} className="text-zinc-700">{name.replace(/_/g, " ")}: {formatAnswer(value)}</div>
       ))}
@@ -117,6 +123,11 @@ function labelFailure(err) {
 
 function ReviewRow({ review, onLabeled, onStale }) {
   const [note, setNote] = useState("");
+  // Starts as, and follows, the saved label's reason: a confirmed-wrong row
+  // opened from the all / confirmed_error filters shows its reason pressed, so
+  // a Replace resends it instead of erasing the classification.
+  const [reason, setReason] = useState(review.label?.reason ?? null);
+  useEffect(() => { setReason(review.label?.reason ?? null); }, [review.id, review.label?.reason]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(null);
@@ -132,6 +143,7 @@ function ReviewRow({ review, onLabeled, onStale }) {
     const body = { verdict, seen_answer: review.jevAnswer, seen_subject: review.subjectVersion ?? null };
     if (verdict === "jev_wrong") body.correct_value = !review.jevAnswer.yes;
     if (note.trim()) body.note = note.trim();
+    if (verdict === "jev_wrong" && reason) body.reason = reason;
     if (force) body.force = true;
     try {
       const result = await adminFetch(`/admin/typed-decisions/reviews/${encodeURIComponent(review.id)}/label`, {
@@ -139,13 +151,18 @@ function ReviewRow({ review, onLabeled, onStale }) {
         body: JSON.stringify(body),
       });
       setConflict(null);
+      // The chip follows the label the server just saved: cleared after a
+      // right/unclear verdict (a chip tapped before it must not ride into a
+      // later Jev wrong unasked), kept after a wrong one so a further Replace
+      // on a still-mounted row resends it instead of nulling it.
+      setReason(result?.review?.label?.reason ?? null);
       onLabeled(review.id, result?.review || null);
     } catch (err) {
       const kind = labelFailure(err);
       if (kind === "conflict") setConflict({ verdict, status: err.details?.labelStatus || review.labelStatus || "labeled" });
       else setConflict(null);
       if (kind === "moved") setMoved(true);
-      if (kind === "stale") onStale();
+      if (kind === "stale") onStale(modelName(review));
       if (kind === "error") setError(err?.message || "Could not save the label.");
     } finally {
       setBusy("");
@@ -168,13 +185,13 @@ function ReviewRow({ review, onLabeled, onStale }) {
 
       {review.label?.verdict && (
         <div className="text-14 text-ink-secondary">
-          Labeled {titleCase(review.label.verdict)}{review.label.note ? ` — ${review.label.note}` : ""}
+          Labeled {titleCase(review.label.verdict)}{review.label.note ? ` — ${review.label.note}` : ""}{review.label.reason ? ` (${correctionReasonLabel(review.label.reason) || review.label.reason})` : ""}
         </div>
       )}
 
       {moved ? (
         <div role="status" className="text-14 text-ink-secondary">
-          This changed after Jev answered (a reprocessed call, or a different earlier Waves text), so what's shown above is not what Jev judged. It can't be labeled.
+          This changed after {modelName(review)} answered (a reprocessed call, or a different earlier Waves text), so what's shown above is not what {modelName(review)} judged. It can't be labeled.
         </div>
       ) : (
       <>
@@ -186,10 +203,12 @@ function ReviewRow({ review, onLabeled, onStale }) {
         maxLength={500}
       />
 
+      {yesNo && <CorrectionReasonChips value={reason} onChange={setReason} disabled={!!busy} label="If wrong, why?" />}
+
       <div className="flex flex-wrap gap-2">
-        <Button variant="secondary" disabled={!!busy} loading={busy === "jev_right" ? true : undefined} onClick={() => submit("jev_right")}>Jev right</Button>
+        <Button variant="secondary" disabled={!!busy} loading={busy === "jev_right" ? true : undefined} onClick={() => submit("jev_right")}>{modelName(review)} right</Button>
         {yesNo && (
-          <Button variant="secondary" disabled={!!busy} loading={busy === "jev_wrong" ? true : undefined} onClick={() => submit("jev_wrong")}>Jev wrong</Button>
+          <Button variant="secondary" disabled={!!busy} loading={busy === "jev_wrong" ? true : undefined} onClick={() => submit("jev_wrong")}>{modelName(review)} wrong</Button>
         )}
         <Button variant="ghost" disabled={!!busy} loading={busy === "unclear" ? true : undefined} onClick={() => submit("unclear")}>Unclear</Button>
       </div>
@@ -296,14 +315,14 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
   }, [status]);
 
   // The server saw a different Jev answer than the one displayed: reload.
-  const handleStale = useCallback(() => {
-    setNotice("Jev's answer changed since this loaded — reloaded");
+  const handleStale = useCallback((name) => {
+    setNotice(`${name || "Jev"}'s answer changed since this loaded — reloaded`);
     load();
   }, [load]);
 
   return (
     <UiSurface density="comfortable" className="min-h-full space-y-4 text-zinc-800">
-      {!embedded && <AdminCommandHeader title="Typed decisions" subtitle="Label Jev's typed answers against the baselines." />}
+      {!embedded && <AdminCommandHeader title="Typed decisions" subtitle="Label each model's typed answers against the baselines." />}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <div className="flex items-center gap-2">
           <label htmlFor="typed-status" className="text-14 font-medium text-ink-secondary">Status</label>

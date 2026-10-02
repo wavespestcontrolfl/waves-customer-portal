@@ -25,6 +25,7 @@
 
 const clamp = (n, lo = 0, hi = 10) => Math.max(lo, Math.min(hi, n));
 const round1 = (n) => Math.round(n * 10) / 10;
+const MODEL_VERSION = 'seasonal-weather-v1';
 
 // Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec
 const PESTS = [
@@ -43,10 +44,10 @@ const PESTS = [
       return score;
     },
     note(s, level) {
-      if (s.wet) return 'Standing water from recent rain is fueling a new generation.';
-      if (s.dry && (level === 'moderate' || level === 'low')) return 'Drier air is holding mosquito numbers down for now.';
-      if (level === 'high' || level === 'elevated') return 'Warm, humid Florida weather keeps biting pressure up.';
-      return 'Cooler conditions are keeping mosquito activity in check.';
+      if (s.wet) return 'Wet weather signals raise the modeled mosquito outlook; check for standing water.';
+      if (s.dry && (level === 'moderate' || level === 'low')) return 'Drier conditions lower the modeled mosquito outlook.';
+      if (level === 'high' || level === 'elevated') return 'Seasonal and weather signals put the modeled mosquito outlook above moderate.';
+      return 'The model estimates a lower mosquito outlook for these conditions.';
     },
   },
   {
@@ -62,8 +63,8 @@ const PESTS = [
       return score;
     },
     note(s, level) {
-      if (s.wet) return 'Wet ground pushes ant colonies to forage indoors for dry shelter.';
-      if (level === 'high' || level === 'elevated') return 'Warm weather has colonies foraging hard for food and water.';
+      if (s.wet) return 'Wet weather signals raise the modeled ant outlook.';
+      if (level === 'high' || level === 'elevated') return 'The model estimates an elevated ant outlook for these conditions.';
       return 'Cooler weather slows ant foraging.';
     },
   },
@@ -98,10 +99,10 @@ const PESTS = [
       return score;
     },
     note(s, level) {
-      if (s.hot && s.wet) return 'Heat plus rain drives American roaches out of mulch and into homes.';
-      if (s.hot) return 'High heat sends palmetto bugs looking for cool, damp indoor spots.';
-      if (level === 'high' || level === 'elevated') return 'Warm Florida nights keep outdoor roaches on the move.';
-      return 'Milder weather keeps palmetto bugs mostly outdoors.';
+      if (s.hot && s.wet) return 'Heat and rain may favor outdoor roaches seeking shelter.';
+      if (s.hot) return 'High heat raises the modeled palmetto bug outlook.';
+      if (level === 'high' || level === 'elevated') return 'The model estimates an elevated outdoor-roach outlook.';
+      return 'The model estimates a lower outdoor-roach outlook; indoor activity is still possible.';
     },
   },
   {
@@ -123,9 +124,9 @@ const PESTS = [
       return score + nudge * seasonScale;
     },
     note(s, level) {
-      if ((level === 'high' || level === 'elevated') && s.wet) return 'Warm rains trigger evening swarms — peak time to spot winged termites.';
-      if (level === 'high' || level === 'elevated') return 'Spring swarm season is underway across the Gulf Coast.';
-      return 'Outside the spring swarm window, termite activity stays low and hidden.';
+      if ((level === 'high' || level === 'elevated') && s.wet) return 'Wet weather signals raise the modeled seasonal termite-swarm outlook.';
+      if (level === 'high' || level === 'elevated') return 'The seasonal model estimates an elevated termite-swarm outlook.';
+      return 'The model estimates lower swarm pressure; this does not rule out an infestation.';
     },
   },
   {
@@ -142,9 +143,9 @@ const PESTS = [
       return score;
     },
     note(s, level) {
-      if (s.coolSnap) return 'A cool snap sends rats and mice indoors hunting for warmth.';
-      if (level === 'high' || level === 'elevated') return 'Cooler-season rodents are seeking shelter and food inside.';
-      return 'Warm weather keeps rodents content outdoors for now.';
+      if (s.coolSnap) return 'A cool snap raises the modeled rodent outlook.';
+      if (level === 'high' || level === 'elevated') return 'The seasonal model estimates an elevated rodent outlook.';
+      return 'The model estimates a lower rodent outlook; indoor activity is still possible.';
     },
   },
   {
@@ -163,7 +164,7 @@ const PESTS = [
     note(s, level) {
       if (s.warm) return 'Warm, humid weather is prime breeding time for fleas and ticks.';
       if (level === 'low' || level === 'minimal') return 'Cooler air slows the flea and tick life cycle.';
-      return 'Pets and yards stay at moderate flea and tick risk.';
+      return 'The model estimates a moderate flea and tick outlook.';
     },
   },
   {
@@ -180,7 +181,7 @@ const PESTS = [
     },
     note(s, level) {
       if (level === 'high' || level === 'elevated') return 'Mature late-summer colonies make nests larger and more defensive.';
-      if (s.coolSnap) return 'Cooling weather is shrinking wasp activity.';
+      if (s.coolSnap) return 'Cooling weather lowers the modeled wasp outlook.';
       return 'Watch eaves and soffits as colonies build through the warm months.';
     },
   },
@@ -224,7 +225,10 @@ function scorePests(month, signals) {
       score: round1(adjusted),
       score10,
       baseline,
+      baseline_comparison: adjusted - baseline >= 0.75 ? 'above' : adjusted - baseline <= -0.75 ? 'below' : 'near',
       level,
+      // Retained for existing third-party consumers: this legacy field is a
+      // seasonal-baseline comparison. Temporal change is week_over_week.
       trend: trendFor(adjusted, baseline),
       note: pest.note(signals, level),
     };
@@ -233,4 +237,4 @@ function scorePests(month, signals) {
   return rows;
 }
 
-module.exports = { PESTS, scorePests, levelFor, trendFor, clamp, round1 };
+module.exports = { PESTS, scorePests, levelFor, trendFor, clamp, round1, MODEL_VERSION };

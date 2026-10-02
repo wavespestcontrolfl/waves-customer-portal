@@ -1,0 +1,168 @@
+#!/usr/bin/env node
+/**
+ * Sandy PR 0a — where each second of a turn goes, per call and in aggregate.
+ *
+ * For each Sandy call, reads Twilio Voice Insights' ConversationRelay event
+ * timeline (end of customer speech → prompt → first token → agent speech)
+ * and joins it with our own stored per-turn stats (model vs tool time, tool
+ * names) from call_log.transcription_metadata.turn_stats (or the recovery
+ * segments' turn_stats). Prints the release-criteria gap (caller stops →
+ * caller hears Sandy) split into hearing / us / voice, plain vs tool turns.
+ *
+ * Usage:
+ *   node server/scripts/voice-relay-turn-timing.js --call=CA...
+ *   node server/scripts/voice-relay-turn-timing.js --sandbox --since=7d [--limit=20]
+ *   ... --json=out.json   (also write every joined turn)
+ *
+ * Read-only: one READ ONLY transaction against call_log, GETs against
+ * insights.twilio.com. Needs DATABASE_URL (or DATABASE_PUBLIC_URL via
+ * `railway run`) and TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN. Events reach
+ * the API about 90 s after a call ends.
+ */
+
+const fs = require('fs');
+const {
+  fetchConversationRelayEvents, parseTimeline, buildCallTimeline, summarizeTimeline,
+} = require('../services/voice-agent/relay-insights');
+const { compareSegments } = require('../services/voice-agent/relay-segments');
+
+const ARGS = Object.fromEntries(
+  process.argv.slice(2).map((arg) => {
+    if (!arg.startsWith('--')) return [arg, true];
+    const [key, value] = arg.slice(2).split('=');
+    return [key, value === undefined ? true : value];
+  })
+);
+
+function sinceDate(spec) {
+  const m = /^(\d+)([hd])$/.exec(String(spec || '7d'));
+  if (!m) throw new Error(`--since must look like 12h or 7d, got ${spec}`);
+  const ms = Number(m[1]) * (m[2] === 'h' ? 3600e3 : 86400e3);
+  return new Date(Date.now() - ms);
+}
+
+function parseJson(value) {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+/**
+ * Our turn stats. A reconnected call (GATE_VOICE_RELAY_RECOVERY) stores one
+ * segment per socket, in order, and the closing socket's transcript write
+ * carries only its own turns — so the segments win whenever they exist.
+ */
+function storedStatsFor(row) {
+  const meta = parseJson(row.metadata) || {};
+  // Call order, not append order: sockets can close out of generation order.
+  const segments = (Array.isArray(meta.relay_segments) ? meta.relay_segments.filter((x) => x && typeof x === 'object') : []).sort(compareSegments);
+  const fromSegments = segments.flatMap((s) => (Array.isArray(s && s.turn_stats) ? s.turn_stats : []));
+  if (fromSegments.length) return fromSegments;
+  const tm = parseJson(row.transcription_metadata) || {};
+  if (Array.isArray(tm.turn_stats)) return tm.turn_stats;
+  const relay = parseJson(tm.relay) || {};
+  return Array.isArray(relay.turn_stats) ? relay.turn_stats : [];
+}
+
+async function loadRows() {
+  const db = require('../models/db');
+  const trx = await db.transaction();
+  try {
+    await trx.raw('SET TRANSACTION READ ONLY');
+    const q = trx('call_log').select('twilio_call_sid', 'source', 'created_at', 'transcription_metadata', 'metadata');
+    if (ARGS.call) q.where('twilio_call_sid', String(ARGS.call));
+    else {
+      if (ARGS.sandbox) q.where('source', 'voice_relay_sandbox');
+      // Inbound Sandy only: outbound collections calls write the same
+      // transcript source marker through the shared buildTranscriptUpdate.
+      // A transferred, reconnected or voicemail-fallback call keeps Sandy's
+      // provenance under transcription_metadata.relay / metadata.relay_segments
+      // once the recording processor rewrites the top level.
+      else {
+        q.where('direction', 'inbound').where((w) => w
+          .whereRaw("transcription_metadata->>'source' = 'voice_relay_session'")
+          .orWhereRaw("jsonb_exists(transcription_metadata, 'relay')")
+          .orWhereRaw("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'relay_segments')"));
+      }
+      q.where('created_at', '>=', sinceDate(ARGS.since)).orderBy('created_at', 'desc').limit(Number(ARGS.limit) || 20);
+    }
+    return await q;
+  } finally {
+    await trx.rollback().catch(() => {});
+    await db.destroy().catch(() => {});
+  }
+}
+
+const fmt = (v) => (v == null ? '   n/a' : `${(v / 1000).toFixed(2).padStart(5)}s`);
+
+function printGroup(label, g) {
+  if (!g.turns) { console.log(`  ${label.padEnd(13)} no turns`); return; }
+  const row = (name, s) => `${name} p50 ${fmt(s.p50)} p95 ${fmt(s.p95)} (n=${s.n})`;
+  console.log(`  ${label.padEnd(13)} ${g.turns} turns`);
+  console.log(`    heard gap   ${row('', g.heard_gap)}   ← release criterion: p50 ≤ 0.80s, p95 ≤ 1.50s (plain)`);
+  console.log(`    = turn end  ${row('', g.endpoint)}   ← end of speech → prompt sent`);
+  console.log(`    + us (app)  ${row('', g.app)}   ← prompt → first text back`);
+  console.log(`    + to audio  ${row('', g.voice)}   ← first text → agent audio`);
+  console.log(`    Twilio diagnostics (overlap the spans above): STT p50 ${fmt(g.stt_provider.p50)}, TTS p50 ${fmt(g.tts_provider.p50)}`);
+  console.log('    whole-turn work (all rounds, incl. after the first reply — not slices of the gap):');
+  console.log(`      model     ${row('', g.model_turn_total)}`);
+  console.log(`      tools     ${row('', g.tools_turn_total)}`);
+}
+
+function printSummary(title, s) {
+  console.log(`\n${title}`);
+  console.log(`  prompts ${s.prompts}  outcomes ${JSON.stringify(s.outcomes)}  agent-over-caller ${s.agent_over_caller}  caller barge-ins ${s.caller_barge_ins}  Twilio interrupts ${s.twilio_interrupts}`);
+  if (s.outcomes.unattributed) console.log('  (unattributed = no stats of ours to say which reply answers that prompt; calls before PR 0a have none)');
+  printGroup('all spoken', s.all);
+  printGroup('plain turns', s.plain);
+  printGroup('tool turns', s.tool);
+}
+
+async function main() {
+  const rows = await loadRows();
+  if (!rows.length) {
+    console.error('No matching calls; no report written.');
+    process.exitCode = 1;
+    return;
+  }
+  const allJoined = [];
+  const perCall = [];
+  let allInterrupts = 0;
+  for (const row of rows) {
+    const sid = row.twilio_call_sid;
+    let fetched;
+    try {
+      fetched = await fetchConversationRelayEvents(sid);
+    } catch (e) {
+      console.log(`${sid}: Voice Insights read failed (${e.message})`);
+      continue;
+    }
+    const joined = buildCallTimeline(fetched.events, storedStatsFor(row));
+    if (!joined.length) { console.log(`${sid}: no ConversationRelay turns in Voice Insights${fetched.available ? '' : ' (not available yet)'}`); continue; }
+    const { interrupts } = parseTimeline(fetched.events);
+    allInterrupts += interrupts;
+    const summary = summarizeTimeline(joined, { interrupts });
+    allJoined.push(...joined.map((t) => ({ callSid: sid, ...t })));
+    perCall.push({ callSid: sid, createdAt: row.created_at, summary, turns: joined });
+    printSummary(`${sid}  ${new Date(row.created_at).toISOString()}  ${row.source || ''}`, summary);
+  }
+  if (!perCall.length) {
+    // Every Insights read failed or came back empty: an outage or bad
+    // credentials, never a successful empty measurement.
+    console.error(`No timeline for any of ${rows.length} call(s); no report written.`);
+    process.exitCode = 1;
+    return;
+  }
+  const aggregate = summarizeTimeline(allJoined, { interrupts: allInterrupts });
+  if (perCall.length > 1) printSummary(`ALL ${perCall.length} CALLS`, aggregate);
+  if (ARGS.json) {
+    fs.writeFileSync(String(ARGS.json), JSON.stringify({ generatedAt: new Date().toISOString(), calls: perCall, aggregate }, null, 2));
+    console.log(`\nWrote ${ARGS.json}`);
+  }
+}
+
+if (require.main === module) {
+  main().catch((e) => { console.error(e.message); process.exit(1); });
+}
+
+module.exports = { storedStatsFor };

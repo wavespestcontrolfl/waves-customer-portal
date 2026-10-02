@@ -136,8 +136,23 @@ function answerInDomain(question, v) {
   return false;
 }
 
+// The closed set of providers a decision_reviews row may come from (the
+// table's provider CHECK, migration 20261002010000, mirrors it). typesafe is
+// Jev; a provider is added here and by a new migration together.
+const DECISION_PROVIDERS = Object.freeze(['typesafe', 'cloudflare']);
+const DEFAULT_DECISION_PROVIDER = 'typesafe';
+// What the review workflow calls each provider's model: the queue, the daily
+// item and the Typed tab name whose answer a row holds (Codex r1 on #5555).
+const DECISION_PROVIDER_LABELS = Object.freeze({ typesafe: 'Jev', cloudflare: 'Clef' });
+// provider is NOT NULL and registry-constrained on the table, so a value this
+// does not know is malformed data, refused rather than shown as Jev's (Codex r8).
+function providerLabel(provider) {
+  if (!Object.prototype.hasOwnProperty.call(DECISION_PROVIDER_LABELS, provider)) throw new Error(`unknown decision provider: ${provider}`);
+  return DECISION_PROVIDER_LABELS[provider];
+}
+
 // How much of a call transcript call_judge is given (call-self-audit.js). The
 // admin review route shows the reviewer the same span.
 const CALL_TRANSCRIPT_CHARS = 5000;
 
-module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS };
+module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel };
