@@ -841,6 +841,11 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
   // A trace saved while the note now records no spray around the house would
   // show on the customer's report as a sprayed perimeter.
   const unusedTrace = draft && perimeterFeet && !perimeterRow;
+  // An "Interior spray too" trace (saved now or earlier) claims inside on the
+  // customer's map; the record and the re-entry wait only say inside when the
+  // note does.
+  const traceMode = traceRead.zone?.capture_mode ?? traceRead.zone?.captureMode;
+  const interiorUnheard = draft && traceMode === 'interior' && !(draft.facts?.areas || []).includes('Inside');
   return [
     [writing, 'Writing the report…'],
     [!draft, 'Generate the report first.'],
@@ -854,6 +859,7 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
       ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
       : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`)],
     [unusedTrace, 'Your saved trace shows a spray around the house, but your note says spots only. Say plainly how you sprayed, then write it again.'],
+    [interiorUnheard, 'Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, or trace again without Interior spray.'],
   ];
 }
 

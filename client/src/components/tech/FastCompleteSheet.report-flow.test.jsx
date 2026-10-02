@@ -700,6 +700,17 @@ describe('complete and send', () => {
     expect(body.products.find((product) => product.productId === 'taurus')).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 150 });
   });
 
+  test('an "Interior spray too" trace holds the send until the note says inside was treated (pre-push P1)', async () => {
+    const request = makeRequest({
+      facts: { ...FACTS, areas: ['Outside'], spray: 'perimeter' },
+      trace: { enabled: true, treatmentZone: { linear_ft: 150, capture_mode: 'interior' } },
+    });
+    await openSheet(request);
+    await generate();
+    expect(screen.getByText('Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, or trace again without Interior spray.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
   test('a spot visit with no trace saved completes with spot treatments and no trace step', async () => {
     const request = makeRequest();
     await openSheet(request);
