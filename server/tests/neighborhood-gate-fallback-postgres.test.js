@@ -80,6 +80,20 @@ postgres('neighborhood gate entries for the day feed', () => {
     ]);
   });
 
+  test('a visit stamped at another address with no property link gets no fallback; at the same address it does', async () => {
+    const n = await neighborhood('Stamp Check');
+    await entry(n, { code: '5656', status: 'active' });
+    const c = await customer([n]);
+    const map = await neighborhoodGateEntriesForVisits(trx, [
+      { id: 'elsewhere', customer_id: c.id, property_id: null, service_address_line1: '900 Rental Road', service_address_zip: '34202' },
+      { id: 'same', customer_id: c.id, property_id: null, service_address_line1: '100 Synthetic Way', service_address_zip: '34202-1234' },
+      { id: 'other-zip', customer_id: c.id, property_id: null, service_address_line1: '100 Synthetic Way', service_address_zip: '34211' },
+    ]);
+    expect(map.has('elsewhere')).toBe(false);
+    expect(map.get('same').map((e) => e.code)).toEqual(['5656']);
+    expect(map.has('other-zip')).toBe(false);
+  });
+
   test('no neighborhood link = no entry', async () => {
     const c = await customer([null]);
     const map = await neighborhoodGateEntriesForVisits(trx, [{ id: 'v', customer_id: c.id, property_id: c.propertyIds[0] }]);

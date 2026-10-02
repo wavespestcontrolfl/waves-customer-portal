@@ -645,7 +645,10 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
 // The neighborhood's gate entries for each visit, keyed by visit id, so the
 // office's day feed can show "Gate: …" for a customer with no gate code of
 // their own. The visit's own property (scheduled_services.property_id), else
-// the customer's ONE active property; none or several = no fallback. Shown:
+// the customer's ONE active property — and then only when the visit carries no
+// stamped service address, or one on that property's street and ZIP (a visit
+// can be stamped at another address with no property link); none or several
+// = no fallback. Shown:
 // confirmed entries (a code or instructions), and unconfirmed KEYPAD codes
 // (a conflict shows every code, flagged) — never an unconfirmed instruction,
 // which may be meant for one house only. Raw codes: staff surfaces only, never
@@ -667,14 +670,23 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
     const rows = await conn('customer_properties')
       .whereIn('customer_id', [...new Set(withoutProperty.map((v) => v.customer_id))])
       .where({ active: true })
-      .select('customer_id', 'neighborhood_id');
+      .select('customer_id', 'neighborhood_id', 'address_line1', 'zip');
     const byCustomer = new Map();
-    for (const r of rows) byCustomer.set(r.customer_id, [...(byCustomer.get(r.customer_id) || []), r.neighborhood_id]);
-    for (const [customerId, ids] of byCustomer) if (ids.length === 1) customerNeighborhood.set(customerId, ids[0]);
+    for (const r of rows) byCustomer.set(r.customer_id, [...(byCustomer.get(r.customer_id) || []), r]);
+    for (const [customerId, props] of byCustomer) if (props.length === 1) customerNeighborhood.set(customerId, props[0]);
   }
+  const zip5 = (z) => String(z || '').trim().slice(0, 5);
   const visitNeighborhood = new Map();
   for (const v of visits) {
-    const n = v.property_id ? propertyNeighborhood.get(v.property_id) : customerNeighborhood.get(v.customer_id);
+    let n = null;
+    if (v.property_id) n = propertyNeighborhood.get(v.property_id);
+    else {
+      const p = customerNeighborhood.get(v.customer_id);
+      const stamped = String(v.service_address_line1 || '').trim();
+      const atProperty = !stamped
+        || (sameStreetLine(stamped, p?.address_line1) && zip5(v.service_address_zip) === zip5(p?.zip));
+      n = p && atProperty ? p.neighborhood_id : null;
+    }
     if (n) visitNeighborhood.set(v.id, n);
   }
   if (!visitNeighborhood.size) return out;
