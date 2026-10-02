@@ -293,17 +293,14 @@ const LINE_RULES = [
   ['unsupported_line', ({ notice }) => !SERVICE_LABELS[notice.family_key]],
   ['renewal_declined', ({ notice, declinedTerms }) => declinedTerms.has(String(parseJson(notice.metadata, {}).term_id || ''))],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
-  // A line carrying words frozen by an earlier attempt may already be in
-  // the customer's inbox (a crash after the provider took it, or a provider
-  // that accepted and still reported failure): it is reconciled under the
-  // same claim key — the email dedupes — whatever the date, never left with
-  // a dead link. The apply counts 30 days from the stamped sent_at, so a
-  // late stamp holds the change (safe direction), never applies it early.
-  // Every other line must be at least 30 days out (31 for a prepaid renewal).
-  ['too_late', ({ line, notice, today }) => !parseJson(notice.metadata, {}).pending_letter
-    && (!line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0))],
+  // Every line must be at least 30 days out (31 for a prepaid renewal) —
+  // a frozen line (reconciled, see planEntry) never reaches this rule; the
+  // apply counts 30 days from the stamped sent_at, so a late reconcile
+  // holds the change (safe direction), never applies it early.
+  ['too_late', ({ line, today }) => !line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0)],
   ['in_flight', ({ notice, now }) => !claimable(notice, now)],
 ];
+const IN_FLIGHT_ONLY = LINE_RULES.filter(([code]) => code === 'in_flight');
 const ACCOUNT_RULES = [
   ['customer_inactive', ({ customer }) => !customer || !!customer.deleted_at || customer.active === false],
   ['too_many_lines', ({ entry }) => entry.lines.length > LINE_SLOTS],
@@ -318,7 +315,11 @@ function planEntry(data, customerId, notices, { today, now }) {
     if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
     const snapshot = data.snapshots.get(String(notice.id)) || null;
     const line = lineFor(notice, snapshot, customer, data.firstVisits.get(String(notice.id)));
-    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms });
+    // A line carrying words frozen by an earlier attempt is reconciled with
+    // its original group whatever changed since (that email may already be
+    // in the inbox, its link must keep working); only a live claim waits.
+    const rules = parseJson(notice.metadata, {}).pending_letter ? IN_FLIGHT_ONLY : LINE_RULES;
+    const reason = firstMatch(rules, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms });
     if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
     else entry.lines.push({ ...line, notice });
   }
@@ -519,6 +520,7 @@ function frozenLetter(entry, payload, costBlock) {
 // said, never a rebuild from data edited since.
 async function letterForClaim(dbh, entry, { claimKey, costBlock }) {
   const existing = frozenFor(entry);
+  entry.hadFrozen = !!existing;
   if (existing) return existing;
   const payload = letterPayload({ customer: entry.customer, lines: entry.lines, costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
@@ -571,13 +573,16 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     // accepted the email): back to draft for a retry, KEEPING the frozen
     // words, so the preview, the digest and the retry show what that email
     // may already have said (and the apply lane never retires it). Never
-    // attempted (no contact, every leg policy-blocked) is definitively
-    // unsent: it parks as unreachable and drops them.
+    // attempted (no contact, every leg policy-blocked) parks as
+    // unreachable; it drops the words only when THIS attempt froze them —
+    // words an EARLIER attempt froze stay, since that attempt is still
+    // unreconciled.
+    const keep = attempted || entry.hadFrozen;
     for (const l of entry.lines) {
       const { pending_letter: _stale, ...meta } = parseJson(l.notice.metadata, {});
       await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
         status: attempted ? 'draft' : 'unreachable',
-        metadata: JSON.stringify(attempted ? { ...meta, pending_letter: frozen } : meta),
+        metadata: JSON.stringify(keep ? { ...meta, pending_letter: frozen } : meta),
         updated_at: new Date(),
       });
     }
@@ -699,7 +704,7 @@ function publicReview(notice) {
 // charge depends on what else that visit bills (combined visit invoices)
 // and a prepaid renewal is recorded by the office — neither is announced.
 function chargeAtNewRate(notice, { monthly, customer }) {
-  if (notice.billing_lane !== 'monthly_membership') return { chargeCents: null, chargeDate: null };
+  if (notice.billing_lane !== 'monthly_membership' || !monthly.some((o) => o.id === notice.id)) return { chargeCents: null, chargeDate: null };
   const dues = Math.round(Number(customer?.monthly_rate || 0) * 100);
   if (!(dues > 0)) return { chargeCents: null, chargeDate: null };
   const { nextBillingDayOnOrAfter } = require('./rate-review-apply')._private;
@@ -709,6 +714,26 @@ function chargeAtNewRate(notice, { monthly, customer }) {
     .filter((o) => ymd(o.effective_date) <= chargeDate)
     .reduce((sum, o) => sum + Number(o.noticed_new_cents ?? o.new_amount_cents) - Number(o.noticed_current_cents ?? o.current_amount_cents), 0);
   return { chargeCents: dues + delta, chargeDate };
+}
+
+// Monthly notices the nightly apply would still write: the lane's live
+// rate (re-read the way applyMonthly reads it — the family's ledger slices
+// for a ledger-priced line, else the account dues) still equals the noticed
+// current rate. A rate moved since the notice holds there, so no charge at
+// the new rate is announced for it.
+async function applicableMonthly(dbh, rows, customer) {
+  const monthly = rows.filter((n) => n.billing_lane === 'monthly_membership');
+  if (!monthly.length) return [];
+  const { loadFamilySlices, sumSlices, cents } = require('./rate-review-apply')._private;
+  const out = [];
+  for (const n of monthly) {
+    const source = parseJson(n.metadata, {}).current_rate_source;
+    const live = source === 'ledger_slice'
+      ? cents(sumSlices((await loadFamilySlices(dbh, n.customer_id, n.family_key)).family))
+      : cents(customer?.monthly_rate);
+    if (live === Number(n.noticed_current_cents ?? n.current_amount_cents)) out.push(n);
+  }
+  return out;
 }
 
 /**
@@ -734,7 +759,7 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   const declinedTerms = await declinedPrepayTermIds(dbh, rows);
   const pending = rows.filter((n) => (!n.applied_at || n.billing_lane === 'annual_prepay')
     && !declinedTerms.has(String(parseJson(n.metadata, {}).term_id || '')));
-  const monthly = pending.filter((o) => o.billing_lane === 'monthly_membership');
+  const monthly = await applicableMonthly(dbh, pending, customer);
   return pending.map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
     unit: unitFor(n),

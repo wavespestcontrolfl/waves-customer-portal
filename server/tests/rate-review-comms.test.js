@@ -236,7 +236,18 @@ describe('sendBatch', () => {
     emailLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ unreachable: 1, sent: 0 });
     expect(notices()[0]).toMatchObject({ status: 'unreachable', sent_at: null });
+    // the blocked retry proves nothing about the EARLIER attempt: its words stay
     const meta = notices()[0].metadata;
+    expect((typeof meta === 'string' ? JSON.parse(meta) : meta).pending_letter).toBeTruthy();
+  });
+
+  test('a first attempt that never reached a provider parks unreachable and drops its words', async () => {
+    mockDb.reset(book());
+    emailLeg.mockResolvedValue({ sent: false, attempted: false });
+    smsLeg.mockResolvedValue({ sent: false, attempted: false });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ unreachable: 1, sent: 0 });
+    const meta = notices()[0].metadata;
+    expect(notices()[0].status).toBe('unreachable');
     expect((typeof meta === 'string' ? JSON.parse(meta) : meta).pending_letter).toBeUndefined();
     expect(snapshots()[0].status).toBe('approved');
   });
@@ -304,6 +315,17 @@ describe('sendBatch', () => {
     expect(out).toMatchObject({ sent: 1, texted: 1 });
     expect(smsLeg).not.toHaveBeenCalled();
     expect(notices()[0]).toMatchObject({ status: 'sent', sms_sent: true });
+  });
+
+  test('a frozen line is reconciled with its group even if it would now be held (its email may be in the inbox)', async () => {
+    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
+    const n = draft(1, { status: 'draft' });
+    n.metadata = { ...n.metadata, pending_letter: { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'December 10, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { lines: [] } } };
+    const b = book({ notices: [n] });
+    b.rate_review_snapshots[0].status = 'skipped';
+    mockDb.reset(b);
+    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(preview.counts.letters).toBe(1);
   });
 
   test('a prepaid renewal the customer declined is held back, never sent', async () => {
@@ -448,17 +470,26 @@ describe('customer surfaces', () => {
     const monthly = draft(1, {
       billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', status: 'sent', sent_at: NOW,
       current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice' },
     });
-    mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00', billing_day: 1 })], notices: [monthly] }));
+    const b = book({ customers: [customer(1, { monthly_rate: '100.00', billing_day: 1 })], notices: [monthly] });
+    b.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '60.00' }];
+    mockDb.reset(b);
     expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ unit: 'month', next: '$44', chargeCents: 10400, chargeDate: '2027-01-01' });
+    // the line's rate moved since the notice: the apply would hold, nothing is announced
+    mockDb.store.customer_plan_rates[0].monthly_rate = '35.00';
+    expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ chargeCents: null, chargeDate: null });
   });
 
   test('portal: two monthly increases on one account project the cumulative dues', async () => {
     const mk = (n, eff) => draft(n, {
       customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: eff, status: 'sent', sent_at: NOW,
       current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice' },
     });
-    mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00' })], notices: [mk(1, '2026-12-15'), mk(2, '2026-12-15')] }));
+    const bk = book({ customers: [customer(1, { monthly_rate: '100.00' })], notices: [mk(1, '2026-12-15'), mk(2, '2026-12-15')] });
+    bk.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'mosquito', monthly_rate: '20.00' }];
+    mockDb.reset(bk);
     const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
     expect(out.map((c) => c.chargeCents)).toEqual([10800, 10800]);
   });
@@ -479,8 +510,11 @@ describe('customer surfaces', () => {
     const mk = (n, eff) => draft(n, {
       customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: eff, status: 'sent', sent_at: NOW,
       current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice' },
     });
-    mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00', billing_day: 1 })], notices: [mk(1, '2026-12-10'), mk(2, '2026-12-20')] }));
+    const bk = book({ customers: [customer(1, { monthly_rate: '100.00', billing_day: 1 })], notices: [mk(1, '2026-12-10'), mk(2, '2026-12-20')] });
+    bk.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'mosquito', monthly_rate: '20.00' }];
+    mockDb.reset(bk);
     const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
     expect(out.map((c) => [c.chargeDate, c.chargeCents])).toEqual([['2027-01-01', 10800], ['2027-01-01', 10800]]);
   });
