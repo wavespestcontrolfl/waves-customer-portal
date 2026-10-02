@@ -323,7 +323,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.payment_summary.statement).toMatch(/^Payment receipt is not confirmed/);
     expect(detail.payment_summary.statement).not.toMatch(/^No payment has been received/);
     expect(detail.payment_summary.statement).toMatch(/do not retry the charge/);
-    expect(detail.invoice).toMatchObject({ status: 'overdue', balance_due: 200, overdue: true });
+    // An unresolved submitted attempt: Stripe may have charged it, so the balance is the portal's recorded one, not confirmed owed.
+    expect(detail.invoice).toMatchObject({ status: 'overdue', balance_due: null, portal_recorded_balance_due: 200, overdue: true });
+    expect(detail.unknowns.join(' ')).toMatch(/Do not collect or retry/);
     expect(detail.payment_plan.active).toMatchObject({ payment_amount: 50, payment_frequency: 'monthly' });
     expect(detail.payment_plan.installments).toMatch(/unknown here/);
     expect(detail.unknowns.join(' ')).toMatch(/PaymentIntent/);
@@ -520,8 +522,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.orphan.id });
     expect(detail.invoice).toMatchObject({ balance_due: null, portal_recorded_balance_due: 60 });
     expect(detail.unknowns.join(' ')).toMatch(/not money owed/);
-    const plain = await read('get_invoice_detail', { invoice_id: inv.open.id });
-    expect(plain.invoice.balance_due).toBe(200);
+    // An unresolved claimed attempt, and a failed row flagged ambiguous, hold the balance the same way.
+    for (const key of ['g_claim', 'g_amb']) {
+      const held = await read('get_invoice_detail', { invoice_id: inv[key].id });
+      expect(held.invoice).toMatchObject({ balance_due: null, portal_recorded_balance_due: inv[key].total });
+    }
+    const plain = await read('get_invoice_detail', { invoice_id: inv.credited.id });
+    expect(plain.invoice.balance_due).toBe(100);
     expect(plain.invoice).not.toHaveProperty('portal_recorded_balance_due');
   });
 

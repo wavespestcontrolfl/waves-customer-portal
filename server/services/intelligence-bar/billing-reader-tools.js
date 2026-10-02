@@ -980,9 +980,13 @@ async function getInvoiceDetail(input, actionContext) {
   }
   if (hold.unknown) unknowns.push(hold.unknown);
   // Stripe accepted a charge the portal never recorded: the portal's balance is stale, not money owed.
-  const unreconciledOwed = orphans.length > 0 && isCollectible(invoice);
+  // The same uncertainty predicate the list uses: an orphan row, a claimed / ambiguous attempt the collection
+  // fence still holds, or a failed row flagged ambiguous_outcome.
+  const unresolvedAttempts = attempts.filter((row) => ['claimed', 'ambiguous'].includes(row.status) && !row.resolved_at).length
+    + linked.filter((row) => !row.payer_funded && failedPaymentOutcomeIsAmbiguous(row)).length;
+  const unreconciledOwed = (orphans.length > 0 || unresolvedAttempts > 0) && isCollectible(invoice);
   if (unreconciledOwed) {
-    unknowns.push('An unresolved Stripe charge for this invoice is not recorded in the portal: portal_recorded_balance_due is the stale ledger balance, not money owed. Do not collect or retry the charge; the ledger needs reconciling.');
+    unknowns.push('Stripe may already have charged this invoice (an unrecorded Stripe charge, or a charge attempt with no confirmed result): portal_recorded_balance_due is the portal\'s recorded balance, not confirmed money owed. Do not collect or retry the charge; the ledger needs reconciling.');
   }
 
   return {
