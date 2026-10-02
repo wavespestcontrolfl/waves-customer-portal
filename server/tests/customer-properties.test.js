@@ -137,6 +137,10 @@ describe('customer-properties pure helpers', () => {
     for (const line1 of ['100 Main St Apt 4', '100 Main St Apt 4.', '100 Main St#4', '100 Main St, #4', '100 Main St. Apt. 4']) {
       expect(addressKey({ address_line1: line1, zip: '34219' })).toBe(split);
     }
+    // a unit in line 1 AND something in line 2: both count, duplicates once
+    const inBuilding = (line1) => addressKey({ address_line1: line1, address_line2: 'Building A', zip: '34219' });
+    expect(inBuilding('100 Main St Apt 4')).not.toBe(inBuilding('100 Main St Apt 5'));
+    expect(addressKey({ address_line1: '100 Main St Apt 4', address_line2: 'Unit 4', zip: '34219' })).toBe(split);
   });
 });
 

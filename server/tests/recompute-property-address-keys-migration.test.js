@@ -102,6 +102,18 @@ describe('20261001200000 recompute property address keys', () => {
     expect(row(db, 'keep-a').active && row(db, 'keep-b').active).toBe(true);
   });
 
+  test('up() never folds two units of one building', async () => {
+    const db = seed();
+    db.customer_properties.push(
+      prop('apt-4', 'c3', { address_line1: '100 Main St Apt 4', address_line2: 'Building A', city: 'Venice', zip: '34285' }, { is_primary: true }),
+      prop('apt-5', 'c3', { address_line1: '100 Main St Apt 5', address_line2: 'Building A', city: 'Venice', zip: '34285' }),
+    );
+    db.scheduled_services.push({ id: 'v-apt5', property_id: 'apt-5' });
+    await migration.up(fakeKnex(db));
+    expect(row(db, 'apt-5').active).toBe(true);
+    expect(db.scheduled_services.find((v) => v.id === 'v-apt5').property_id).toBe('apt-5');
+  });
+
   test('up() stores the live key on every row, retired ones included', async () => {
     const db = seed();
     await migration.up(fakeKnex(db));

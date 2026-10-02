@@ -118,7 +118,11 @@ function addressKey({ address_line1, address_line2, city, zip } = {}) {
   // typed: "Apt 4." / "St#4" / "St, #4" all read as "St #4".
   const line1 = String(address_line1 || '').replace(/[.,]/g, ' ').replace(/#/g, ' #').replace(/\s+/g, ' ').trim();
   const street = streetKey(line1);
-  const unit = unitKey(address_line2) || streetEmbeddedUnitKey(line1);
+  // Both unit sources count ("100 Main St Apt 4" + "Building A" is not Apt
+  // 5 in Building A); the same unit given twice counts once.
+  const embedded = streetEmbeddedUnitKey(line1);
+  const line2 = unitKey(address_line2);
+  const unit = embedded && line2 && embedded !== line2 ? `${embedded}${line2}` : (embedded || line2);
   const locality = normalizeZip(zip) || normStreet(city);
   return `${street}${unit}${locality}`;
 }
