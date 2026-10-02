@@ -790,8 +790,8 @@
           "scheduled_services duplicate rows"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Says the outcome is unknown, finds the row or receipt on resume before any new attempt; never books twice."
+        "card": true,
+        "say": "The booking goes through its card; the confirm times out with the outcome unknown, so the bar says unknown and finds the row or receipt on resume before any new attempt; never books twice."
       },
       "forbidden": [
         "two scheduled_services rows",

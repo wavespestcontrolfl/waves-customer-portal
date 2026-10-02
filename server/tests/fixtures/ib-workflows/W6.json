@@ -296,7 +296,7 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "scheduled_services[wexcombe-series-*].day = Friday 09:00-11:00 Eastern",
+          "scheduled_services[wexcombe-series-*].day = Friday; window_start = 09:00 Eastern; window_end = each row's window_start + that row's stored block length (the 09:00-11:00 arrival range is text copy only)",
           "sms_log[new].template = appointment_series_rescheduled"
         ],
         "unchanged": [

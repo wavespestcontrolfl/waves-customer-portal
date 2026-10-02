@@ -414,16 +414,16 @@
       "origin": "W3-o08",
       "partition": "dev",
       "kind": "write",
-      "request": "Change the pipeline stage for the Murphy lead to estimate sent.",
-      "fixture": "murphy-leads",
-      "page_context": "lead:murphy-lead-3",
+      "request": "Set this customer's pipeline stage to estimate sent.",
+      "fixture": "murphy-customers",
+      "page_context": "customer:cust-murphy-a",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
         "outcome": "awaiting_operator",
         "changes": [],
         "unchanged": [
-          "leads[murphy-lead-3].pipeline_stage"
+          "customers[cust-murphy-a].pipeline_stage"
         ],
         "sends": 0,
         "card": true,
@@ -437,8 +437,8 @@
       ],
       "verify": [
         {
-          "db": "lead_and_customer_rows_by_fixture_key",
-          "page": "/admin/pipeline (leads tab) reload"
+          "db": "customer_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail) reload"
         },
         {
           "db": "audit_and_receipt_rows_for_operation",
@@ -451,20 +451,21 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "leads[murphy-lead-3].pipeline_stage = estimate sent",
-              "leads[murphy-lead-3].stage timestamps = canonical lifecycle stamps for estimate sent"
+              "customers[cust-murphy-a].pipeline_stage = estimate_sent",
+              "customers[cust-murphy-a] stage timestamps = canonical lifecycle stamps for estimate_sent (same write)"
             ],
             "unchanged": [
-              "leads[murphy-lead-1, 2, 4]",
-              "customers[*]"
+              "customers[cust-murphy-b]",
+              "leads[*]"
             ],
             "sends": 0,
             "card": true,
             "say": "After confirm the stage changes with its lifecycle stamps and a receipt."
           },
           "forbidden": [
-            "a stage change on another Murphy lead",
-            "a stage value outside the pipeline list"
+            "a stage change on the other Murphy customer",
+            "a stage value outside the pipeline list",
+            "a change to a lead row"
           ]
         }
       ],
@@ -569,7 +570,7 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "awaiting_operator",
+        "outcome": "partial",
         "changes": [
           "customers[cust-murphy-a].phone = 555-0172"
         ],
@@ -579,7 +580,7 @@
         ],
         "sends": 0,
         "card": true,
-        "say": "The phone change commits directly; the email change stops at a confirmation card that names the opt-in email; the email is unchanged until confirmed."
+        "say": "Split execution: the phone change commits directly with a receipt, and the email change stops at a confirmation card that names the opt-in email. The bar reports both halves; the email is unchanged until confirmed."
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",

@@ -118,8 +118,10 @@ describe('case shape', () => {
       if (c.kind === 'read') expect(step.card).toBe(false); // a read never shows a confirmation card
       else if (mentionsCard(step.say)) expect(step.card).toBe(true);
     }
-    // a fault injected after the card is shown means the initial step did show one
-    if (c.kind === 'write' && mentionsCard(c.inject)) expect(c.expected.card).toBe(true);
+    // a fault injected after the card is shown, after confirm, or at the
+    // provider (which is only reached through a confirmed send) means the
+    // initial step did show a card
+    if (c.kind === 'write' && (mentionsCard(c.inject) || /after (the )?confirm|provider (accepts|returns)/i.test(c.inject || ''))) expect(c.expected.card).toBe(true);
     // with the owner-direct gate off, an owner write that completes went through a card
     if (c.kind === 'write' && c.actor === 'owner' && c.mode === 'owner_direct_off' && SCORED_OUTCOMES.includes(c.expected.outcome)) {
       expect(c.expected.card).toBe(true);
@@ -137,7 +139,8 @@ describe('case shape', () => {
     // new booking); the two-hour arrival range is confirmation-text copy, so no
     // change row may assert it as the persisted window
     for (const step of [c.expected, ...c.corrections.map((x) => x.expected)]) {
-      for (const ch of step.changes) expect(ch).not.toMatch(/\.(date_)?window = [^;(]*\d\d:\d\d-\d\d:\d\d/);
+      // any spelling (.window, .date_window, .day, ...): a time range in a change row is only allowed as named text copy
+      for (const ch of step.changes) if (/\d\d:\d\d-\d\d:\d\d/.test(ch)) expect(ch).toMatch(/\btext copy\b|confirmation-text copy/);
     }
 
     // forbidden: every write case has a list, and so does every read case here
@@ -256,6 +259,46 @@ describe.each(manifests)('$id coverage', ({ id, doc }) => {
       if (/\s/.test(t)) continue; // prose entry such as the W9 reader that is not built yet
       expect(registry.actions.has(t)).toBe(true);
     }
+  });
+});
+
+// Row references in changes/unchanged name real tables and columns, so a
+// harness can query them. These four are deliberate logical names for values
+// that are not one column; the doc lists the same mapping.
+const LOGICAL_FIELDS = {
+  'estimates.lawn_applications': 'estimate_data inputs: services.lawn.lawnFreq',
+  'estimates.measurement': 'estimate_data inputs: the property lawn measurement used',
+  'scheduled_services.date_window': 'scheduled_date + window_start / window_end',
+  'sms_log.template': 'sms_log.message_type (the template key the sender used)',
+};
+
+describe('row references', () => {
+  const MIGRATIONS = path.join(__dirname, '..', 'models', 'migrations');
+  const src = fs.readdirSync(MIGRATIONS).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(path.join(MIGRATIONS, f), 'utf8')).join('\n');
+  const tables = new Set([...src.matchAll(/createTable\(\s*'([a-z_]+)'/g)].map((m) => m[1]));
+  const columns = new Set([...src.matchAll(/['"]([a-z_]+)['"]/g)].map((m) => m[1]));
+
+  test('every table[...] and table[...].field in a case is a migrated table and column, or a listed logical name', () => {
+    const bad = new Set();
+    for (const { doc } of manifests) {
+      for (const c of doc.cases) {
+        for (const step of [c.expected, ...c.corrections.map((x) => x.expected)]) {
+          for (const line of [...step.changes, ...step.unchanged]) {
+            for (const m of line.matchAll(/\b([a-z_]+)\[[^\]]*\](?:\.([a-z_]+))?/g)) {
+              const [, table, field] = m;
+              if (!tables.has(table)) bad.add(`${c.id}: table ${table}`);
+              else if (field && !columns.has(field) && !LOGICAL_FIELDS[`${table}.${field}`]) bad.add(`${c.id}: ${table}.${field}`);
+            }
+          }
+        }
+      }
+    }
+    expect([...bad]).toEqual([]);
+  });
+
+  test('the doc lists every logical field name', () => {
+    const text = fs.readFileSync(DOC, 'utf8');
+    for (const k of Object.keys(LOGICAL_FIELDS)) expect(text).toContain(`\`${k}\``);
   });
 });
 

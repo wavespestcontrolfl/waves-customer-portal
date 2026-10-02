@@ -58,6 +58,15 @@ Ten development and ten held-out cases per workflow. They are split by originati
 
 Booking and move rows record the stored block, not the arrival range: a new booking stores a flat 60-minute `window_end`, and a move keeps the visit's stored block length. The two-hour range a customer sees ("10 AM to 12 PM") is confirmation-text copy, and the test rejects a change row that asserts it as the persisted window.
 
+Row references in `changes` and `unchanged` name real tables and columns (`product_inventory_movements[new].product_id`, `sms_log[x].status`), and the test checks each against the migrations. Four are deliberate logical names for values that are not one column:
+
+| Logical name | Where it lives |
+| --- | --- |
+| `estimates.lawn_applications` | `estimate_data` inputs, `services.lawn.lawnFreq` |
+| `estimates.measurement` | `estimate_data` inputs, the property lawn measurement used |
+| `scheduled_services.date_window` | `scheduled_date` plus `window_start` / `window_end` |
+| `sms_log.template` | `sms_log.message_type`, the template key the sender used |
+
 A recovery tag describes a step that happens: `pre_exec_change` needs a follow-up correction after the initial proposal, and a fault injected "after the card is shown" means the initial step expects a card.
 
 | Workflow | Dev scored / negative | Held scored / negative | Cases needing a missing reader |
@@ -69,9 +78,9 @@ A recovery tag describes a step that happens: `pre_exec_change` needs a follow-u
 | W5 | 5 / 5 | 4 / 6 | 0 |
 | W6 | 7 / 3 | 6 / 4 | 0 |
 | W7 | 7 / 3 | 6 / 4 | 0 |
-| W8 | 6 / 4 | 6 / 4 | 0 |
+| W8 | 6 / 4 | 5 / 5 | 0 |
 | W9 | 8 / 2 | 6 / 4 | 10 (PR 3a invoice and payment reader) |
-| W10 | 6 / 4 | 7 / 3 | 0 |
+| W10 | 6 / 4 | 6 / 4 | 0 |
 
 W5 is negative-heavy on purpose: its first release is deliberately narrow (decision D2), so recurring, add-on, new-customer, commercial, special-price and half-hour requests are listed as visible negatives rather than silently simplified.
 

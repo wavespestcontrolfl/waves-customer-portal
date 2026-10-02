@@ -824,30 +824,24 @@
       "kind": "write",
       "request": "Quote the Pellham lawn twelve a year.",
       "fixture": "est-drift",
-      "inject": "the engine price changes after compute because a catalog price is edited",
+      "inject": "the pricing engine returns an error on compute",
       "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "estimates[new].customer = cust-pellham",
-          "estimates[new].lawn_applications = 12",
-          "estimates[new].price = recomputed engine output"
+        "outcome": "failed",
+        "changes": [],
+        "unchanged": [
+          "estimates rows for cust-pellham"
         ],
-        "unchanged": [],
         "sends": 0,
         "card": false,
-        "say": "Drift refusal, recompute, then one save at the new price."
+        "say": "Says the price could not be computed and nothing was saved; never states a price from memory or a typical range as if it were the quote."
       },
       "forbidden": [
-        "a second draft created on revision",
-        "a cadence outside 9x or 12x",
-        "a price typed by the model or the operator instead of the engine",
-        "any send or acceptance of the estimate",
-        "a sent quote touched without saying so",
-        "a deposit line",
-        "stale price saved"
+        "any price not produced by the engine in this turn",
+        "a saved estimate row",
+        "a typical-price range presented as the quote"
       ],
       "verify": [
         {
@@ -860,13 +854,9 @@
         }
       ],
       "corrections": [],
-      "tags": [
-        "plan_drift"
-      ],
-      "covers": [
-        "W8-C3"
-      ],
-      "negative": false
+      "tags": [],
+      "covers": [],
+      "negative": true
     },
     {
       "id": "W8-held-08",

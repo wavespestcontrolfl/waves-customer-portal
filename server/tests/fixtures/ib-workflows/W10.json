@@ -46,14 +46,14 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].product = Taurus SC",
-          "stock_movements[new].type = receipt",
-          "stock_movements[new].quantity = 2 gal",
-          "on_hand[Taurus SC] = previous 62 fl oz + 256 fl oz"
+          "product_inventory_movements[new].product_id = Taurus SC",
+          "product_inventory_movements[new].movement_type = receipt",
+          "product_inventory_movements[new].quantity = 2 gal",
+          "products_catalog[Taurus SC].inventory_on_hand = previous 62 fl oz + 256 fl oz"
         ],
         "unchanged": [
-          "on_hand[Talak]",
-          "stock_movements count = 1"
+          "products_catalog[Talak].inventory_on_hand",
+          "product_inventory_movements count = 1"
         ],
         "sends": 0,
         "card": false,
@@ -94,13 +94,13 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].product = Taurus SC",
-          "restock_requests[taurus-open].status = received",
-          "restock_requests[taurus-open].delivered_quantity = 2 gal"
+          "product_inventory_movements[new].product_id = Taurus SC",
+          "product_restock_requests[taurus-open].status = received",
+          "product_restock_requests[taurus-open].closed_at = set (receiving closes the request)"
         ],
         "unchanged": [
           "purchase_orders count",
-          "on_hand[Talak]"
+          "products_catalog[Talak].inventory_on_hand"
         ],
         "sends": 0,
         "card": false,
@@ -141,7 +141,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].quantity = 2 qt"
+          "product_inventory_movements[new].quantity = 2 qt"
         ],
         "unchanged": [
           "purchase_orders count"
@@ -173,10 +173,10 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "stock_movements[correction].quantity = difference between 2 gal and 2 qt"
+              "product_inventory_movements[correction].quantity = difference between 2 gal and 2 qt"
             ],
             "unchanged": [
-              "stock_movements[first].quantity = 2 qt"
+              "product_inventory_movements[first].quantity = 2 qt"
             ],
             "sends": 0,
             "card": false,
@@ -207,7 +207,7 @@
         "outcome": "awaiting_operator",
         "changes": [],
         "unchanged": [
-          "stock_movements count"
+          "product_inventory_movements count"
         ],
         "sends": 0,
         "card": false,
@@ -251,8 +251,8 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "stock_movements count",
-          "restock_requests[talak-received]"
+          "product_inventory_movements count",
+          "product_restock_requests[talak-received]"
         ],
         "sends": 0,
         "card": false,
@@ -296,7 +296,7 @@
         "outcome": "awaiting_operator",
         "changes": [],
         "unchanged": [
-          "stock_movements count"
+          "product_inventory_movements count"
         ],
         "sends": 0,
         "card": false,
@@ -338,8 +338,8 @@
       "expected": {
         "outcome": "partial",
         "changes": [
-          "stock_movements[new].product = Talak",
-          "stock_movements[new].quantity = 3 jugs"
+          "product_inventory_movements[new].product_id = Talak",
+          "product_inventory_movements[new].quantity = 3 jugs"
         ],
         "unchanged": [
           "purchase_orders count",
@@ -385,11 +385,11 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].quantity = 2 gal",
-          "on_hand[Taurus SC] = recomputed from the live count"
+          "product_inventory_movements[new].quantity = 2 gal",
+          "products_catalog[Taurus SC].inventory_on_hand = recomputed from the live count"
         ],
         "unchanged": [
-          "stock_movements duplicate"
+          "product_inventory_movements duplicate"
         ],
         "sends": 0,
         "card": true,
@@ -433,7 +433,7 @@
         "outcome": "blocked_by_rule",
         "changes": [],
         "unchanged": [
-          "stock_movements count"
+          "product_inventory_movements count"
         ],
         "sends": 0,
         "card": false,
@@ -475,10 +475,10 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].quantity = 2 gal"
+          "product_inventory_movements[new].quantity = 2 gal"
         ],
         "unchanged": [
-          "stock_movements count = 1"
+          "product_inventory_movements count = 1"
         ],
         "sends": 0,
         "card": false,
@@ -523,8 +523,8 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "stock_movements count",
-          "on_hand[*]"
+          "product_inventory_movements count",
+          "products_catalog[*].inventory_on_hand"
         ],
         "sends": 0,
         "card": false,
@@ -565,11 +565,11 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].product = Talak 96 oz",
-          "stock_movements[new].quantity = 3 jugs"
+          "product_inventory_movements[new].product_id = Talak 96 oz",
+          "product_inventory_movements[new].quantity = 3 jugs"
         ],
         "unchanged": [
-          "on_hand[Taurus SC]"
+          "products_catalog[Taurus SC].inventory_on_hand"
         ],
         "sends": 0,
         "card": false,
@@ -608,26 +608,25 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "stock_movements[new].product = Taurus SC",
-          "stock_movements[new].quantity = 1 gal",
-          "restock_requests[taurus-open].delivered_quantity = 1 gal"
-        ],
+        "outcome": "unsupported",
+        "changes": [],
         "unchanged": [
-          "restock_requests[talak-*]",
+          "product_restock_requests[taurus-open].status",
+          "product_inventory_movements rows",
           "purchase_orders count"
         ],
         "sends": 0,
         "card": false,
-        "say": "Records one gallon against the open request and says one gallon is still outstanding; no purchase or supplier action."
+        "say": "Says a partial delivery cannot be recorded against an open request yet (receiving closes the whole request), so nothing was written; points to the inventory screen and asks how to proceed."
       },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
-        "any supplier submission, purchase order or price change"
+        "any supplier submission, purchase order or price change",
+        "receiving the request (it would close with one gallon still outstanding)",
+        "claiming one gallon remains tracked as outstanding"
       ],
       "verify": [
         {
@@ -644,7 +643,7 @@
       "covers": [
         "W10-C3"
       ],
-      "negative": false
+      "negative": true
     },
     {
       "id": "W10-held-04",
@@ -660,7 +659,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "stock_movements count"
+          "product_inventory_movements count"
         ],
         "sends": 0,
         "card": false,
@@ -702,7 +701,7 @@
         "outcome": "completed",
         "changes": [],
         "unchanged": [
-          "restock_requests[*]"
+          "product_restock_requests[*]"
         ],
         "sends": 0,
         "card": false,
@@ -744,11 +743,11 @@
       "expected": {
         "outcome": "unknown",
         "changes": [
-          "stock_movements[new].product = Talak",
-          "stock_movements[new].quantity = 5 jugs"
+          "product_inventory_movements[new].product_id = Talak",
+          "product_inventory_movements[new].quantity = 5 jugs"
         ],
         "unchanged": [
-          "stock_movements duplicate"
+          "product_inventory_movements duplicate"
         ],
         "sends": 0,
         "card": false,
@@ -792,7 +791,7 @@
         "outcome": "awaiting_operator",
         "changes": [],
         "unchanged": [
-          "stock_movements count"
+          "product_inventory_movements count"
         ],
         "sends": 0,
         "card": false,
@@ -833,8 +832,8 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].product = Talak",
-          "stock_movements[new].quantity = 2 jugs"
+          "product_inventory_movements[new].product_id = Talak",
+          "product_inventory_movements[new].quantity = 2 jugs"
         ],
         "unchanged": [
           "purchase_orders count"
@@ -880,7 +879,7 @@
         "outcome": "blocked_by_rule",
         "changes": [],
         "unchanged": [
-          "stock_movements count"
+          "product_inventory_movements count"
         ],
         "sends": 0,
         "card": true,
@@ -924,7 +923,7 @@
         "outcome": "awaiting_operator",
         "changes": [],
         "unchanged": [
-          "stock_movements rows",
+          "product_inventory_movements rows",
           "products on-hand"
         ],
         "sends": 0,
@@ -955,11 +954,11 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "stock_movements[new].product = Talak",
-              "stock_movements[new].quantity = 3 jugs"
+              "product_inventory_movements[new].product_id = Talak",
+              "product_inventory_movements[new].quantity = 3 jugs"
             ],
             "unchanged": [
-              "stock_movements[2 jugs]"
+              "product_inventory_movements[2 jugs]"
             ],
             "sends": 0,
             "card": true,
