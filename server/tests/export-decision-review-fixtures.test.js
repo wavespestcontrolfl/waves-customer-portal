@@ -27,6 +27,7 @@ describe('rowToCase', () => {
   test('keeps only ids, typed answers, labels, baselines and evidence; never text', () => {
     const c = rowToCase(ROW);
     expect(c).toEqual({
+      provider: 'typesafe',
       subject_type: 'call_log',
       subject_id: '11111111-1111-4111-8111-111111111111',
       subject_version: null,
@@ -42,6 +43,13 @@ describe('rowToCase', () => {
       outcome_evidence: { source: 'leads_customers', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
     });
     expect(JSON.stringify(c)).not.toMatch(/transcript|someone@example|labeled_by|Jane Doe|123 Main|note/);
+  });
+
+  test('provider is a closed registry value: a second provider exports as itself, a stored string outside the registry is not exported', () => {
+    expect(rowToCase({ ...ROW, provider: 'cloudflare' }).provider).toBe('cloudflare');
+    expect(rowToCase({ ...ROW, provider: null }).provider).toBe('typesafe'); // a row from before the column
+    expect(rowToCase({ ...ROW, provider: 'Jane Doe at 123 Main' })).toBeNull();
+    expect(COLUMNS).toContain('provider');
   });
   test('carries the stored subject version so the eval can drop a reprocessed subject; never a non-digest', () => {
     expect(rowToCase({ ...ROW, subject_hash: 'b'.repeat(64) }).subject_version).toBe('b'.repeat(64));

@@ -3,7 +3,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const { recordDecisions, sampleFor, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY } = require('../services/typed-decisions/shadow-recorder');
+const { recordDecisions, sampleFor, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY } = require('../services/typed-decisions/shadow-recorder');
 const { packageFor, packageHash } = require('../services/typed-decisions/packages');
 
 const pkg = packageFor('call_judge.v2');
@@ -79,8 +79,9 @@ describe('recordDecisions', () => {
     expect(calls.inserted).toHaveLength(6);
     const row = calls.inserted.find((r) => r.question_id === 'is_spam');
     expect(Object.keys(row).sort()).toEqual([
-      'baseline_answers', 'capability', 'jev_answer', 'package_hash', 'package_id', 'question_id', 'sampled_for', 'served_model', 'subject_hash', 'subject_id', 'subject_type',
+      'baseline_answers', 'capability', 'jev_answer', 'package_hash', 'package_id', 'provider', 'question_id', 'sampled_for', 'served_model', 'subject_hash', 'subject_id', 'subject_type',
     ]);
+    expect(row.provider).toBe('typesafe'); // the default provider is Jev
     expect(row).toMatchObject({ capability: 'call_judge', package_id: 'call_judge.v2', package_hash: packageHash(pkg), served_model: 'jev-1.13.0', subject_type: 'call_log', subject_id: '11111111-1111-4111-8111-111111111111' });
     expect(JSON.parse(row.jev_answer)).toEqual(noul(0.9));
     expect(JSON.parse(row.baseline_answers)).toEqual({ production: false, deep_judge: false });
@@ -102,7 +103,7 @@ describe('recordDecisions', () => {
   test('upserts on the unique key and merges only answer columns, only onto unlabeled rows', async () => {
     const { conn, calls } = stubConn();
     await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
-    expect(calls.conflict).toEqual(['capability', 'package_id', 'subject_type', 'subject_id', 'question_id']);
+    expect(calls.conflict).toEqual(['capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id']);
     expect(CONFLICT_KEY).toEqual(calls.conflict);
     expect(calls.merge).toEqual(['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash']);
     expect(MERGE_COLUMNS).toEqual(calls.merge);
@@ -155,5 +156,34 @@ describe('recordDecisions', () => {
     const out = await recordDecisions({ capability: 'call_judge', pkg, subjectType, subjectId, result, conn });
     expect(out.recorded).toBe(0);
     expect(calls.table).toBeNull();
+  });
+});
+
+describe('provider (one row per provider per subject and question; Codex r1 on #5546)', () => {
+  test('a named provider is written on every row and is part of the conflict key', async () => {
+    const { conn, calls } = stubConn();
+    const out = await recordDecisions({ capability: 'call_judge', pkg, provider: 'cloudflare', subjectType: 'call_log', subjectId: 'c1', result: { ...ok(), servedModel: 'clef-flash' }, conn });
+    expect(out.recorded).toBe(6);
+    expect(calls.inserted.every((r) => r.provider === 'cloudflare' && r.served_model === 'clef-flash')).toBe(true);
+    expect(calls.conflict).toContain('provider');
+  });
+
+  test('a provider outside the closed set is refused before any write', async () => {
+    const { conn, calls } = stubConn();
+    const out = await recordDecisions({ capability: 'call_judge', pkg, provider: 'mystery', subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
+    expect(out).toEqual({ recorded: 0, skipped: 'bad_provider' });
+    expect(calls.inserted).toBeNull();
+  });
+
+  test('the audit draw is keyed on the subject, not the provider: both providers are sampled on the same cases', async () => {
+    expect(DRAW_KEY).toEqual(['capability', 'package_id', 'subject_type', 'subject_id', 'question_id']);
+    const record = async (provider) => {
+      const { conn, calls } = stubConn();
+      await recordDecisions({ capability: 'call_judge', pkg, provider, subjectType: 'call_log', subjectId: 'c-same', result: ok(), baselines: { is_lead: { production: true } }, conn });
+      return calls.inserted;
+    };
+    const [jev, clef] = [await record('typesafe'), await record('cloudflare')];
+    expect(clef.map((r) => stableDraw(r))).toEqual(jev.map((r) => stableDraw(r)));
+    expect(clef.map((r) => r.sampled_for)).toEqual(jev.map((r) => r.sampled_for));
   });
 });

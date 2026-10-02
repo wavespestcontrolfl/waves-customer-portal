@@ -22,7 +22,7 @@ const ALL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disag
 // subject_hash travels as subject_version: the eval re-reads the text by
 // subject id and must drop a case whose live digest no longer matches (a call
 // reprocessed after it was labeled), or the label would score new text.
-const COLUMNS = ['capability', 'subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'jev_answer', 'label', 'label_status', 'baseline_answers', 'outcome_evidence', 'subject_hash'];
+const COLUMNS = ['capability', 'provider', 'subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'jev_answer', 'label', 'label_status', 'baseline_answers', 'outcome_evidence', 'subject_hash'];
 // The same contract the schema enforces (migrations 20261001130000 +
 // 20261001140000), repeated here so the export stays honest against rows older
 // than the CHECKs: a real sha256 hex hash, and for confirmed rows a label of the
@@ -44,7 +44,7 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 // a score is a finite number. Anything else (a name, an address, a sentence, an
 // option that is not in the package) is dropped, and a confirmed case that
 // cannot produce an in-domain expected answer is not exported at all.
-const { packageFor, packageHash, OUTCOME_SOURCES, answerInDomain } = require('../services/typed-decisions/packages');
+const { packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER } = require('../services/typed-decisions/packages');
 
 // The row must name a registered package AND carry that package's CURRENT
 // content hash: a syntactically valid digest for different question wording
@@ -146,7 +146,14 @@ function rowToCase(row, capability = null) {
   if (row.label_status === 'confirmed_error' && verdict !== 'jev_wrong') return null;
   const label = structuredLabel(row.label);
   if (label && row.label && row.label.verdict === 'jev_wrong' && inDomain(question, row.label.correct_value)) label.correct_value = row.label.correct_value;
+  // Which provider's answer this case holds: a closed registry value, never a
+  // stored string. A row from before the column reads as the default; a value
+  // outside the registry is not exported at all (it can never be relabeled as
+  // another provider's answer).
+  const provider = row.provider == null ? DEFAULT_DECISION_PROVIDER : (DECISION_PROVIDERS.includes(row.provider) ? row.provider : null);
+  if (!provider) return null;
   return {
+    provider,
     subject_type: row.subject_type,
     subject_id: row.subject_id,
     subject_version: typeof row.subject_hash === 'string' && /^[0-9a-f]{64}$/.test(row.subject_hash) ? row.subject_hash : null,

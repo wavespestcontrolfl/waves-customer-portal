@@ -2,7 +2,8 @@
  * Typed-decisions shadow recorder (dark behind GATE_TYPED_DECISIONS).
  *
  * recordDecisions() writes ONE decision_reviews row per question of a package
- * answered by TypeSafe Jev: the normalised Jev answer, what the existing paths
+ * and provider (default typesafe = Jev; the row's `provider` is part of its
+ * unique key) answered by a decision model: the normalised Jev answer, what the existing paths
  * said (`baselines`) and, for a call, the digest of the transcript Jev was
  * given (`subjectHash`, ./subject-hash.js). It is shadow only: nothing it
  * writes is read by a customer-facing path, and no caller acts on a Jev answer.
@@ -23,11 +24,17 @@
 const db = require('../../models/db');
 const { typedDecisionsLive } = require('../../config/feature-gates');
 const crypto = require('crypto');
-const { packageHash } = require('./packages');
+const { packageHash, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER } = require('./packages');
 
 const TABLE = 'decision_reviews';
 const SUBJECT_TYPES = ['call_log', 'sms_log'];
-const CONFLICT_KEY = ['capability', 'package_id', 'subject_type', 'subject_id', 'question_id'];
+// One row per provider per subject and question (migration 20261002010000):
+// a second provider answering the same case keeps its own row.
+const CONFLICT_KEY = ['capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id'];
+// The random-audit draw is keyed on the SUBJECT, never the provider: two
+// providers answering the same subject and question fall in (or out of) the
+// audit together, so their labels compare on the same cases.
+const DRAW_KEY = ['capability', 'package_id', 'subject_type', 'subject_id', 'question_id'];
 const MERGE_COLUMNS = ['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash'];
 const HEX64 = /^[0-9a-f]{64}$/;
 // Share of agreeing answers pulled into the review set anyway, so the
@@ -44,9 +51,10 @@ function comparable(jevAnswer) {
 }
 
 // The random-audit draw for one row: a number in [0, 1) fixed by the row's
-// unique key, so every re-record of the same question draws the same value.
+// subject key (DRAW_KEY), so every re-record of the same question draws the
+// same value, whichever provider answered.
 function stableDraw(row) {
-  const key = CONFLICT_KEY.map((k) => row[k]).join('|');
+  const key = DRAW_KEY.map((k) => row[k]).join('|');
   return crypto.createHash('sha256').update(key).digest().readUInt32BE(0) / 2 ** 32;
 }
 
@@ -98,7 +106,7 @@ function cleanBaselines(baselines) {
 const jsonOrNull = (value) => (value ? JSON.stringify(value) : null);
 
 // `random` (tests) overrides the stable per-row draw.
-function buildRows({ capability, pkg, subjectType, subjectId, result, baselines, subjectHash, random }) {
+function buildRows({ capability, pkg, provider, subjectType, subjectId, result, baselines, subjectHash, random }) {
   const hash = result.packageHash || packageHash(pkg);
   const rows = [];
   for (const questionId of Object.keys(pkg.questions)) {
@@ -108,6 +116,7 @@ function buildRows({ capability, pkg, subjectType, subjectId, result, baselines,
       capability: capability || pkg.capability,
       package_id: pkg.id,
       package_hash: hash,
+      provider,
       served_model: result.servedModel || null,
       subject_type: subjectType,
       subject_id: subjectId,
@@ -127,12 +136,15 @@ function buildRows({ capability, pkg, subjectType, subjectId, result, baselines,
  * Gate off, a failed answer or a bad subject returns early with no write.
  * Throws only on a database error (callers wrap shadow work in try/catch).
  */
-async function recordDecisions({ capability, pkg, subjectType, subjectId, result, baselines = {}, subjectHash = null, random = null, conn = db } = {}) {
+async function recordDecisions({ capability, pkg, provider = DEFAULT_DECISION_PROVIDER, subjectType, subjectId, result, baselines = {}, subjectHash = null, random = null, conn = db } = {}) {
   if (!typedDecisionsLive()) return { recorded: 0, skipped: 'gate_off' };
   if (!pkg || !pkg.questions) return { recorded: 0, skipped: 'no_package' };
   if (!result || result.ok !== true || !result.answers) return { recorded: 0, skipped: 'no_answers' };
   if (!SUBJECT_TYPES.includes(subjectType) || !subjectId) return { recorded: 0, skipped: 'bad_subject' };
-  const rows = buildRows({ capability, pkg, subjectType, subjectId, result, baselines, subjectHash, random });
+  // The table's CHECK closes this set; an unknown provider is refused here so
+  // shadow work never fails on a constraint.
+  if (!DECISION_PROVIDERS.includes(provider)) return { recorded: 0, skipped: 'bad_provider' };
+  const rows = buildRows({ capability, pkg, provider, subjectType, subjectId, result, baselines, subjectHash, random });
   if (!rows.length) return { recorded: 0, skipped: 'no_answers' };
   await conn(TABLE)
     .insert(rows)
@@ -146,4 +158,4 @@ async function recordDecisions({ capability, pkg, subjectType, subjectId, result
   return { recorded: rows.length, sampled };
 }
 
-module.exports = { recordDecisions, sampleFor, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, TABLE };
+module.exports = { recordDecisions, sampleFor, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY, TABLE };

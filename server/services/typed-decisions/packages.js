@@ -136,8 +136,14 @@ function answerInDomain(question, v) {
   return false;
 }
 
+// The closed set of providers a decision_reviews row may come from (the
+// table's provider CHECK, migration 20261002010000, mirrors it). typesafe is
+// Jev; a provider is added here and by a new migration together.
+const DECISION_PROVIDERS = Object.freeze(['typesafe', 'cloudflare']);
+const DEFAULT_DECISION_PROVIDER = 'typesafe';
+
 // How much of a call transcript call_judge is given (call-self-audit.js). The
 // admin review route shows the reviewer the same span.
 const CALL_TRANSCRIPT_CHARS = 5000;
 
-module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS };
+module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER };

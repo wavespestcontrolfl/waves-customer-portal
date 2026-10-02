@@ -73,6 +73,7 @@ function mapReview(row, subject) {
     baselineAnswers: parse(row.baseline_answers),
     sampledFor: row.sampled_for,
     servedModel: row.served_model,
+    provider: row.provider || 'typesafe',
     label: parse(row.label),
     labelStatus: row.label_status,
     labeledBy: row.labeled_by,
