@@ -628,9 +628,18 @@ async function bindSavedAddress(supplied, targets) {
 }
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
+  // Owner-direct (owner ruling 2026-10-01, owner-direct.js): for the owner
+  // login the record the bar picks IS the target, so the request-text
+  // authority checks below — ambiguous cohort, customer-scoped task vs a
+  // route-wide or outside write, a name without its id, a record the request
+  // did not name — do not refuse. The data checks stay for everyone: a
+  // malformed or missing record (readReferences) and a record that belongs to
+  // a different customer than the same call names (relationshipFailure).
+  // The flag is set by the route from the live request, never by tool input.
+  const direct = context.ownerDirect === true;
   // A refused cohort or unresolved name stops here too; explicit record IDs
   // inside "both appointment A and appointment B" do not reopen it.
-  if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
+  if (context.ambiguous && !direct) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
   // Every caller names the tool; a call without one has no reviewed scope
   // and is refused like an unclassified tool rather than admitted.
   const scope = scopeOf(toolName);
@@ -642,7 +651,7 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // recheck. An explicitly named customer who did not resolve keeps the task
   // customer-scoped (as for the broad readers), so a misspelling never widens
   // a request to a whole date or technician.
-  if (scope === 'route_wide' && customerSpecific(context)) {
+  if (scope === 'route_wide' && customerSpecific(context) && !direct) {
     return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
   }
   // Outside-write tools carry no customer selector to check below (their
@@ -650,10 +659,10 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // a customer-scoped task even though their preview pulls in unrelated
   // provider text — the same leak readScopeRefusal already blocks for their
   // 'broad' read equivalents.
-  if (OUTSIDE_WRITE_TOOL_NAMES.has(toolName) && customerSpecific(context)) {
+  if (OUTSIDE_WRITE_TOOL_NAMES.has(toolName) && customerSpecific(context) && !direct) {
     return { error: 'This action reaches an outside service, not this customer\'s records. Run it from a request that does not name a customer.', code: 'customer_scope_required' };
   }
-  if (policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
+  if (!direct && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
     return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };
   }
   const references = { ...params };
@@ -713,8 +722,8 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
       if (eligibility.eligible) permitted.add(permitted.has(winnerId) ? loserId : winnerId);
     }
   }
-  const missingTarget = customerIds(records).some(id => !permitted.has(id));
-  const unlinkedTarget = (await Promise.all(records.map(r => unlinkedRecordIsReferenced(r, context)))).some(allowed => !allowed);
+  const missingTarget = !direct && customerIds(records).some(id => !permitted.has(id));
+  const unlinkedTarget = !direct && (await Promise.all(records.map(r => unlinkedRecordIsReferenced(r, context)))).some(allowed => !allowed);
   if (missingTarget || unlinkedTarget) return {
     error: 'Choose the target for this action; the current request has not established it',
     code: 'target_clarification_required', candidates: context.candidates || [],
@@ -724,7 +733,7 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
     const customer = records.find(r => r.kind === 'customer_id');
     const matchesCustomer = customer && String(customer.phone || '').replace(/\D/g, '').slice(-10) === phone;
     if (customer && !matchesCustomer) return { error: 'The message recipient does not match the target customer', code: 'target_relationship_mismatch' };
-    if (!customer && (permitted.size || !context.explicitPhones?.includes(phone))) return { error: 'Select the customer or explicitly provide the recipient number', code: 'target_clarification_required' };
+    if (!customer && !direct && (permitted.size || !context.explicitPhones?.includes(phone))) return { error: 'Select the customer or explicitly provide the recipient number', code: 'target_clarification_required' };
   }
   return accepted;
 }
@@ -851,7 +860,20 @@ function inheritTaskCustomer(input, context, schema) {
   return null;
 }
 
-async function prepareReadInput(params, context, { toolName, schema }) {
+// Owner-direct reads (owner ruling 2026-10-01): the scoped preparation below
+// still runs first, so a read that fits the task keeps its bound customer id
+// and saved address. Only when it would refuse for request-text authority
+// (which customer the request named) does the reader get the call as the
+// model made it — the same input the non-platform path executes. A data
+// refusal (invalid id, missing record, cross-customer mismatch) stands.
+const OWNER_DIRECT_READ_CODES = new Set(['target_clarification_required', 'customer_scope_required']);
+async function prepareReadInput(params, context, options) {
+  const prepared = await prepareScopedReadInput(params, context, options);
+  if (prepared.error && context?.ownerDirect === true && OWNER_DIRECT_READ_CODES.has(prepared.code)) return { input: { ...params } };
+  return prepared;
+}
+
+async function prepareScopedReadInput(params, context, { toolName, schema }) {
   // A refused cohort never widens into an unscoped read; an unresolved
   // explicit name is handled by readScopeRefusal, which still admits a
   // reader that carries its own selector or record identifier.
@@ -878,11 +900,24 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   return invalid || { input };
 }
 
+// Owner-direct task context: whatever resolve() concluded — an unresolved or
+// duplicated name, a second person in the request, a stale page record, a
+// rejected selection — the request still runs. A uniquely resolved customer
+// stays the task target (readers inherit it); nothing else is a target and
+// nothing is refused for it. The page ids survive as hints only.
+function ownerDirectContext(context = {}) {
+  const { error: _error, code: _code, selectable: _selectable, ...rest } = context;
+  const targets = Array.isArray(rest.targets) ? rest.targets : [];
+  return { ...rest, page: rest.page || { ids: {}, records: {} }, candidates: rest.candidates || [],
+    target: rest.target || null, targets, requestedRecords: rest.requestedRecords || {},
+    ambiguous: false, ownerDirect: true };
+}
+
 // A sender block inside a customer-scoped task may only target the task
 // customer's own saved address. A domain-wide filter affects every sender at
 // that domain and cannot be bound to one customer, so it is refused there.
 async function validateSenderBlock(params, context) {
-  if (!context?.targets?.length) return null;
+  if (!context?.targets?.length || context.ownerDirect === true) return null;
   if (String(params.domain || '').trim()) {
     return { error: 'A domain-wide block affects every sender at that domain and cannot be proposed inside a task for a specific customer. Block the customer\'s own address instead.', code: 'target_relationship_mismatch' };
   }
@@ -894,4 +929,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { UUID_RE, pageIds, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { UUID_RE, pageIds, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

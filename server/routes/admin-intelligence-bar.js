@@ -70,6 +70,7 @@ const {
 } = require('../services/intelligence-bar/write-gates');
 const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
+const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
@@ -2616,6 +2617,11 @@ async function runQuery(req, res, next) {
     // sees or can invoke one through initialTools/discover/validateInput
     // either, whatever GATE_IB_PLATFORM is set to.
     const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
+    // Owner-direct (owner ruling 2026-10-01, GATE_IB_OWNER_DIRECT): the owner
+    // login gets no target refusals, no card on internal edits and short
+    // replies. Read from the live request on every run; the isolated tech
+    // and agent_estimate rails keep their own contracts.
+    const ownerDirect = OwnerDirect.ownerDirectLive(req) && context !== 'tech' && context !== 'agent_estimate';
     let taskContext = null;
     if (platformEnabled) {
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
@@ -2645,6 +2651,10 @@ async function runQuery(req, res, next) {
           taskContext = { ...req.ibResumedTask.target, error: undefined, code: undefined, selectable: undefined, target: refreshed, targets: [refreshed], ambiguous: false };
         }
       }
+      // The flag comes from this request alone: a stored or resumed context
+      // never carries it in, and a non-owner run always has it cleared.
+      if (ownerDirect) taskContext = TaskContext.ownerDirectContext(taskContext);
+      else if (taskContext.ownerDirect) taskContext = { ...taskContext, ownerDirect: false };
       if (taskContext.error || taskContext.ambiguous) {
         // A customer choice is the only clarification the task card can
         // supply. A hard resolution error (stale or mismatched page record)
@@ -2718,6 +2728,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
 - Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.`;
     }
+    // Last, so every shared prefix above stays cacheable across logins.
+    if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
     // the system prompt made the prefix unique per request and defeated
@@ -2952,6 +2964,23 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
+            } else if (proposed.clientPayload && ownerDirect && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input)) {
+              // Owner-direct internal edit: no card. The pending action just
+              // minted is committed now through the same path a Confirm
+              // click takes, so its pins, receipt and audit row are the same.
+              let committed = null;
+              try {
+                committed = await commitPendingAction(req, { id: proposed.clientPayload.id, contractHash: proposed.clientPayload.contract_hash });
+              } finally {
+                // An approval that was never consumed must not linger as a
+                // pending row with no card to confirm or cancel it.
+                if (!committed?.claimed) await PendingActions.cancelPendingAction(proposed.clientPayload.id, getAdminActorId(req)).catch(() => {});
+              }
+              result = OwnerDirect.directModelResult(committed);
+              if (!result.executed) {
+                failed = true;
+                errorMessage = result.error;
+              }
             } else if (proposed.clientPayload) {
               if (!pendingProposals.some(p => p.id === proposed.clientPayload.id)) pendingProposals.push(proposed.clientPayload);
               proposedCard = true;
@@ -2973,7 +3002,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             // Recall is actor-bound: the owner id travels from the
             // authenticated request, never from model-supplied input.
             result = await executeToolByName(toolUse.name, executionInput, techContext, {
-              actorId: getAdminActorId(req), readCustomerIds: taskContext?.targets?.map(target => target.customer_id) || [],
+              // Owner-direct reads are not narrowed to the task customer:
+              // the owner's request may reach any record.
+              actorId: getAdminActorId(req), readCustomerIds: ownerDirect ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
             });
             if (isToolFailure(result)) {
@@ -3443,22 +3474,27 @@ router.post('/execute', async (req, res, next) => {
 // pending-action id is the confirmation credential: it travels client →
 // server only, and only a real Confirm click produces it.
 
-router.post('/confirm-action', async (req, res, next) => {
+// The one commit path for a pending action: the operator's Confirm click
+// (/confirm-action below) and the owner-direct internal edit in the /query
+// loop (owner ruling 2026-10-01, services/intelligence-bar/owner-direct.js)
+// both run exactly this — the same claim, role guards, proposal-time pin
+// re-checks and receipt. Returns { status, body, claimed } and never touches
+// the response; `claimed` says whether the approval was consumed.
+async function commitPendingAction(req, { id, contractHash }) {
   let claimedAction = null;
+  const reply = (status, body) => ({ status, body, claimed: claimedAction !== null });
   try {
-    const id = String(req.body?.pending_action_id || '').trim();
-    if (!id) return res.status(400).json({ error: 'pending_action_id is required' });
+    if (!id) return reply(400, { error: 'pending_action_id is required' });
 
     // Emergency write freeze covers commits too — a pending action proposed
     // before the freeze must not slip through after it.
     if (ibWritesDisabled()) {
-      return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+      return reply(409, { error: IB_WRITES_DISABLED_MESSAGE });
     }
 
     // Exact-effect confirm (W0B): the card echoes the contract hash it
     // displayed; the claim refuses any other, so the operator can only ever
     // approve exactly the effect set they saw.
-    const contractHash = req.body?.contract_hash ? String(req.body.contract_hash).trim() : null;
     const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req), { contractHash });
     if (claim.error) {
       const status = claim.error === 'not_found' ? 404
@@ -3467,7 +3503,7 @@ router.post('/confirm-action', async (req, res, next) => {
       const message = claim.error === 'contract_mismatch'
         ? 'The confirmation card no longer matches the proposed action. Ask again to get a fresh card.'
         : `Pending action ${claim.error.replace(/_/g, ' ')}`;
-      return res.status(status).json({ error: message });
+      return reply(status, { error: message });
     }
     const action = claim.action;
     claimedAction = action;
@@ -3486,7 +3522,7 @@ router.post('/confirm-action', async (req, res, next) => {
       && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
       await PendingActions.recordResult(action.id, result);
-      return res.status(409).json(result);
+      return reply(409, result);
     }
 
     // A card minted while its tool was still preview-only (#5489, before this
@@ -3496,17 +3532,17 @@ router.post('/confirm-action', async (req, res, next) => {
     if (action.contract?.preview_only === true) {
       const result = { error: 'This card was created as a preview only and cannot be applied — ask again for a fresh confirmation card.', code: 'preview_only' };
       await PendingActions.recordResult(action.id, result);
-      return res.status(409).json(result);
+      return reply(409, result);
     }
 
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
       await PendingActions.recordResult(action.id, { error: 'Agent Estimate is not enabled' });
-      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+      return reply(404, { error: 'Agent Estimate is not enabled' });
     }
 
     if (ADMIN_ONLY_TOOL_NAMES.has(action.tool_name) && req.techRole !== 'admin') {
       await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'Admin access required for this action' });
-      return res.status(403).json({ error: 'Admin access required for this action' });
+      return reply(403, { error: 'Admin access required for this action' });
     }
 
     // Outside-service writes (owner ruling 2026-09-28) are full-access only.
@@ -3516,7 +3552,7 @@ router.post('/confirm-action', async (req, res, next) => {
     // only thing stopping a commit.
     if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.tool_name) && !ibFullAccess(req)) {
       await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'This action is limited to the owner account.' });
-      return res.status(403).json({ error: 'This action is limited to the owner account.' });
+      return reply(403, { error: 'This action is limited to the owner account.' });
     }
 
     // Default-deny catch-all: a technician may confirm/execute only the tech
@@ -3524,7 +3560,7 @@ router.post('/confirm-action', async (req, res, next) => {
     // admin-only guard so its message wins for the tools it covers.
     if (!isToolAllowedForRole(action.tool_name, req.techRole)) {
       await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'This action is not available to your role' });
-      return res.status(403).json({ error: 'This action is not available to your role' });
+      return reply(403, { error: 'This action is not available to your role' });
     }
 
     const execParams = { ...action.params };
@@ -3541,7 +3577,7 @@ router.post('/confirm-action', async (req, res, next) => {
       const targetFailure = await TaskContext.validateRecordTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
       if (targetFailure) {
         await PendingActions.recordResult(action.id, targetFailure);
-        return res.status(409).json(targetFailure);
+        return reply(409, targetFailure);
       }
       delete execParams._ib_task_context;
     }
@@ -3552,7 +3588,7 @@ router.post('/confirm-action', async (req, res, next) => {
         || (approved.resourceName && approved.resourceName !== current._pin.resourceName)) {
         const result = { error: 'The review identity or content changed. Review a fresh confirmation card.', preview_changed: true };
         await PendingActions.recordResult(action.id, result);
-        return res.status(409).json(result);
+        return reply(409, result);
       }
     }
     let approvedAgentEstimateFingerprint = null;
@@ -3573,7 +3609,7 @@ router.post('/confirm-action', async (req, res, next) => {
           preview_changed: true,
         };
         await PendingActions.recordResult(action.id, result);
-        return res.status(409).json(result);
+        return reply(409, result);
       }
     }
     // W0B proposal-time pins for legacy-bare writes: re-resolve exactly as
@@ -3662,7 +3698,7 @@ router.post('/confirm-action', async (req, res, next) => {
           preview_changed: true,
         };
         await PendingActions.recordResult(action.id, result);
-        return res.status(409).json(result);
+        return reply(409, result);
       }
     }
 
@@ -3684,7 +3720,7 @@ router.post('/confirm-action', async (req, res, next) => {
             preview_changed: true,
           };
           await PendingActions.recordResult(action.id, result);
-          return res.status(409).json(result);
+          return reply(409, result);
         }
         if (action.tool_name === 'switch_appointment_property') execParams._verified_address_fingerprint = approvedTwoStep;
         if (['add_customer_property', 'update_customer_property', 'set_primary_property'].includes(action.tool_name)) {
@@ -3782,10 +3818,9 @@ router.post('/confirm-action', async (req, res, next) => {
     const success = ['completed', 'partially_completed', 'provider_accepted'].includes(outcome);
     logger.info(`[intelligence-bar:pending] Confirmed action ${action.id} (${action.tool_name})`, { success, outcome });
 
-    res.status(result?.preview_changed ? 409 : 200)
-      .json({ success, outcome, tool: action.tool_name, result,
-        ...(receiptSaved === false ? { receiptPersisted: false, warning: 'The backend returned this outcome, but its recovery record could not be saved. Do not repeat the action.' } : {}),
-      });
+    return reply(result?.preview_changed ? 409 : 200, { success, outcome, tool: action.tool_name, result,
+      ...(receiptSaved === false ? { receiptPersisted: false, warning: 'The backend returned this outcome, but its recovery record could not be saved. Do not repeat the action.' } : {}),
+    });
   } catch (err) {
     // Once an approval was consumed a thrown error may follow a committed
     // DB/provider effect. Preserve uncertainty instead of inviting a retry.
@@ -3796,11 +3831,23 @@ router.post('/confirm-action', async (req, res, next) => {
       // stopped. Never replace that evidence, including if recovery reads fail.
       const saved = await PendingActions.getActionReceipt(claimedAction.id, getAdminActorId(req)).catch(() => null);
       if (saved?.result && saved.outcome !== 'outcome_unknown') {
-        return res.status(200).json({ success: saved.success, outcome: saved.outcome, tool: claimedAction.tool_name, result: saved.result });
+        return reply(200, { success: saved.success, outcome: saved.outcome, tool: claimedAction.tool_name, result: saved.result });
       }
       await PendingActions.recordResult(claimedAction.id, result, { onlyIfEmpty: true });
-      return res.status(200).json({ success: false, outcome: 'outcome_unknown', tool: claimedAction.tool_name, result });
+      return reply(200, { success: false, outcome: 'outcome_unknown', tool: claimedAction.tool_name, result });
     }
+    throw err;
+  }
+}
+
+router.post('/confirm-action', async (req, res, next) => {
+  try {
+    const committed = await commitPendingAction(req, {
+      id: String(req.body?.pending_action_id || '').trim(),
+      contractHash: req.body?.contract_hash ? String(req.body.contract_hash).trim() : null,
+    });
+    res.status(committed.status).json(committed.body);
+  } catch (err) {
     logger.error(`[intelligence-bar] confirm-action failed (code=${err.code || 'unknown'})`);
     next(err);
   }
