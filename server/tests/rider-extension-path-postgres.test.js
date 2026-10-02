@@ -547,6 +547,29 @@ postgres('series extension keeps riding the lawn', () => {
       return { apply, fired, file };
     }
 
+    test('deferredCommitScope: a kept scope inside a savepoint that later ROLLS BACK never fires, even when the root commits', async () => {
+      const { deferredCommitScope } = require('../utils/trx-commit-promise');
+      const state = (p) => Promise.race([p.then(() => 'fired', () => 'dropped'), settle().then(() => 'waiting')]);
+      // Kept, then the enclosing savepoint rolls back.
+      const root = await mockPg.transaction();
+      try {
+        const mid = await root.transaction();
+        const scope = deferredCommitScope(mid);
+        scope.keep();
+        await mid.rollback(new Error('enclosing work failed'));
+        expect(await state(scope.executionPromise)).toBe('dropped');
+      } finally { await root.rollback().catch(() => {}); }
+      // Kept, savepoint released: still waits for the root, then fires on its commit.
+      const root2 = await mockPg.transaction();
+      const mid2 = await root2.transaction();
+      const scope2 = deferredCommitScope(mid2);
+      scope2.keep();
+      await mid2.commit();
+      expect(await state(scope2.executionPromise)).toBe('waiting');
+      await root2.commit();
+      expect(await state(scope2.executionPromise)).toBe('fired');
+    });
+
     test('a kept ride files its alert only after the outer commit', async () => {
       const trx = await mockPg.transaction();
       const { apply, fired, file } = spies();
