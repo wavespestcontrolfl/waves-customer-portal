@@ -8,9 +8,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn() }));
 jest.mock('../services/sms-operational-actions', () => ({ smsCommitmentsEnabled: jest.fn(), listSmsCommitments: jest.fn() }));
 // the no-show detector's promise evidence (what the customer was actually sent): none by default
+// (the stop resolution — byVisit / groupedStops / stopPromise — is the real one)
 jest.mock('../services/no-show-detector', () => ({
+  ...jest.requireActual('../services/no-show-detector'),
   loadPromiseEvents: jest.fn(async () => []),
-  latestPromises: (events) => new Map((events || []).map((e) => [String(e.visit_id), e])),
 }));
 const { loadPromiseEvents } = require('../services/no-show-detector');
 
@@ -337,6 +338,22 @@ describe('pastWindow', () => {
     // the customer was told 3 PM (a communicated move): not passed at noon
     loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T19:00:00.000Z', communicated_at: '2026-10-01T12:00:00Z' }]);
     expect((await run({ status: 'confirmed', window_start: '09:00:00' })).pastWindow).toBeNull();
+  });
+
+  test('a grouped reminder stored on a SIBLING supersedes this member\'s older confirmation', async () => {
+    const isSiblingQuery = (ops) => hasOp(ops, 'whereIn', (a) => a[0] === 'visit_id');
+    const conn = fakeConn({ scheduled_services: (ops) => {
+      if (isCandidateQuery(ops)) return [todayRow({ visit_id: 'g1', status: 'confirmed' })];
+      if (isSiblingQuery(ops)) return [{ id: 'visit-2', visit_id: 'g1', status: 'confirmed' }];
+      return [];
+    } });
+    // visit-1: 9 AM confirmation on 09-29; visit-2 carries the newer grouped 3 PM reminder for the whole stop
+    loadPromiseEvents.mockResolvedValueOnce([
+      { visit_id: 'visit-1', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z' },
+      { visit_id: 'visit-2', start_at: '2026-10-01T19:00:00.000Z', communicated_at: '2026-09-30T12:00:00Z', grouped: true },
+    ]);
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow).toBeNull();
+    expect(loadPromiseEvents.mock.calls[0][1]).toEqual(['visit-1', 'visit-2']);
   });
 
   test('a promise whose window is UNKNOWN (a newer notice superseded it, start_at null) is never "passed"', async () => {

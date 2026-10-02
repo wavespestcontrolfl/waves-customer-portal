@@ -176,7 +176,7 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
   // a lagging member of a stop whose sibling has already ARRIVED or finished carries
   // no delay (the passed-window stop rule, arrival-only: en route can still be late)
   const startedStops = await startedStopKeys(conn, customerId, alerts || [], { arrivedOnly: true });
-  const latest = await latestPromiseMap(conn, [...new Set((alerts || []).map((r) => r.id))], now);
+  const latest = await stopPromiseMap(conn, alerts || [], now);
   const applicable = [];
   for (const row of alerts || []) {
     const key = stopKey(row);
@@ -245,14 +245,31 @@ async function startedStopKeys(conn, customerId, rows, { arrivedOnly = false } =
 // A promise event with start_at null (a newer notice superseded the window without
 // recording its replacement) means the promised time is UNKNOWN: null, and the row
 // is skipped — never substitute the schedule and apologise for a window we can't name.
-async function latestPromiseMap(conn, ids, now) {
-  if (!ids.length) return new Map();
+// Each row's STOP promise, the detector's own resolution: a grouped reminder's
+// evidence sits on whichever member won the claim, so siblings are loaded and
+// stopPromise picks the window across all members. Map id → promise (absent: none).
+async function stopPromiseMap(conn, rows, now) {
+  const own = [...new Map(rows.map((r) => [String(r.id), { id: r.id, visit_id: r.visit_id, status: r.status }])).values()];
+  if (!own.length) return new Map();
   const detector = require('./no-show-detector');
-  const events = await detector.loadPromiseEvents(conn, ids, { now });
-  return detector.latestPromises(events || [], now);
+  const known = new Set(own.map((r) => String(r.id)));
+  const visitIds = [...new Set(own.map((r) => r.visit_id).filter(Boolean).map(String))];
+  const siblings = visitIds.length
+    ? ((await conn('scheduled_services').whereIn('visit_id', visitIds).select('id', 'visit_id', 'status')) || [])
+      .filter((r) => !known.has(String(r.id)) && visitIds.includes(String(r.visit_id)))
+    : [];
+  const members = [...own, ...siblings];
+  const events = detector.byVisit((await detector.loadPromiseEvents(conn, members.map((r) => String(r.id)), { now })) || []);
+  const out = new Map();
+  for (const stop of detector.groupedStops(members)) {
+    const promise = detector.stopPromise(stop.members, events, now);
+    if (!promise) continue;
+    for (const m of stop.members) if (known.has(String(m.id))) out.set(String(m.id), promise);
+  }
+  return out;
 }
 async function promisedOccurrences(conn, rows, now) {
-  const latest = await latestPromiseMap(conn, rows.map((r) => r.id), now);
+  const latest = await stopPromiseMap(conn, rows, now);
   const out = new Map();
   for (const row of rows) {
     const promise = latest.get(String(row.id));
