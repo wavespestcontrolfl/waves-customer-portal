@@ -21,7 +21,8 @@
  *
  * The read-only form of the second fence performs no writes and takes no locks (it never releases or promotes a
  * stale claim). Any other outcome, or a check that cannot run, is `collectible: false`, `balance_due: null`, with
- * the fence's reason and a pointer to the Invoices page. Nothing here infers a Stripe state, links orphan rows to
+ * the fence's reason and a pointer to the Invoices page. An invoice with a PaymentIntent attached is held the same way
+ * (the pay paths retrieve it from Stripe; this reader never calls Stripe). Nothing here infers a Stripe state, links orphan rows to
  * sibling invoices, or classifies refunds and disputes: the payments-table rows are listed as informational
  * "recorded payments" with no received / not-received verdict.
  *
@@ -199,6 +200,7 @@ async function resolveBillingCustomer(input, actionContext) {
 
 const FENCE_CODES = ['STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_CHARGED_DB_FAILED'];
 const RECONCILE_POINTER = 'needs reconciliation — check the Invoices page';
+const ATTACHED_INTENT_REASON = 'a payment was started on this invoice and its outcome is not confirmed here — check the Invoices page';
 // A PaymentIntent id in a fence message is not needed to answer; keep it out.
 const fenceReason = (message) => scrub(String(message || '').replace(/\bpi_[A-Za-z0-9_]+/g, '[payment]'), 200);
 
@@ -221,6 +223,14 @@ async function invoiceFence(invoice) {
       reason: `${known ? fenceReason(err.message) : 'The payment-state check could not be completed'} — ${RECONCILE_POINTER}`,
       balance_due: null,
     };
+  }
+  // A PaymentIntent attached to the invoice means a payment was started on it. The pay paths retrieve that
+  // intent from Stripe and refuse to collect again unless it is unconfirmed or canceled (stripe.js
+  // chargeInvoiceWithSavedCard and createInvoicePaymentIntent). The reader never calls Stripe, so it holds the
+  // balance whenever one is attached: conservative (an abandoned pay-page setup holds too), and it covers every
+  // sibling of a combined payment, whose PaymentIntent is stamped on each of them.
+  if (invoice.stripe_payment_intent_id) {
+    return { collectible: false, needs_reconciliation: true, reason: ATTACHED_INTENT_REASON, balance_due: null };
   }
   return { collectible: true, needs_reconciliation: false, reason: null, balance_due: invoiceAmountDue(invoice) };
 }
@@ -251,8 +261,13 @@ async function readDisputeHold(customerId) {
 async function readCredit(customerId) {
   try {
     const CustomerCredit = require('../customer-credit');
-    const balance = await CustomerCredit.getBalance(customerId);
-    const sum = await db('customer_credit_ledger').where({ customer_id: customerId }).sum({ total: 'delta' }).first();
+    // One REPEATABLE READ read-only snapshot: a grant, application or reversal commits the balance and the
+    // ledger together, so reading them in separate statements could straddle it and report a false mismatch.
+    let balance; let sum;
+    await db.transaction(async (trx) => {
+      balance = await CustomerCredit.getBalance(customerId, trx);
+      sum = await trx('customer_credit_ledger').where({ customer_id: customerId }).sum({ total: 'delta' }).first();
+    }, { isolationLevel: 'repeatable read', readOnly: true });
     const ledgerSum = money(sum && sum.total) || 0;
     return {
       credit_balance: balance,
@@ -461,6 +476,8 @@ function paymentPlanDetail(rows) {
 // waves_invoice_id, the invoice's Stripe PaymentIntent or charge id, and the manual-payment description. A row
 // that names a different invoice explicitly is that invoice's (a combined payment writes one row per invoice
 // on one PaymentIntent). Informational: no row is classified as received or not received here.
+const RECORDED_PAYMENT_COLUMNS = ['id', 'payment_date', 'amount', 'status', 'metadata', 'created_at', 'processor', 'card_brand', 'payment_method_type', 'refund_amount', 'refund_status', 'payer_id'];
+
 async function loadRecordedPayments(customerId, invoice) {
   const rows = await db('payments')
     .where({ customer_id: customerId })
@@ -472,13 +489,18 @@ async function loadRecordedPayments(customerId, invoice) {
     })
     .orderBy('created_at', 'desc')
     .limit(PAYMENT_ROW_CAP + 1)
-    .select('id', 'payment_date', 'amount', 'status', 'metadata', 'created_at', 'processor', 'card_brand', 'payment_method_type', 'refund_amount', 'refund_status', 'payer_id');
+    .select(RECORDED_PAYMENT_COLUMNS);
+  // A payer statement settles ONE payments row (customer_id NULL, statement_id) for every invoice on it.
+  const statementRows = invoice.payer_statement_id != null
+    ? await db('payments').where({ statement_id: invoice.payer_statement_id }).orderBy('created_at', 'desc').limit(PAYMENT_ROW_CAP + 1)
+      .select([...RECORDED_PAYMENT_COLUMNS, 'statement_id'])
+    : [];
   const namesOtherInvoice = (row) => {
     const metadata = parseJson(row.metadata) || {};
     const named = INVOICE_LINK_KEYS.map((key) => metadata[key]).filter(Boolean).map(String);
     return named.length > 0 && !named.includes(String(invoice.id));
   };
-  const kept = rows.filter((row) => !namesOtherInvoice(row)).slice(0, PAYMENT_ROW_CAP);
+  const kept = [...rows.filter((row) => !namesOtherInvoice(row)).slice(0, PAYMENT_ROW_CAP), ...statementRows.slice(0, PAYMENT_ROW_CAP)];
   const payerRef = (row) => (row.payer_id != null ? row.payer_id : (parseJson(row.metadata) || {}).payer_id);
   const payerIds = [...new Set(kept.map(payerRef).filter((id) => Number.isInteger(Number(id)) && Number(id) > 0).map(Number))];
   let names = new Map();
@@ -490,14 +512,16 @@ async function loadRecordedPayments(customerId, invoice) {
     }
   }
   return {
-    truncated: rows.length > PAYMENT_ROW_CAP,
-    payments: kept.reverse().map((row) => {
+    truncated: rows.length > PAYMENT_ROW_CAP || statementRows.length > PAYMENT_ROW_CAP,
+    payments: kept.sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map((row) => {
       const payer = payerRef(row);
       return {
         id: row.id,
         date: dateOnly(row.payment_date),
         recorded_at: iso(row.created_at),
-        amount: money(row.amount),
+        // A statement-level row covers every invoice on the statement: its amount is never this invoice's share.
+        amount: row.statement_id != null ? null : money(row.amount),
+        ...(row.statement_id != null ? { statement_level: { statement_id: String(row.statement_id), statement_amount: money(row.amount), applies_to: 'every invoice on the payer statement, not this invoice alone' } } : {}),
         status: row.status,
         method: row.processor ? [row.processor, row.card_brand, row.payment_method_type].filter(Boolean).join(' ') : (invoice.payment_method || 'manual'),
         refunded_amount: money(row.refund_amount) || 0,

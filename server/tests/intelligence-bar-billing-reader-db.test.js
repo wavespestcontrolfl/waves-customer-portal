@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G;
+  let A; let B; let H; let E; let G; let Z;
   const inv = {};
   const tokens = [];
 
@@ -115,6 +115,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('e_payer_draft', E, { total: 30, status: 'draft', due_date: null, payer_id: payerId });
     await invoice('e_payer_sent', E, { total: 20, payer_id: payerId });
     await invoice('e_withdrawn', E, { total: 25, scheduled_send_error: `payer_billed:${payerId}` });
+    // Credit reconciliation read as one snapshot.
+    Z = await customer(`Credit${run}`, `Snapshot${run}`, { account_credits: 10 });
+    await db('customer_credit_ledger').insert({ customer_id: Z, delta: 10, balance_after: 10, source: 'manual', note: 'Synthetic grant' });
+    // An attached PaymentIntent (a payment started, outcome not confirmed here), shared by two combined siblings.
+    await invoice('z_attached', Z, { total: 80, stripe_payment_intent_id: `pi_attached_${run}` });
+    await invoice('z_sibling', Z, { total: 20, stripe_payment_intent_id: `pi_attached_${run}` });
+    await invoice('z_plain', Z, { total: 15 });
     // Recorded payments listed beside a collectible invoice: payer-funded, dispute alias, waves alias, more than the read bound.
     G = await customer(`Listed${run}`, `Payments${run}`);
     const gPayer = await invoice('g_payer', G, { total: 300, status: 'paid', paid_at: new Date() });
@@ -131,6 +138,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       { customer_id: G, payment_date: day(-3), amount: 5, status: 'paid', processor: 'stripe', stripe_charge_id: `ch_legacy_${run}`, description: 'Charge-linked', metadata: json({}) },
       { customer_id: G, payment_date: day(-3), amount: 999, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_legacy_${run}`, description: 'Sibling share', metadata: json({ invoice_id: uid() }) },
     ]);
+    // A payer statement settles ONE payments row (customer_id NULL, statement_id) for every invoice on it.
+    const [statement] = await db('payer_statements').insert({ payer_id: payerId, period_start: day(-30), period_end: day(-1), status: 'paid', terms_snapshot: 'net_30',
+      subtotal: 900, total: 900, invoice_count: 3, token: crypto.randomBytes(16).toString('hex'), paid_at: new Date() }).returning('id');
+    inv.statementId = statement.id || statement;
+    await invoice('g_stmt', G, { total: 300, status: 'paid', paid_at: new Date(), payer_statement_id: inv.statementId });
+    await db('payments').insert({ customer_id: null, payer_id: payerId, statement_id: inv.statementId, payment_date: day(-1), amount: 900, status: 'paid', processor: 'stripe',
+      description: `Payer statement S-${inv.statementId} settlement (ach)`, metadata: json({ statement_id: inv.statementId, payer_id: payerId, source: 'synthetic' }) });
     const gBulk = await invoice('g_bulk', G, { total: 90 });
     await db.batchInsert('payments', Array.from({ length: 51 }, (_, n) => ({ customer_id: G, payment_date: day(-1), amount: 5, status: 'failed', processor: 'stripe',
       description: `Synthetic failed ${n}`, metadata: json({ invoice_id: gBulk.id }) })), 51);
@@ -172,8 +186,10 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     try {
       // Fence passes -> collectible, even for the invoice the real fence holds.
       const list = await read('get_customer_invoices', { customer_id: A, limit: 50 });
-      expect(by(list, 'open')).toMatchObject({ collectible: true, balance_due: 200 });
-      expect(spy).toHaveBeenCalledWith(inv.open.id, db, { readOnly: true });
+      expect(by(list, 'amb')).toMatchObject({ collectible: true, balance_due: 45 });
+      expect(spy).toHaveBeenCalledWith(inv.amb.id, db, { readOnly: true });
+      // An attached PaymentIntent still holds it: the reader cannot confirm that outcome.
+      expect(by(list, 'open')).toMatchObject({ collectible: false, balance_due: null });
       // Terminal invoices never reach the second fence.
       expect(spy.mock.calls.some(([id]) => id === inv.paid.id)).toBe(false);
       // The fence cannot run -> not collectible, with the reconcile pointer, never an exact balance.
@@ -283,12 +299,46 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(alias.recorded_payments.map((p) => p.status).sort()).toEqual(['disputed', 'paid']);
     expect(alias.recorded_payments.find((p) => p.status === 'disputed')).toMatchObject({ amount: 150, method: 'stripe visa' });
     expect(alias.invoice).toMatchObject({ collectible: true, balance_due: 150 });
+    const stmt = await read('get_invoice_detail', { invoice_id: inv.g_stmt.id });
+    expect(stmt.recorded_payments).toEqual([expect.objectContaining({ amount: null, status: 'paid', funded_by_payer: { id: expect.any(Number), name: `Synthetic Payer ${run}` },
+      statement_level: { statement_id: String(inv.statementId), statement_amount: 900, applies_to: expect.stringMatching(/not this invoice alone/) } })]);
     const legacy = await read('get_invoice_detail', { invoice_id: inv.g_legacy.id });
     expect(legacy.recorded_payments.map((p) => p.amount).sort((a, b) => a - b)).toEqual([5, 70]);
     expect(legacy.recorded_payments.find((p) => p.amount === 70)).toMatchObject({ status: 'refunded', refunded_amount: 20, refund_status: 'succeeded' });
     const bulk = await read('get_invoice_detail', { invoice_id: inv.g_bulk.id });
     expect(bulk.recorded_payments).toHaveLength(50);
     expect(bulk.unknowns.join(' ')).toMatch(/More payment rows are tied to this invoice than were read/);
+  });
+
+  test('an invoice with an attached PaymentIntent holds its balance (a payment was started; the reader does not call Stripe); so does every combined sibling', async () => {
+    const list = await read('get_customer_invoices', { customer_id: Z, limit: 50 });
+    for (const key of ['z_attached', 'z_sibling']) {
+      expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, overdue: null });
+      expect(by(list, key).reason).toBe('a payment was started on this invoice and its outcome is not confirmed here — check the Invoices page');
+    }
+    expect(by(list, 'z_plain')).toMatchObject({ collectible: true, balance_due: 15 });
+    expect(list.account_summary).toMatchObject({ total_due: 15, needs_reconciliation_count: 2 });
+    const detail = await read('get_invoice_detail', { invoice_id: inv.z_sibling.id });
+    expect(detail.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true });
+    expect(json(detail)).not.toContain(`pi_attached_${run}`);
+  });
+
+  test('credit_matches_ledger compares one snapshot: a ledger write committing between the reads cannot cause a false mismatch', async () => {
+    const CustomerCredit = require('../services/customer-credit');
+    const original = CustomerCredit.getBalance;
+    const spy = jest.spyOn(CustomerCredit, 'getBalance').mockImplementation(async (...args) => {
+      const balance = await original(...args);
+      // A grant commits on another connection after the balance was read.
+      await db('customer_credit_ledger').insert({ customer_id: Z, delta: 5, balance_after: 15, source: 'manual', note: 'Concurrent grant' });
+      await db('customers').where({ id: Z }).update({ account_credits: 15 });
+      return balance;
+    });
+    try {
+      const during = await read('get_customer_invoices', { customer_id: Z, limit: 1 });
+      expect(during.account_summary).toMatchObject({ credit_balance: 10, credit_ledger_sum: 10, credit_matches_ledger: true });
+    } finally { spy.mockRestore(); }
+    const after = await read('get_customer_invoices', { customer_id: Z, limit: 1 });
+    expect(after.account_summary).toMatchObject({ credit_balance: 15, credit_ledger_sum: 15, credit_matches_ledger: true });
   });
 
   test('no card number, full email or invoice token leaves either tool', async () => {
