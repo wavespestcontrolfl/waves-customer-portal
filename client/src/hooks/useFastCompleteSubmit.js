@@ -23,7 +23,10 @@
 //  confirm     — a heads-up the tech may send through (the report-flow
 //                sheet's edited-report check, a promise that changed after
 //                the report was written): the SAME body and key go again with
-//                the server's confirmation flag, as on the full form.
+//                the server's confirmation flag, as on the full form. Going
+//                back instead makes the next completion a new request, under
+//                a new key: an earlier attempt under the old key may be on
+//                record, and the server refuses a changed body under it.
 import { useCallback, useRef, useState } from 'react';
 import { shouldResetCompletionIdempotencyKey } from '../lib/completion-idempotency';
 
@@ -114,9 +117,13 @@ export default function useFastCompleteSubmit({ base, request }) {
     pendingBodyRef.current = { ...held, [flag]: true };
     submit(() => ({}), summary);
   }, [prompt, submit]);
-  // Back to the sheet: the next submit builds a fresh body under the same key.
+  // Back to the sheet: the next submit builds a fresh body under a new key
+  // (a failed attempt under this one would refuse the changed body). The
+  // server's per-visit claim still keeps an older attempt from completing
+  // twice (pre-push P1 on #5538).
   const dismissPrompt = useCallback(() => {
     pendingBodyRef.current = null;
+    keyRef.current = genIdempotencyKey();
     setPrompt(null);
   }, []);
 

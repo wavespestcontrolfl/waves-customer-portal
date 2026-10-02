@@ -863,6 +863,23 @@ describe('complete and send', () => {
     expect({ ...second, reportRulesConfirmed: undefined }).toEqual({ ...first, reportRulesConfirmed: undefined });
   });
 
+  test('Go back after a failed attempt sends the next completion under a new key (pre-push P1)', async () => {
+    const failed = Object.assign(new Error('Server error'), { status: 500 });
+    const request = makeRequest({
+      complete: [failed, conflict('promise_marks_changed', 'A promise you marked changed after the report was written.'), { success: true }],
+    });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [first, retried, fresh] = request.bodies('/complete');
+    expect(retried.idempotencyKey).toBe(first.idempotencyKey);
+    expect(fresh.idempotencyKey).not.toBe(first.idempotencyKey);
+  });
+
   test('Go back from the heads-up returns to the report without sending', async () => {
     const request = makeRequest({ complete: [conflict('report_rules_review', 'Refused words: "safe"'), { success: true }] });
     await openSheet(request);
