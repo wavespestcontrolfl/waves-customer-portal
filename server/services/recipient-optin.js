@@ -451,6 +451,17 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
   let requested = 0;
   for (const claim of claims) {
     try {
+      // An on-site ask (visitId) is re-checked at the provider boundary: a
+      // visit cancelled / moved / under way since the claim releases the ask;
+      // a hold or an unreadable check leaves it pending for the recovery sweep.
+      if (claim.visitId) {
+        const asked = await visitAskState(claim.visitId, claim.customerId).catch(() => ({ state: 'unknown' }));
+        if (asked.state === 'dead') {
+          await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
+            .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        }
+        if (asked.state !== 'live') continue;
+      }
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
       const result = await sendCustomerMessage({
         to: claim.phone,

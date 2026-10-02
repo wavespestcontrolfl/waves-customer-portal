@@ -13751,7 +13751,8 @@ const CallRecordingProcessor = {
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
-      // dedup, cross-customer, empty slot). Stop early when slots run out.
+      // dedup, cross-customer, empty slot). A full set of slots does not end
+      // the scan: a later party already on record still gets its on-site ask.
       const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       for (const secondaryEntry of callSecondaryContacts) {
       try {
@@ -13891,7 +13892,9 @@ const CallRecordingProcessor = {
             .ignore()
             .catch((triageErr) => logger.warn(`[call-proc] secondary-collision triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
         }
-        if (result === 'skipped_slots_full') break;
+        // Slots full is NOT the end of the scan: a later party may already sit
+        // in a slot (on record) and still owe its on-site opt-in ask.
+        if (result === 'skipped_slots_full') continue;
       } catch (e) {
         // Code/name only — a DB error message can echo the contact's phone/email.
         logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);

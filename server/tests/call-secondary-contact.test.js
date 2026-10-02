@@ -875,6 +875,9 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain('keepConsentStamp: onSiteBlockedBeforeWrite,');
     // A phone that already confirmed on this account is not held again.
     expect(src).toContain('holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,');
+    // A full set of slots does not end the scan (a later on-record party still gets its ask).
+    expect(src).toContain("if (result === 'skipped_slots_full') continue;");
+    expect(src).not.toContain("if (result === 'skipped_slots_full') break;");
     // The confirmed-status read runs for every on-site phone, on record or new.
     const pre = src.slice(src.indexOf('if (newKey && !knownKeys.includes(newKey)) {'));
     expect(pre.indexOf("onSiteAlreadyConfirmed = existing?.status === 'confirmed';")).toBeGreaterThan(pre.indexOf('onSiteBlockedBeforeWrite = true;\n          }'));

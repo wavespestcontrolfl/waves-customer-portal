@@ -280,6 +280,10 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     expect(src).toContain('optin_visit_id: claim.visitId || null,');
     // An on-site visit ask is tagged on the row, and the undispatched-ask
     // recovery sweep releases it instead of re-sending it without its visit.
+    // dispatch re-checks an on-site ask's visit at the provider boundary.
+    const dispatchSrc = src.slice(src.indexOf('async function dispatchRecipientOptins'));
+    expect(dispatchSrc.indexOf("const asked = await visitAskState(claim.visitId, claim.customerId)")).toBeLessThan(dispatchSrc.indexOf('const result = await sendCustomerMessage({'));
+    expect(dispatchSrc).toContain("if (asked.state !== 'live') continue;");
     // The visit is stored on the row (fresh claim and re-claim alike).
     expect(src.split('visit_id: visitId || null,').length - 1).toBe(2);
     // ...but only AFTER the accepted-send reconcile: a delivered ask is marked
