@@ -38,7 +38,9 @@ function trialEnabled() {
 // worth a model call (the 2026-10-01 sweep: 4 of 905 inbound texts).
 function needsTranslation(inbound) {
   if (typeof inbound !== 'string' || !inbound.trim()) return false;
-  return !require('./sms-label-facts').isEnglishInbound(inbound);
+  const labelFacts = require('./sms-label-facts');
+  // (a one-word reply is English to the guards' two-word language checks: ask about an unknown one too)
+  return !labelFacts.isEnglishInbound(inbound) || labelFacts.isUnknownSingleWord(inbound);
 }
 
 const INBOUND_SCHEMA = {
@@ -118,7 +120,7 @@ async function translateInbound(inbound) {
 async function translateReply({ englishReply, language }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, time, date, price, phone number, link, email and name exactly as written (digits stay digits). Return only the translation. ${DATA_NOTE}`,
+    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written (digits stay digits). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). Return only the translation. ${DATA_NOTE}`,
     text: `<text>\n${englishReply}\n</text>`,
     jsonSchema: TRANSLATE_SCHEMA,
   });
@@ -151,7 +153,7 @@ const LANGUAGE_DISPLAY = new Intl.DisplayNames(['en'], { type: 'language', fallb
 function languageNameOf(code) {
   let name;
   try { name = LANGUAGE_DISPLAY.of(code); } catch { return null; }
-  return typeof name === 'string' && /^[A-Za-z][A-Za-z ()'-]{1,40}$/.test(name) && name.toLowerCase() !== code.toLowerCase() ? name : null;
+  return typeof name === 'string' && /^\p{L}[\p{L}\p{M} ()'-]{1,40}$/u.test(name) && name.toLowerCase() !== code.toLowerCase() ? name : null;
 }
 
 // "es", "es-MX", "PT_br" -> "es" / "pt"; a script subtag is kept because it
@@ -212,7 +214,22 @@ const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.[a-z]{2,}/gi;
 // Other separated runs (dates like "10/14", "14/10") compare part by part.
 const NUMBER_RE = /\d+(?:[.,:]\d+)*/g;
 const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b)/i;
-const PM_RE = /^\s*(?:pm\b|p\.m\.)/i;
+// a clock marker only: "2 horas" / "2 heures" are durations, not 2 o'clock
+const CLOCK_MARK_RE = /^\s*(?:h\b|uhr\b)/i;
+const PM_RE = /^\s*(?:pm\b|p\.\s?m\.)/i;
+const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
+
+// strictTimes: every clock time compares as a 24-hour value ("2 PM", "14:00",
+// "14 h" are all t:14; "2 AM" is t:2), so AM/PM cannot flip or drop. Our own
+// translation is asked to write 24-hour times, so it is checked this way; a
+// customer's text (written their way, "2 de la tarde") is not.
+function clockValue(raw, after) {
+  const [h, mm] = raw.split(':');
+  let hour = Number(h);
+  if (PM_RE.test(after) && hour >= 1 && hour <= 11) hour += 12;
+  else if (AM_RE.test(after) && hour === 12) hour = 0;
+  return `t:${hour}${mm && mm !== '00' ? `:${mm}` : ''}`;
+}
 
 function trimZeros(n) {
   return n.replace(/^0+(?=\d)/, '');
@@ -225,7 +242,7 @@ const PHONE_RE = /\+\d{1,3}(?:[\s.-]?\(?\d{1,4}\)?){2,5}\b|(?:\+?1[\s.-]?)?\(?\b
 
 const DATE_RE = /\b\d{1,4}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g;
 
-function numberValues(text) {
+function numberValues(text, { strictTimes = false } = {}) {
   const out = [];
   const withoutPhones = String(text || '').replace(PHONE_RE, (p) => {
     out.push({ value: `tel:${p.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '')}`, pm: false, time: false });
@@ -241,6 +258,10 @@ function numberValues(text) {
     const raw = m[0];
     const after = str.slice(m.index + raw.length);
     const flags = { pm: PM_RE.test(after), time: raw.includes(':') || HOUR_WORD_RE.test(after) };
+    if (strictTimes && /^\d{1,2}(?::\d{2})?$/.test(raw) && (raw.includes(':') || CLOCK_MARK_RE.test(after) || flags.pm || AM_RE.test(after))) {
+      out.push({ value: clockValue(raw, after), ...flags });
+      continue;
+    }
     let values;
     if (/^\d{1,3}(?:[.,]\d{3})+$/.test(raw)) values = [raw.replace(/[.,]/g, '')];
     else if (/^\d+[.,]\d{1,2}$/.test(raw)) values = [raw.replace(',', '.').replace(/\.0+$/, '')];
@@ -252,11 +273,11 @@ function numberValues(text) {
   return out;
 }
 
-function protectedTokens(text) {
+function protectedTokens(text, opts = {}) {
   const str = String(text || '');
   const links = (str.match(LINK_RE) || []).map((l) => l.replace(/[.,;:!?]+$/, ''));
   const emails = (str.replace(LINK_RE, ' ').match(EMAIL_RE) || []).map((e) => e.replace(/[.,;:!?]+$/, '').toLowerCase());
-  const numbers = numberValues(str.replace(LINK_RE, ' ').replace(EMAIL_RE, ' '));
+  const numbers = numberValues(str.replace(LINK_RE, ' ').replace(EMAIL_RE, ' '), opts);
   return { links, emails, numbers, digits: numbers.map((n) => n.value) };
 }
 
@@ -274,8 +295,8 @@ function diffCounts(from, to) {
   return out;
 }
 
-// A 12-hour PM time may legitimately be written as a 24-hour one ("2 PM" ->
-// "14 h", "2:30 PM" -> "14:30"). Only then: a time the English states as PM
+// Loose mode (a customer's own text): a 12-hour PM time may legitimately be
+// written as a 24-hour one ("2 PM" -> "14 h", "2:30 PM" -> "14:30"). Only then: a time the English states as PM
 // (hour 1-11) may come back as hour+12, minutes unchanged, where the
 // translation writes a time. Any other number must match exactly.
 function pairTwentyFourHour(missing, added, en, tr) {
@@ -313,10 +334,12 @@ function addressOrderFaults(englishReply, translated) {
   return faults;
 }
 
-function tokenParity(englishReply, translated) {
-  const en = protectedTokens(englishReply);
-  const tr = protectedTokens(translated);
-  const digits = pairTwentyFourHour(diffCounts(en.digits, tr.digits), diffCounts(tr.digits, en.digits), en, tr);
+function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
+  const en = protectedTokens(englishReply, { strictTimes });
+  const tr = protectedTokens(translated, { strictTimes });
+  const missingDigits = diffCounts(en.digits, tr.digits);
+  const addedDigits = diffCounts(tr.digits, en.digits);
+  const digits = strictTimes ? { missing: missingDigits, added: addedDigits } : pairTwentyFourHour(missingDigits, addedDigits, en, tr);
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];
   const added = [...diffCounts(tr.links, en.links), ...diffCounts(tr.emails, en.emails), ...digits.added];
   const order = addressOrderFaults(englishReply, translated);
@@ -343,7 +366,7 @@ async function translateThread(context, inboundMessage, inboundEnglish) {
       const t = await translateInbound(m.body);
       if (!t.ok) return { ok: false, reason: t.reason };
       // same figure check as the current text: a row the draft reads must keep the customer's numbers
-      if (!t.isEnglish && !tokenParity(t.english, m.body).ok) return { ok: false, reason: 'figures_changed' };
+      if (!t.isEnglish && !tokenParity(t.english, m.body, { strictTimes: false }).ok) return { ok: false, reason: 'figures_changed' };
       if (!t.isEnglish) {
         const meaning = await inboundMeaningCheck({ original: m.body, english: t.english, language: t.language });
         if (!meaning.ok) return { ok: false, reason: meaning.reason };
@@ -414,7 +437,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (inbound.isEnglish) return { english: true };
   const fields = { language: inbound.language, language_code: inbound.languageCode, inbound_english: inbound.english };
   // the customer's own figures (a time, an address number, an amount) must survive into the English the draft reads
-  const inboundParity = tokenParity(inbound.english, inboundMessage);
+  const inboundParity = tokenParity(inbound.english, inboundMessage, { strictTimes: false });
   if (!inboundParity.ok) return { stop: 'figures_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity } };
   const inboundMeaning = await inboundMeaningCheck({ original: inboundMessage, english: inbound.english, language: inbound.language });
   if (!inboundMeaning.ok) return { stop: `inbound_meaning_check_failed:${inboundMeaning.reason}`, fields, checks: { inbound_parity: inboundParity } };

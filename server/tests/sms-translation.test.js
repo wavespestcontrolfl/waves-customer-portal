@@ -69,6 +69,7 @@ describe('tokenParity', () => {
     expect(tokenParity(REPLY, REPLY_ES.replace('30', '20'))).toMatchObject({ ok: false, missing: ['30'], added: ['20'] });
     expect(tokenParity('Your balance is $45.50.', 'Su saldo es de 45 dólares.')).toMatchObject({ ok: false, missing: ['45.50'], added: ['45'] });
     expect(tokenParity('We will call you back.', 'Le llamaremos en 2 horas.')).toMatchObject({ ok: false, added: ['2'] });
+    expect(tokenParity('We will call you back in 2 hours.', 'Le llamaremos en 2 horas.')).toMatchObject({ ok: true });
   });
 
   test('only a PM time may come back as a 24-hour time: a price or count never gets the +12 pass', () => {
@@ -107,6 +108,23 @@ describe('tokenParity', () => {
   test('an international phone number is one ordered value too', () => {
     expect(tokenParity('Call +44 20 7946 0958.', 'Llame al +44 7946 20 0958.')).toMatchObject({ ok: false });
     expect(tokenParity('Call +44 20 7946 0958.', 'Llame al +44 20 7946 0958.')).toMatchObject({ ok: true });
+  });
+
+  test('clock times compare in 24-hour form: AM/PM cannot flip or drop', () => {
+    expect(tokenParity('See you at 2 PM.', 'Nos vemos a las 2 AM.')).toMatchObject({ ok: false });
+    expect(tokenParity('See you at 2 PM.', 'Nos vemos a las 2.')).toMatchObject({ ok: false });
+    expect(tokenParity('See you at 2 PM.', 'Nos vemos a las 14:00.')).toMatchObject({ ok: true });
+    expect(tokenParity('See you at 9:30 AM.', 'Nos vemos a las 9:30.')).toMatchObject({ ok: true });
+    expect(tokenParity('See you at 12 AM.', 'Nos vemos a las 0:00.')).toMatchObject({ ok: true });
+  });
+
+  test('a customer\'s own text is checked loosely: their "2 de la tarde" may read as 2 PM', () => {
+    expect(tokenParity('Can you come at 2 PM?', '¿Pueden venir a las 2 de la tarde?', { strictTimes: false })).toMatchObject({ ok: true });
+  });
+
+  test('one-word foreign replies are asked about; English ones are not', () => {
+    expect(needsTranslation('Ndiyo')).toBe(true);
+    expect(needsTranslation('Yes')).toBe(false);
   });
 
   test('links and emails must come through exactly', () => {
@@ -254,6 +272,9 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: { ...SPANISH_INBOUND, language_code: 'sw', language: 'whatever' } });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's3' });
     expect(mockDispatch.mock.calls.map(([, p]) => p.system).join('\n')).toContain('into Swahili');
+    scriptModels({ inbound: { ...SPANISH_INBOUND, language_code: 'mi' } });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's4' });
+    expect(mockDispatch.mock.calls.map(([, p]) => p.system).join('\n')).toContain('into Māori');
     scriptModels({ inbound: { ...SPANISH_INBOUND, language_code: 'xx' } });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'inbound_translation_failed:language_not_supported' });
   });

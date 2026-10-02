@@ -1031,6 +1031,19 @@ function englishKnown(word) {
 const ENGLISH_SHARE = 0.6;
 const REACTION_RE = /^\s*(?:(?:liked|loved|disliked|laughed\s+at|emphasi[sz]ed|questioned|removed\s+an?\s+\w+\s+from|reacted\s+\S+\s+to)\s+[\u201c\u2018"'][\s\S]*$|reacted\s+\S+\s+to\s+(?:an?\s+)?(?:image|photo|picture|video|message|attachment|sticker|gif)\s*$)/i;
 // A reaction with nothing typed after the quote it reacts to (a truncated quote with no closing mark is still pure).
+// One word the English lexicon does not know ("Ndiyo", "Da", "Да"): the
+// language checks above need two words, so a one-word reply in another
+// language reads as English to them. Used by the any-language trial to ask a
+// model; never by the reply guards (a one-word "yes" stays English there).
+function isUnknownSingleWord(text) {
+  const c = canonText(text);
+  if (isPureReaction(c)) return false;
+  const words = [...stripMarks(c).toLowerCase().matchAll(/\p{L}+/gu)].map((m) => m[0]);
+  if (words.length !== 1) return false;
+  if (!/^[a-z]+$/.test(words[0])) return true;
+  return words[0].length > 1 && !englishKnown(words[0]);
+}
+
 function isPureReaction(text) {
   if (!REACTION_RE.test(text)) return false;
   const open = text.search(/[\u201c\u2018"']/);
@@ -1781,6 +1794,7 @@ module.exports = {
   isVerifiablyEnglish,
   isUnverifiedLanguageInbound,
   isEnglishInbound,
+  isUnknownSingleWord,
   nonEnglishTimingWords,
   labelFactsForInbound,
   parseReentryText,
