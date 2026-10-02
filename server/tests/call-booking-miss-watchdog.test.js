@@ -143,10 +143,18 @@ describe('rowClearsSlot — cancelled/rescheduled rows the office created after 
   const afterCall = new Date(new Date(OLD_ENOUGH).getTime() + 10 * 60 * 1000).toISOString();
   const beforeCall = new Date(new Date(OLD_ENOUGH).getTime() - 10 * 60 * 1000).toISOString();
 
-  test('booked right after the call, same date, later cancelled: handled (even at an unrelated time)', () => {
-    const cancelled = bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: afterCall });
+  test('booked right after the call, near the slot, same date, later cancelled: handled', () => {
+    const cancelled = bookedRow({ status: 'cancelled', window_start: '13:00:00', created_at: afterCall });
     expect(rowClearsSlot(cancelled, call(), slot)).toBe(true);
     expect(rowClearsSlot({ ...cancelled, status: 'rescheduled' }, call(), slot)).toBe(true);
+  });
+
+  test('a cancelled post-call row at an UNRELATED time (8 AM vs the noon slot) does not clear; with call provenance it does', () => {
+    const unrelated = bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: afterCall });
+    expect(rowClearsSlot(unrelated, call(), slot)).toBe(false);
+    expect(rowClearsSlot({ ...unrelated, window_start: null }, call(), slot)).toBe(false);
+    expect(rowClearsSlot({ ...unrelated, source_call_log_id: 'call-1' }, call(), slot)).toBe(true);
+    expect(rowClearsSlot({ ...unrelated, sched_date: '2026-08-05', notes: 'Call SID: CAsynthetic001.' }, call(), slot)).toBe(true);
   });
 
   test('a cancelled row created BEFORE the call, or on another date, proves nothing', () => {
@@ -159,7 +167,7 @@ describe('rowClearsSlot — cancelled/rescheduled rows the office created after 
   });
 
   test('computeBookingMisses: a booked-then-cancelled visit is no miss; a pre-call cancelled one is', () => {
-    const cancelled = bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: afterCall });
+    const cancelled = bookedRow({ status: 'cancelled', window_start: '12:00:00', created_at: afterCall });
     expect(computeBookingMisses([call()], [cancelled], { now: NOW })).toEqual([]);
     expect(computeBookingMisses([call()], [{ ...cancelled, created_at: beforeCall }], { now: NOW })).toHaveLength(1);
   });

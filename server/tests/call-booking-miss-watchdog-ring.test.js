@@ -123,16 +123,22 @@ describe('booked then cancelled by the office', () => {
   const afterCall = '2026-09-28T21:50:00Z';
 
   test('first ring is suppressed for a post-call visit that was later cancelled', async () => {
-    mockState.booked = [{ customer_id: 'cust-9', status: 'cancelled', sched_date: '2026-10-04', window_start: '08:00:00', created_at: afterCall, source_call_log_id: null, notes: null }];
+    mockState.booked = [{ customer_id: 'cust-9', status: 'cancelled', sched_date: '2026-10-04', window_start: '12:00:00', created_at: afterCall, source_call_log_id: null, notes: null }];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result.misses).toBe(0);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('a cancelled post-call row at an unrelated time (8 AM vs the 11 AM slot) does not suppress the ring', async () => {
+    mockState.booked = [{ customer_id: 'cust-9', status: 'cancelled', sched_date: '2026-10-04', window_start: '08:00:00', created_at: afterCall, source_call_log_id: null, notes: null }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+  });
+
   test('a repeat is suppressed too (the first bell already rang, then the office cancelled)', async () => {
     mockState.alertedKeys = new Set([`call-booking-miss:${CALL_ID}`]);
     mockState.rung = [{ call_log_id: CALL_ID, last_at: new Date(NOW.getTime() - (REPEAT_INTERVAL_MINUTES + 10) * 60000).toISOString() }];
-    mockState.booked = [{ customer_id: 'cust-9', status: 'cancelled', sched_date: '2026-10-04', window_start: '08:00:00', created_at: afterCall, source_call_log_id: null, notes: null }];
+    mockState.booked = [{ customer_id: 'cust-9', status: 'cancelled', sched_date: '2026-10-04', window_start: '12:00:00', created_at: afterCall, source_call_log_id: null, notes: null }];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result).toMatchObject({ misses: 0, repeated: 0 });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();

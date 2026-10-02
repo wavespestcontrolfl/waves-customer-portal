@@ -165,21 +165,20 @@ function rowClearsSlot(row, call, slot) {
   // A cancelled / rescheduled row is the office having ACTED on this call's
   // slot (owner 2026-10-01: a visit booked right after the call and cancelled
   // later is handled, not missed; the bell rang four times on one). With no
-  // call provenance, a row that is no longer active clears only when it was
-  // created at/after the call for the confirmed ET date. A pre-existing
-  // cancelled same-day row (created before the call) proves nothing. Active
-  // rows keep the stricter window-proximity rule below: an active
-  // post-call row at a far-off time could be an unrelated booking.
+  // call provenance (handled above), a row that is no longer active clears
+  // only when BOTH hold: it was created at/after the call, and its window is
+  // within WINDOW_MATCH_TOLERANCE_MINUTES of the confirmed slot (the same
+  // proximity an active row needs), so an unrelated 8 AM visit cancelled
+  // later never hides a noon commitment. A row created before the call
+  // proves nothing and never reaches the proximity test.
+  const startMinutes = windowStartMinutes(row.window_start);
+  const near = startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES;
   if (INACTIVE_STATUSES.has(row.status)) {
     const rowCreated = row.created_at ? new Date(row.created_at).getTime() : NaN;
     const callCreated = call.created_at ? new Date(call.created_at).getTime() : NaN;
-    // Never falls through to the window match below: a stale cancelled row
-    // at the same time of day is not this call's booking.
-    return !Number.isNaN(rowCreated) && !Number.isNaN(callCreated) && rowCreated >= callCreated;
+    return near && !Number.isNaN(rowCreated) && !Number.isNaN(callCreated) && rowCreated >= callCreated;
   }
-  const startMinutes = windowStartMinutes(row.window_start);
-  if (startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES) return true;
-  return false;
+  return near;
 }
 
 // Pure diff, exported for tests: which calls confirmed a slot that has no
