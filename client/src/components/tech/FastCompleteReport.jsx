@@ -85,8 +85,11 @@ export function ActivitySection({ value, scaleLabels, locked, onChange }) {
 
 // The visit's photos (staged against the visit by the photo manager), read
 // again each time the manager closes. Their captions go to the report
-// writer, so the report waits for the first read (`loaded`); a failed read
-// counts as no photos, never a hold.
+// writer, so the report waits for the first read (`loaded`); a failed first
+// read counts as no photos, never a hold. A failed later read keeps the
+// photos last read, so a dropped connection never empties the note's box
+// under an open description (codex local r1 on #5624); the sheet mounts once
+// per visit, so they are always this visit's.
 export function useVisitPhotos({ serviceId, request, version }) {
   const [state, setState] = useState({ photos: [], loaded: false });
   // Only the latest read may land: a read still in flight when the manager
@@ -102,7 +105,7 @@ export function useVisitPhotos({ serviceId, request, version }) {
         if (sequence === readSequence.current) setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true });
       })
       // The photo manager reports its own errors.
-      .catch(() => { if (sequence === readSequence.current) setState({ photos: [], loaded: true }); });
+      .catch(() => { if (sequence === readSequence.current) setState((prev) => ({ photos: prev.photos, loaded: true })); });
     return () => { readSequence.current += 1; };
   }, [request, serviceId, version]);
   return state;

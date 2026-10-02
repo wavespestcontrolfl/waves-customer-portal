@@ -1082,6 +1082,31 @@ describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
     expect(staged.stored.map((photo) => photo.id)).toEqual(['ph-2']);
   });
 
+  test('a dropped connection keeps the description and its photos, and Save works again (codex local r1 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let reads = 0;
+    let saves = 0;
+    const offline = () => Object.assign(new Error('Failed to fetch'), { status: 0 });
+    const request = makeRequest({
+      // The first read lands; the one after the failed save does not.
+      photos: () => { reads += 1; if (reads === 2) throw offline(); return staged.photos(); },
+      photoChange: (path, options) => { saves += 1; if (saves === 1) throw offline(); return staged.photoChange(path, options); },
+    });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Ants along the slider track' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Couldn’t save the photo change. Try again.')).toBeTruthy();
+    await waitFor(() => expect(reads).toBe(2));
+    // The photos stay, and so do the words: Save again goes through.
+    expect(screen.getByText('Counter edge')).toBeTruthy();
+    expect(screen.getByLabelText('Description for photo 2').value).toBe('Ants along the slider track');
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Ants along the slider track')).toBeTruthy();
+    expect(staged.stored[1].caption).toBe('Ants along the slider track');
+  });
+
   test('a description the server refuses stays open with its words, and says why', async () => {
     const staged = stagedPhotos();
     const refused = Object.assign(new Error('Photo caption contains wording we can\'t put on a customer report (eliminated).'), {
