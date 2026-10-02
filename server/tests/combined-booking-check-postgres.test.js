@@ -308,6 +308,37 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('the hourly pass refreshing a bell keeps its standing price finding (prices are not re-checked there)', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const { etDateString } = require('../utils/datetime-et');
+      const tomorrow = etDateString(new Date(Date.now() + 86400000));
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      const lawnChild = rows.find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 90 });
+      await runCombinedBookingCheck({ conn: trx });
+      expect((await alertsOf(trx, est.estimateId))[0].metadata.problemCodes).toEqual(['price_mismatch']);
+      // A pest visit tomorrow loses its technician: the hourly pass refreshes the same bell.
+      const pestChild = rows.find((row) => row.recurring_parent_id && /pest/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ technician_id: null, scheduled_date: tomorrow });
+      await runCombinedBookingCheck({ conn: trx, urgentOnly: true });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.metadata.itemKeys).toEqual(expect.arrayContaining(['pest_control', 'lawn_care']));
+      expect(alert.body).toMatch(/lawn visits priced \$90\.00, accepted \$100\.00/);
+      // The pest fix on the next hourly pass does not close the bell: the price finding stands.
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ technician_id: lawnChild.technician_id });
+      expect(await runCombinedBookingCheck({ conn: trx, urgentOnly: true })).toMatchObject({ closed: 0 });
+      expect((await alertsOf(trx, est.estimateId)).filter((row) => !row.read_at && !row.metadata.doneAt)).toHaveLength(1);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a standing bell gaining a problem past the budget is left untouched until a run with room rings it', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

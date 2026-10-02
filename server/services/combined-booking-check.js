@@ -381,12 +381,18 @@ function evaluateCombinedBooking(ctx) {
     ...checkTimeAndTech(dated, families, { firstDay, byId, todayET }),
     ...checkPrices(dated, families, plan.prices, { timeTechOnly: ctx.timeTechOnly }),
   ];
-  // Families whose accepted price is unknown: their prices were not checked,
-  // so a standing price finding about one is kept (the runner's heldProblems).
-  const unpricedFamilies = [...families].filter((family) => plan.prices.get(family) == null);
+  const unpricedFamilies = uncheckedPriceFamilies(families, plan.prices, ctx.timeTechOnly);
   // A schedule gap, or an estimate the classifier did not judge, is never OK.
   const deferred = scheduleGaps.length > 0 || scheduleUnjudged;
   return { ok: !problems.length && !deferred, deferred, heldFamilies, unpricedFamilies, problems, labels };
+}
+
+// Families whose prices this run did not check: every one on the hourly
+// (time-only) pass, else those whose accepted price is unknown. A standing
+// price finding about one is kept (the runner's heldProblems).
+function uncheckedPriceFamilies(families, prices, timeTechOnly) {
+  if (timeTechOnly) return [...families];
+  return [...families].filter((family) => prices.get(family) == null);
 }
 
 function shortName(customer) {
