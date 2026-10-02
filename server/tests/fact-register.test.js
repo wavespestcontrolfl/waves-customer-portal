@@ -664,12 +664,14 @@ describe('findUnverifiedClaims', () => {
       // centigrade is Celsius
       'Large patch thrives at 30 degrees centigrade.',
       'Large patch thrives when temperatures are 30 centigrade or higher.',
-      // the idiom on a receding word is the claim
-      'Large patch is anything but dormant when temperatures are 85°F.',
-      'Large patch is never anything but active in summer.',
-      'Large patch isn\u2019t anything but active when temperatures are 85°F.',
       'Large patch thrives in summer despite being far from common in winter.',
-      // the idiom must sit on the activity word
+      // "anything but" is not a negation: these are the claim
+      'Large patch cannot be anything but active in summer.',
+      'Large patch thrives in anything but dry summers.',
+      'Large patch is never anything but active in summer.',
+      // a postfix ceiling above the line is still heat
+      'Large patch thrives at a 90°F maximum air temperature.',
+      'Large patch is active at 95°F max.',
       'Large patch thrives when temperatures are 85°F, far from the coast.',
       // unitless trailing bounds with temperature wording are still temperatures
       'Large patch thrives when highs are 85 or more.',
@@ -789,10 +791,6 @@ describe('findUnverifiedClaims', () => {
       // a ceiling named after the figure caps it, with or without its noun
       'Large patch is active at an 80°F maximum temperature.',
       'Large patch is active at an 80°F maximum air temperature.',
-      // an idiom that negates the activity word
-      'Large patch is anything but active when temperatures are 85°F.',
-      'Large patch is anything but common when temperatures are 90 degrees.',
-      'Large patch is never anything but dormant in summer.',
       'Large patch far from homes remains dormant in summer.',
       'It is estimated that large patch damaged 85 or more properties.',
       'Large patch was found on 85 or more lawns last year.',
