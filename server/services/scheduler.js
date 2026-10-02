@@ -1969,6 +1969,34 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Neighborhood gate-code directory (PR 2): file every saved neighborhood
+  // gate code under its property's neighborhood; dark behind
+  // GATE_NEIGHBORHOOD_ACCESS, read at each tick. Logs counts and error codes
+  // only — never a code.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
+    const tickStartedAt = Date.now();
+    try {
+      // A pass in which any customer's filing or any conflict bell failed is
+      // reported to job health as failed (both retry next pass).
+      const lockRes = await runExclusive('neighborhood-gate-codes', async () => {
+        const result = await require('./neighborhood-access').sweepSavedGateCodes();
+        if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, bellsFailed: result.bellsFailed, conflicts: result.conflicts })}`);
+        if (result?.failed > 0) throw Object.assign(new Error(`${result.failed} gate-code filing(s) failed`), { code: 'GATE_CODE_FILINGS_FAILED' });
+        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict bell step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
+        return result;
+      });
+      // No connection / lost lock session = no filing ran: a missed tick in
+      // job health. 'lease_held' means a concurrent run is doing the work.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('neighborhood-gate-codes', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw Object.assign(new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`), { code: 'TICK_SKIPPED' });
+      }
+    } catch (err) {
+      logger.error(`[neighborhood-access] sweep tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 */5 * * * *', async () => {
     if (require('./reschedule-link-promises').mode() === 'off') return;
