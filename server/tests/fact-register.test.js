@@ -661,12 +661,25 @@ describe('findUnverifiedClaims', () => {
       'Large patch rarely fails to thrive in summer.',
       'Large patch seldom fails to spread in summer.',
       'Large patch rarely stops short of spreading in summer.',
+      // centigrade is Celsius
+      'Large patch thrives at 80 degrees centigrade.',
+      'Large patch thrives between 80 and 90 degrees centigrade.',
+      'Large patch thrives at 80 degrees centigrade or higher.',
+      'Large patch thrives at 30 degrees centigrade.',
+      'Large patch thrives when temperatures are 30 centigrade or higher.',
+      'Large patch thrives in summer despite being far from common in winter.',
+      // a unit-less trailing bound is a temperature unless a listed count noun follows (parent rule)
+      'Large patch thrives when the weather is 85 or higher.',
+      'Large patch thrives when temperatures are expected to be about 85 or higher.',
+      // "anything but" is not a negation: these are the claim
+      'Large patch cannot be anything but active in summer.',
+      'Large patch thrives in anything but dry summers.',
+      'Large patch is never anything but active in summer.',
+      'Large patch thrives when temperatures are 85°F, far from the coast.',
       // decimal temperatures are read numerically
       'Large patch thrives at 85.5°F.',
       'Large patch thrives at 26.7°C.',
       'Large patch thrives when temperatures are above 80.5 degrees.',
-      // a figure followed by "maximum <noun>" is not a ceiling
-      'Large patch does 90°F maximum damage.',
       // Celsius is converted before the 80°F line is applied (codex #5414 round 4)
       'Large patch thrives at 30°C.',
       'Large patch thrives when temperatures are 30 degrees Celsius or higher.',
@@ -774,11 +787,15 @@ describe('findUnverifiedClaims', () => {
       'Large patch is active when temperatures are lower than or equal to 80 degrees.',
       'Large patch is active when temperatures are at or below 80°F.',
       'Large patch is active when temperatures are equal to or less than 80 degrees Fahrenheit.',
-      // a ceiling named after the figure caps it
-      'Large patch is active at 80°F max.',
-      'Large patch is active at 80 degrees maximum.',
-      'Large patch is active when temperatures are 80°F at most.',
-      'Large patch is active at 80°F max, and it slows after that.',
+      'Large patch far from homes remains dormant in summer.',
+      // every ceiling folds cool whatever its figure, as the parent documents
+      'Large patch is active when temperatures are at most 90°F.',
+      'Large patch can affect up to 90 lawns.',
+      'Large patch rings form arcs of at most 90°.',
+      // a comparator keeps its documented cool reading
+      'Large patch is active when temperatures are below 90°F.',
+      // cool centigrade
+      'Large patch is active when temperatures are 20 degrees centigrade.',
       // cool decimals stay cool
       'Large patch is active when temperatures are 75.5°F.',
       'Large patch is active when temperatures are below 80.5°F.',

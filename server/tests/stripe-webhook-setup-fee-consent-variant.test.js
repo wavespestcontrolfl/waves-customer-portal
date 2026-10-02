@@ -70,7 +70,16 @@ jest.mock('../models/db', () => {
 const { _handleSetupIntentSucceeded: handleSetupIntentSucceeded } = require('../routes/stripe-webhook');
 
 const intent = () => ({ id: 'seti_rec_1', status: 'succeeded', payment_method: 'pm_rec_1', metadata: { purpose: 'estimate_recurring_card', estimate_id: 'est-1' } });
-const accepted = (estimateData) => ({ id: 'est-1', status: 'accepted', customer_id: 'cust-1', bill_by_invoice: false, accepted_service_mode: null, estimate_data: estimateData });
+// The accept stamps the consent text version its tab attested beside the
+// intent (acceptedRecurringCardConsentVersion, #5434); a current stamp lets
+// the recovery record from the current copy.
+const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+const withVersion = (data) => {
+  const obj = typeof data === 'string' ? JSON.parse(data) : data;
+  const stamped = { acceptedRecurringCardConsentVersion: CONSENT_VERSION, ...obj };
+  return typeof data === 'string' ? JSON.stringify(stamped) : stamped;
+};
+const accepted = (estimateData) => ({ id: 'est-1', status: 'accepted', customer_id: 'cust-1', bill_by_invoice: false, accepted_service_mode: null, estimate_data: withVersion(estimateData) });
 
 beforeEach(() => { jest.clearAllMocks(); });
 

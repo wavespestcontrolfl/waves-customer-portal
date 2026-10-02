@@ -94,7 +94,18 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // scheduling.selected_day_words. agent_committed_booking now also accepts a
 // day set earlier in the call and a bare yes to the caller's own exact
 // proposal (owner ruling 2026-09-30). A new cohort.
-const PROMPT_VERSION = 'v20';
+// v21: secondary_contact(s).wants_appointment_texts and .on_site (schema
+// 1.22.0; owner ruling 2026-09-30 "on-site person is the contact point",
+// redesigned 2026-10-01). wants_notifications is channel-neutral (it is also
+// set for "email him the report"), so it cannot say a person should be texted.
+// The model now separately records whether the caller agreed THIS person gets
+// the appointment TEXTS (reminders, route-tracking link, arrival text) and
+// whether the call says they will be AT the property for the visit; each needs
+// an evidence quote when true (model guidance only). The pipeline uses them for
+// ONE thing: deciding whether to send that person the recipient opt-in ask.
+// Consent is the recipient's own YES to that text, never these flags. New
+// fields and instructions: a new cohort.
+const PROMPT_VERSION = 'v21';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -276,6 +287,8 @@ SECONDARY CONTACT (a SECOND person who is a party to the service):
 - The CALLER's own identity always stays in the "caller" object. Never duplicate the caller into secondary_contact, and never put the other person's phone/email into the caller's fields.
 - role is this person's relationship to the TRANSACTION: the buyer a realtor is booking for is home_buyer (not real_estate_agent); the borrower a loan officer is arranging an inspection for is home_buyer, while a loan officer named as a party by someone else is lender.
 - wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — is false.
+- wants_appointment_texts: true ONLY when the caller agreed this person should receive the appointment TEXT messages — visit reminders, the "on the way"/route-tracking link, the arrival text ("we could put his cell on the account so he'll get the reminders" — "yeah"; "text my tenant when you're on the way"). Wanting the REPORT or INVOICE sent to someone ("email him the report") is NOT appointment-text intent: false. wants_notifications can be true while this is false. Default false; do not invent.
+- on_site: true ONLY when the call says this person will be AT the property for the visit — they live there, "he'll be there", "she'll meet your technician". A relationship alone (spouse, buyer) does not prove presence: if the call does not say they will be there, false. Default false; do not invent.
 - is_billing_party: true ONLY when the caller clearly says THIS person pays for the service ("the owner Jim will pay by credit card", "bill the management company", "send the invoice to the landlord"). Merely being the owner/landlord/manager is NOT enough — the caller must indicate this person covers the cost. false/absent otherwise. At most one party is the billing party.
 - secondary_contacts (ARRAY): when MORE THAN ONE other person is a party to the service (buyer + co-buyer + agent; tenant + owner + manager), list EVERY such person here — up to 3, ordered most notification-central first (the person the caller designates for contact/notifications leads; the property's buyer/occupant beats a bystander). Each entry follows every rule in this section. The FIRST entry must be the SAME person as secondary_contact. One other party → a one-entry array. Nobody → [] or null.
 - other_parties_mentioned: true ONLY when the call named MORE parties than fit in secondary_contacts (a 4th+ person) — this tells the office to re-listen for the overflow. false/null otherwise.
@@ -368,6 +381,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values (day, hour, period) verbatim. When scheduling.moved_appointment_words is set, the /scheduling/moved_appointment_date quote must contain it verbatim.
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
+- secondary_contact.wants_appointment_texts (when true — quote the caller agreeing this person gets the appointment texts/reminders/tracking link) and secondary_contact.on_site (when true — quote the words saying this person will be at the property for the visit); the field_path is the JSON pointer /secondary_contact/wants_appointment_texts and /secondary_contact/on_site, and for each secondary_contacts[] entry /secondary_contacts/<index>/wants_appointment_texts and /secondary_contacts/<index>/on_site. Each quote must be the CALLER's own words (speaker "caller"), copied verbatim from ONE caller turn — not the agent's offer: when the agent proposed it and the caller agreed, quote the caller's agreement ("Yeah."). Always give one when a flag is true
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
 - service_request.price_offered_by_staff (when true — the agent's price sentence; speaker must be "agent") and service_request.price_accepted_by_caller (when true — the caller's acceptance; speaker must be "caller")
 - scheduling.staff_accepted_proposed_slot (when true — the ENTIRE agent reply turn; speaker must be "agent") and scheduling.selected_day_words (when set — the caller turn holding the selected day; speaker must be "caller")

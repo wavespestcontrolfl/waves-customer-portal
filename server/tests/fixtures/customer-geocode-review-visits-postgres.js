@@ -30,6 +30,8 @@ async function createSchema(trx) {
     table.uuid('id').primary().defaultTo(trx.raw('gen_random_uuid()')); table.uuid('customer_id');
     table.boolean('active'); table.boolean('is_primary');
     table.string('label'); table.string('occupancy_type'); table.string('relationship'); table.string('source');
+    // 20261001190000_neighborhood_access: syncPrimaryAddress clears these on a street move.
+    table.uuid('neighborhood_id'); table.string('neighborhood_source'); table.string('county_subdivision'); table.timestamp('neighborhood_checked_at', { useTz: true });
     table.string('address_line1'); table.string('address_line2'); table.string('city');
     table.string('state'); table.string('zip'); table.string('address_key');
     table.string('property_type'); table.string('lawn_type'); table.integer('property_sqft');

@@ -308,6 +308,37 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('the hourly pass refreshing a bell keeps its standing price finding (prices are not re-checked there)', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const { etDateString } = require('../utils/datetime-et');
+      const tomorrow = etDateString(new Date(Date.now() + 86400000));
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      const lawnChild = rows.find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 90 });
+      await runCombinedBookingCheck({ conn: trx });
+      expect((await alertsOf(trx, est.estimateId))[0].metadata.problemCodes).toEqual(['price_mismatch']);
+      // A pest visit tomorrow loses its technician: the hourly pass refreshes the same bell.
+      const pestChild = rows.find((row) => row.recurring_parent_id && /pest/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ technician_id: null, scheduled_date: tomorrow });
+      await runCombinedBookingCheck({ conn: trx, urgentOnly: true });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.metadata.itemKeys).toEqual(expect.arrayContaining(['pest_control', 'lawn_care']));
+      expect(alert.body).toMatch(/lawn visits priced \$90\.00, accepted \$100\.00/);
+      // The pest fix on the next hourly pass does not close the bell: the price finding stands.
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ technician_id: lawnChild.technician_id });
+      expect(await runCombinedBookingCheck({ conn: trx, urgentOnly: true })).toMatchObject({ closed: 0 });
+      expect((await alertsOf(trx, est.estimateId)).filter((row) => !row.read_at && !row.metadata.doneAt)).toHaveLength(1);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a standing bell gaining a problem past the budget is left untouched until a run with room rings it', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
@@ -321,7 +352,7 @@ postgres('combined-booking check through the real conversion', () => {
       await trx('scheduled_services').where({ id: childOf(/lawn/i).id }).update({ technician_id: null });
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
       const [before] = await alertsOf(trx, est.estimateId);
-      expect(before.metadata.itemKeys).toEqual(['missing_time_tech:lawn_care']);
+      expect(before.metadata.itemKeys).toEqual(['lawn_care']);
       await trx('notifications').where({ id: before.id }).update({ read_at: new Date() });
       // A new service family goes untimed (a pest visit) with no budget left.
       await trx('scheduled_services').where({ id: childOf(/pest/i).id }).update({ technician_id: null });
@@ -336,7 +367,7 @@ postgres('combined-booking check through the real conversion', () => {
       expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10, raise: raiseAdminAlert })).toMatchObject({ problems: 1, held: 0 });
       const [after] = await alertsOf(trx, est.estimateId);
       expect(after.read_at).toBeNull();
-      expect(after.metadata.itemKeys).toEqual(['missing_time_tech:pest_control', 'missing_time_tech:lawn_care']);
+      expect(after.metadata.itemKeys).toEqual(['pest_control', 'lawn_care']);
     } finally {
       mockPg = pool;
       await trx.rollback();
@@ -435,6 +466,180 @@ postgres('combined-booking check through the real conversion', () => {
       await trx('estimates').where({ id: est.estimateId }).update({ estimate_data: JSON.stringify(data), annual_total: 600, monthly_total: 50 });
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ skipped: 1, closed: 1 });
       expect((await alertsOf(trx, est.estimateId))[0].done_at).not.toBeNull();
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('visit prices: the converter\'s own prices pass; a visit priced off the accepted price rings', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      // As converted and assigned: no price finding (the converter priced every visit right, or left it unpriced).
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0, failed: 0 });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
+      // One upcoming lawn visit at the wrong price.
+      const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 1 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.metadata.itemKeys).toEqual(['lawn_care']);
+      expect(alert.body).toMatch(/lawn visits priced \$1\.00, accepted \$100\.00/);
+      // Fixed: the bell closes.
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 100 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0, closed: 1 });
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a booking on ONE combined-route series (lawn + T&S) is still a price-check candidate, judged on both prices', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const tree = { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 6, frequency: 'bimonthly', annual: 360, mo: 30, perTreatment: 60, catalog: 'tree_shrub_bimonthly' };
+      const est = await acceptedEstimate(trx, [...lines, tree]);
+      await trx('estimates').where({ id: est.estimateId }).update({ annual_total: 1560, monthly_total: 130 });
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      // Leave a single series: the lawn one, made the lawn + tree & shrub combined route.
+      const drop = rows.filter((row) => !/lawn/i.test(row.service_type)).map((row) => row.id);
+      await trx('scheduled_services').whereIn('id', drop).del();
+      const lawnIds = rows.filter((row) => /lawn/i.test(row.service_type)).map((row) => row.id);
+      await trx('scheduled_services').whereIn('id', lawnIds).update({ service_id: null, service_key_snapshot: 'lawn_tree_shrub_combo' });
+      const child = rows.find((row) => row.recurring_parent_id && lawnIds.includes(row.id));
+      // The combined price ($100 lawn + $60 T&S) passes; $100 alone does not.
+      await trx('scheduled_services').whereIn('id', lawnIds.filter((id) => id !== rows.find((r) => lawnIds.includes(r.id) && !r.recurring_parent_id)?.id))
+        .update({ estimated_price: 160 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0 });
+      await trx('scheduled_services').where({ id: child.id }).update({ estimated_price: 100 });
+      const result = await runCombinedBookingCheck({ conn: trx });
+      expect(result.candidates).toBeGreaterThanOrEqual(1);
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.metadata.problemCodes).toContain('price_mismatch');
+      expect(alert.body).toMatch(/priced \$100\.00, accepted \$160\.00/);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a visit priced only through primary_line_price is a candidate and is checked on it', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const lawnIds = (await rowsOf(trx, est.estimateId)).filter((row) => /lawn/i.test(row.service_type) && row.recurring_parent_id).map((row) => row.id);
+      await trx('scheduled_services').whereIn('id', lawnIds).update({ estimated_price: null, primary_line_price: 100 });
+      await trx('scheduled_services').where({ id: lawnIds[0] }).update({ primary_line_price: 90 });
+      await runCombinedBookingCheck({ conn: trx });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.body).toMatch(/1 lawn visits priced \$90\.00, accepted \$100\.00/);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a name-only combined-route series (no catalog row) is a price candidate too', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const tree = { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 6, frequency: 'bimonthly', annual: 360, mo: 30, perTreatment: 60, catalog: 'tree_shrub_bimonthly' };
+      const est = await acceptedEstimate(trx, [...lines, tree]);
+      await trx('estimates').where({ id: est.estimateId }).update({ annual_total: 1560, monthly_total: 130 });
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      await trx('scheduled_services').whereIn('id', rows.filter((row) => !/lawn/i.test(row.service_type)).map((row) => row.id)).del();
+      const lawnIds = rows.filter((row) => /lawn/i.test(row.service_type)).map((row) => row.id);
+      await trx('scheduled_services').whereIn('id', lawnIds)
+        .update({ service_id: null, service_key_snapshot: null, service_type: 'Lawn + Tree & Shrub Service' });
+      const child = rows.find((row) => row.recurring_parent_id && lawnIds.includes(row.id));
+      await trx('scheduled_services').where({ id: child.id }).update({ estimated_price: 100, primary_line_price: null });
+      await runCombinedBookingCheck({ conn: trx });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.body).toMatch(/priced \$100\.00, accepted \$160\.00/);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('visits with no status are still live price candidates', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      await trx('scheduled_services').whereIn('id', rows.map((row) => row.id)).update({ status: null });
+      const lawnChild = rows.find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 90 });
+      await runCombinedBookingCheck({ conn: trx });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.body).toMatch(/1 lawn visits priced \$90\.00, accepted \$100\.00/);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a one-time root beside one recurring series does not make a booking multi-service', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      const lawnRoot = rows.find((row) => !row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').whereIn('id', rows.filter((row) => /lawn/i.test(row.service_type) && row.id !== lawnRoot.id).map((row) => row.id)).del();
+      await trx('scheduled_services').where({ id: lawnRoot.id }).update({ is_recurring: false });
+      const pestChild = rows.find((row) => row.recurring_parent_id && /pest/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ estimated_price: 140 });
+      await runCombinedBookingCheck({ conn: trx });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
+      // The same booking with the lawn root recurring is a candidate and rings.
+      await trx('scheduled_services').where({ id: lawnRoot.id }).update({ is_recurring: true });
+      await runCombinedBookingCheck({ conn: trx });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(1);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a booking that kept an existing series for one service is still price-checked on the new one', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      // The duplicate-series guard kept the customer's older lawn series: this estimate seeded pest only.
+      const lawnRows = rows.filter((row) => /lawn/i.test(row.service_type));
+      const lawnParent = lawnRows.find((row) => !row.recurring_parent_id);
+      await trx('scheduled_services').whereIn('id', lawnRows.map((row) => row.id)).update({ source_estimate_id: null });
+      await trx('scheduled_services').whereIn('id', lawnRows.filter((row) => row.recurring_parent_id).map((row) => row.id)).del();
+      await trx('activity_log').insert({ customer_id: est.customerId, action: 'recurring_series_skipped',
+        description: 'kept existing lawn series', metadata: JSON.stringify({ estimateId: est.estimateId, existingParentId: lawnParent.id }) });
+      const pestChild = rows.find((row) => row.recurring_parent_id && /pest/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ estimated_price: 140 });
+      await runCombinedBookingCheck({ conn: trx });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.metadata.problemCodes).toEqual(['price_mismatch']);
+      expect(alert.metadata.itemKeys).toEqual(['pest_control']);
     } finally {
       mockPg = pool;
       await trx.rollback();

@@ -903,6 +903,17 @@ const REGISTRY = {
             .some((c) => digits(c.phone) === String(meta.optin_phone_key));
           if (!stillPresent) return { eligible: false, reason: 'contact-removed' };
         }
+        // An on-site ask (#5467) is about one booked visit: it goes out only
+        // while that visit is still confirmed and ahead — a visit cancelled or
+        // moved off overnight leaves nobody to ask about.
+        if (meta.optin_visit_id) {
+          const visit = await db('scheduled_services')
+            .where({ id: meta.optin_visit_id, customer_id: meta.optin_customer_id || null, status: 'confirmed' })
+            .first('id');
+          const { scheduledServiceApptTime } = require('../appointment-reminders');
+          const at = visit ? await scheduledServiceApptTime(meta.optin_visit_id, { throwOnError: true }) : null;
+          if (!(at?.getTime() > Date.now())) return { eligible: false, reason: 'optin-visit-not-live' };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('recipient-optin', meta.optin_phone_key, err);

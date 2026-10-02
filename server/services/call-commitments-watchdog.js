@@ -12,7 +12,8 @@
  * Alerting mirrors the stall watchdog: one bell per commitment per ET day
  * (dedupeKey), `bell: true` because the 'alert' category is silenced under
  * GATE_ADMIN_BELL_POLICY and a pager that cannot page is no pager; a burst
- * past AGGREGATE_THRESHOLD collapses into one bell keyed on the batch.
+ * past AGGREGATE_THRESHOLD collapses into one standing row keyed on the batch,
+ * kept out of the bell (a backlog is a count on the Owed tab, not a bell).
  * Rows that a human dismissed or that were fulfilled leave the scan on
  * their own. Read-only except admin notifications.
  *
@@ -214,7 +215,12 @@ async function runInner({ now = new Date() } = {}) {
           link: '/admin/communications#tab=owed', dedupeKey: `call-commitments-overdue:${today}`,
           dedupeVersion: require('node:crypto').createHash('sha256').update(JSON.stringify(ids.map((id) => versions[id]))).digest('hex'),
           refreshOnDedupe: true, bell: true, trx,
-          metadata: { triggerKey: TRIGGER_KEY, overdue_count: overdue.length, overdue_commitment_ids: ids, overdue_versions: versions, retired: false },
+          // A backlog of overdue promises is a standing condition, not an event
+          // (owner 2026-10-01: it rang every day). It stays a count on the Owed
+          // tab and an open row for needs-me, but never reaches the bell: an
+          // Activity-only row is hidden from the bell list, its unread count and
+          // mark-all-read. The row is still the watchdog's state (versions, batch).
+          metadata: { triggerKey: TRIGGER_KEY, overdue_count: overdue.length, overdue_commitment_ids: ids, overdue_versions: versions, retired: false, feed: 'activity' },
         });
       if (!persisted(notif)) return { ...result, unannounced: overdue.length, aggregate: true };
       // Rows are picked by done_at, not read_at: a reminder someone only
