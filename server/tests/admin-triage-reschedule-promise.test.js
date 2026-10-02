@@ -23,7 +23,7 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technician = { id: 'tech-1', role: 'admin' };
     req.technicianId = 'tech-1';
-    req.techRole = 'admin';
+    req.techRole = req.headers['x-test-role'] || 'admin';
     next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -145,9 +145,9 @@ async function withServer(fn) {
   }
 }
 
-function put(baseUrl, path, body = {}) {
+function put(baseUrl, path, body = {}, headers = {}) {
   return fetch(`${baseUrl}/admin/triage${path}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
   });
 }
 function post(baseUrl, path, body = {}) {
@@ -306,6 +306,33 @@ test.each(['resolve', 'dismiss'])('%s requires the card version and leaves the p
   expect(tables.triage_items[0].status).toBe('open');
   expect(tables.call_commitments[0].status).toBe('open');
   expect(tables.outbox_messages[0].status).toBe('review');
+});
+
+describe('PUT /admin/triage/:id/resolve on a missing_first_name card', () => {
+  const seed = () => {
+    const f = fixture();
+    f.tables.triage_items[0].reason_code = 'missing_first_name';
+    f.tables.triage_items[0].payload = { customer_id: 'cust-1', heard_name_v1: { first_name: null, last_name: 'Murphy' } };
+    return f;
+  };
+  test('a non-admin Resolve is refused (403) and the card stays open; Dismiss stays available', async () => {
+    const { conn, tables } = seed();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION }, { 'x-test-role': 'technician' });
+      expect(res.status).toBe(403);
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+  });
+  test('an admin Resolve closes it', async () => {
+    const { conn, tables } = seed();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items[0].status).toBe('resolved');
+  });
 });
 
 describe('POST /admin/triage/:id/verdict', () => {

@@ -1085,15 +1085,19 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
                             </Button>
                           ) : isFirstNameCard ? (
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              disabled={actioning === busyKey}
-                              onClick={() => resolveItem(item)}
-                            >
-                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                              {actioning === busyKey ? "Saving…" : "Resolve"}
-                            </Button>
+                            // Admin-only (the server 403s a non-admin Resolve): the first name is
+                            // entered on the customer record, which only an admin edits.
+                            isAdmin ? (
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                disabled={actioning === busyKey}
+                                onClick={() => resolveItem(item)}
+                              >
+                                <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                                {actioning === busyKey ? "Saving…" : "Resolve"}
+                              </Button>
+                            ) : null
                           ) : isFollowUpCard ? (
                             <Button
                               size="sm"

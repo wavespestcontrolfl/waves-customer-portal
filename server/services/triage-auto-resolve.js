@@ -931,7 +931,7 @@ function heardNames(item) {
 }
 
 function firstNameCameFromCall(item) {
-  const onFile = String(item.customer_first_name || '').trim().toLowerCase();
+  const onFile = String(item.stamped_customer_first_name || '').trim().toLowerCase();
   const names = heardNames(item);
   // No filing-time names (a pre-snapshot card): not independent evidence.
   return !names || names.first.includes(onFile);
@@ -1028,15 +1028,18 @@ const CLASSIFY_RULES = [
       && filled(item.customer_last_name) },
   // GATE_CALL_FIRST_NAME_ADVISORY's missing_first_name card: the customer was CREATED
   // from this very call (first_name stored empty), so the surname rule's
-  // "pre-existing customer" guard cannot apply. The card's filing-time snapshot
+  // "pre-existing customer" guard cannot apply. The card is filed FOR one customer
+  // (payload.customer_id, stamped at filing) and is settled only by THAT record: a
+  // call later relinked to a named customer must not close it. The snapshot
   // (payload.heard_name_v1) proves the name was blank at filing, so the ask is moot
-  // once the record carries a nonblank first name — however it got there (Customer
-  // 360's save does not bump updated_at, so no timestamp is required) — that the
-  // call itself did not hear, on a customer that is not deleted.
+  // once the stamped customer — loaded directly, not through the call — is live and
+  // carries a nonblank first name the call did not hear (Customer 360's save does not
+  // bump updated_at, so no timestamp is required). No stamp, no auto-resolve.
   { rule: 'first_name_moot', action: 'resolve',
     when: (item) => item.reason_code === 'missing_first_name'
-      && !item.customer_deleted_at
-      && filled(item.customer_first_name)
+      && !!item.stamped_customer_id
+      && !item.stamped_customer_deleted_at
+      && filled(item.stamped_customer_first_name)
       && !firstNameCameFromCall(item) },
   // Evidence rules: each flag is true only when the proof postdates the
   // CARD — see loadEvidence for the exact predicates.
@@ -1126,6 +1129,8 @@ function loadCandidateItems(conn, itemIds = null) {
   const q = conn('triage_items as t')
     .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
     .leftJoin('customers as c', 'c.id', 'cl.customer_id')
+    // The customer a missing_first_name card was filed FOR (payload.customer_id), never the call's current link.
+    .leftJoin('customers as sc', conn.raw("sc.id::text = t.payload->>'customer_id'"))
     .where('t.status', 'open')
     .select(
       't.id', 't.call_log_id', 't.reason_code', 't.status', 't.severity',
@@ -1144,6 +1149,9 @@ function loadCandidateItems(conn, itemIds = null) {
       'cl.bridged_at as call_bridged_at',
       'cl.twilio_call_sid as call_twilio_call_sid',
       'cl.metadata as call_metadata',
+      'sc.id as stamped_customer_id',
+      'sc.first_name as stamped_customer_first_name',
+      'sc.deleted_at as stamped_customer_deleted_at',
       'c.created_at as customer_created_at',
       'c.deleted_at as customer_deleted_at',
       'c.pipeline_stage as customer_pipeline_stage',

@@ -226,21 +226,28 @@ describe('moot-condition resolves', () => {
     expect(classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', payload: { heard_name: { first_name: 'Pat', last_name: null } } }), noBookings, { now: NOW })).toBeNull();
   });
 
-  test('missing_first_name resolves once the customer carries a first name the call did not hear (no timestamp needed)', () => {
+  test('missing_first_name resolves once the customer it was FILED FOR carries a first name the call did not hear (no timestamp needed)', () => {
     const card = (over = {}) => item({
-      reason_code: 'missing_first_name', customer_first_name: 'Sam', customer_last_name: 'Murphy',
-      customer_created_at: CUSTOMER_AFTER, // created FROM the call: the surname rule's pre-existing guard would never fire
+      reason_code: 'missing_first_name',
+      // the call's CURRENT link (customer_*) is deliberately a different, named person: only the stamped customer counts
+      customer_first_name: 'Relinked', customer_last_name: 'Other',
+      stamped_customer_id: 'cust-created', stamped_customer_first_name: 'Sam', stamped_customer_deleted_at: null,
+      customer_created_at: CUSTOMER_AFTER,
       ...heardV1(null, 'Murphy'), ...over,
     });
     expect(classifyTriageItem(card(), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
-    // still blank, or only whitespace -> stays open
-    expect(classifyTriageItem(card({ customer_first_name: '' }), noBookings, { now: NOW })).toBeNull();
-    expect(classifyTriageItem(card({ customer_first_name: '  ' }), noBookings, { now: NOW })).toBeNull();
+    // still blank, or only whitespace, on the stamped customer -> stays open
+    expect(classifyTriageItem(card({ stamped_customer_first_name: '' }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ stamped_customer_first_name: '  ' }), noBookings, { now: NOW })).toBeNull();
+    // RELINK: the call now points at a named customer, but the stamped customer is still blank -> stays open
+    expect(classifyTriageItem(card({ stamped_customer_first_name: '', customer_first_name: 'Relinked' }), noBookings, { now: NOW })).toBeNull();
+    // no stamp (a card filed without its customer, or the stamped row is gone) never auto-resolves
+    expect(classifyTriageItem(card({ stamped_customer_id: null, stamped_customer_first_name: null }), noBookings, { now: NOW })).toBeNull();
     // a first name the card's own snapshot heard is the call's, not independent
     expect(classifyTriageItem(card(heardV1('Sam', 'Murphy')), noBookings, { now: NOW })).toBeNull();
-    // no filing-time snapshot -> fail closed; deleted customer -> stays open
+    // no filing-time snapshot -> fail closed; deleted stamped customer -> stays open
     expect(classifyTriageItem(card({ payload: { flag: 'missing_first_name' } }), noBookings, { now: NOW })).toBeNull();
-    expect(classifyTriageItem(card({ customer_deleted_at: FRESH }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ stamped_customer_deleted_at: FRESH }), noBookings, { now: NOW })).toBeNull();
     expect(RULE_NOTES.first_name_moot).toBeTruthy();
   });
 

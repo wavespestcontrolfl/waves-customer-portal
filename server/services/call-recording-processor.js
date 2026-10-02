@@ -3752,6 +3752,23 @@ function verdictAcceptsAddress(av, { requirePremise = false } = {}) {
   return requirePremise ? av.granularity === 'PREMISE' : !av.granularity || av.granularity === 'PREMISE';
 }
 
+// ONE normalized agreement predicate for the address a call STORES / BOOKS against the
+// verdict that validated it — shared by customer creation (firstNameAdvisoryAddressOk)
+// and the booking hold (avValidatesBookedAddress), so an input creation accepts can
+// never be re-judged differently at booking. Street (suffix aliases, directionals,
+// unit-first) and ZIP (ZIP+4 tolerant) must be present on both sides and agree with
+// the verdict's normalized form, and the stored UNIT — from either line — must equal
+// the unit of the address the verdict was computed on (none = none; "Apt 3" and
+// "Unit 3" are the same unit). Pure.
+function storedAddressMatchesVerdict(stored = {}, normalized = {}, verdictAddress = {}) {
+  return addressRenderingsAgree(
+    { address_line1: stored.address_line1, zip: stored.zip },
+    { address_line1: normalized?.street_line_1, zip: normalized?.postal_code },
+    { strict: true },
+  ) && addressLineUnit(stored.address_line1, stored.address_line2)
+    === addressLineUnit(verdictAddress?.street_line_1, verdictAddress?.street_line_2);
+}
+
 // GATE_CALL_FIRST_NAME_ADVISORY: the address the new customer row will STORE must be
 // the premise the verdict validated — explicit PREMISE granularity, and the stored
 // street + ZIP (and city, when both carry one) agree with the verdict's normalized
@@ -3760,16 +3777,7 @@ function verdictAcceptsAddress(av, { requirePremise = false } = {}) {
 function firstNameAdvisoryAddressOk(av, extracted = {}, verdictAddress = {}) {
   if (!verdictAcceptsAddress(av, { requirePremise: true })) return false;
   const n = av.normalized || {};
-  if (!addressRenderingsAgree(
-    { address_line1: extracted.address_line1, zip: extracted.zip },
-    { address_line1: n.street_line_1, zip: n.postal_code },
-    { strict: true },
-  )) return false;
-  // The UNIT must agree too (none = none): the verdict's normalized form omits the
-  // subpremise, so the unit it was computed on is the verdict address's own
-  // (the V2 service_address). V1 "Apt 3" vs V2 "Apt 4" means no creation.
-  if (addressLineUnit(extracted.address_line1, extracted.address_line2)
-    !== addressLineUnit(verdictAddress.street_line_1, verdictAddress.street_line_2)) return false;
+  if (!storedAddressMatchesVerdict(extracted, n, verdictAddress)) return false;
   const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   return !cityKey(extracted.city) || !cityKey(n.city) || cityKey(extracted.city) === cityKey(n.city);
 }
@@ -3779,7 +3787,7 @@ function firstNameAdvisoryAddressOk(av, extracted = {}, verdictAddress = {}) {
 // claimed or already resolved — is the card, so neither site duplicates or re-opens
 // it; the conditional insert also covers a concurrent pass. Advisory; the card's
 // heard_name_v1 snapshot is what the auto-resolve rule reads.
-async function fileMissingFirstNameCard(conn, { callLogId, extraction, extracted = {} }) {
+async function fileMissingFirstNameCard(conn, { callLogId, customerId, extraction, extracted = {} }) {
   const existing = await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' }).first('id');
   if (existing) return false;
   await conn('triage_items')
@@ -3789,12 +3797,24 @@ async function fileMissingFirstNameCard(conn, { callLogId, extraction, extracted
       extraction,
       severity: 'advisory',
       extraPayload: {
+        // The customer this card is filed FOR: the auto-resolve rule reads THIS record,
+        // never whoever the call is later relinked to.
+        customer_id: customerId ? String(customerId) : null,
         heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
       },
     }))
     .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
     .ignore();
   return true;
+}
+
+// Is the call's missing_first_name card still an open task (open or claimed)? Read under
+// the finalization triage lock so a concurrent close is seen. Pure of side effects.
+async function missingFirstNameCardStillOpen(conn, callLogId) {
+  const card = await conn('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
+    .whereIn('status', ['open', 'in_progress']).first('id');
+  return !!card;
 }
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
@@ -12221,7 +12241,7 @@ const CallRecordingProcessor = {
           // or not a booking follows. Fail-soft: a card failure never undoes the create.
           if (!String(extracted.first_name || '').trim()) {
             try {
-              await fileMissingFirstNameCard(db, { callLogId: call.id, extraction: v2CanonicalExtraction || undefined, extracted });
+              await fileMissingFirstNameCard(db, { callLogId: call.id, customerId, extraction: v2CanonicalExtraction || undefined, extracted });
               if (!bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
             } catch (cardErr) {
               logger.warn(`[call-proc] first-name card insert failed for ${maskSid(callSid)}: ${cardErr.code || cardErr.name || 'db_error'}`);
@@ -16773,7 +16793,7 @@ const CallRecordingProcessor = {
           // 2026-10-02): the same ONE card per call the customer-create branch
           // files (fileMissingFirstNameCard is idempotent across both sites).
           const fileFirstNameAdvisoryCard = (conn) => fileMissingFirstNameCard(conn, {
-            callLogId: call.id, extraction: v2ApprovedExtraction || undefined, extracted,
+            callLogId: call.id, customerId, extraction: v2ApprovedExtraction || undefined, extracted,
           }).catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });
           if (customerValidation.advisory?.includes('first_name')) {
             await fileFirstNameAdvisoryCard(db)
@@ -16837,7 +16857,6 @@ const CallRecordingProcessor = {
             ? { street_line_1: addressRecovery.recovered.address_line1, city: addressRecovery.recovered.city }
             : null;
           const v2ValidatedAddress = recoveredVerdictInput || v2StatedAddress;
-          const unitKey = (v) => String(v || '').toLowerCase().replace(/[#.,]/g, ' ').replace(/\s+/g, ' ').trim();
           // City included (codex final-round P1): ZIP almost always pins the
           // city, but multi-city ZIPs exist and deriveCallReviewBridge
           // refuses adoption on a city disagreement — the gate matches that
@@ -16855,13 +16874,13 @@ const CallRecordingProcessor = {
           // verdict's own normalized city below is what keeps this safe:
           // the booked city always has to be the validated one.
           const requireStatedCityMatch = String(effectiveAddressValidation?.status || '') === 'validated_accept';
+          // Street + ZIP + unit agreement is the SAME shared predicate customer creation
+          // uses (storedAddressMatchesVerdict); city keeps its own bar below.
           const avValidatesBookedAddress = !!avNormalized && !!v2ValidatedAddress && !!v2StatedAddress
-            && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(avNormalized.street_line_1 || ''))
-            && String(extracted.zip || '').trim() === String(avNormalized.postal_code || '').trim()
+            && storedAddressMatchesVerdict(extracted, avNormalized, v2StatedAddress)
             && cityKey(extracted.city) === cityKey(avNormalized.city)
-            && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(v2ValidatedAddress.street_line_1 || ''))
-            && (!requireStatedCityMatch || cityKey(extracted.city) === cityKey(v2ValidatedAddress.city))
-            && unitKey(extracted.address_line2) === unitKey(v2StatedAddress.street_line_2);
+            && sameHouseNumberStreet(extracted.address_line1, v2ValidatedAddress.street_line_1)
+            && (!requireStatedCityMatch || cityKey(extracted.city) === cityKey(v2ValidatedAddress.city));
           const avPositiveForBooking = !!effectiveAddressValidation
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
             && effectiveAddressValidation.inServiceArea === true
@@ -21028,8 +21047,14 @@ const CallRecordingProcessor = {
       // it, and a stale reason must not reopen a call with no open card.
       const streetLevelStillHeld = !bridgeNeedsConfirmation.includes('street_level_address_review')
         || (!!appointmentResult?.scheduledServiceId && await isStreetLevelHoldVisit(appointmentResult.scheduledServiceId, trx));
+      // …and the same for the owed-first-name reason: an office Resolve / Dismiss (or the
+      // auto-resolve sweep) may have closed the card since this pass filed it, and a
+      // closed card's reason must not reopen review. Judged under the lock just taken.
+      const firstNameStillOwed = !bridgeNeedsConfirmation.includes('missing_first_name')
+        || await missingFirstNameCardStillOpen(trx, call.id);
       const reviewReasonCount = bridgeNeedsConfirmation
-        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;
+        .filter((r) => (r !== 'street_level_address_review' || streetLevelStillHeld)
+          && (r !== 'missing_first_name' || firstNameStillOwed)).length;
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
@@ -22353,7 +22378,9 @@ CallRecordingProcessor._test = {
   maskPhone,
   validatePhoneCallAppointmentCustomer,
   advisoryBookingAddressHoldFields,
+  storedAddressMatchesVerdict,
   fileMissingFirstNameCard,
+  missingFirstNameCardStillOpen,
   slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,

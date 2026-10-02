@@ -289,7 +289,7 @@ describe('missing first-name card', () => {
 
   it('is an operational card: Resolve and Dismiss, no Accept/Deny', async () => {
     load();
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     const el = (await screen.findByText('Murphy')).closest('.py-4');
     expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
     expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
@@ -297,9 +297,17 @@ describe('missing first-name card', () => {
     expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
   });
 
+  it('Resolve is admin-only: a non-admin sees Dismiss but no Resolve', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    const el = (await screen.findByText('Murphy')).closest('.py-4');
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /^resolve$/i })).toBeNull();
+  });
+
   it('Resolve closes the card only: PUT /resolve with its version, never a /verdict', async () => {
     load();
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     const el = (await screen.findByText('Murphy')).closest('.py-4');
     fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fn/resolve', {

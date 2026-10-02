@@ -743,6 +743,11 @@ async function transition(req, res, nextStatus) {
     if (guarded && guarded.reason_code === 'property_role_confirm') {
       return res.status(403).json({ error: 'Admin access required' });
     }
+    // A missing first name is settled on the customer record, which only an admin edits:
+    // Resolve is admin-only (Dismiss stays open to the office).
+    if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
   }
   const result = await transitionCore({
     id, nextStatus, note, assignedTo: req.technicianId,

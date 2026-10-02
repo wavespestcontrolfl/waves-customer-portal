@@ -21,7 +21,7 @@ const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
 const { validatePhoneCallAppointmentCustomer, advisoryBookingAddressHoldFields,
-  fileMissingFirstNameCard, firstNameAdvisoryAddressOk } = _test;
+  fileMissingFirstNameCard, firstNameAdvisoryAddressOk, storedAddressMatchesVerdict, missingFirstNameCardStillOpen } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
 const FIRST_NAME_GATE = 'GATE_CALL_FIRST_NAME_ADVISORY';
@@ -143,7 +143,47 @@ describe('FIX 1: the address a first-name-less customer is created at must be th
   });
 });
 
+describe('FIX 1: creation and the booking hold share ONE address-agreement predicate', () => {
+  const AV = { status: 'validated_accept', inServiceArea: true, granularity: 'PREMISE',
+    normalized: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' } };
+  const verdictAddr = (unit) => ({ street_line_1: '100 Example Loop', street_line_2: unit });
+  // Each input creation ACCEPTS must also be accepted by the booking predicate (and vice versa).
+  const cases = [
+    ['ZIP+4 vs a 5-digit verdict ZIP', { address_line1: '100 Example Loop', zip: '34240-1111' }, null],
+    ['a unit embedded in the street line', { address_line1: '100 Example Loop Apt 3', zip: '34240' }, 'Apt 3'],
+    ['Apt 3 vs Unit 3 (same unit, different designator)', { address_line1: '100 Example Loop', address_line2: 'Apt 3', zip: '34240' }, 'Unit 3'],
+  ];
+  test.each(cases)('%s: accepted by creation AND by the booking predicate', (_label, stored, verdictUnit) => {
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: 'Sarasota' }, verdictAddr(verdictUnit))).toBe(true);
+    expect(storedAddressMatchesVerdict(stored, AV.normalized, verdictAddr(verdictUnit))).toBe(true);
+  });
+  test.each([
+    ['a different unit', { address_line1: '100 Example Loop', address_line2: 'Apt 3', zip: '34240' }, 'Apt 4'],
+    ['a stored unit the verdict address lacks', { address_line1: '100 Example Loop Apt 3', zip: '34240' }, null],
+    ['a different ZIP', { address_line1: '100 Example Loop', zip: '34241' }, null],
+    ['a missing ZIP', { address_line1: '100 Example Loop', zip: '' }, null],
+  ])('%s: refused by both', (_label, stored, verdictUnit) => {
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: 'Sarasota' }, verdictAddr(verdictUnit))).toBe(false);
+    expect(storedAddressMatchesVerdict(stored, AV.normalized, verdictAddr(verdictUnit))).toBe(false);
+  });
+  test('the divergent booking-side comparison is gone (rule 19): street, ZIP and unit go through the shared predicate', () => {
+    const start = source.indexOf('const avValidatesBookedAddress =');
+    const block = source.slice(start, source.indexOf('const avPositiveForBooking', start));
+    expect(block).toContain('storedAddressMatchesVerdict(extracted, avNormalized, v2StatedAddress)');
+    expect(block).not.toMatch(/streetCompareKey|postal_code \|\| ''\)\.trim\(\)|unitKey\(extracted/);
+    expect(source).toContain('const n = av.normalized || {};\n  if (!storedAddressMatchesVerdict(extracted, n, verdictAddress)) return false;');
+  });
+});
+
 describe('FIX 1 wiring in processRecording (structural pin)', () => {
+  test('finalization counts the owed-first-name reason toward review_status only while its card is still open (judged under the triage lock)', () => {
+    const start = source.indexOf('await lockTriageCall(trx, call.id);\n      // A street-level hold');
+    const block = source.slice(start, source.indexOf('// Keep the established leads -> call_log lock order', start));
+    expect(block).toContain("const firstNameStillOwed = !bridgeNeedsConfirmation.includes('missing_first_name')");
+    expect(block).toContain('await missingFirstNameCardStillOpen(trx, call.id)');
+    expect(block).toContain("(r !== 'missing_first_name' || firstNameStillOwed)");
+  });
+
   test('the customer-create branch opens only behind the first-name gate and the validated-premise predicate', () => {
     expect(source).toMatch(/\(extracted\.first_name \|\| firstNameAdvisoryCreate\) && phone && !extracted\.is_voicemail && !v2NonCustomerCallNature/);
     const predicate = source.slice(source.indexOf('const firstNameAdvisoryCreate ='), source.indexOf('const sharedPhoneAmbiguity = {}'));
@@ -160,7 +200,7 @@ describe('FIX 1 wiring in processRecording (structural pin)', () => {
     const start = source.indexOf('Created customer ${customerId} from call recording');
     const site = source.slice(start, source.indexOf('// Both default rows', start));
     expect(site).toContain("if (!String(extracted.first_name || '').trim()) {");
-    expect(site).toContain('fileMissingFirstNameCard(db, { callLogId: call.id');
+    expect(site).toContain('fileMissingFirstNameCard(db, { callLogId: call.id, customerId');
     expect(site).toContain('catch (cardErr)');
     // the booking path files through the SAME idempotent helper
     expect(source).toContain('fileMissingFirstNameCard(conn, {');
@@ -186,17 +226,29 @@ const SKIP = !process.env.DATABASE_URL;
 
   test('ONE card per call across the creation site and the booking path, whatever its status', async () => {
     const callLogId = randomUUID();
-    const args = { callLogId, extracted: { first_name: null, last_name: 'Murphy' } };
+    const customerId = randomUUID();
+    const args = { callLogId, customerId, extracted: { first_name: null, last_name: 'Murphy' } };
     expect(await fileMissingFirstNameCard(trx, args)).toBe(true); // customer-create site
     const [card] = await trx('triage_items').where({ call_log_id: callLogId });
     expect(card).toMatchObject({ reason_code: 'missing_first_name', category: 'name_review', severity: 'advisory', status: 'open' });
-    expect(card.payload).toMatchObject({ heard_name_v1: { first_name: null, last_name: 'Murphy' } });
+    // stamped with the customer it was filed FOR (the auto-resolve rule reads this record, never the call's later link)
+    expect(card.payload).toMatchObject({ customer_id: customerId, heard_name_v1: { first_name: null, last_name: 'Murphy' } });
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false); // booking-path site: no duplicate
     await trx('triage_items').update({ status: 'in_progress' });
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     await trx('triage_items').update({ status: 'resolved' }); // a resolved card is not re-opened by the other site
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(1);
+    // the finalization recheck: only an open / claimed card keeps the reason counting toward review_status
+    await trx('triage_items').update({ status: 'open' });
+    expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(true);
+    await trx('triage_items').update({ status: 'in_progress' });
+    expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(true);
+    await trx('triage_items').update({ status: 'resolved' });
+    expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(false);
+    await trx('triage_items').update({ status: 'dismissed' });
+    expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(false);
+    expect(await missingFirstNameCardStillOpen(trx, randomUUID())).toBe(false);
     // a different call gets its own card
     expect(await fileMissingFirstNameCard(trx, { ...args, callLogId: randomUUID() })).toBe(true);
   });
