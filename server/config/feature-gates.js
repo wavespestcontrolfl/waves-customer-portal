@@ -753,8 +753,11 @@ const gates = {
   // typedDecisionsLive() below; this entry is for logGateStatus only.
   typedDecisions: gateEnvValue('GATE_TYPED_DECISIONS'),
   // Cloudflare Clef as a second typed-decision provider: ships DARK. CALL-TIME
-  // reader is typedDecisionsClefLive() below; this entry is for logGateStatus only.
-  typedDecisionsClef: gateEnvValue('GATE_TYPED_DECISIONS_CLEF'),
+  // reader is typedDecisionsClefLive() below; this entry is for logGateStatus
+  // and the integrations page, so it carries the same prerequisite the reader
+  // enforces: with GATE_TYPED_DECISIONS off the lane is dark whatever this
+  // variable says, and the status must not read as enabled (Codex r1 on #5557).
+  typedDecisionsClef: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF'),
   // Estimated AI spend: ships DARK. CALL-TIME reader is llmCostTrackingLive()
   // below; this entry is for logGateStatus only.
   llmCostTracking: process.env.GATE_LLM_COST_TRACKING === 'true',

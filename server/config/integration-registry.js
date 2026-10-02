@@ -95,7 +95,9 @@ const ADMIN_INTEGRATIONS = [
     platform: 'Cloudflare Workers AI',
     description: 'Typed decisions, second provider (shadow; dark behind GATE_TYPED_DECISIONS_CLEF)',
     env: { required: ['CF_ACCOUNT_ID'], oneOfRequired: ['CF_WORKERS_AI_TOKEN', 'CF_API_TOKEN'], supporting: ['MODEL_CLOUDFLARE_CLEF'] },
-    health: { type: 'token-health', key: 'cloudflare_workers_ai', primaryEnvKey: 'CF_WORKERS_AI_TOKEN' },
+    // Either token passes the probe (the adapter prefers the dedicated one), so the
+    // "check passed using …" line names both rather than claim the one that may be unset.
+    health: { type: 'token-health', key: 'cloudflare_workers_ai', primaryEnvKey: 'CF_WORKERS_AI_TOKEN or CF_API_TOKEN' },
     gates: [{ key: 'typedDecisionsClef', label: 'Typed decisions (Clef)' }],
   },
   {

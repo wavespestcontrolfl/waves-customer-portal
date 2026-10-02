@@ -158,6 +158,14 @@ describe('registry and dispatch', () => {
     for (const id of ['clef-flash', 'clef']) expect(MODEL_CATALOG[id]).toMatchObject({ provider: 'cloudflare', caps: ['decision'] });
   });
 
+  test('the integrations entry accepts either token and its health line names both (Codex r1 on #5557)', () => {
+    const { ADMIN_INTEGRATIONS } = require('../config/integration-registry');
+    const entry = ADMIN_INTEGRATIONS.find((i) => i.id === 'cloudflare_workers_ai');
+    expect(entry.env).toMatchObject({ required: ['CF_ACCOUNT_ID'], oneOfRequired: ['CF_WORKERS_AI_TOKEN', 'CF_API_TOKEN'] });
+    expect(entry.health).toMatchObject({ type: 'token-health', key: 'cloudflare_workers_ai', primaryEnvKey: 'CF_WORKERS_AI_TOKEN or CF_API_TOKEN' });
+    expect(entry.gates).toEqual([{ key: 'typedDecisionsClef', label: 'Typed decisions (Clef)' }]);
+  });
+
   test('no TEXT_POLICIES leg may carry the decision-only provider', () => {
     for (const [name, policy] of Object.entries(TEXT_POLICIES)) {
       for (const leg of [policy.primary, policy.fallback].filter(Boolean)) {

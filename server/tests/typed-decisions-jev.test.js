@@ -174,3 +174,26 @@ describe('askPackage — second provider (Cloudflare Clef)', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
+
+describe('the Clef gate status carries its prerequisite (Codex r1 on #5557)', () => {
+  const saved = { main: process.env.GATE_TYPED_DECISIONS, clef: process.env.GATE_TYPED_DECISIONS_CLEF };
+  afterAll(() => {
+    if (saved.main === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = saved.main;
+    if (saved.clef === undefined) delete process.env.GATE_TYPED_DECISIONS_CLEF; else process.env.GATE_TYPED_DECISIONS_CLEF = saved.clef;
+  });
+  const statusWith = (main, clef) => {
+    if (main === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = main;
+    if (clef === undefined) delete process.env.GATE_TYPED_DECISIONS_CLEF; else process.env.GATE_TYPED_DECISIONS_CLEF = clef;
+    let fresh;
+    jest.isolateModules(() => { fresh = require('../config/feature-gates'); });
+    return { map: fresh.isEnabled('typedDecisionsClef'), live: fresh.typedDecisionsClefLive() };
+  };
+
+  test('the reported status and the call-time reader agree in every combination', () => {
+    expect(statusWith(undefined, 'true')).toEqual({ map: false, live: false }); // Clef set, main gate off: dark, and reported dark
+    expect(statusWith('true', undefined)).toEqual({ map: false, live: false });
+    expect(statusWith('true', 'true')).toEqual({ map: true, live: true });
+    expect(statusWith(undefined, undefined)).toEqual({ map: false, live: false });
+  });
+});
+
