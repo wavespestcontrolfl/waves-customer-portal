@@ -260,6 +260,7 @@ const LANE_RUNTIME = {
   // completion, so it drafts for a human like report_copy.
   visit_voice_facts: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0' },
   visit_lane_facts: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0' },
+  visit_typed_facts: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0' },
   // M2 (Codex r20): notes / email copy land in the editable invoice fields, never saved or sent directly.
   invoice_summary: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   // M3 (Codex r21): appointment-tagger generates and persists the brief the moment the appointment is tagged.
