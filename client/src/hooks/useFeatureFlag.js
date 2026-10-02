@@ -4,6 +4,11 @@ import { useEffect, useState } from 'react';
 // Server is source of truth; we never persist to localStorage.
 let cache = null; // null = unloaded, object = loaded (empty object on error = fail-closed)
 let inflight = null;
+// Bumped by refetchFlags (a toggle, a login change): a read started under an
+// older generation is aborted and its answer — or its failure — never
+// becomes the cache, so a previous user's flags cannot win a switch.
+let generation = 0;
+let inflightAbort = null;
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // A flag read that never answers (a field dead zone) must not hold a gated
 // screen on its loading state: give up and fail closed like any other error.
@@ -13,9 +18,12 @@ async function loadFlags() {
   if (cache !== null) return cache;
   if (inflight) return inflight;
 
-  inflight = (async () => {
-    // Headers and body share the one bound.
-    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+  const gen = generation;
+  // Headers and body share the one bound.
+  const abort = typeof AbortController === 'function' ? new AbortController() : null;
+  inflightAbort = abort;
+  const current = () => gen === generation;
+  const read = (async () => {
     const timer = abort ? setTimeout(() => abort.abort(), FLAGS_FETCH_TIMEOUT_MS) : null;
     try {
       const token = localStorage.getItem('waves_admin_token');
@@ -29,18 +37,21 @@ async function loadFlags() {
       });
       if (!res.ok) throw new Error(`flags fetch failed: ${res.status}`);
       const data = await res.json();
+      if (!current()) return loadFlags();
       cache = data.flags || {};
       return cache;
     } catch (err) {
+      if (!current()) return loadFlags();
       console.warn('[useFeatureFlag] load failed — failing closed', err);
       cache = {}; // fail closed — everyone gets stable UI
       return cache;
     } finally {
       if (timer) clearTimeout(timer);
-      inflight = null;
+      if (inflight === read) { inflight = null; inflightAbort = null; }
     }
   })();
-  return inflight;
+  inflight = read;
+  return read;
 }
 
 // `defaultValue` is returned when the user has no row for this flag (absence
@@ -100,6 +111,9 @@ export function useFeatureFlagReady(key, defaultValue = false) {
 // Call after a toggle UI mutation so the operator's own view reflects
 // the change on next render without a full page reload.
 export function refetchFlags() {
+  generation += 1;
+  inflightAbort?.abort();
+  inflightAbort = null;
   cache = null;
   inflight = null;
   return loadFlags();
