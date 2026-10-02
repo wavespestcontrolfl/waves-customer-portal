@@ -16217,14 +16217,13 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
 // AI CHAT WIDGET
 // =========================================================================
 // Buttons the assistant may show under a reply. The server builds every label
-// and target; only a self-serve reschedule page, a Waves service report page,
-// or a known portal tab renders.
+// and target; only a self-serve reschedule page or a known portal tab renders.
 const CHAT_ACTION_TABS = ['billing', 'schedule', 'services', 'plan', 'documents', 'refer'];
 const CHAT_ACTION_BUTTON = { ...PORTAL_SECONDARY_ACTION, padding: '11px 18px', fontSize: 14 };
 function chatActionsOf(actions) {
   if (!Array.isArray(actions)) return [];
   return actions.filter((a) => a && typeof a.label === 'string' && a.label && (
-    (a.type === 'link' && typeof a.href === 'string' && /^\/(reschedule|report)\/[A-Za-z0-9_-]+$/.test(a.href))
+    (a.type === 'link' && typeof a.href === 'string' && /^\/reschedule\/[A-Za-z0-9_-]+$/.test(a.href))
     || (a.type === 'tab' && CHAT_ACTION_TABS.includes(a.tab))
   )).slice(0, 9);
 }
@@ -16235,7 +16234,19 @@ function chatActionsOf(actions) {
 const CHAT_CARD_TEXT = (v) => (typeof v === 'string' ? v.slice(0, 120) : '');
 function chatCardsOf(cards) {
   if (!Array.isArray(cards)) return [];
-  return cards.filter((c) => c && c.type === 'payments' && Array.isArray(c.rows) && c.rows.length).slice(0, 2).map((c) => ({
+  const known = cards.filter((c) => c && ['payments', 'visits'].includes(c.type) && Array.isArray(c.rows) && c.rows.length).slice(0, 2);
+  return known.map((c) => (c.type === 'visits' ? {
+    type: 'visits',
+    title: CHAT_CARD_TEXT(c.title) || 'Recent visits',
+    rows: c.rows.slice(0, 5).map((r, i) => ({
+      id: typeof r.id === 'string' ? r.id : String(i),
+      service: CHAT_CARD_TEXT(r.service),
+      dateLabel: CHAT_CARD_TEXT(r.dateLabel),
+      technician: CHAT_CARD_TEXT(r.technician),
+      summary: typeof r.summary === 'string' ? r.summary.slice(0, 700) : '',
+      reportUrl: typeof r.reportUrl === 'string' && /^\/report\/[A-Za-z0-9_-]+$/.test(r.reportUrl) ? r.reportUrl : null,
+    })),
+  } : {
     type: 'payments',
     title: CHAT_CARD_TEXT(c.title) || 'Recent payments',
     rows: c.rows.slice(0, 5).map((r, i) => ({
@@ -16257,7 +16268,17 @@ function ChatCards({ cards }) {
   return cards.map((card, ci) => (
     <div key={ci} data-chat-card={card.type} style={{ marginTop: 8, borderRadius: 8, background: '#fff', border: `1px solid ${PORTAL_SHELL.border}`, padding: 12, maxWidth: '84%' }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text, marginBottom: 6 }}>{card.title}</div>
-      {card.rows.map((r) => (
+      {card.type === 'visits' && card.rows.map((r) => (
+        <div key={r.id} style={{ padding: '8px 0', borderTop: `1px solid ${PORTAL_SHELL.border}`, fontSize: 14, color: PORTAL_SHELL.text }}>
+          <div style={{ fontWeight: 700 }}>{r.service}</div>
+          <div style={{ color: PORTAL_SHELL.muted, marginTop: 2 }}>{[r.dateLabel, r.technician].filter(Boolean).join(' · ')}</div>
+          {r.summary && <div style={{ marginTop: 6, lineHeight: 1.5 }}>{r.summary}</div>}
+          {/* The report page is an in-app route: a same-tab link works in the
+              browser and the native shell alike. */}
+          {r.reportUrl && <a href={r.reportUrl} style={CHAT_RECEIPT_LINK}>View report</a>}
+        </div>
+      ))}
+      {card.type === 'payments' && card.rows.map((r) => (
         <div key={r.id} style={{ padding: '8px 0', borderTop: `1px solid ${PORTAL_SHELL.border}`, fontSize: 14, color: PORTAL_SHELL.text }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
             <span style={{ fontWeight: 700, minWidth: 0 }}>{r.description}</span>

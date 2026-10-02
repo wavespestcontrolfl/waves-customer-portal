@@ -172,7 +172,7 @@ test('a card built before the model call fails still shows under the fallback te
   expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
 });
 
-test('GATE_PORTAL_CHAT_VISIT_FACTS on: the model answers from the visit facts, and the gates compose', async () => {
+test('GATE_PORTAL_CHAT_VISIT_FACTS on: structured facts to the model, the summary on a card, and the gates compose', async () => {
   process.env.GATE_PORTAL_CHAT_VISIT_FACTS = 'true';
   mockListVisits.mockResolvedValue({ services: [{ id: 's1', date: '2026-09-28', type: 'Pest Control', technician: 'Jordan Sample', notes: 'Treated the lanai.', products: [{ product_name: 'BrandName', product_category: 'insecticide' }], reportUrl: '/report/tok_r' }], total: 1 });
   wire('portal_chat', 'cust-1');
@@ -189,13 +189,10 @@ test('GATE_PORTAL_CHAT_VISIT_FACTS on: the model answers from the visit facts, a
   // Payments gate off: the billing section is still the page-button one.
   expect(first.system[0].text).toMatch(/BILLING, PLAN, REPORTS/);
   const toolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0].content;
-  expect(toolResult).toMatch(/Treated the lanai/);
-  expect(toolResult).not.toMatch(/BrandName|tok_r|Sample/);
-  expect(result.actions).toEqual([
-    { type: 'tab', label: 'Open completed visits and reports', tab: 'services' },
-    { type: 'link', label: 'View report, Pest Control, Sep 28, 2026', href: '/report/tok_r' },
-  ]);
-  expect(result).not.toHaveProperty('cards');
+  expect(toolResult).toMatch(/Pest Control/);
+  expect(toolResult).not.toMatch(/Treated the lanai|BrandName|tok_r|Sample/);
+  expect(result.actions).toEqual([{ type: 'tab', label: 'Open completed visits and reports', tab: 'services' }]);
+  expect(result.cards).toEqual([expect.objectContaining({ type: 'visits', rows: [expect.objectContaining({ summary: 'Treated the lanai.', reportUrl: '/report/tok_r' })] })]);
 
   // Both gates: both fact tools, both prompt sections.
   process.env.GATE_PORTAL_CHAT_FACTS = 'true';

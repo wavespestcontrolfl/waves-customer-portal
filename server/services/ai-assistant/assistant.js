@@ -109,7 +109,7 @@ function portalLane(channel) {
     prompt: PORTAL_PROMPTS[`${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}`],
     tools: portalToolsFor({ payments, visits }),
     actions: [],
-    cards: payments ? [] : null,
+    cards: payments || visits ? [] : null,
   };
 }
 
@@ -249,7 +249,7 @@ function withVisitFacts(prompt) {
     .replace('- Hand the conversation to the Waves team (escalate)', '- Look up the customer\'s recent completed visits (get_recent_visits)\n- Hand the conversation to the Waves team (escalate)')
     .replace('plan details, past visits, or documents', 'plan details, or documents')
     .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PAST VISITS:
-For a question about what was done at a visit, when the last visit was, or where a service report is, call get_recent_visits and answer from what it returns: the date, the service, the technician's first name, the kinds of product applied, and the reviewed visit summary. Do not add a finding, product or date it did not return, and never name a product brand. If the customer reports a problem since the visit or says something was missed, escalate.
+For a question about what was done at a visit, when the last visit was, or where a service report is, call get_recent_visits. Answer from what it returns (the date, the service, the technician's first name, the kinds of product applied) and point the customer to the card it shows for the reviewed summary and the report link. You are not given the summary text. Do not add a finding, product or date it did not return, and never name a product brand. If the customer reports a problem since the visit or says something was missed, escalate.
 
 ${renderCompanyFactsSection()}
 WHAT YOU MUST ESCALATE (use the escalate tool):`);
