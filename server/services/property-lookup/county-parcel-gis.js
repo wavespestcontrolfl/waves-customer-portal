@@ -39,6 +39,7 @@
  */
 
 const logger = require('../logger');
+const { routeSpellingVariants } = require('./route-spellings');
 
 const DEFAULT_TIMEOUT_MS = 3500;
 const METERS_PER_DEGREE_LAT = 111320;
@@ -867,17 +868,53 @@ async function lookupCountyParcelAttributesById(county, parcelId, options = {}) 
 // Fail-open null on error/timeout — the audit is a diagnostic hint, never
 // worth sinking a lookup for. The street text is stripped to [A-Z0-9 ] before
 // interpolation, so no quoting is reachable.
+//
+// A numbered route ("SR 70") is queried under EVERY spelling the rolls use
+// (routeSpellingVariants), one request per spelling, and the rows merged:
+// Manatee's WAF rejects ANY "… OR …" where-clause ("Request Rejected", live
+// 10-02), so the variants cannot ride one OR'd query, and stopping at the
+// first non-empty spelling would hide a number listed only under another one
+// (the audit would then call a real address missing). Any failed request is
+// a null (no signal), never a partial answer.
 async function queryStreetSitusAddresses(county, streetText, options = {}) {
+  const text = String(streetText || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const variants = routeSpellingVariants(text);
+  if (variants.length === 1) return queryStreetSitusAddressesOnce(county, variants[0], options);
+  // One deadline across the spellings: the variants run in series (the WAF
+  // forbids OR), and a fresh timer per request would stretch the leg's bound
+  // ~3x on a slow-but-answering county. Out of time = no signal (null).
+  const deadline = Date.now() + timeoutMsFor(options);
+  const merged = { situs: [], zips: [], truncated: false };
+  for (const variant of variants) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return null;
+    const result = await queryStreetSitusAddressesOnce(county, variant, { ...options, timeoutMs: remainingMs });
+    if (result === null) return null;
+    merged.situs.push(...result.situs);
+    merged.zips.push(...result.zips);
+    merged.truncated = merged.truncated || result.truncated;
+  }
+  return merged;
+}
+
+async function queryStreetSitusAddressesOnce(county, streetText, options = {}) {
   if (isDisabled()) return null;
   const layerUrl = COUNTY_LAYERS[county]?.url || SITUS_ONLY_LAYER_URLS[county];
   const fields = SITUS_QUERY_FIELDS[county];
   const text = String(streetText || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!layerUrl || !fields || text.length < 3) return null;
+  // options.houseNumber (a targeted route query): "<number> %<route>" — one
+  // LIKE with a mid-pattern wildcard reaches every direction or spelling
+  // placed between the number and the route ("123 NE US 41") without listing
+  // them, and needs no AND/OR (Manatee's WAF rejects both, live 10-02). The
+  // number is digits only, so no quoting is reachable.
+  const houseNumber = /^\d{1,7}$/.test(String(options.houseNumber ?? '')) ? String(options.houseNumber) : null;
+  const likeBody = houseNumber ? `${houseNumber} %${text}` : text;
 
   const zipField = SITUS_ZIP_FIELDS[county];
   const params = new URLSearchParams({
     f: 'json',
-    where: fields.map((f) => `UPPER(${f}) LIKE '%${text}%'`).join(' OR '),
+    where: fields.map((f) => `UPPER(${f}) LIKE '%${likeBody}%'`).join(' OR '),
     outFields: [...fields, ...(zipField ? [zipField] : [])].join(','),
     returnGeometry: 'false',
     resultRecordCount: '2000',
