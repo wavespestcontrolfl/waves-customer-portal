@@ -105,7 +105,10 @@ const money = (value) => (value === null || value === undefined || value === '' 
 const cents = (value) => Math.round((Number(value) || 0) * 100);
 const fromCents = (value) => Math.round(value) / 100;
 
-const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// Anything shaped like local@domain: an internationalized local part (any non-space, non-@ characters) and a domain
+// that has a dot or is a bracketed address literal ([192.0.2.1], [IPv6:...]). A bare "@handle" or "call @ 5pm" has
+// neither, so it is left alone.
+const EMAIL_RE = /[^\s@]+@(?:\[[^\]\s]+\]|[^\s@]+\.[^\s@]+)/gu;
 // Digit groups joined by non-alphanumeric separators of ANY length (spaces, tabs, newlines and indentation, dashes,
 // dots, slashes, underscores, any mix, or none): 13 or more digits in all. Only a letter or digit ends a run.
 const DIGIT_RUN_RE = /\d(?:[^A-Za-z0-9]*\d){12,}/g;
@@ -247,6 +250,7 @@ const optionalRead = (database, work) => database.transaction(work);
 
 const RECONCILE_POINTER = 'needs reconciliation — check the Invoices page';
 const VISIT_DID_NOT_HAPPEN_REASON = 'the visit for this invoice did not happen (cancelled/skipped) — check the Invoices page';
+const CUSTOMER_CHANGED_REASON = 'this customer record changed during the read; ask again';
 const RECORD_CHANGED_REASON = 'this record changed hands during the read; ask again';
 const CARD_INCOMPLETE_REASON = 'a card payment did not complete — check the Invoices page';
 const ATTACHED_INTENT_REASON = 'a payment was started on this invoice and its outcome is not confirmed here — check the Invoices page';
@@ -385,13 +389,20 @@ async function processingStatusOutcome(invoice, database, terminalError) {
  * flag), which the list reports as dispute_hold, and visitRefusesSettlement, a lock-taking settlement-write guard.
  * Anything unexpected, or a check that cannot run, holds the balance.
  */
-// The linked visit's never-ran status, or null: invoice-helpers neverRanVisitStatus (the predicate
-// visitRefusesSettlement applies under its lock) on a plain read of the visit the invoice links to.
-async function linkedVisitNeverRan(invoice, database) {
+// The visit the invoice links to (canonical linkedScheduledServiceId, including a service-record-only link) and the
+// two verdicts that hang off it: the never-ran status (invoice-helpers neverRanVisitStatus, the predicate
+// visitRefusesSettlement applies under its lock, here on a plain read) and the LIVE payer lookup with that visit id.
+// memberCollectionPending's own payer lookup keys only on invoices.scheduled_service_id and re-reads the invoice row,
+// so a service-record-only invoice whose visit later got a payer needs this resolution.
+async function linkedVisitVerdict(invoice, database) {
   const visitId = await require('../invoice').linkedScheduledServiceId(invoice, database);
   if (!visitId) return null;
   const visit = await database('scheduled_services').where({ id: visitId }).first('status');
-  return require('../invoice-helpers').neverRanVisitStatus(visit && visit.status);
+  const neverRan = require('../invoice-helpers').neverRanVisitStatus(visit && visit.status);
+  if (neverRan) return { neverRan };
+  if (invoice.scheduled_service_id) return null;
+  const payer = await require('../payer').resolveForInvoice({ database, customerId: String(invoice.customer_id), scheduledServiceId: String(visitId), throwOnError: true });
+  return payer && payer.payerId ? { payerBilled: true } : null;
 }
 
 async function decideCollectibility(invoice, listed, database) {
@@ -416,8 +427,9 @@ async function decideCollectibility(invoice, listed, database) {
   const fresh = member.row;
   // A visit that never ran refuses settlement (visitRefusesSettlement): the same pure status check, read-only, through
   // the canonical invoice-to-visit linkage (including a service-record-only link).
-  const neverRan = await linkedVisitNeverRan(fresh, database);
-  if (neverRan) return { ...held('needs_reconciliation', VISIT_DID_NOT_HAPPEN_REASON), row: fresh };
+  const linked = await linkedVisitVerdict(fresh, database);
+  if (linked && linked.neverRan) return { ...held('needs_reconciliation', VISIT_DID_NOT_HAPPEN_REASON), row: fresh };
+  if (linked && linked.payerBilled) return { ...held('not_collectible', MEMBER_REASONS.payer_billed), payer_billed: true, row: fresh };
   if (fresh.stripe_payment_intent_id) return { ...(await heldAttemptOutcome(fresh, database, ATTACHED_INTENT_REASON, { complete: true })), row: fresh };
   return { collectible: true, needs_reconciliation: false, state: 'collectible', reason: null, balance_due: invoiceAmountDue(fresh), row: fresh };
 }
@@ -637,8 +649,12 @@ function invoiceItem(listedRow, today, fence, heldIds) {
 async function getCustomerInvoices(input, actionContext) {
   const resolved = await resolveBillingCustomer(input, actionContext);
   if (resolved.error) return resolved;
-  // Every read below shares ONE read-only REPEATABLE READ snapshot.
-  return inSnapshot((database) => listForCustomer(resolved.customer, input, database));
+  // Every read below shares ONE read-only REPEATABLE READ snapshot, and the selected customer is re-validated INSIDE it.
+  return inSnapshot(async (database) => {
+    const current = await database('customers').where({ id: resolved.customer.id }).first('id', 'first_name', 'last_name', 'phone', 'deleted_at');
+    if (!current || current.deleted_at || String(current.id) !== String(resolved.customer.id)) return { error: CUSTOMER_CHANGED_REASON, code: 'record_unavailable' };
+    return listForCustomer(current, input, database);
+  });
 }
 
 // The list's own join follows invoices.annual_prepay_term_id only; some existing prepay invoices carry just the

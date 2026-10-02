@@ -179,6 +179,14 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const [record] = await db('service_records').insert({ customer_id: VISIT, service_date: day(-1), service_type: 'Pest Control', scheduled_service_id: idOf(skippedVisit) }).returning('id');
     await invoice('vis_record', VISIT, { total: 40, service_record_id: record.id || record });
     await invoice('vis_live', VISIT, { total: 50, scheduled_service_id: idOf(liveVisit) });
+    // A service-record-only invoice (no scheduled_service_id) whose visit was assigned a payer AFTER the invoice was minted.
+    const [visitPayer] = await db('payers').insert({ display_name: `Visit Payer ${run}` }).returning('id');
+    const [payerVisit] = await db('scheduled_services').insert({ customer_id: VISIT, scheduled_date: day(-1), service_type: 'Pest Control', status: 'completed', payer_id: visitPayer.id || visitPayer }).returning('id');
+    const [payerRecord] = await db('service_records').insert({ customer_id: VISIT, service_date: day(-1), service_type: 'Pest Control', scheduled_service_id: idOf(payerVisit) }).returning('id');
+    await invoice('vis_payer', VISIT, { total: 60, service_record_id: idOf(payerRecord) });
+    const [selfVisit] = await db('scheduled_services').insert({ customer_id: VISIT, scheduled_date: day(-1), service_type: 'Pest Control', status: 'completed' }).returning('id');
+    const [selfRecord] = await db('service_records').insert({ customer_id: VISIT, service_date: day(-1), service_type: 'Pest Control', scheduled_service_id: idOf(selfVisit) }).returning('id');
+    await invoice('vis_self_record', VISIT, { total: 70, service_record_id: idOf(selfRecord) });
     // More payment plans than the history shows.
     M = await customer(`Plans${run}`, `Many${run}`);
     const manyPlans = await invoice('m_plans', M, { total: 70 });
@@ -606,8 +614,50 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
         reason: 'the visit for this invoice did not happen (cancelled/skipped) — check the Invoices page' });
     }
     expect(by(list, 'vis_live')).toMatchObject({ collectible: true, balance_due: 50 });
-    expect(list.account_summary).toMatchObject({ total_due: 50, needs_reconciliation_count: 2 });
+    expect(list.account_summary).toMatchObject({ total_due: 120, needs_reconciliation_count: 2 });
     expect((await read('get_invoice_detail', { invoice_id: inv.vis_record.id })).invoice).toMatchObject({ collectible: false, needs_reconciliation: true });
+  });
+
+  test('a service-record-only invoice whose visit later got a payer is payer-billed (the live payer lookup uses the resolved visit)', async () => {
+    const list = await read('get_customer_invoices', { customer_id: VISIT, limit: 50 });
+    expect(by(list, 'vis_payer')).toMatchObject({ collectible: false, balance_due: null, amount_due_after_credit: null, payer_billed: true, needs_reconciliation: false });
+    expect(by(list, 'vis_payer').reason).toMatch(/billed to a third-party payer/);
+    // The same shape with a self-pay visit stays collectible; the payer one is out of total_due (50 live + 70 self = 120).
+    expect(by(list, 'vis_self_record')).toMatchObject({ collectible: true, balance_due: 70, payer_billed: false });
+    expect(list.account_summary.total_due).toBe(120);
+    expect((await read('get_invoice_detail', { invoice_id: inv.vis_payer.id })).invoice).toMatchObject({ payer_billed: true, collectible: false });
+  });
+
+  test('emails with internationalized local parts or address-literal domains are masked; ordinary @ mentions are not', async () => {
+    const Q = await customer(`Intl${run}`, `Mail${run}`);
+    const masked = ['用户@example.com', 'user@[192.0.2.1]', 'üser.name+tag@sub.例え.jp', 'x@[IPv6:2001:db8::1]'];
+    for (const [n, email] of masked.entries()) await invoice(`q_mail_${n}`, Q, { total: 5, title: `Mail ${email} done` });
+    await invoice('q_mail_kept', Q, { total: 5, title: 'ping @alice and meet @ 5pm, host user@localhost ok' });
+    const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
+    expect(text).not.toMatch(/用户|192\.0\.2\.1|üser|例え|IPv6/);
+    expect((text.match(/Mail \[email\] done/g) || []).length).toBe(masked.length);
+    expect(text).toContain('ping @alice and meet @ 5pm, host user@localhost ok');
+  });
+
+  test('a customer archived between selection and the snapshot is refused, not shown as an empty account', async () => {
+    const Q = await customer(`Gone${run}`, `Between${run}`);
+    await invoice('q_gone', Q, { total: 9 });
+    const comms = require('../services/intelligence-bar/comms-tools');
+    const original = comms.resolveCustomer;
+    const spy = jest.spyOn(comms, 'resolveCustomer').mockImplementation(async (...args) => {
+      const found = await original(...args);
+      await db('customers').where({ id: Q }).update({ deleted_at: new Date() });
+      return found;
+    });
+    try {
+      const result = await read('get_customer_invoices', { customer_id: Q });
+      expect(result).toMatchObject({ code: 'record_unavailable', error: 'this customer record changed during the read; ask again' });
+      expect(result.invoices).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+      await db('customers').where({ id: Q }).update({ deleted_at: null });
+    }
+    expect((await read('get_customer_invoices', { customer_id: Q })).invoices).toHaveLength(1);
   });
 
   test('card numbers split by long separators, tabs, newlines and indentation are masked', async () => {
