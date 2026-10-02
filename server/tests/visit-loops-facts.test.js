@@ -342,9 +342,10 @@ describe('pastWindow', () => {
 
   test('a grouped reminder stored on a SIBLING supersedes this member\'s older confirmation', async () => {
     const isSiblingQuery = (ops) => hasOp(ops, 'whereIn', (a) => a[0] === 'visit_id');
+    let sibTech = 'tech-1';
     const conn = fakeConn({ scheduled_services: (ops) => {
       if (isCandidateQuery(ops)) return [todayRow({ visit_id: 'g1', status: 'confirmed' })];
-      if (isSiblingQuery(ops)) return [{ id: 'visit-2', visit_id: 'g1', status: 'confirmed' }];
+      if (isSiblingQuery(ops)) return [{ id: 'visit-2', visit_id: 'g1', status: 'confirmed', technician_id: sibTech, scheduled_date: '2026-10-01' }];
       return [];
     } });
     // visit-1: 9 AM confirmation on 09-29; visit-2 carries the newer grouped 3 PM reminder for the whole stop
@@ -354,6 +355,13 @@ describe('pastWindow', () => {
     ]);
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow).toBeNull();
     expect(loadPromiseEvents.mock.calls[0][1]).toEqual(['visit-1', 'visit-2']);
+    // the sibling was reassigned to another tech: a separate physical stop, its notice never speaks for visit-1
+    sibTech = 'tech-2';
+    loadPromiseEvents.mockResolvedValueOnce([
+      { visit_id: 'visit-1', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z' },
+    ]);
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow).toMatchObject({ visitId: 'visit-1' });
+    expect(loadPromiseEvents.mock.calls[1][1]).toEqual(['visit-1']);
   });
 
   test('a promise whose window is UNKNOWN (a newer notice superseded it, start_at null) is never "passed"', async () => {

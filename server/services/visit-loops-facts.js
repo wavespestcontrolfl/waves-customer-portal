@@ -247,24 +247,37 @@ async function startedStopKeys(conn, customerId, rows, { arrivedOnly = false } =
 // is skipped — never substitute the schedule and apologise for a window we can't name.
 // Each row's STOP promise, the detector's own resolution: a grouped reminder's
 // evidence sits on whichever member won the claim, so siblings are loaded and
-// stopPromise picks the window across all members. Map id → promise (absent: none).
+// stopPromise picks the window across all members. The stop is PHYSICAL — same
+// visit_id, tech and day (stopKey): a member reassigned to another tech or day keeps
+// its visit_id but is a separate stop, and its notices never speak for this one.
+// Map id → promise (absent: none).
+const promiseStopKey = (r) => (r.visit_id && stopKey(r)) || `row:${r.id}`;
 async function stopPromiseMap(conn, rows, now) {
-  const own = [...new Map(rows.map((r) => [String(r.id), { id: r.id, visit_id: r.visit_id, status: r.status }])).values()];
+  const pick = (r) => ({ id: r.id, visit_id: r.visit_id, status: r.status, technician_id: r.technician_id, scheduled_date: r.scheduled_date });
+  const own = [...new Map(rows.map((r) => [String(r.id), pick(r)])).values()];
   if (!own.length) return new Map();
   const detector = require('./no-show-detector');
   const known = new Set(own.map((r) => String(r.id)));
+  const stopKeys = new Set(own.map(promiseStopKey));
   const visitIds = [...new Set(own.map((r) => r.visit_id).filter(Boolean).map(String))];
   const siblings = visitIds.length
-    ? ((await conn('scheduled_services').whereIn('visit_id', visitIds).select('id', 'visit_id', 'status')) || [])
-      .filter((r) => !known.has(String(r.id)) && visitIds.includes(String(r.visit_id)))
+    ? ((await conn('scheduled_services').whereIn('visit_id', visitIds)
+      .select('id', 'visit_id', 'status', 'technician_id', 'scheduled_date')) || [])
+      .filter((r) => !known.has(String(r.id)) && stopKeys.has(promiseStopKey(r))).map(pick)
     : [];
-  const members = [...own, ...siblings];
-  const events = detector.byVisit((await detector.loadPromiseEvents(conn, members.map((r) => String(r.id)), { now })) || []);
+  const stops = new Map();
+  for (const m of [...own, ...siblings]) {
+    const key = promiseStopKey(m);
+    if (!stops.has(key)) stops.set(key, []);
+    stops.get(key).push(m);
+  }
+  const all = [...stops.values()].flat();
+  const events = detector.byVisit((await detector.loadPromiseEvents(conn, all.map((r) => String(r.id)), { now })) || []);
   const out = new Map();
-  for (const stop of detector.groupedStops(members)) {
-    const promise = detector.stopPromise(stop.members, events, now);
+  for (const members of stops.values()) {
+    const promise = detector.stopPromise(members, events, now);
     if (!promise) continue;
-    for (const m of stop.members) if (known.has(String(m.id))) out.set(String(m.id), promise);
+    for (const m of members) if (known.has(String(m.id))) out.set(String(m.id), promise);
   }
   return out;
 }
