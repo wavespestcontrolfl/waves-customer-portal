@@ -45,6 +45,7 @@ const AWAITING = 'awaiting_first_visit';
 const STALE_DAYS = 14;
 const NOT_PERFORMED_OUTCOMES = ['inspection_only', 'customer_declined', 'incomplete'];
 const DEAD_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refunded'];
+const UNFINISHED_COMPLETION_STATUSES = ['pending', 'side_effects_pending', 'side_effects_running'];
 const JOB = "estimate_data -> 'prepayAutoChargeJob'";
 
 const staleAlertKey = (estimateId) => `paf-prepay-no-first-visit:${estimateId}`;
@@ -108,10 +109,21 @@ async function performedVisitCandidates(estimateId, customerId) {
     .whereNotExists(function unfinishedCompletion() {
       this.select(db.raw('1')).from('service_completion_attempts as a')
         .whereRaw('a.service_id = s.id')
-        .whereIn('a.status', ['pending', 'side_effects_pending', 'side_effects_running']);
+        .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES);
     })
     .orderBy('s.scheduled_date', 'asc')
     .select('s.*');
+}
+
+async function planHasUnfinishedCompletion(estimateId, customerId) {
+  const row = await db('service_completion_attempts as a')
+    .join('scheduled_services as s', 's.id', 'a.service_id')
+    .leftJoin('scheduled_services as p', 'p.id', 's.recurring_parent_id')
+    .where('s.customer_id', customerId)
+    .where((q) => q.where('s.source_estimate_id', estimateId).orWhere('p.source_estimate_id', estimateId))
+    .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES)
+    .first('a.id');
+  return !!row;
 }
 
 async function releaseOne(row, now) {
@@ -155,6 +167,12 @@ async function releaseOne(row, now) {
     return moved ? 'cancelled' : null;
   }
   const visit = await firstPerformedVisit(row.id, invoice.customer_id);
+  // Never release while ANY visit of the plan is still finishing its
+  // completion (pre-push audit P0): that visit decided its bill from the hold,
+  // and the charge and activation this release leads to would end the hold
+  // under it, so a resumed completion could bill beside the paid year. The
+  // next pass releases once every completion has finished.
+  if (visit && !settled && await planHasUnfinishedCompletion(row.id, invoice.customer_id)) return null;
   if (settled || visit) {
     // Due date first, so the transition stays retryable until it lands: a
     // declined charge's pay link and follow-ups then age from after the

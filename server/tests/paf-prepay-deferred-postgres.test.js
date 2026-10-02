@@ -495,6 +495,17 @@ postgres('annual prepay charged after the first visit', () => {
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     });
 
+    it('waits while another visit of the plan is still finishing its completion (pre-push audit P0)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.childId, idempotency_key: `k-${attemptId}`, status: 'side_effects_running' });
+      expect(await release()).toMatchObject({ released: 0 });
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+      await trx('service_completion_attempts').where({ id: attemptId }).update({ status: 'succeeded' });
+      expect(await release()).toMatchObject({ released: 1 });
+    });
+
     it('a dead year never sends the office a visit it did not hold (a service the term does not cover)', async () => {
       const f = await deferredAccept();
       const otherId = randomUUID();
