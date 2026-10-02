@@ -2,7 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const { rawAdminFetch } = vi.hoisted(() => ({ rawAdminFetch: vi.fn() }));
@@ -147,6 +147,23 @@ it("a linked neighborhood opens on its own: a filter set before never narrows it
     expect(url).not.toContain("filter=");
     expect(url).not.toContain("q=");
   }
+});
+
+it("opening a linked neighborhood on the mounted page drops the previous rows at once, while its load is still pending", async () => {
+  rawAdminFetch.mockImplementation((path) => (path.includes("neighborhood=")
+    ? new Promise(() => {}) // a slow load that has not answered yet
+    : response(ALL)));
+  function GoToBell() {
+    const navigate = useNavigate();
+    return <button type="button" onClick={() => navigate(`/?neighborhood=${ONE_ID}`)}>Open bell link</button>;
+  }
+  render(<MemoryRouter initialEntries={["/"]}><GoToBell /><NeighborhoodGateCodesPage /></MemoryRouter>);
+  expect(await screen.findByText("Sample Pines")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Open bell link" }));
+  await waitFor(() => expect(rawAdminFetch.mock.calls.at(-1)[0]).toContain(`neighborhood=${ONE_ID}`));
+  await waitFor(() => expect(screen.queryByText("Sample Pines")).toBeNull());
+  expect(screen.queryByText("Synthetic Oaks")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
 });
 
 it("a malformed ?neighborhood= is ignored: everything lists, no control", async () => {

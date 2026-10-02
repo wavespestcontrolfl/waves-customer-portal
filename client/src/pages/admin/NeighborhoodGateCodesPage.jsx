@@ -186,8 +186,19 @@ export default function NeighborhoodGateCodesPage() {
   }, [search]);
 
   const readSeq = useRef(0);
+  // What the rows on screen were loaded for. A first page for a different
+  // view (search, filter or linked neighborhood) drops the old rows at once,
+  // so a slow or failed load never leaves another view's entries actionable;
+  // a reload of the same view (after a save) keeps them in place.
+  const shownView = useRef(null);
   const load = useCallback(async ({ offset = 0 } = {}) => {
     const seq = ++readSeq.current;
+    const view = `${onlyNeighborhood || ""}|${query}|${filter}`;
+    if (!offset && shownView.current !== view) {
+      setNeighborhoods([]);
+      setTotal(0);
+      shownView.current = view;
+    }
     setLoading(true);
     setReadError("");
     try {
