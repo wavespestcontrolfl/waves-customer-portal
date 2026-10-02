@@ -63,9 +63,11 @@
   .tf-tool-grid { grid-template-columns: 1fr 1fr; }
 }
 
-/* Embedded in Waves Admin (/admin/today): .admin-main is the scroll container,
-   so the header/nav stick inside it instead of pinning to the viewport. */
-.tech-field.tf-embedded { min-height: auto; }
+/* Embedded in Waves Admin (/admin/today): .admin-main is the scroll container.
+   The shell fills it as a flex column so the field nav sits at the bottom of
+   the visible area on a short page and stays pinned there (sticky inside the
+   scroll container) on a long one; the header stays pinned at the top. */
+.tech-field.tf-embedded { display: flex; flex-direction: column; min-height: 100%; }
 .tech-field.tf-embedded .tf-header { position: sticky; top: 0; }
+.tech-field.tf-embedded .tf-main { flex: 1; padding-bottom: 24px; }
 .tech-field.tf-embedded .tf-nav { position: sticky; bottom: 0; left: auto; right: auto; }
-.tech-field.tf-embedded .tf-main { padding-bottom: 24px; }

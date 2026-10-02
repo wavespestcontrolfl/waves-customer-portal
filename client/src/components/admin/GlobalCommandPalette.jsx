@@ -100,6 +100,7 @@ function adminFetch(path, options = {}) {
 
 // ─── Route → Context mapping ────────────────────────────────────
 const ROUTE_CONTEXT_MAP = {
+  "/admin/today": "schedule", // the technician field workspace: Today is grouped with Schedule
   "/admin/schedule": "schedule",
   "/admin/dispatch": "dispatch",
   "/admin/dashboard": "dashboard",

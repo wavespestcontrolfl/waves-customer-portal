@@ -256,6 +256,7 @@ export default function AdminLayoutV2() {
   // be stable across renders that change neither the drawer nor the viewport.
   const openPalette = useCallback(() => { if (fieldBusy) return; closeSidebarForPalette(); paletteRef.current?.open(); },
     [closeSidebarForPalette, fieldBusy]);
+  const openPageFinder = useCallback(() => { if (fieldBusy) return; paletteRef.current?.openNavigation(); }, [fieldBusy]);
 
   const sidebarVisible = !isMobile || sidebarOpen;
   // On a phone the field workspace (/admin/today) supplies its own header and
@@ -330,7 +331,7 @@ export default function AdminLayoutV2() {
           </button>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 24 }} />
           <div style={{ flex: 1 }} />
-          {navigationEnabled && <Button density="comfortable" variant="ghost" onClick={() => paletteRef.current?.openNavigation()} aria-label="Search pages" className="!px-3"><Search size={20} aria-hidden /></Button>}
+          {navigationEnabled && <Button density="comfortable" variant="ghost" onClick={openPageFinder} aria-label="Search pages" className="!px-3"><Search size={20} aria-hidden /></Button>}
           <button
             type="button"
             onClick={openPalette}
@@ -407,7 +408,7 @@ export default function AdminLayoutV2() {
             isMobile && sidebarOpen ? "2px 0 16px rgba(0,0,0,0.12)" : "none",
         }}
       >
-        {navigationEnabled ? <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onSearch={() => paletteRef.current?.openNavigation()} onLogout={handleLogout} unreadCount={unreadConversations} /> : <>
+        {navigationEnabled ? <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onSearch={openPageFinder} onLogout={handleLogout} unreadCount={unreadConversations} /> : <>
         {/* Logo + title + notification bell */}
         <div
           style={{

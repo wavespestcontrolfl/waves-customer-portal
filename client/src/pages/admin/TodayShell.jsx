@@ -22,14 +22,19 @@ export default function TodayShell() {
   // The tech-field-workspace flag keeps its meaning here (pre-push Codex P1):
   // on → the field workspace; off → the legacy route UI, exactly as the /tech
   // shell rendered it, as this shell's children.
+  // The legacy route UI paints light text for the retired /tech shell's dark
+  // page; keep that wrapper so a flag-off (or flag-fetch-failure) render is
+  // readable inside the light admin surface.
   const legacy = (
-    <Outlet context={{
-      fieldWorkspace: false,
-      techRole: user?.role,
-      documentsAvailable,
-      payGrowthAvailable,
-      setNavigationBusy: lock?.setNavigationBusy,
-    }} />
+    <div style={{ minHeight: '100%', margin: '-24px -28px', padding: 16, background: '#0f1923', color: '#e2e8f0', fontFamily: "'Nunito Sans', sans-serif" }} data-legacy-field-shell>
+      <Outlet context={{
+        fieldWorkspace: false,
+        techRole: user?.role,
+        documentsAvailable,
+        payGrowthAvailable,
+        setNavigationBusy: lock?.setNavigationBusy,
+      }} />
+    </div>
   );
   return (
     <TechBasePathContext.Provider value="/admin/today">

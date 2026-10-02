@@ -85,6 +85,7 @@ describe('/admin/today field shell', () => {
     expect(await screen.findByText("Today's Route")).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'Field navigation' })).not.toBeInTheDocument();
     expect(flags.shellReads).toContain('tech-field-workspace');
+    expect(document.querySelector('[data-legacy-field-shell]')).not.toBeNull();
   });
 
   it('Menu leaves the workspace for the admin menu', async () => {
