@@ -173,8 +173,8 @@ describe.each(LAYOUTS)('Complete Service form, %s layout', (_layout, width) => {
       expect(row.total.parentElement.textContent).not.toMatch(/\bml\b/i);
     }
     expect(mlOptions()).toEqual([]);
-    // The injection record's free-text dose asks for the truck's measures.
-    expect(screen.getByPlaceholderText('Dose (tsp or fl oz)')).toBeTruthy();
+    // The injection record's dose is a number of tsp or fl oz.
+    expect([...screen.getByLabelText('Dose unit').options].map((option) => option.value)).toEqual(['tsp', 'fl_oz']);
   });
 
   it('offers tsp only for a liquid, never a granule or gel bait', async () => {
@@ -291,6 +291,12 @@ describe('the Tree & Shrub injection dose', () => {
     }
     for (const dose of ['½ fl oz', '4 tsp']) expect(doseBlocks(dose)).toEqual([]);
     expect(doseBlocks('')).toEqual(['Injection record requires dose.']);
+    // A saved dose that is not a number of tsp or fl oz is entered again.
+    expect(doseBlocks('a squirt')).toEqual(['Enter the injection dose as a number of tsp or fl oz.']);
+    // A dose left mid-entry, or zero, is not a dose.
+    expect(doseBlocks('. fl oz')).toEqual(['Enter the injection dose as a number of tsp or fl oz.']);
+    expect(doseBlocks('0 tsp')).toEqual(['Enter the injection dose as a number of tsp or fl oz.']);
+    expect(doseBlocks('.5 tsp')).toEqual([]);
   });
 });
 
