@@ -184,7 +184,8 @@ describe('validateFill', () => {
     expect(ok.visit.linearFt).toBe(180);
     const invented = validateFill(answer({ visit: visit({ areas: ['Outside'], linearFt: 180, heard: 'the perimeter outside' }) }), ctx, 'did the perimeter outside');
     expect(invented.visit.linearFt).toBeNull();
-    expect(invented.unclear).toEqual([{ heard: 'the perimeter outside', reason: 'amount_not_spoken' }]);
+    // linear feet need a number said with a distance word (changed from amount_not_spoken, audit P1 #3)
+    expect(invented.unclear).toEqual([{ heard: 'the perimeter outside', reason: 'linear_ft_not_heard' }]);
   });
 
   describe('notes', () => {
@@ -620,5 +621,108 @@ describe('an amount belongs to the product whose name it sits with', () => {
     expect(out.products.map((p) => p.amount)).toEqual([4, 5, 0.25]);
     const swapped = run([row('p-taurus', 5, 'fl_oz', text), row('p-surf', 4, 'fl_oz', text)], text);
     expect(swapped.products.map((p) => p.amount)).toEqual([null, null]);
+  });
+});
+
+describe('ownership is read off the transcript, not the model\'s stitched quote (audit round 3)', () => {
+  const TRANSCRIPT = 'Taurus four ounces and Talstar five ounces';
+  const run = (rows, transcript = TRANSCRIPT) => validateFill(answer({ products: rows }), ctx, transcript);
+  const row = (productId, amount, heard, extra = {}) => product({ productId, amount, unit: 'fl_oz', heard, ...extra });
+
+  test('the audit reproduction: heard "Taurus ... five ounces" does not give Taurus the five', () => {
+    const out = run([row('p-taurus', 5, 'Taurus ... five ounces')]);
+    expect(out.products).toHaveLength(1);
+    expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
+    expect(out.unclear).toEqual([{ heard: 'Taurus ... five ounces', reason: 'amount_not_spoken' }]);
+  });
+
+  test('the same stitched quote with the right number passes', () => {
+    expect(run([row('p-taurus', 4, 'Taurus ... four ounces')]).products[0]).toMatchObject({ amount: 4, unit: 'fl_oz' });
+    expect(run([row('p-talak', 5, 'Talstar ... five ounces')]).products[0]).toMatchObject({ amount: 5, unit: 'fl_oz' });
+  });
+
+  test('a stitched quote cannot pick up the other product\'s number in either order', () => {
+    expect(run([row('p-talak', 4, 'Taurus four ounces ... Talstar')]).products[0].amount).toBeNull();
+    const reversed = 'four ounces of Taurus and five of Talstar';
+    expect(run([row('p-taurus', 5, 'four ounces of Taurus ... five of')], reversed).products[0].amount).toBeNull();
+    expect(run([row('p-talak', 4, 'four ounces ... of Talstar')], reversed).products[0].amount).toBeNull();
+  });
+
+  test('a product named twice: the heard piece points at its own mention', () => {
+    const text = 'Taurus four ounces on the front. Later more Taurus, six ounces on the back.';
+    expect(run([row('p-taurus', 6, 'more Taurus, six ounces')], text).products[0].amount).toBe(6);
+    expect(run([row('p-taurus', 4, 'more Taurus, six ounces')], text).products[0].amount).toBeNull();
+    expect(run([row('p-taurus', 4, 'Taurus four ounces')], text).products[0].amount).toBe(4);
+  });
+
+  test('when the heard words cannot point at one mention, either mention\'s number is allowed, never another product\'s', () => {
+    const text = 'Taurus four ounces on the front. Talstar five ounces. Later Taurus, six ounces on the back.';
+    expect(run([row('p-taurus', 4, 'Taurus')], text).products[0].amount).toBe(4);
+    expect(run([row('p-taurus', 6, 'Taurus')], text).products[0].amount).toBe(6);
+    expect(run([row('p-taurus', 5, 'Taurus')], text).products[0].amount).toBeNull();
+  });
+});
+
+describe('a product method needs its word in that product\'s span or sentence', () => {
+  const run = (productRow, transcript) => validateFill(answer({ products: [productRow] }), ctx, transcript);
+  const withMethod = (method, heard) => product({ method, heard });
+
+  test('"Used Taurus" with a model-chosen granular_broadcast: cleared, tap kept, Check raised (the audit reproduction)', () => {
+    const out = run(withMethod('granular_broadcast', 'Used Taurus'), 'Used Taurus');
+    expect(out.products).toHaveLength(1);
+    expect(out.products[0]).toMatchObject({ productId: 'p-taurus', method: '' });
+    expect(out.unclear).toEqual([{ heard: 'Used Taurus', reason: 'method_not_heard' }]);
+  });
+
+  test.each([
+    ['spot_treatment', 'Spot treated with Taurus'], ['spot_treatment', 'Taurus, spot-treated the corners'],
+    ['perimeter_spray', 'Taurus around the house'], ['perimeter_spray', 'Taurus on the foundation'], ['perimeter_spray', 'Taurus as a barrier'],
+    ['bait_placement', 'Placed Taurus under the sink'], ['bait_placement', 'Taurus bait stations'],
+    ['granular_broadcast', 'Spread the Taurus with a spreader'], ['granular_broadcast', 'Taurus granules, broadcast'],
+  ])('%s is kept for "%s"', (method, words) => {
+    const out = run(withMethod(method, 'Taurus'), words);
+    expect(out.products[0].method).toBe(method);
+    expect(out.unclear).toEqual([]);
+  });
+
+  test('a method word in a different sentence, before the product, does not count', () => {
+    const out = run(withMethod('perimeter_spray', 'Used Taurus'), 'We walked the perimeter. Used Taurus.');
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear).toEqual([{ heard: 'Used Taurus', reason: 'method_not_heard' }]);
+  });
+
+  test('a method word after the product, in its span, counts even across a sentence', () => {
+    const out = run(withMethod('perimeter_spray', 'Used Taurus'), 'Used Taurus. Ran the perimeter.');
+    expect(out.products[0].method).toBe('perimeter_spray');
+  });
+
+  test('a method word that follows the NEXT product does not back this one', () => {
+    const out = validateFill(answer({ products: [withMethod('spot_treatment', 'Used Taurus')] }), ctx, 'Used Taurus. Talstar. Spot treated the garage.');
+    expect(out.products[0].method).toBe('');
+  });
+});
+
+describe('linear feet need a quantity said with a distance word', () => {
+  const run = (linearFt, transcript, heard = transcript) => validateFill(answer({ visit: visit({ areas: ['Outside'], linearFt, heard }) }), ctx, transcript);
+
+  test('"four ounces of Taurus" never becomes 4 linear feet (the audit reproduction)', () => {
+    const out = run(4, 'four ounces of Taurus outside');
+    expect(out.visit.linearFt).toBeNull();
+    expect(out.unclear).toEqual([{ heard: 'four ounces of Taurus outside', reason: 'linear_ft_not_heard' }]);
+  });
+
+  test.each([
+    ['sprayed 180 linear feet outside', 180], ['about two hundred feet outside', 200], ['120 ft of foundation outside', 120],
+    ['a hundred and fifty linear feet outside', 150], ['sprayed 80 lf outside', 80], ['one foot outside', 1],
+  ])('"%s" authorizes exactly %p', (words, feet) => {
+    const out = run(feet, words);
+    expect(out.visit.linearFt).toBe(feet);
+    expect(out.unclear).toEqual([]);
+  });
+
+  test('a different number than the one said with the distance word is dropped', () => {
+    const out = run(200, 'sprayed 180 linear feet outside, 200 ounces');
+    expect(out.visit.linearFt).toBeNull();
+    expect(out.unclear[0].reason).toBe('linear_ft_not_heard');
   });
 });

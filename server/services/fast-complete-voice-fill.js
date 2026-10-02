@@ -338,6 +338,8 @@ const UNIT_WORDS = {
   pound: 'lb', pounds: 'lb', lb: 'lb', lbs: 'lb',
   teaspoon: 'tsp', teaspoons: 'tsp', tsp: 'tsp', tsps: 'tsp',
   each: 'each', bait: 'each', baits: 'each', station: 'each', stations: 'each', tube: 'each', tubes: 'each', placement: 'each', placements: 'each', can: 'each', cans: 'each',
+  // a distance (linear feet of perimeter), never a product amount
+  foot: 'ft', feet: 'ft', ft: 'ft', lf: 'ft',
   // spoken, but not units the sheet offers
   tablespoon: 'unsupported', tablespoons: 'unsupported', tbsp: 'unsupported', tbs: 'unsupported', cup: 'unsupported', cups: 'unsupported',
   quart: 'unsupported', quarts: 'unsupported', pint: 'unsupported', pints: 'unsupported', liter: 'unsupported', liters: 'unsupported', ml: 'unsupported',
@@ -409,6 +411,7 @@ function readNumber(tokens, i) {
 // The unit word at tokens[i] and how many tokens it takes ("fl oz", "fluid ounces").
 function readUnit(tokens, i) {
   if ((tokens[i] === 'fl' || tokens[i] === 'fluid') && own(UNIT_WORDS, tokens[i + 1]) === 'oz') return { unit: 'fl_oz', length: 2 };
+  if (tokens[i] === 'linear' && own(UNIT_WORDS, tokens[i + 1]) === 'ft') return { unit: 'ft', length: 2 };
   const unit = own(UNIT_WORDS, tokens[i]);
   return unit ? { unit, length: 1 } : { unit: null, length: 0 };
 }
@@ -487,12 +490,14 @@ function amountValue(raw) {
 // The unambiguous spoken quantities among `quantities` that EQUAL the value.
 const equalQuantities = (value, quantities) => quantities.filter((q) => !q.ambiguous && Math.abs(q.value - value) < 1e-6);
 
-// A number said for a visit field (linear feet): { value } when equal to one
-// spoken in `heard`, else the one thing wrong with it.
-function spokenNumber(raw, heard) {
+// Linear feet: a quantity the tech SAID with a distance unit word after it
+// ("180 linear feet", "two hundred ft"), found in the transcript itself, equal
+// to the value the model gave.
+function linearFeet(raw, transcript) {
   const parsed = amountValue(raw);
   if (parsed.value === undefined) return parsed;
-  return equalQuantities(parsed.value, quantitiesIn(heard)).length ? parsed : { reason: 'amount_not_spoken' };
+  const feet = quantitiesIn(transcript).filter((q) => q.unit === 'ft');
+  return equalQuantities(parsed.value, feet).length ? parsed : { reason: 'linear_ft_not_heard' };
 }
 
 // ── Evidence for the SELECTED product ────────────────────────────────────
@@ -509,9 +514,20 @@ const isDistinctiveWord = (word) => word.length >= 4 && /^[a-z]+$/.test(word) &&
 const hasLetters = (word) => /[a-z]/.test(word);
 const containsRun = (tokens, run) => run.length > 0 && tokens.some((_, i) => run.every((word, k) => tokens[i + k] === word));
 
-// For one product against the heard tokens: whether its name is said, every word
-// of its names that was said (to tell two products apart), and where its name
-// sits (the first run of its said letter words) as { start, end } token positions.
+// Runs of consecutive token positions, as { start, end }.
+function runsOf(positions) {
+  const runs = [];
+  for (const i of [...positions].sort((x, y) => x - y)) {
+    const last = runs[runs.length - 1];
+    if (last && last.end === i) last.end = i + 1;
+    else runs.push({ start: i, end: i + 1 });
+  }
+  return runs;
+}
+
+// For one product against a token stream: whether its name is said, every word of
+// its names that was said (to tell two products apart), and where its name sits:
+// each run of its said letter words as { start, end } token positions.
 function nameEvidence(product, tokens) {
   const words = new Set();
   const spots = new Set();
@@ -519,16 +535,13 @@ function nameEvidence(product, tokens) {
   for (const name of [product.name, product.fullName, ...product.aliases]) {
     const nameTokens = tokensOf(name);
     const said = nameTokens.filter((t) => tokens.includes(t));
-    const letters = said.filter(hasLetters);
-    const named = containsRun(tokens, nameTokens) || said.some(isDistinctiveWord) || letters.length >= 2;
+    const letters = said.filter((t) => hasLetters(t) && t.length > 2);
+    const named = containsRun(tokens, nameTokens) || said.some(isDistinctiveWord) || said.filter(hasLetters).length >= 2;
     qualifies = qualifies || named;
     said.forEach((t) => words.add(t));
     if (named) tokens.forEach((t, i) => letters.includes(t) && spots.add(i));
   }
-  const start = Math.min(...spots);
-  let end = start + 1;
-  while (spots.has(end)) end += 1;
-  return { qualifies, words, start, end };
+  return { qualifies, words, runs: runsOf(spots) };
 }
 
 // Every product's evidence against one heard snippet, computed once per row.
@@ -547,23 +560,49 @@ function productEvidenceVerdict(product, evidence) {
   return tied ? 'ambiguous_product' : null;
 }
 
-// The spoken quantities that belong to THIS product when one snippet names
-// several. A quantity joined to a name by "of" ("four ounces of Taurus", "five of
-// Talstar") belongs to that name. Otherwise a quantity belongs to the product
-// whose name it follows, up to the next product's name ("Taurus four ounces and
-// Talstar five ounces"); failing that, a number right before the first name
-// said. Deterministic: position only.
-function productQuantities(product, evidence, quantities) {
-  const named = evidence.filter((e) => e.qualifies);
-  const mine = named.find((e) => e.id === product.id);
-  const joined = (q) => q.nameAt !== null && named.some((e) => e.start === q.nameAt);
-  const joinedToMe = quantities.filter((q) => q.nameAt === mine.start);
+// ── Which words in the TRANSCRIPT belong to which product ────────────────
+// The model's heard text is a stitched quote and cannot be trusted to keep a
+// number next to its product, so ownership is read off the transcript's own
+// token stream: where each product is named, and every spoken quantity.
+function transcriptWorld(ctx, transcript) {
+  const tokens = tokensOf(transcript);
+  const mentions = ctx.products.flatMap((product) => {
+    const evidence = nameEvidence(product, tokens);
+    return evidence.qualifies ? evidence.runs.map((run) => ({ id: product.id, ...run })) : [];
+  });
+  return { tokens, mentions, quantities: quantitiesIn(transcript) };
+}
+
+// The places in the transcript this product is named, as the heard words point
+// to them: the mentions that the heard's first contiguous piece overlaps; if it
+// overlaps none (or cannot be placed), every mention of the product.
+function productMentions(product, heard, world) {
+  const mine = world.mentions.filter((m) => m.id === product.id);
+  const piece = tokensOf(String(heard).split(/\.{3}|…/)[0]);
+  const ranges = world.tokens.map((_, i) => i).filter((i) => piece.length && piece.every((t, k) => world.tokens[i + k] === t)).map((i) => ({ start: i, end: i + piece.length }));
+  const hit = mine.filter((m) => ranges.some((r) => m.start < r.end && m.end > r.start));
+  return hit.length ? hit : mine;
+}
+
+// The tokens between a mention's end and the next product mention (any product).
+const afterSpan = (mention, world) => {
+  const next = Math.min(world.tokens.length, ...world.mentions.filter((m) => m.start > mention.start).map((m) => m.start));
+  return { from: mention.end, to: next };
+};
+
+// The spoken quantities that belong to ONE mention of a product. A quantity joined
+// to a name by "of" ("four ounces of Taurus", "five of Talstar") belongs to that
+// name. Otherwise a quantity belongs to the product whose name it follows, up to
+// the next product's name ("Taurus four ounces and Talstar five ounces"); failing
+// that, a number right before the first name said. Position only.
+function mentionQuantities(mention, world) {
+  const joinedToMe = world.quantities.filter((q) => q.nameAt === mention.start);
   if (joinedToMe.length) return joinedToMe;
-  const nextStart = Math.min(Infinity, ...named.filter((e) => e.start > mine.start).map((e) => e.start));
-  const after = quantities.filter((q) => !joined(q) && q.start >= mine.end && q.end <= nextStart);
+  const joined = (q) => q.nameAt !== null && world.mentions.some((m) => m.start === q.nameAt);
+  const { from, to } = afterSpan(mention, world);
+  const after = world.quantities.filter((q) => !joined(q) && q.start >= from && q.end <= to);
   if (after.length) return after;
-  // "four Taurus": a number right before the FIRST name said, with no product named earlier to own it
-  return quantities.filter((q) => q.end === mine.start && !named.some((e) => e.start < q.start));
+  return world.quantities.filter((q) => q.end === mention.start && !world.mentions.some((m) => m.start < q.start));
 }
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
@@ -592,7 +631,7 @@ function unitVerdict(spoken, unit, product) {
 // (by position), in the unit word attached to that number, in a unit the sheet
 // offers for the product; else none (and a Check for what was wrong, the product
 // tap stays).
-function productAmount(raw, product, heard, unclear, evidence) {
+function productAmount(raw, product, heard, unclear, world) {
   const none = { amount: null, unit: '' };
   const parsed = amountValue(raw.amount);
   if (parsed.reason) pushUnclear(unclear, heard, parsed.reason);
@@ -602,7 +641,8 @@ function productAmount(raw, product, heard, unclear, evidence) {
     pushUnclear(unclear, heard, 'bad_unit');
     return none;
   }
-  const matches = equalQuantities(parsed.value, productQuantities(product, evidence, quantitiesIn(heard)));
+  const owned = productMentions(product, heard, world).flatMap((m) => mentionQuantities(m, world));
+  const matches = equalQuantities(parsed.value, owned);
   if (!matches.length) {
     pushUnclear(unclear, heard, 'amount_not_spoken');
     return none;
@@ -611,6 +651,26 @@ function productAmount(raw, product, heard, unclear, evidence) {
   if (verdicts.includes(null)) return { amount: parsed.value, unit };
   pushUnclear(unclear, heard, verdicts[0]);
   return none;
+}
+
+// What the tech must have said for a product's application method to be kept.
+const METHOD_LEXICON = {
+  spot_treatment: /\bspot\b/,
+  perimeter_spray: /\b(perimeter|around the house|foundation|barrier)\b/,
+  bait_placement: /\b(bait(ed|s|ing)?|placed|placement|stations?)\b/,
+  granular_broadcast: /\b(granular|granules?|broadcast|spread|spreader)\b/,
+};
+
+// The method the model chose for a product, kept only when its word is in that
+// product's span of the transcript (after its name, before the next product) or in
+// the transcript sentence that names it; otherwise cleared with a Check.
+function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
+  if (!ctx.productMethods.includes(raw.method)) return '';
+  const spans = productMentions(product, heard, world).map((m) => afterSpan(m, world)).map(({ from, to }) => world.tokens.slice(from, to).join(' '));
+  const text = norm([...spans, sentenceOf(transcript, heard)].join(' . '));
+  if (METHOD_LEXICON[raw.method]?.test(text)) return raw.method;
+  pushUnclear(unclear, heard, 'method_not_heard');
+  return '';
 }
 
 function productSameAsLast(raw, amount, heard, transcript, unclear) {
@@ -625,6 +685,7 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
   const byId = new Map(ctx.products.map((p) => [p.id, p]));
   const seen = new Set();
   const out = [];
+  const world = transcriptWorld(ctx, transcript);
   for (const raw of Array.isArray(rawProducts) ? rawProducts : []) {
     if (!raw || typeof raw !== 'object') continue;
     const heard = cleanText(raw.heard, CAPS.heard);
@@ -636,9 +697,9 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
       continue;
     }
     seen.add(product.id);
-    const { amount, unit } = productAmount(raw, product, heard, unclear, evidence);
+    const { amount, unit } = productAmount(raw, product, heard, unclear, world);
     const sameAsLast = productSameAsLast(raw, amount, heard, transcript, unclear);
-    const method = ctx.productMethods.includes(raw.method) ? raw.method : '';
+    const method = productMethod(raw, product, heard, transcript, ctx, world, unclear);
     out.push({ productId: product.id, amount, unit, sameAsLast, method, heard });
   }
   for (const dropped of out.splice(CAPS.products)) pushUnclear(unclear, dropped.heard, 'too_many_products');
@@ -746,7 +807,7 @@ function validateVisit(rawVisit, ctx, normTranscript, unclear, transcript = '') 
   const visit = rawVisit && typeof rawVisit === 'object' ? rawVisit : {};
   const heard = cleanText(visit.heard, CAPS.heard);
   const { pests, areas, method, activity, otherPest } = pickVisitFields(visit, ctx, heard, unclear, transcript);
-  const feet = spokenNumber(visit.linearFt, heard);
+  const feet = linearFeet(visit.linearFt, transcript);
   if (feet.reason) pushUnclear(unclear, heard, feet.reason);
   const linearFt = feet.value ?? null;
   const anyFilled = pests.length || areas.length || method || activity || linearFt !== null;
