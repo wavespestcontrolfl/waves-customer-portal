@@ -195,6 +195,24 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     expect(block).toContain("bridgeNeedsConfirmation.push('missing_first_name')");
   });
 
+  test('no transcript cleanup closes an owed first-name card (codex #5559 r13)', () => {
+    const { SUPERSEDE_KEPT_CARD_SQL } = require('../services/call-routing-gates');
+    expect(SUPERSEDE_KEPT_CARD_SQL).toContain("OR reason_code = 'missing_first_name')");
+    // the implausible-transcript rejection dismissal applies the shared keep rule
+    const start = source.indexOf("resolution_note: 'Transcript rejected as an implausible hallucination.'");
+    expect(source.slice(start - 600, start)).toContain('.whereRaw(SUPERSEDE_KEPT_CARD_SQL)');
+  });
+
+  test('wiring: a first-name exact-address hold outside enforce mode files the booking task, pre-fence and fenced (codex #5559 r13)', () => {
+    const pre = source.indexOf("if (customerValidation.ok && advisoryHoldFields.includes('first_name') && !enforceModeActive) {");
+    expect(pre).toBeGreaterThan(-1);
+    expect(source.slice(pre, pre + 500)).toContain("skippedReason: 'first_name_exact_address_hold'");
+    const fenced = source.indexOf('if (schedErr.firstNameHold) {');
+    const block = source.slice(fenced, fenced + 1500);
+    expect(block).toContain('if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {');
+    expect(block).toContain("skippedReason: 'first_name_exact_address_hold'");
+  });
+
   test('wiring: the booking path marks the call for review while the first-name card is open', () => {
     expect(source).toContain("if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)");
   });

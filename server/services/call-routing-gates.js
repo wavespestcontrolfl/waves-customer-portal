@@ -1121,7 +1121,10 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 // The same rule keeps the owed-follow-up card the confirm hook files for such a
 // hold (its skipped_reason marker): a sweep must not retire the office's task or
 // make a system resolution read as "handled".
-const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked'))";
+// An owed first-name card belongs to the CUSTOMER the call created, not to the transcript:
+// no transcript cleanup (swap, adopt, or an implausible-transcript rejection) closes it,
+// because a terminal card blocks re-filing it (codex #5559 r13).
+const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked') OR reason_code = 'missing_first_name')";
 
 module.exports = {
   SUPERSEDE_KEPT_CARD_SQL,

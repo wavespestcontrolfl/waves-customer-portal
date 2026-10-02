@@ -16927,6 +16927,17 @@ const CallRecordingProcessor = {
               `[call-proc] Skipping appointment auto-create for ${callSid}: missing required customer fields ` +
               missingFields.join(', ') + (emailAdvisoryHold ? ' (a booking with no email or no first name outside enforce mode requires a validated address)' : '')
             );
+            // The first-name exact-address hold skipped a confirmed booking: outside enforce
+            // mode nothing else files a scheduling task, and the first-name card closes as soon
+            // as the name is typed in — so the office gets the booking task too (codex #5559 r13).
+            if (customerValidation.ok && advisoryHoldFields.includes('first_name') && !enforceModeActive) {
+              await fileSkippedBookingCard({
+                call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                skippedReason: 'first_name_exact_address_hold',
+                preferredDateTime: extracted.preferred_date_time,
+                serviceType: serviceResolution.service, bridgeNeedsConfirmation, callSid,
+              });
+            }
           } else {
             // 'there' when no first name is on file (advisory-create path):
             // a confirmation must never read "Hello !" or "Hello null!".
@@ -19342,6 +19353,14 @@ const CallRecordingProcessor = {
                 .catch((err) => logger.warn(`[call-proc] fenced first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
               if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
                 && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+                await fileSkippedBookingCard({
+                  call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                  skippedReason: 'first_name_exact_address_hold',
+                  preferredDateTime: extracted.preferred_date_time,
+                  serviceType, bridgeNeedsConfirmation, callSid,
+                });
+              }
             }
           }
 
