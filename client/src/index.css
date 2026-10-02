@@ -186,9 +186,9 @@ input[type="week"] {
    shift. In production renderHTML (server/index.js) injects html.admin-app
    server-side for /admin paths. */
 html.admin-app,
-html.admin-app *:not(.tech-field):not(.tech-field *):not(.tech-field-portal):not(.tech-field-portal *),
+html.admin-app *:not(.tech-field):not(.tech-field *):not(.tech-field-portal):not(.tech-field-portal *):not(.tech-field-fallback):not(.tech-field-fallback *),
 .admin-shell-v2,
-.admin-shell-v2 *:not(.tech-field):not(.tech-field *) {
+.admin-shell-v2 *:not(.tech-field):not(.tech-field *):not(.tech-field-fallback):not(.tech-field-fallback *) {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
 /* The field workspace (/admin/today, TechFieldShell) keeps its own type:

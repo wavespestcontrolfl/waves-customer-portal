@@ -341,6 +341,17 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     await waitFor(() => expect(localStorage.getItem("waves_admin_token")).toBeNull());
   });
 
+  it.each([
+    ["no id", { name: "No Id", role: "technician" }],
+    ["no role", { id: "x-1", name: "No Role" }],
+  ])("a malformed staff profile (%s) never marks Today ready (Codex #5573 r18)", async (_label, profile) => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, profile)));
+    renderAt();
+    expect(await screen.findByText(/Unable to verify staff access/i)).toBeInTheDocument();
+    expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);

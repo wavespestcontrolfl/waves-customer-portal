@@ -117,3 +117,9 @@ it('opening a visit (?visit= only) scrolls the field main back to the top (Codex
   fireEvent.click(screen.getByRole('link', { name: 'Open stop' }));
   await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(before));
 });
+
+it('the flag-off view sits in the font-exempt fallback root (Codex #5573 r18)', () => {
+  flag.enabled = false;
+  renderShell();
+  expect(screen.getByText('Existing route').closest('.tech-field-fallback')).not.toBeNull();
+});

@@ -79,7 +79,13 @@ export default function useStaffSession() {
     adminFetch("/admin/auth/me", { redirectOn401: false, ...(abort ? { signal: abort.signal } : {}) })
       .then((profile) => {
         if (superseded()) return;
-        if (!profile) {
+        // On the field workspace, a verified identity needs an id and a role
+        // (Codex #5573 r18). Any staff role is allowed: /admin/today is the
+        // landing for every non-admin role (CSR included), not only
+        // technicians. Other admin pages keep their existing check.
+        const fieldIdentityInvalid = isFieldPath(locationRef.current.pathname)
+          && (!profile?.id || !profile?.role);
+        if (!profile || fieldIdentityInvalid) {
           patch({ status: "error" });
           return;
         }

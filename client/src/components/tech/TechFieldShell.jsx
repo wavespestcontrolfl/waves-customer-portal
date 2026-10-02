@@ -35,7 +35,9 @@ export default function TechFieldShell({ children, techName, techRole, staffProf
   if (!ready) return <div className={embedded ? 'tech-field tf-embedded' : 'tech-field'} role="status">Loading field workspace…</div>;
   // The retired /tech shell showed the install hint whatever the flag said:
   // the flag-off (or fail-closed) view keeps it (Codex #5573 r8).
-  if (!enabled) return <><AddToHomeScreenHint />{children}</>;
+  // The flag-off view keeps the field typography too: its root carries the
+  // font exemption class (index.css; Codex #5573 r18).
+  if (!enabled) return <div className="tech-field-fallback"><AddToHomeScreenHint />{children}</div>;
   const section = moreRoute || documentsRoute || payGrowthRoute ? 'more'
     : todayRoute ? 'today' : 'tools';
   return (

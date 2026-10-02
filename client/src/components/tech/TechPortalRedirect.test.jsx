@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -60,5 +60,14 @@ describe('retired /tech portal redirect', () => {
     view.unmount();
     expect(document.querySelector('link[rel="manifest"]').getAttribute('href')).toBe('/manifest.json');
     expect(document.title).toBe('Waves Customer Portal');
+  });
+
+  it('a sign-in in another tab moves the signed-out landing on to /admin/today (Codex #5573 r18)', async () => {
+    localStorage.clear();
+    renderAt('/tech/tools');
+    expect(screen.getByRole('link', { name: 'Sign in' })).toBeInTheDocument();
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    await act(async () => { window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_token' })); });
+    expect(screen.getByRole('status').textContent).toBe('/admin/today/tools');
   });
 });

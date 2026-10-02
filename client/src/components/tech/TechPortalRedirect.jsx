@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, Navigate, useLocation } from 'react-router-dom';
 import { isNativeApp } from '../../native/platform';
 import { getAdminAuthToken } from '../../lib/adminAuth';
@@ -42,7 +42,17 @@ function useFieldInstallIdentity(active) {
 
 export default function TechPortalRedirect() {
   const { pathname, search, hash } = useLocation();
-  const signedOutLanding = !isNativeApp() && !getAdminAuthToken();
+  // Reactive to a sign-in (or out) in another tab, as the retired shell was:
+  // the landing then redirects to /admin/today (Codex #5573 r18).
+  const [hasToken, setHasToken] = useState(() => !!getAdminAuthToken());
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key === null || event.key === 'waves_admin_token') setHasToken(!!getAdminAuthToken());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+  const signedOutLanding = !isNativeApp() && !hasToken;
   useFieldInstallIdentity(signedOutLanding);
   if (isNativeApp()) return <Navigate to="/" replace />;
   const target = `${techToTodayPath(pathname)}${search}${hash}`;
@@ -50,7 +60,7 @@ export default function TechPortalRedirect() {
   // Field Tools manifest for /tech) so a new technician can Add to Home
   // Screen before signing in, as the retired /tech shell allowed (Codex
   // #5573 r10). The installed app starts at /admin/today.
-  if (!getAdminAuthToken()) {
+  if (signedOutLanding) {
     return (
       // Standalone PWA under viewport-fit=cover: clear the notch / status bar
       // like the retired shell did (Codex #5573 r14).
