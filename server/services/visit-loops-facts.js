@@ -115,12 +115,6 @@ function windowLabel(row, deriveWindow) {
 }
 
 // ── today's visits ──────────────────────────────────────────────────────────
-// A visit dated yesterday whose customer-facing window rolls past midnight and has
-// not yet ended at nowMin (ET minutes of today).
-function crossesIntoNow(row, nowMin) {
-  const end = customerWindowEndMinutes(row);
-  return end != null && end > 1440 && nowMin < end - 1440;
-}
 
 // The occurrence an alert was raised for, from its own record — or null when it
 // records none (reschedules do not resolve alerts, so an unstamped one cannot be
@@ -172,7 +166,6 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type');
   const today = etDateString(now);
   const yesterday = etDateString(addETDays(now, -1));
-  const nowMin = nowEtMinutes(now);
   // yesterday's overnight window stays live while its alert is unresolved: a stage-2
   // alert is raised AFTER the window ends, so "window still open" would drop it
   const overnight = (occ) => (customerWindowEndMinutes({ window_start: occ.startHms }) || 0) > 1440;
