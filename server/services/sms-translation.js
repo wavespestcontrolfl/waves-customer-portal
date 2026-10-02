@@ -534,6 +534,11 @@ function translationAddedFault(englishReply, backTranslation, context) {
 // Steps 1-2: the customer's text in English, then the English draft.
 async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (inboundMessage.length > MAX_TEXT) return { stop: 'inbound_too_long' };
+  // the customer's thread and account, snapshotted the moment the trial starts (after any consuming
+  // branch committed): a staff reply or newer text landing during the model calls below never reaches
+  // the draft. Same live-ETA opt-in as the live drafter (draftShadowReply): the real-answers gate.
+  const ContextAggregator = require('./context-aggregator');
+  const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
   const inbound = await translateInbound(inboundMessage);
   if (!inbound.ok) return { stop: `inbound_translation_failed:${inbound.reason}` };
   // the model reads it as English: today's English path already answers it
@@ -546,9 +551,6 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (!inboundMeaning.ok) return { stop: `inbound_meaning_check_failed:${inboundMeaning.reason}`, fields, checks: { inbound_parity: inboundParity } };
   if (!inboundMeaning.same) return { stop: 'meaning_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity, inbound_meaning: { differences: inboundMeaning.differences } } };
 
-  const ContextAggregator = require('./context-aggregator');
-  // same opt-in as the live drafter (draftShadowReply): the live ETA rides the real-answers gate
-  const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
   const thread = await translateThread(liveContext, inboundMessage, inbound.english);
   if (!thread.ok) return { stop: `thread_translation_failed:${thread.reason}`, fields };
   const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');

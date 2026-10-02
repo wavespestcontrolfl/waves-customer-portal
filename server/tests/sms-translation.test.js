@@ -239,6 +239,19 @@ describe('runTranslationTrial', () => {
     expect(mockDraft).not.toHaveBeenCalled();
   });
 
+  test('the customer\'s context is snapshotted before any model call', async () => {
+    const ctx = require('../services/context-aggregator');
+    const order = [];
+    ctx.getContextForCustomer.mockClear();
+    ctx.getContextForCustomer.mockImplementationOnce(async () => { order.push('context'); return { customer: { id: 'c1' } }; });
+    scriptModels({ inbound: SPANISH_INBOUND });
+    const base = mockDispatch.getMockImplementation();
+    mockDispatch.mockImplementation(async (policy, payload) => { order.push('model'); return base(policy, payload); });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(order[0]).toBe('context');
+    expect(ctx.getContextForCustomer).toHaveBeenCalledTimes(1);
+  });
+
   test('trial drafting is metered on the translation lane', async () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
