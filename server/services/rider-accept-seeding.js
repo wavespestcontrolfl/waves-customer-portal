@@ -160,7 +160,15 @@ async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }
 async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
   if (!ctx) return;
   if (ctx.lawn && String(ctx.lawn.parent.id) === String(parentRow.id)) {
-    ctx.lawn.seededDates = (seedResult?.insertedRows || []).map((r) => dateOnly(r.scheduled_date)).filter(Boolean);
+    // The lawn series as SAVED (a resumed seed keeps existing follow-ups and
+    // inserts only the missing ones), never just this call's inserts.
+    try {
+      const rows = await liveSeriesRows(conn, [parentRow.id]);
+      ctx.lawn.seededDates = rows.filter((r) => r.recurring_parent_id).map((r) => dateOnly(r.scheduled_date)).filter(Boolean);
+    } catch (err) {
+      logger.warn(`[rider-accept] could not read lawn ${parentRow.id}'s series (hosts nothing): ${err.message}`);
+      ctx.lawn = null;
+    }
   }
   if (!rider?.hostParentId) return;
   // Link only what was actually persisted: on a retried/resumed accept the
@@ -180,15 +188,26 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
   await linkRider(conn, parentRow.id, rider.hostParentId);
 }
 
-async function persistedRiderOnHost(conn, riderId, hostId) {
-  const rows = await inSavepoint(conn, (sp) => sp('scheduled_services')
-    .where((q) => q.whereIn('id', [riderId, hostId]).orWhereIn('recurring_parent_id', [riderId, hostId]))
+// Live (not cancelled) rows of the given series: parents and their children.
+function liveSeriesRows(conn, parentIds) {
+  return inSavepoint(conn, (sp) => sp('scheduled_services')
+    .where((q) => q.whereIn('id', parentIds).orWhereIn('recurring_parent_id', parentIds))
     .whereNotIn('status', ['cancelled'])
-    .select('id', 'recurring_parent_id', 'scheduled_date'));
+    .select('id', 'recurring_parent_id', 'scheduled_date', 'visit_id'));
+}
+
+// Every saved rider follow-up sits on a saved lawn date AND is in that lawn
+// row's visit (a seeded row whose grouping failed is a separate stop).
+async function persistedRiderOnHost(conn, riderId, hostId) {
+  const rows = await liveSeriesRows(conn, [riderId, hostId]);
   const seriesOf = (row) => String(row.recurring_parent_id || row.id);
-  const hostDates = new Set(rows.filter((r) => seriesOf(r) === String(hostId)).map((r) => dateOnly(r.scheduled_date)));
-  const riderFollowUps = rows.filter((r) => String(r.recurring_parent_id || '') === String(riderId)).map((r) => dateOnly(r.scheduled_date));
-  return riderFollowUps.length > 0 && riderFollowUps.every((d) => hostDates.has(d));
+  const hostVisitByDate = new Map(rows.filter((r) => seriesOf(r) === String(hostId))
+    .map((r) => [dateOnly(r.scheduled_date), r.visit_id ? String(r.visit_id) : null]));
+  const riderFollowUps = rows.filter((r) => String(r.recurring_parent_id || '') === String(riderId));
+  return riderFollowUps.length > 0 && riderFollowUps.every((r) => {
+    const hostVisit = hostVisitByDate.get(dateOnly(r.scheduled_date));
+    return !!hostVisit && !!r.visit_id && String(r.visit_id) === hostVisit;
+  });
 }
 
 async function linkRider(conn, riderId, hostParentId) {

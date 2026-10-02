@@ -274,33 +274,47 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
-  test('the link is written only when the SAVED rider follow-ups sit on saved lawn dates (retry keeps old dates)', async () => {
+  test('the link is written only when every SAVED rider follow-up sits on a lawn date AND in that lawn visit', async () => {
     const RiderAcceptSeeding = require('../services/rider-accept-seeding');
+    const VisitGroups = require('../services/visit-groups');
     const trx = await mockPg.transaction();
     try {
       const base = await customerFixture(trx);
       const first = weekdayAhead(10);
+      const lawnId = (await trx('services').where({ service_key: 'lawn_care_6week' }).first('id')).id;
+      const pestId = (await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id')).id;
       const row = (over) => ({
         customer_id: base.customerId, property_id: base.propertyId, status: 'pending', is_recurring: true,
-        window_start: '09:00', window_end: '10:00', ...over,
+        window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, ...over,
       });
-      const [lawn] = await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', scheduled_date: first })).returning('*');
+      const [lawn] = await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', service_id: lawnId, scheduled_date: first })).returning('*');
       for (let i = 1; i <= 8; i++) {
-        await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', scheduled_date: addDays(first, 42 * i), recurring_parent_id: lawn.id }));
+        await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', service_id: lawnId, scheduled_date: addDays(first, 42 * i), recurring_parent_id: lawn.id }));
       }
-      const [offPest] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', scheduled_date: first })).returning('*');
-      for (const d of [91, 182, 273]) {
-        await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', scheduled_date: addDays(first, d), recurring_parent_id: offPest.id }));
-      }
-      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, offPest, { hostParentId: lawn.id }, { insertedRows: [] });
-      expect((await trx('scheduled_services').where({ id: offPest.id }).first('rides_parent_id')).rides_parent_id).toBeNull();
+      const pestSeries = async (days, { group }) => {
+        const [p] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: first })).returning('*');
+        for (const d of days) {
+          const [c] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: addDays(first, d), recurring_parent_id: p.id })).returning('*');
+          if (group) await VisitGroups.maybeGroupRow(c.id, { database: trx, createdBy: 'test' });
+        }
+        return p;
+      };
+      const linkOf = async (p) => (await trx('scheduled_services').where({ id: p.id }).first('rides_parent_id')).rides_parent_id;
 
-      const [onPest] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', scheduled_date: first })).returning('*');
-      for (const d of [84, 168, 252]) {
-        await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', scheduled_date: addDays(first, d), recurring_parent_id: onPest.id }));
-      }
-      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, onPest, { hostParentId: lawn.id }, { insertedRows: [] });
-      expect((await trx('scheduled_services').where({ id: onPest.id }).first('rides_parent_id')).rides_parent_id).toBe(lawn.id);
+      // A retried accept that kept its own quarterly-walk dates: off the lawn days.
+      const off = await pestSeries([91, 182, 273], { group: true });
+      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, off, { hostParentId: lawn.id }, { insertedRows: [] });
+      expect(await linkOf(off)).toBeNull();
+      // On the lawn days but never grouped into the lawn visits.
+      const ungrouped = await pestSeries([84, 168, 252], { group: false });
+      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, ungrouped, { hostParentId: lawn.id }, { insertedRows: [] });
+      expect(await linkOf(ungrouped)).toBeNull();
+      await trx('scheduled_services').where({ recurring_parent_id: ungrouped.id }).del();
+      await trx('scheduled_services').where({ id: ungrouped.id }).del();
+      // On the lawn days and in the lawn visits: linked.
+      const on = await pestSeries([84, 168, 252], { group: true });
+      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, on, { hostParentId: lawn.id }, { insertedRows: [] });
+      expect(await linkOf(on)).toBe(lawn.id);
     } finally { await trx.rollback(); }
   });
 

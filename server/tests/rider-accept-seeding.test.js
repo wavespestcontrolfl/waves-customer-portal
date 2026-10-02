@@ -144,10 +144,16 @@ describe('rider context fall-backs', () => {
       : { update: async (u) => { conn.updates.push({ table, w, u }); return 1; } }),
   }), { updates: [], persisted: [] });
   // The lawn seeds first in this accept, with these follow-up dates.
+  // Saved lawn rows, each in its own visit v<date>.
+  const lawnRows = (n) => [
+    { id: 'lawn', recurring_parent_id: null, scheduled_date: '2098-01-05', visit_id: 'v2098-01-05' },
+    ...lawnDates(n).map((d, i) => ({ id: `l${i}`, recurring_parent_id: 'lawn', scheduled_date: d, visit_id: `v${d}` })),
+  ];
   async function seedLawn(ctx, n = 8, over = {}) {
     const lawn = parent({ id: 'lawn', ...over });
     expect(await RiderAccept.beforeSeed(ctx, conn, lawn, lawnPlan)).toBeNull();
-    await RiderAccept.afterSeed(ctx, conn, lawn, null, { insertedRows: lawnDates(n).map((d) => ({ scheduled_date: d })) });
+    conn.persisted = lawnRows(n);
+    await RiderAccept.afterSeed(ctx, conn, lawn, null, { insertedRows: [] });
   }
   const pest = (over) => parent({ id: 'pest', service_type: 'Quarterly Pest Control', ...over });
   beforeEach(() => { conn.updates = []; conn.persisted = []; });
@@ -183,12 +189,30 @@ describe('rider context fall-backs', () => {
     expect(rider.hostParentId).toBe('lawn');
     expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
     conn.persisted = [
-      { id: 'lawn', recurring_parent_id: null, scheduled_date: '2098-01-05' },
-      ...lawnDates(8).map((d, i) => ({ id: `l${i}`, recurring_parent_id: 'lawn', scheduled_date: d })),
-      ...rider.overrideDates.map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d })),
+      ...lawnRows(8),
+      ...rider.overrideDates.map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: `v${d}` })),
     ];
     await RiderAccept.afterSeed(ctx, conn, pest(), rider, { insertedRows: [] });
     expect(conn.updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
+  });
+
+  test('a rider follow-up on a lawn date but NOT in the lawn visit (its grouping failed) is not linked', async () => {
+    const ctx = RiderAccept.createContext();
+    await seedLawn(ctx);
+    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    conn.persisted = [
+      ...lawnRows(8),
+      ...rider.overrideDates.map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: i === 1 ? null : `v${d}` })),
+    ];
+    await RiderAccept.afterSeed(ctx, conn, pest(), rider, { insertedRows: [] });
+    expect(conn.updates).toEqual([]);
+  });
+
+  test('a resumed lawn seed that inserted nothing still hosts from its SAVED follow-ups', async () => {
+    const ctx = RiderAccept.createContext();
+    await seedLawn(ctx); // insertedRows: [] — the saved series supplies the dates
+    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
   });
 
   test('a retried accept whose saved rider dates are NOT lawn dates is not linked', async () => {
@@ -197,9 +221,8 @@ describe('rider context fall-backs', () => {
     const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
     // The seeder kept the series' existing quarterly-walk dates (inserted none).
     conn.persisted = [
-      { id: 'lawn', recurring_parent_id: null, scheduled_date: '2098-01-05' },
-      ...lawnDates(8).map((d, i) => ({ id: `l${i}`, recurring_parent_id: 'lawn', scheduled_date: d })),
-      ...['2098-04-06', '2098-07-06', '2098-10-05'].map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d })),
+      ...lawnRows(8),
+      ...['2098-04-06', '2098-07-06', '2098-10-05'].map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: null })),
     ];
     await RiderAccept.afterSeed(ctx, conn, pest(), rider, { insertedRows: [] });
     expect(conn.updates).toEqual([]);
