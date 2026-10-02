@@ -283,6 +283,15 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   });
 
   describe('the next-visit gap counts only for this visit\'s property', () => {
+    // The builder only takes scheduled dates after today's ET date: pin today
+    // (Date only; timers stay real) so the 2027 fixture always qualifies.
+    beforeEach(() => {
+      jest.useFakeTimers({
+        now: new Date('2026-10-02T16:00:00Z'),
+        doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+      });
+    });
+    afterEach(() => { jest.useRealTimers(); });
     const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
     const HOME_B = { service_address_line1: '200 Sample Oak Ln', service_address_city: 'Sarasota', service_address_zip: '34232' };
     const gapFor = async (nextStamp) => {
