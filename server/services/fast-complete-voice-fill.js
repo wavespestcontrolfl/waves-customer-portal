@@ -725,7 +725,7 @@ function isOtherVisitAt(tokens, j) {
   if (tokens[j] === 'previously') return true;
   // "same as last time", "like last time": this visit, done the earlier way
   if (tokens[j - 1] === 'as' || tokens[j - 1] === 'like') return false;
-  return (tokens[j] === 'last' || tokens[j] === 'next') && OTHER_VISIT_NEXT.has(tokens[j + 1]);
+  return ['last', 'next', 'previous', 'prior', 'earlier'].includes(tokens[j]) && OTHER_VISIT_NEXT.has(tokens[j + 1]);
 }
 function isNegationAt(tokens, j) {
   if (isOtherVisitAt(tokens, j)) return true;
@@ -908,13 +908,15 @@ const METHOD_LEXICON = {
 // The method the model chose for a product, kept only when its word is said, not
 // negated, in that product's own clause (mentionClause); otherwise cleared with a
 // Check.
-// A catalog method's evidence is its own distinctive words ("foliar", "drench",
-// "injection"), each at its start ("drenched", "injected").
+// A catalog method's evidence is its ACTION word, the last distinctive word of
+// its key ("soil_drench" → "drench", "trunk_injection" → "injection",
+// "foliar_spray" → "foliar"), at its start ("drenched", "injected"); a context
+// noun ("soil", "trunk") proves nothing.
 const GENERIC_METHOD_WORDS = new Set(['spray', 'treatment', 'application', 'placement', 'and', 'the', 'of']);
 function methodLexicon(method) {
   if (METHOD_LEXICON[method]) return METHOD_LEXICON[method];
-  const words = method.split('_').filter((w) => w.length >= 4 && !GENERIC_METHOD_WORDS.has(w)).map((w) => w.slice(0, Math.max(4, w.length - 3)));
-  return words.length ? new RegExp(`\\b(${words.join('|')})\\w*\\b`) : null;
+  const action = method.split('_').filter((w) => w.length >= 4 && !GENERIC_METHOD_WORDS.has(w)).pop();
+  return action ? new RegExp(`\\b${action.slice(0, Math.max(4, action.length - 3))}\\w*\\b`) : null;
 }
 
 function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
@@ -1233,12 +1235,17 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     else pushUnclear(unclear, text, scope === 'unclear' ? 'note_audience_unclear' : 'note_not_heard');
   }
   // The office note is held to the same rule: only clauses the tech said.
+  // the model's office label is not trusted either: a plain customer clause goes
+  // back to the customer note (through the same safety screen)
   const officeSaid = [];
   for (const sentence of String(officeRaw ?? '').split(SENTENCE_SPLIT_RE)) {
     const text = sentence.trim();
     if (!text) continue;
-    if (spokenClauseScope(text, spoken)) officeSaid.push(text);
-    else pushUnclear(unclear, text, 'note_not_heard');
+    const said = spokenClauseScope(text, spoken);
+    if (!said) pushUnclear(unclear, text, 'note_not_heard');
+    else if (said !== 'customer' || isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) officeSaid.push(text);
+    else if (reentrySafetyClaimFinding(text)) pushUnclear(unclear, text, 'note_safety_claim');
+    else customer.push(text);
   }
   const officeText = [...officeSaid, ...office].join(' ');
   return {

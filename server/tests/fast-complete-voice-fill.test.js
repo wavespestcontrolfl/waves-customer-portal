@@ -1244,3 +1244,25 @@ test.each([
   expect(out.products[0].amount).toBeNull();
   expect(out.unclear.map((u) => u.reason)).toContain('amount_not_spoken');
 });
+
+describe('Codex #5580 round 6', () => {
+  test.each(['On the previous visit, I used four ounces of Taurus. Today Talstar.', 'Prior visit I used four ounces of Taurus. Today Talstar.'])('"%s" is another visit\'s Taurus', (t) => {
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'four ounces of Taurus' }] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('a catalog method needs its action word, not its noun ("soil" is not "soil drench")', () => {
+    const withDrench = { ...ctx, products: ctx.products.map((p) => (p.id === 'p-taurus' ? { ...p, catalogMethod: 'soil_drench' } : p)) };
+    withDrench.productMethods = [...ctx.productMethods, 'soil_drench'];
+    const row = (heard) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'soil_drench', heard });
+    expect(validateFill(answer({ products: [row('Applied Taurus to the soil')] }), withDrench, 'Applied Taurus to the soil.').products[0].method).toBe('');
+    expect(validateFill(answer({ products: [row('Drenched the soil with Taurus')] }), withDrench, 'Drenched the soil with Taurus.').products[0].method).toBe('soil_drench');
+  });
+
+  test('a plain customer clause the model put in the office note goes back to the customer note', () => {
+    const t = 'Treated the kitchen for roaches. Note for the office, gate code changed to 4412.';
+    const out = validateFill(answer({ officeNote: 'Treated the kitchen for roaches. Gate code changed to 4412.' }), ctx, t);
+    expect(out.customerNote).toBe('Treated the kitchen for roaches.');
+    expect(out.officeNote).toBe('Gate code changed to 4412.');
+  });
+});
