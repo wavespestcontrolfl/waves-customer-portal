@@ -18,6 +18,7 @@
  */
 
 const db = require("../models/db");
+const { estimateGreetingFirstName } = require("../utils/greeting-first-name");
 const EmailTemplateLibrary = require("./email-template-library");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const logger = require("./logger");
@@ -654,7 +655,7 @@ async function checkDepositAbandoned(now = new Date()) {
         );
         continue;
       }
-      const firstName = (est.customer_name || "").split(" ")[0] || "there";
+      const firstName = await estimateGreetingFirstName(db, est);
       // Whole dollars render bare ("$49"); a refund-netted remainder with
       // cents renders exactly ("$29.50") instead of misquoting via round.
       const depositAmountText = Number.isInteger(depositAmount)
@@ -1131,7 +1132,7 @@ async function checkPaymentStepAbandoned(now = new Date()) {
         continue;
       }
       claimed = true;
-      const firstName = (est.customer_name || "").split(" ")[0] || "there";
+      const firstName = await estimateGreetingFirstName(db, est);
       const { emailUrl } = await mintStageLinks(est, "estimate_followup_payment_step");
       const ok = await sendDualChannel(est, {
         email: {
@@ -1230,7 +1231,7 @@ const EstimateFollowUp = {
             continue;
           }
           claimed = true;
-          const firstName = (est.customer_name || "").split(" ")[0] || "there";
+          const firstName = await estimateGreetingFirstName(db, est);
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_unviewed");
           const smsBody = delivery.unviewed.smsEnabled ? await renderTemplate("estimate_followup_unviewed", {
             first_name: firstName,
@@ -1315,7 +1316,7 @@ const EstimateFollowUp = {
             continue;
           }
           claimed = true;
-          const firstName = (est.customer_name || "").split(" ")[0] || "there";
+          const firstName = await estimateGreetingFirstName(db, est);
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_viewed");
           const smsBody = delivery.viewed.smsEnabled ? await renderTemplate("estimate_followup_viewed", {
             first_name: firstName,
@@ -1401,7 +1402,7 @@ const EstimateFollowUp = {
             continue;
           }
           claimed = true;
-          const firstName = (est.customer_name || "").split(" ")[0] || "there";
+          const firstName = await estimateGreetingFirstName(db, est);
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_final");
           const smsBody = delivery.final.smsEnabled ? await renderTemplate("estimate_followup_final", {
             first_name: firstName,
@@ -1508,7 +1509,7 @@ const EstimateFollowUp = {
             continue;
           }
           claimed = true;
-          const firstName = (est.customer_name || "").split(" ")[0] || "there";
+          const firstName = await estimateGreetingFirstName(db, est);
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_expiring");
           // The row's own offer deadline — the same value the candidate bound
           // selected on, so the copy can never quote a different date than
