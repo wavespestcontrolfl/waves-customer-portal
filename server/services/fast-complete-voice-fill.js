@@ -799,7 +799,9 @@ const positiveWords = (world, { from, to }) => world.tokens.slice(from, to)
 function mentionQuantities(mention, world) {
   const joinedToMe = world.quantities.filter((q) => q.nameAt === mention.start);
   if (joinedToMe.length) return joinedToMe;
-  const joined = (q) => q.nameAt !== null && world.mentions.some((m) => m.start === q.nameAt);
+  // "two ounces of <a name>" belongs to that name, on the sheet or not ("two
+  // ounces of Demand CS" with no Demand row is no one else's); "of it" refers back.
+  const joined = (q) => q.nameAt !== null && !['it', 'that', 'this', 'them', 'those'].includes(world.tokens[q.nameAt]);
   const trailing = (m) => {
     const { from, to } = afterSpan(m, world);
     return world.quantities.filter((q) => !joined(q) && q.start >= from && q.end <= to);

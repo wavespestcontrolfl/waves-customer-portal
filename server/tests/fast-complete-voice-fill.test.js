@@ -1160,3 +1160,12 @@ test('"Taurus same as last time but a different rate" with heard "Taurus" is no 
   const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus' }] }), ctx, t);
   expect(out.products[0].sameAsLast).toBe(false);
 });
+
+test('"two ounces of <a product not on the sheet>" is never the previous product\'s amount', () => {
+  const t = 'Used Taurus, and two ounces of Demand CS.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, t);
+  expect(out.products[0].amount).toBeNull();
+  const back = 'Used Taurus, two ounces of it.';
+  const kept = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, back);
+  expect(kept.products[0].amount).toBe(2);
+});
