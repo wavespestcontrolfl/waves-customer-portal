@@ -1,8 +1,8 @@
-// Call recordings are admin-only (security audit 2026-10-01). A technician
-// login must never list recordings, read a call row (transcript), stream the
-// audio, run paid processing, tag a disposition (spam deletes the call and
-// blocks the caller) or touch the block list. The follow-through surfaces a
-// technician works from the field stay reachable.
+// A technician login gets no customer calls (owner 2026-10-02; security audit
+// 2026-10-01): it must never list recordings, read a call row (transcript) or
+// its intelligence, stream the audio, run paid processing, tag a disposition
+// (spam deletes the call and blocks the caller) or unblock a number. The
+// follow-through surfaces a technician works from the field stay reachable.
 //
 // The role middlewares are the REAL ones; only adminAuthenticate is replaced
 // so the test can pick the role.
@@ -68,7 +68,7 @@ const ADMIN_ONLY = [
   ['POST', '/process-all', {}],
   ['POST', `/synopsis/${SID}`, {}],
   ['PUT', `/calls/${CALL_ID}/disposition`, { disposition: 'spam' }],
-  ['GET', '/blocked', null],
+  ['GET', `/calls/${CALL_ID}/intelligence`, null],
   ['DELETE', '/blocked/9415550100', null],
 ];
 
@@ -110,10 +110,13 @@ describe('call recordings are admin-only', () => {
   });
 });
 
-describe('technician follow-through stays reachable', () => {
+describe('technician follow-through and block-list read stay reachable', () => {
   test.each([
     ['GET', '/commitments/open'],
     ['GET', '/proposals'],
+    // Reading the block list stays staff-wide (the SMS tab labels blocked
+    // threads from it); only block/unblock is admin-only.
+    ['GET', '/blocked'],
   ])('%s %s is not refused by the role gate for a technician', async (method, path) => {
     mockRole = 'technician';
     await withServer(async (base) => {

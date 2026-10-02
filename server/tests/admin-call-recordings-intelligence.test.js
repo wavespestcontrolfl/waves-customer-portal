@@ -175,22 +175,20 @@ describe('GET /calls/:id/intelligence', () => {
       expect(intelligence.loadCallIntelligence).not.toHaveBeenCalled();
     });
   });
-  test('returns the normalized object for staff', async () => {
-    mockRole = 'tech';
+  test('returns the normalized object for an admin (the route is admin-only)', async () => {
     intelligence.loadCallIntelligence.mockResolvedValue({ call_id: CALL_ID, commitments: [] });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.intelligence.call_id).toBe(CALL_ID);
-      // The panel hides its write controls on these flags: commitments while
-      // the gate is off, the admin-only corrections for non-admins.
-      expect(body.features).toEqual({ commitments: true, admin: false });
+      // The panel hides its commitment write controls while the gate is off.
+      expect(body.features).toEqual({ commitments: true, admin: true });
     });
     isEnabled.mockReturnValue(false);
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
-      expect((await res.json()).features).toEqual({ commitments: false, admin: false });
+      expect((await res.json()).features).toEqual({ commitments: false, admin: true });
     });
   });
   test('404s when the call does not exist', async () => {
@@ -333,20 +331,19 @@ describe('commitment writes are staff-wide but fail closed when the gate is off'
     expect(commitments.addHumanCommitment).not.toHaveBeenCalled();
   });
 
-  test('a technician receives the intelligence without billing outcomes (invoices, revenue) — admin-only everywhere else (codex gh-r11 P1)', async () => {
+  test('a technician is refused the per-call intelligence (no customer calls for technicians, owner 2026-10-02); an admin gets it with billing outcomes', async () => {
     mockRole = 'tech';
     require('../services/call-intelligence').loadCallIntelligence.mockImplementation(async () => ({ call_id: CALL_ID, outcomes: { lead: null, estimates: [], appointments: [], invoices: [{ id: 'inv-1', total: 250, status: 'paid', paid_at: 'T' }], revenue_cents: 25000, basis_note: '' } }));
     mockDb([]);
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`);
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.features.admin).toBe(false);
-      expect(body.intelligence.outcomes).toMatchObject({ invoices: [], revenue_cents: null, billing_hidden: true });
+      expect(res.status).toBe(403);
     });
+    expect(require('../services/call-intelligence').loadCallIntelligence).not.toHaveBeenCalled();
     mockRole = 'admin';
     await withServer(async (base) => {
       const body = await (await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/intelligence`)).json();
+      expect(body.features.admin).toBe(true);
       expect(body.intelligence.outcomes.invoices).toHaveLength(1);
       expect(body.intelligence.outcomes.revenue_cents).toBe(25000);
     });

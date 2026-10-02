@@ -113,14 +113,14 @@ router.get(
   },
 );
 
-// Role map for this router (security audit 2026-10-01):
-//   - Recordings themselves are ADMIN-ONLY: the list, the per-call row
-//     (transcript), the audio proxy above, processing/synopsis (paid), the
-//     disposition tag (spam deletes the call and blocks the caller) and the
-//     block list each carry requireAdmin.
-//   - The follow-through surfaces a technician works from the field stay
-//     staff-wide: commitments, reschedule proposals, and the trimmed
-//     per-call intelligence read.
+// Role map for this router (owner 2026-10-02: a technician login gets no
+// customer calls, and only an admin blocks or unblocks numbers):
+//   - ADMIN-ONLY: the recordings list, the per-call row (transcript), the
+//     audio proxy above, per-call intelligence, processing/synopsis (paid),
+//     the disposition tag (spam deletes the call and blocks the caller) and
+//     unblocking a number.
+//   - Staff-wide: commitments and reschedule proposals (the Promises tab and
+//     the technician follow-through cards), and READING the block list.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /stats — processing dashboard stats
@@ -222,19 +222,14 @@ router.post('/synopsis/:callSid', requireAdmin, async (req, res, next) => {
 // fulfillment, later outcomes, honest processing state, and which values a
 // person overrode. Read-only apart from the fulfillment refresh (open AI
 // rows are marked fulfilled when a later record proves it).
-router.get('/calls/:id/intelligence', async (req, res, next) => {
+router.get('/calls/:id/intelligence', requireAdmin, async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
     const { loadCallIntelligence } = require('../services/call-intelligence');
     const intelligence = await loadCallIntelligence(db, req.params.id);
     if (!intelligence) return res.status(404).json({ error: 'Call not found' });
-    // Billing is admin-only everywhere else (the technician-safe customer
-    // payload strips invoices, payments and revenue): the outcomes block
-    // carries invoice totals and paid revenue, so a technician gets it
-    // without them (Codex r11 P1).
-    if (req.techRole !== 'admin' && intelligence.outcomes) {
-      intelligence.outcomes = { ...intelligence.outcomes, invoices: [], revenue_cents: null, billing_hidden: true };
-    }
+    // Admin-only route (requireAdmin above): the payload carries the call's
+    // evidence and its billing outcomes, neither of which a technician sees.
     const { isEnabled } = require('../config/feature-gates');
     // The panel hides its write controls when the gate is off, instead of
     // offering buttons that can only 409.
@@ -1108,7 +1103,7 @@ router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
 
 // GET /blocked — list blocked numbers (UI expects { phone, reason, blocked_at }
 // — alias from new schema for back-compat until the inbox UI redesign in PR 4).
-router.get('/blocked', requireAdmin, async (req, res, next) => {
+router.get('/blocked', async (req, res, next) => {
   try {
     const rows = await db('blocked_numbers').orderBy('blocked_at', 'desc');
     res.json({
