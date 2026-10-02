@@ -172,7 +172,6 @@ async function postQuery(baseUrl, body, token = 'admin') {
   return { status: res.status, body: await res.json() };
 }
 
-const CONTRACT_HASH_RE = /^[0-9a-f]{16,}$/i;
 
 function pendingRow(toolName) {
   return { id: PENDING_ID, tool_name: toolName, summary: `${toolName} — synthetic`, status: 'pending',

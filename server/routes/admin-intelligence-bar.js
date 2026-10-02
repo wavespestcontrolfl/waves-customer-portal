@@ -2805,6 +2805,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
+    let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let writeFrontierBlocked = false;
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
     // not do this request, for the owner's weekly review. Platform mode gets
@@ -2991,7 +2992,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // does: later writes in the same model turn would otherwise
               // run before the model has seen the uncertainty (pre-push
               // P1). Reads stay open so the model can re-check the record.
-              if (result.executed === null || result.receiptPersisted === false) writeFrontierBlocked = true;
+              if (result.executed === null || result.receiptPersisted === false) {
+                writeFrontierBlocked = true;
+                directOutcomeUncertain = true;
+              }
               if (!result.executed) {
                 failed = true;
                 errorMessage = result.error;
@@ -3273,8 +3277,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // or saved candidates). A child-record clarification (appointment,
       // email, call, lead) on an already-resolved page target has no card
       // path; it is answered in the response text and the task stays responded.
+      // A direct commit with an unknown outcome (or an unsaved receipt) keeps
+      // the task open as outcome_unknown — never 'responded', which the task
+      // store treats as closed and drops from the open list (pre-push P1 on
+      // #5563); its saved receipt stays the authority on recovery.
       ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length ? 'awaiting_approval'
-        : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
+        : directOutcomeUncertain ? 'outcome_unknown'
+          : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
     if (activeTask) {
