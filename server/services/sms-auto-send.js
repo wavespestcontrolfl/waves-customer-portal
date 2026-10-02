@@ -228,6 +228,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     // text. Same lock, so a reviewer's send and this claim cannot both win.
     if (unanswered && await require('./sms-unanswered-reply').claimGuard(trx, {
       suggestionId: unanswered.suggestionId, draftId, smsLogId, threadLast10, customerId,
+      fromPhone: inbound.from_phone, toPhone: inbound.to_phone,
     })) {
       return null;
     }
@@ -336,7 +337,10 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       visitLoopCommitmentIds: Array.isArray(visitLoopCommitmentIds) ? visitLoopCommitmentIds : null,
       visitLoopStatus: visitLoopStatus || null,
       // what the unanswered-text lane's provider-boundary check reads
-      unanswered: unanswered ? { suggestionId: unanswered.suggestionId, threadLast10, customerId, smsLogId, factsAt: unanswered.factsAt || null } : null,
+      unanswered: unanswered ? {
+        suggestionId: unanswered.suggestionId, threadLast10, customerId, smsLogId, factsAt: unanswered.factsAt || null,
+        fromPhone: inbound.from_phone, toPhone: inbound.to_phone,
+      } : null,
     };
   });
 }
@@ -843,9 +847,10 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
         gratitudeLane
           ? gratitudeOpenLoopsProviderPreSendCheck({ customerId })
           : openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, customerId, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt }),
-        // unanswered-text lane: the customer texted again, or someone called, after the claim
-        claim.unanswered ? checkHandoff : undefined,
         laneFields.providerPreSendCheck,
+        // unanswered-text lane, LAST so it is the final state read before the provider:
+        // the customer texted again, someone called, a visit moved, the phone changed hands
+        claim.unanswered ? checkHandoff : undefined,
       );
     })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an

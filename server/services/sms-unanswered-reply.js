@@ -146,7 +146,8 @@ function candidatePage({ now, limit = SWEEP_LIMIT, after = null }) {
       'md.id as draft_id', 'md.draft_response', 'md.inbound_message', 'md.intent as draft_intent',
       'md.intended_actions', 'md.scheduling_intent', 'md.model', 'md.prompt_version',
       'md.created_at as draft_created_at',
-      's.created_at as inbound_created_at',
+      's.created_at as inbound_created_at', 's.from_phone as inbound_from_phone', 's.to_phone as inbound_to_phone',
+      's.metadata as inbound_metadata',
     );
 }
 
@@ -174,6 +175,10 @@ function candidateRefusal({ row, meta, snapshot, now, dueAt }) {
   if (stamp.require_review !== false) return 'review_required';
   if (stamp.lint_pass !== true || (Array.isArray(snapshot.comms_lint) && snapshot.comms_lint.length)) return 'lint_flagged';
   if (stamp.actions_verified_safe !== true || !autoSendActionsSafe(meta.actions)) return 'action_required';
+  // A gap the drafter recorded is a promise nobody owns, whatever the Real Answers gate says.
+  if (typeof meta.missing_info === 'string' ? meta.missing_info.trim() : meta.missing_info) return 'missing_info';
+  // A photo the drafter never saw stays with staff (Twilio's attachment list; unknown = refuse).
+  if (require('./sms-gratitude-context').mediaCountFromMetadata(row.inbound_metadata) !== 0) return 'media_or_unknown';
   if (suggest.hasRedactionPlaceholder(reply)) return 'redaction_placeholder';
   if (suggest.hasPriceQuote(reply)) return 'price_quote';
   const followupSla = require('./sms-followup-sla');
@@ -206,7 +211,18 @@ async function readinessRefusal({ row, meta, snapshot }) {
   });
   if (profile.reason) return { reason: profile.reason };
 
-  const backstop = await require('./sms-graduation').evaluateJudgeBackstop({
+  // The judge evidence is per prompt cohort: a draft from a superseded or
+  // rolled-back prompt is not covered by the current cohort's clean record.
+  const graduation = require('./sms-graduation');
+  const cohort = graduation.resolveCohortVersions();
+  if (!row.prompt_version || (cohort && !cohort.includes(row.prompt_version))) return { reason: 'prompt_cohort_mismatch' };
+
+  const owner = await threadOwnerRefusal(db, {
+    customerId: row.customer_id, fromPhone: row.inbound_from_phone, toPhone: row.inbound_to_phone,
+  });
+  if (owner) return { reason: owner };
+
+  const backstop = await graduation.evaluateJudgeBackstop({
     intent: row.detected_intent,
     voiceProfileVersion: profile.version,
   });
@@ -216,6 +232,25 @@ async function readinessRefusal({ row, meta, snapshot }) {
     return { reason: 'visit_changed' };
   }
   return { reason: null };
+}
+
+/**
+ * The thread phone must still belong to exactly one live customer, the one the
+ * draft was written for: in two hours a customer can be merged, deleted or the
+ * number reassigned. A technician's own line never gets an automated reply.
+ * Returns a reason or null. Same ownership rule as the delayed gratitude lane.
+ */
+async function threadOwnerRefusal(dbh, { customerId, fromPhone, toPhone }) {
+  const { phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
+  const digits = phoneMatchDigits(fromPhone);
+  if (!digits.length || !toPhone) return 'invalid_thread';
+  if (require('../config/twilio-numbers').isTechLine(toPhone)) return 'tech_line_thread';
+  const customers = await require('./sms-gratitude-context').threadCustomersQuery(dbh, digits);
+  const owner = customers.length === 1 ? customers[0] : null;
+  if (!owner || owner.id !== customerId || phoneIdentityKey(owner.phone) !== phoneIdentityKey(fromPhone)) {
+    return 'customer_untrusted';
+  }
+  return null;
 }
 
 /** Did any of the customer's visits change after the reply's facts were read? */
@@ -250,7 +285,7 @@ async function callSinceInbound(dbh, { threadLast10, customerId, smsLogId }) {
  * null. The suggestion row is locked so a person's Use Draft and this claim
  * serialize on it as well as on the thread.
  */
-async function claimGuard(trx, { suggestionId, draftId, smsLogId, threadLast10, customerId }) {
+async function claimGuard(trx, { suggestionId, draftId, smsLogId, threadLast10, customerId, fromPhone, toPhone }) {
   if (!unansweredReplyLive()) return 'gate_off';
   const { SUGGEST_WORKFLOW } = require('./sms-suggest-mode');
   const card = await trx('agent_decisions')
@@ -259,7 +294,7 @@ async function claimGuard(trx, { suggestionId, draftId, smsLogId, threadLast10, 
     .first('id');
   if (!card) return 'suggestion_moved';
   if (await callSinceInbound(trx, { threadLast10, customerId, smsLogId })) return 'call_since_inbound';
-  return null;
+  return threadOwnerRefusal(trx, { customerId, fromPhone, toPhone });
 }
 
 /**
@@ -274,7 +309,7 @@ function handoffCheck(claim) {
     // The executor's sends are conversational, so the shared validator never
     // defers them: a sweep that started at 7:58 PM must not deliver at 8:01.
     if (!isWithinSendWindowET(new Date())) return { ok: false, code: 'outside_send_window', reason: 'outside_send_window' };
-    const { threadLast10, customerId, smsLogId, factsAt } = claim.unanswered;
+    const { threadLast10, customerId, smsLogId, factsAt, fromPhone, toPhone } = claim.unanswered;
     const newerInbound = await dbi('sms_log')
       .where({ direction: 'inbound' })
       .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
@@ -292,6 +327,8 @@ function handoffCheck(claim) {
     if (await callSinceInbound(dbi, { threadLast10, customerId, smsLogId })) {
       return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
     }
+    const owner = await threadOwnerRefusal(dbi, { customerId, fromPhone, toPhone });
+    if (owner) return { ok: false, code: owner, reason: owner };
     // A reschedule during the claim or provider preparation makes the reply stale.
     if (await visitChangedSince(dbi, { customerId, factsAt: factsAt ? new Date(factsAt) : null })) {
       return { ok: false, code: 'visit_changed', reason: 'visit_changed' };
@@ -405,6 +442,13 @@ async function attemptCandidate({ row, meta, snapshot }) {
  */
 async function processUnansweredReplyCandidates({ now = new Date() } = {}) {
   const totals = { scanned: 0, attempted: 0, sent: 0, refused: {} };
+  // Bookkeeping first, whatever the gate or the clock: an accepted send whose
+  // card label was lost must still be labeled after a rollback to false.
+  try {
+    await settleAnsweredSuggestions({ now });
+  } catch (err) {
+    logger.warn(`[sms-unanswered] answered-card repair failed: ${errLabel(err)}`);
+  }
   if (!unansweredReplyLive()) return { ...totals, reason: 'gate_off' };
   // The executor marks its sends conversational (never deferred), so the
   // 8 AM–8 PM ET window is enforced here.
@@ -412,12 +456,6 @@ async function processUnansweredReplyCandidates({ now = new Date() } = {}) {
   // On a rolling enable, an older instance that never saw the gate does not
   // interlock staff replies; claim nothing until every instance reads it.
   if (!require('./sms-gratitude-context').gratitudeRolloutSettled()) return { ...totals, reason: 'rollout_settling' };
-
-  try {
-    await settleAnsweredSuggestions({ now });
-  } catch (err) {
-    logger.warn(`[sms-unanswered] answered-card repair failed: ${errLabel(err)}`);
-  }
 
   const sla = require('./followup-sla-watcher');
   const refuse = (reason) => { totals.refused[reason] = (totals.refused[reason] || 0) + 1; };
@@ -493,6 +531,7 @@ module.exports = {
   readinessRefusal,
   callSinceInbound,
   visitChangedSince,
+  threadOwnerRefusal,
   claimGuard,
   handoffCheck,
   settleAnsweredSuggestions,

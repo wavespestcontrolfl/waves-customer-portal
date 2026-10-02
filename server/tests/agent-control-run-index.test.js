@@ -158,6 +158,10 @@ describe('adapters project onto the canonical shape', () => {
     // statuses: sms-auto-send's lifecycle constants + the literals the other producers write on agent_decisions rows
     const statuses = new Set(['pending_review', 'scheduled', 'superseded', 'expired', 'ignored', 'shadow', 'reviewed', 'auto_resolved', 'auto_applied']);
     for (const m of read('services/sms-auto-send.js').matchAll(/const (?:CLAIM|SENT|FAILED)_STATUS = '([a-z_]+)'/g)) statuses.add(m[1]);
+    // the unanswered-text lane's answered card (sms-unanswered-reply ANSWERED_STATUS)
+    const answered = read('services/sms-unanswered-reply.js').match(/const ANSWERED_STATUS = '([a-z_]+)'/)[1];
+    statuses.add(answered);
+    expect(agentDecisions.STATUS_MAP[answered]).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' });
     // the review paths persist the owner's verdict as the row status too (admin-agent-decisions VALID_VERDICTS; admin-communications + sms-suggest-mode write the same values)
     const verdicts = new Set([...read('routes/admin-agent-decisions.js').match(/const VALID_VERDICTS = new Set\(\[([^\]]*)\]\)/)[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]));
     expect([...verdicts].sort()).toEqual(['accepted', 'corrected', 'dismissed']);

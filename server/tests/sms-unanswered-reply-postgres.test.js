@@ -14,6 +14,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/sms-shadow-drafter', () => ({
   reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
+  currentPromptVersion: jest.fn(() => 'house_voice_v11'),
   findEtaMinutesClaims: jest.fn(() => []),
   bodyMentionsArrival: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
@@ -37,7 +38,7 @@ const NOW = new Date('2026-10-06T18:00:00Z');
 const at = (iso) => new Date(iso);
 const INBOUND_AT = at('2026-10-06T15:00:00Z'); // 11:00 AM ET, three open hours before NOW
 const CUSTOMER_PHONE = '+12025550101';
-const WAVES_LINE = '+19413529161';
+const WAVES_LINE = '+19413521572'; // a location line; tech lines never get automated replies
 const REPLY = 'Your next visit is this Thursday. We will text you the morning of.';
 
 postgres('unanswered-text reply sweep on PostgreSQL', () => {
@@ -62,12 +63,13 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     trx = await database.transaction();
     const schema = `sms_unanswered_${randomUUID().replaceAll('-', '')}`;
     await trx.raw('CREATE SCHEMA ??', [schema]);
-    for (const table of ['sms_log', 'agent_decisions', 'message_drafts', 'call_log', 'scheduled_services']) {
+    for (const table of ['sms_log', 'agent_decisions', 'message_drafts', 'call_log', 'scheduled_services', 'customers']) {
       await trx.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
     await trx.raw('SET LOCAL search_path TO ??, public', [schema]);
     db.connection = trx;
     customerId = randomUUID();
+    await trx('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Tester', phone: CUSTOMER_PHONE, active: true });
     jest.spyOn(graduation, 'evaluateJudgeBackstop').mockResolvedValue({ clear: true, blockers: [] });
     jest.spyOn(gratitudeContext, 'gratitudeRolloutSettled').mockReturnValue(true);
     sendCustomerMessage.mockReset();
@@ -85,7 +87,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
   // One waiting suggestion: inbound text → verified draft (stamped) → pending card.
   async function waitingSuggestion({
     inboundAt = INBOUND_AT, intent = 'general_customer_sms_needs_review', reply = REPLY, phone = CUSTOMER_PHONE,
-    stamp = {}, actions = [], snapshot = {},
+    stamp = {}, actions = [], snapshot = {}, missingInfo = null, media = [], promptVersion = 'house_voice_v11',
   } = {}) {
     const inboundId = randomUUID();
     const draftId = randomUUID();
@@ -94,13 +96,15 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     await trx('sms_log').insert({
       id: inboundId, customer_id: customerId, direction: 'inbound', from_phone: phone, to_phone: WAVES_LINE,
       message_body: 'When is my next visit?', status: 'received', created_at: inboundAt, updated_at: inboundAt,
+      metadata: JSON.stringify(media === null ? {} : { media }), // null = no media list recorded
     });
     await trx('message_drafts').insert({
       id: draftId, sms_log_id: inboundId, customer_id: customerId, inbound_message: 'When is my next visit?',
-      draft_response: reply, intent, status: 'suggested', model: 'synthetic-model', prompt_version: 'house_voice_v11',
+      draft_response: reply, intent, status: 'suggested', model: 'synthetic-model', prompt_version: promptVersion,
       scheduling_intent: false, created_at: draftedAt,
       intended_actions: JSON.stringify({
         actions,
+        missing_info: missingInfo,
         verify: { passes: 2, converged: true },
         voice_profile_version: null,
         unanswered: {
@@ -114,7 +118,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
       mode: 'suggest', status: 'pending_review', entity_type: 'message_draft', entity_id: draftId, customer_id: customerId,
       source_channel: 'sms', sms_log_id: inboundId, detected_intent: intent, suggested_message: reply,
       input_snapshot: JSON.stringify({ sms: { body: 'When is my next visit?' }, draft_id: draftId, facts_generated_at: draftedAt.toISOString(), ...snapshot }),
-      prompt_version: 'house_voice_v11', idempotency_key: `${suggest.SUGGEST_WORKFLOW}:draft:${draftId}`,
+      prompt_version: promptVersion, idempotency_key: `${suggest.SUGGEST_WORKFLOW}:draft:${draftId}`,
       created_at: draftedAt, updated_at: draftedAt,
     });
     return { inboundId, draftId, decisionId };
@@ -218,10 +222,63 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     ['action_required', { actions: [{ type: 'escalate' }] }],
     ['price_quote', { reply: 'Your total is $89 for this visit.' }],
     ['redaction_placeholder', { reply: 'Hello [name], your visit is Thursday.' }],
+    ['missing_info', { missingInfo: 'the exact arrival window' }],
+    ['media_or_unknown', { media: [{ url: 'https://example.invalid/photo.jpg', contentType: 'image/jpeg' }] }],
+    ['media_or_unknown', { media: null }],
+    ['prompt_cohort_mismatch', { promptVersion: 'house_voice_v9' }],
   ])('%s keeps the card for a person', async (reason, overrides) => {
     const s = await waitingSuggestion(overrides);
     const totals = await sweep();
     await expectUntouched(s, totals, reason);
+  });
+
+  test.each([
+    ['the phone now belongs to a different customer', async () => {
+      await trx('customers').where({ id: customerId }).update({ phone: '+12025550199' });
+      await trx('customers').insert({ id: randomUUID(), first_name: 'Other', last_name: 'Person', phone: CUSTOMER_PHONE, active: true });
+    }],
+    ['two live customers share the phone', async () => {
+      await trx('customers').insert({ id: randomUUID(), first_name: 'Other', last_name: 'Person', phone: CUSTOMER_PHONE, active: true });
+    }],
+    ['the customer was deactivated', async () => {
+      await trx('customers').where({ id: customerId }).update({ active: false });
+    }],
+  ])('%s: nothing is sent', async (_label, change) => {
+    const s = await waitingSuggestion();
+    await change();
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'customer_untrusted');
+  });
+
+  test('a text to a technician\'s own line never gets an automated reply', async () => {
+    const s = await waitingSuggestion();
+    await trx('sms_log').where({ id: s.inboundId }).update({ to_phone: '+19413529161' }); // Tech line 1
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'tech_line_thread');
+  });
+
+  test('the phone changing hands after the claim is caught at the provider boundary', async () => {
+    const s = await waitingSuggestion();
+    sendCustomerMessage.mockImplementation(async (input) => {
+      await trx('customers').where({ id: customerId }).update({ active: false });
+      const verdict = await input.providerPreSendCheck({ dbi: trx });
+      return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code, reason: verdict.reason };
+    });
+    const totals = await sweep();
+    expect(totals.sent).toBe(0);
+    expect(totals.refused.customer_untrusted).toBe(1);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
+  });
+
+  test('a lost answered-card label is still repaired after a rollback to false', async () => {
+    const s = await waitingSuggestion();
+    await sweep();
+    await trx('agent_decisions').where({ id: s.decisionId }).update({ status: 'ignored', human_verdict: 'ignored', reviewed_by: 'Admin' });
+    process.env.GATE_SMS_UNANSWERED_REPLY = 'false';
+    jest.setSystemTime(at('2026-10-07T01:30:00Z')); // 9:30 PM ET, outside the window too
+    const totals = await unanswered.processUnansweredReplyCandidates({ now: new Date() });
+    expect(totals.reason).toBe('gate_off');
+    expect(await card(s.decisionId)).toMatchObject({ status: unanswered.ANSWERED_STATUS, human_verdict: null });
   });
 
   test('a judge backstop that is not clear blocks the send', async () => {

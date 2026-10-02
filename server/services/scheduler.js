@@ -4176,7 +4176,9 @@ function initScheduledJobs() {
   let unansweredSweepRunning = false;
   cron.schedule('3-59/5 * * * *', async () => {
     const unanswered = require('./sms-unanswered-reply');
-    if (!unanswered.unansweredReplyLive() || unansweredSweepRunning) return;
+    // Runs while the variable is present at all: after a rollback to false it
+    // still repairs answered-card labels, and sends nothing.
+    if (!unanswered.unansweredClaimsPossible() || unansweredSweepRunning) return;
     unansweredSweepRunning = true;
     try {
       const result = await unanswered.processUnansweredReplyCandidates();
