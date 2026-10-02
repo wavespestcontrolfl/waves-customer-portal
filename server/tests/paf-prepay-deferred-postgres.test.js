@@ -204,6 +204,28 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await covers(f.childId)).toBe(false);
     });
 
+    it('stops holding once the year invoice is voided, even before the term catches up', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback' } });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      expect(await covers(f.childId)).toBe(false);
+    });
+
+    it('holds only the visits the year bought: an extra visit past the sold count bills', async () => {
+      const f = await deferredAccept();
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ coverage_visit_count: 1 });
+      expect(await covers(f.parentId)).toBe(true);
+      expect(await covers(f.childId)).toBe(false);
+    });
+
+    it('billing previews see the hold the completion applies', async () => {
+      const f = await deferredAccept();
+      const { annualCoverageVerdictForPrediction } = require('../services/annual-prepay-renewals');
+      const visit = await trx('scheduled_services').where({ id: f.childId }).first();
+      expect(await annualCoverageVerdictForPrediction(visit, trx)).toBe(true);
+      await trx('estimates').where({ id: f.estimateId }).update({ estimate_data: JSON.stringify({}) });
+      expect(await annualCoverageVerdictForPrediction(visit, trx)).toBeNull();
+    });
+
     it('never holds a visit of a service the term does not cover', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.childId }).update({ service_type: 'Lawn Fertilization' });
@@ -258,6 +280,17 @@ postgres('annual prepay charged after the first visit', () => {
       expect(summary).toMatchObject({ scanned: 4, released: 1 });
       expect((await jobOf(performed)).status).toBe('pending');
       for (const f of waiting) expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
+    it('a card payment still processing before any visit does not release the job', async () => {
+      const f = await deferredAccept({ invoiceStatus: 'processing' });
+      await trx('invoices').where({ id: f.invoiceId }).update({ payment_method: 'card' });
+      expect(await release()).toMatchObject({ released: 0 });
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+      const bank = await deferredAccept({ invoiceStatus: 'processing' });
+      await trx('invoices').where({ id: bank.invoiceId }).update({ payment_method: 'us_bank_account' });
+      await release();
+      expect((await jobOf(bank)).status).toBe('pending');
     });
 
     it('releases on a performed child visit of the series', async () => {
@@ -377,6 +410,17 @@ postgres('annual prepay charged after the first visit', () => {
       await release();
       expect(raiseAdminAlert.mock.calls.filter((c) => c[2]?.dedupeKey === `paf-prepay-charge-failed:${paidLater.estimateId}`)).toHaveLength(1);
       expect(await jobOf(paidLater)).toHaveProperty('charge_alert_closed_at');
+    });
+
+    it('closes the R2 alert once the year is paid even if its raised stamp never landed', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback' } });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid' });
+      const episodes = require('../services/admin-alert-episodes');
+      const closeSpy = jest.spyOn(episodes, 'closeAdminAlertKeys');
+      await release();
+      expect(closeSpy).toHaveBeenCalledWith(expect.anything(), [`paf-prepay-charge-failed:${f.estimateId}`], 'resolved', expect.anything());
+      expect(await jobOf(f)).toHaveProperty('charge_alert_closed_at');
+      closeSpy.mockRestore();
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {

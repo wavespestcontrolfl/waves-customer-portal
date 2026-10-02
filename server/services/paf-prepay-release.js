@@ -91,13 +91,17 @@ async function firstPerformedVisit(estimateId, customerId) {
 async function releaseOne(row, now) {
   const job = parseData(row.estimate_data)?.prepayAutoChargeJob;
   if (!job || job.status !== AWAITING || !job.invoice_id) return null;
-  const invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id');
+  const invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payment_method');
   const invStatus = String(invoice?.status || '').toLowerCase();
   const term = invoice
     ? await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('status')
     : null;
   const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || String(term?.status || '') === 'cancelled';
-  const settled = !dead && SETTLED_INVOICE_STATUSES.includes(invStatus);
+  // Settled before any visit = paid, or a BANK debit already initiated. A card
+  // intent parked 'processing' is incomplete (the sweep treats it so): it
+  // never releases the job before the first visit.
+  const settled = !dead && (['paid', 'prepaid'].includes(invStatus)
+    || (invStatus === 'processing' && String(invoice.payment_method || '') === 'us_bank_account'));
   const visit = invoice && !settled ? await firstPerformedVisit(row.id, invoice.customer_id) : null;
 
   if (dead) {
@@ -196,7 +200,10 @@ async function reconcileJobAlerts(estimateId) {
       }, chargeAlertKey(estimateId));
       await patchJob(estimateId, { charge_alert_raised_at: nowIso }, whileUnset('charge_alert_raised_at'));
     } else if (!stillOwed) {
-      if (job.charge_alert_raised_at) await close(chargeAlertKey(estimateId), 'The annual prepay invoice settled or was closed.');
+      // Closed whether or not the raised stamp landed: a raise that persisted
+      // just before a failed stamp must not stay open. Closing a key with no
+      // alert is a no-op.
+      await close(chargeAlertKey(estimateId), 'The annual prepay invoice settled or was closed.');
       await patchJob(estimateId, { charge_alert_closed_at: nowIso });
     }
   }

@@ -6038,17 +6038,13 @@ router.get('/', async (req, res, next) => {
       // authority completion uses; null = validation unavailable, the
       // prediction falls back to the stamp (Codex r3).
       let annualCoverageValidated = null;
-      if (s.prepaid_method === 'annual_prepay_invoice') {
-        // Validated for ANY lane carrying the stamp (GitHub r4 P2): a
-        // customer reclassified off annual_prepay keeps stale stamps from
-        // refunded/voided terms — leaving validation null would demote the
-        // prediction forever while completion's strict verdict validates
-        // and charges. Stamp present = validate, whatever the lane.
-        try {
-          const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-          annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
-        } catch { annualCoverageValidated = null; }
-      }
+      // A stamped visit validates against its term (any lane, GitHub r4 P2); an
+      // unstamped visit held by a deferred annual prepay (GATE_PAF_PREPAY) reads
+      // as covered, as completion will treat it.
+      try {
+        const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+        annualCoverageValidated = await AnnualPrepayRenewals.annualCoverageVerdictForPrediction(s, db);
+      } catch { annualCoverageValidated = null; }
       // Present-tense money state for the sheet's billing card: what the
       // customer already owes (collectible invoices) and, for members,
       // whether this month's dues actually collected. Non-blocking — a
@@ -6630,17 +6626,13 @@ router.get('/week', async (req, res, next) => {
         // authority completion uses; null = validation unavailable, the
         // prediction falls back to the stamp (Codex r3).
         let annualCoverageValidated = null;
-        if (s.prepaid_method === 'annual_prepay_invoice') {
-        // Validated for ANY lane carrying the stamp (GitHub r4 P2): a
-        // customer reclassified off annual_prepay keeps stale stamps from
-        // refunded/voided terms — leaving validation null would demote the
-        // prediction forever while completion's strict verdict validates
-        // and charges. Stamp present = validate, whatever the lane.
-          try {
-            const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-            annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
-          } catch { annualCoverageValidated = null; }
-        }
+        // A stamped visit validates against its term (any lane, GitHub r4 P2); an
+        // unstamped visit held by a deferred annual prepay (GATE_PAF_PREPAY) reads
+        // as covered, as completion will treat it.
+        try {
+          const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+          annualCoverageValidated = await AnnualPrepayRenewals.annualCoverageVerdictForPrediction(s, db);
+        } catch { annualCoverageValidated = null; }
         // Present-tense money state for the sheet's billing card: what the
         // customer already owes (collectible invoices) and, for members,
         // whether this month's dues actually collected. Non-blocking — a

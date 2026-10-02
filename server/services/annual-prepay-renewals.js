@@ -4087,6 +4087,7 @@ const PAF_PREPAY_HOLD_STATUSES = new Set([
 // until it settles. Other skips (invoice missing / voided / refunded) are not
 // a live year bill and bill normally.
 const PAF_PREPAY_HOLD_SKIP_REASONS = new Set(['payer_billed', 'settled_zero_due']);
+const PAF_PREPAY_DEAD_INVOICE_STATUSES = new Set(['void', 'voided', 'canceled', 'cancelled', 'refunded']);
 function pafPrepayJobHolds(job) {
   const status = String(job?.status || '');
   if (PAF_PREPAY_HOLD_STATUSES.has(status)) return true;
@@ -4112,7 +4113,7 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnErr
       .whereNull('dispute_suspended_at')
       .whereNotNull('source_estimate_id')
       .whereNotNull('prepay_invoice_id')
-      .select('id', 'source_estimate_id', 'prepay_invoice_id', 'coverage_service_type');
+      .select('*');
     if (!terms.length) return false;
     let estimateId = scheduledService.source_estimate_id || null;
     if (scheduledService.recurring_parent_id) {
@@ -4133,13 +4134,38 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnErr
     if (!job || job.deferred_to_first_visit !== true) return false;
     if (String(job.invoice_id || '') !== String(term.prepay_invoice_id)) return false;
     if (!pafPrepayJobHolds(job)) return false;
-    return !(term.coverage_service_type && scheduledService.service_type
-      && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type)));
+    // The year bill must still be live: a voided / cancelled / refunded year
+    // holds nothing, even before the term sync catches up.
+    const invoice = await conn('invoices').where({ id: term.prepay_invoice_id }).first('status');
+    if (!invoice || PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) return false;
+    // Only a visit the year actually BOUGHT is held: the same sold selection
+    // first activation will stamp (count cap, window as projected for a
+    // payment today, ownership, callbacks out), minus a visit the stamp-time
+    // price check would refuse — never every same-service visit on the plan.
+    const sold = await coverageRowsForTerm(term, conn, { projectFirstActivationOn: etDateString() });
+    if (!sold.some((row) => String(row.id) === String(scheduledService.id))) return false;
+    const { heldIds } = await holdPriceDriftedRows(term, sold, conn, {
+      includeCompleted: true, skipRow: (r) => rowPrepaidElsewhere(term, r),
+    });
+    return !heldIds.has(String(scheduledService.id));
   } catch (err) {
     if (throwOnError) throw err;
     logger.warn(`[annual-prepay] deferred-prepay coverage check failed for scheduled service ${scheduledService.id}: ${err.message}`);
     return false;
   }
+}
+
+// The coverage verdict a billing PREDICTION (closeout status, appointment
+// sheet, card-expiry exemptions) passes as annualCoverageValidated: a stamped
+// visit is validated strictly against its term; an unstamped visit held by a
+// deferred annual prepay (GATE_PAF_PREPAY) reads as covered, exactly as
+// completion will treat it; anything else stays null (no stamp to validate).
+// Throws like the strict check, so each caller keeps its own failure posture.
+async function annualCoverageVerdictForPrediction(visit, conn = db) {
+  if (visit?.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
+    return annualPrepayCoversVisit(visit, conn, { throwOnError: true });
+  }
+  return (await pafDeferredPrepayCoversVisit(visit || {}, conn, { throwOnError: true })) ? true : null;
 }
 
 async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
@@ -6587,9 +6613,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // a malformed stamp (no amount / no term) or a failed coverage query
       // must fail toward the warning, not fall back to trusting the stamp
       // (predictCompletionBilling treats null as "trust the stamp").
-      const annualCoverageValidated = v.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
-        ? await annualPrepayCoversVisit(v, conn, { throwOnError: true })
-        : null;
+      const annualCoverageValidated = await annualCoverageVerdictForPrediction(v, conn);
       const payer = await resolveForInvoice({
         database: conn, customerId: v.customer_id, customer: { id: v.customer_id, payer_id: v.customer_payer_id },
         scheduledServiceId: v.id, throwOnError: true,
@@ -10906,6 +10930,7 @@ module.exports = {
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   pafDeferredPrepayCoversVisit,
+  annualCoverageVerdictForPrediction,
   PAF_PREPAY_HOLD_STATUSES,
   coveredTermsAsOf,
   retryPaidLapseReconciles,
