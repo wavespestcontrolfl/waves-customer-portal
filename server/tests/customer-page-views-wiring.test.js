@@ -69,8 +69,11 @@ const inspectionRouter = require('../routes/inspection-public');
 const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
 
 const TOKEN = 'a'.repeat(64);
+// The secure-card page GET attests the consent text version its bundle
+// renders (codex #5434 r1 P1); other routes ignore the query.
+const { CONSENT_VERSION } = jest.requireActual('../services/payment-method-consent-text');
 const req = (token, extra = {}) => ({
-  params: { token }, query: {}, headers: {}, ip: '203.0.113.5', get: () => 'Mozilla/5.0', ...extra,
+  params: { token }, query: { consentTextVersion: CONSENT_VERSION }, headers: {}, ip: '203.0.113.5', get: () => 'Mozilla/5.0', ...extra,
 });
 
 function getHandler(router, method = 'get', path = '/:token') {

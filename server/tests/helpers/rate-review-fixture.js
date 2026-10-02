@@ -27,7 +27,7 @@ function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, cou
     return q;
   };
   for (const name of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'whereNotIn', 'orWhere', 'orWhereRaw', 'orWhereIn', 'leftJoin', 'join',
-    'select', 'orderBy', 'orderByRaw', 'groupBy', 'limit', 'count', 'sum', 'max', 'countDistinct', 'modify']) {
+    'select', 'orderBy', 'orderByRaw', 'groupBy', 'limit', 'count', 'sum', 'max', 'countDistinct', 'modify', 'forUpdate']) {
     q[name] = record(name);
   }
   q.insert = (...args) => { record('insert')(...args); if (onInsert) onInsert(args[0], q); return q; };
@@ -59,10 +59,19 @@ function scriptedDb(scenario) {
       case 'rate_review_snapshots':
       case 'rate_review_snapshots as r':
         return chain({
-          // three reads share this table: prior reviews (customer_id, family_key),
-          // latest snapshots (… status, review_date …) and the batch page (r.*)
-          rows: (q) => (q.calls.some(([name, args]) => name === 'select' && args.includes('review_date')) ? (scenario.latestSnapshots || []) : (scenario.priorReviews || [])),
-          count: () => ({ n: scenario.sentRowCount || 0 }),
+          // four reads share this table: prior reviews (customer_id, family_key),
+          // latest snapshots (… status, review_date …), the owner-decision check
+          // (status, flags — scripted as a QUEUE, one answer per read, so a test
+          // can land a decision between two reads) and the batch page (r.*)
+          rows: (q) => {
+            const selected = q.calls.filter(([name]) => name === 'select').flatMap(([, args]) => args);
+            if (selected.includes('review_date')) return scenario.latestSnapshots || [];
+            if (selected.includes('flags')) return (scenario.ownerDecisionReads || []).shift() || [];
+            return scenario.priorReviews || [];
+          },
+          // the sent / approved counts of the rebuild refusal — scripted as a QUEUE
+          // (one answer per count) when a test lands an approval mid-build
+          count: () => ({ n: scenario.refusalCounts && scenario.refusalCounts.length ? scenario.refusalCounts.shift() : (scenario.sentRowCount || 0) }),
           onInsert: (rows) => writes.snapshotInserts.push(...(Array.isArray(rows) ? rows : [rows])),
           onDelete: () => { writes.snapshotDeletes += 1; },
         });
@@ -103,6 +112,7 @@ function scriptedDb(scenario) {
     if (/WITH te AS/.test(sql)) return { rows: scenario.completedVisits || [] };
     if (/is_callback = true/.test(sql)) return { rows: (signalsFor(bindings[0]).callbacks || []).map((line) => ({ line, n: 1 })) };
     if (/WaveGuard Monthly/.test(sql)) return { rows: Object.entries(scenario.settledDues || {}).map(([customer_id, settled]) => ({ customer_id, settled })) };
+    if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
     if (/^\?$/.test(sql.trim())) return bindings[0];
     if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] }; // the per-batch rebuild/schedule lock (lockBatch)
     throw new Error(`rate-review fixture: unexpected raw SQL ${sql.slice(0, 60)}`);

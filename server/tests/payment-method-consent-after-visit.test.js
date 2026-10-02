@@ -1,6 +1,8 @@
 // Pay-after-first-visit consent variants (GATE_PAY_AFTER_FIRST_VISIT, owner
-// ruling 2026-09-30). The variants carry their own v12_2026-09-30 label; the
-// global CONSENT_VERSION and every base text stay untouched.
+// ruling 2026-09-30). They landed beside the v12 rate-review sentence
+// (#5434): every after-visit text carries RATE_IN_EFFECT_SENTENCE and is
+// recorded under their own v13_2026-10-01 label (#5481's v12 rows carry the
+// text without it).
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql) => sql);
@@ -11,16 +13,19 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const consentText = require('../services/payment-method-consent-text');
 const {
-  CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION, getConsentText, consentVersionForVariant,
+  CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION, RATE_IN_EFFECT_SENTENCE, PREPAY_CONSENT_MARKER, getConsentText, consentVersionForVariant,
   CARD_CONSENT_TEXT, ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT,
   AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT,
 } = consentText;
 const { recordConsent, consentVersionQualifiesForEnrollment } = require('../services/payment-method-consents');
 
 describe('after-visit consent variants', () => {
-  test('global CONSENT_VERSION is NOT bumped; the after-visit label is v12_2026-09-30', () => {
-    expect(CONSENT_VERSION).toBe('v11_2026-08-25');
-    expect(AFTER_VISIT_CONSENT_VERSION).toBe('v12_2026-09-30');
+  test('the revised after-visit copy carries its own label (v13), the base copy stays v12', () => {
+    expect(CONSENT_VERSION).toBe('v12_2026-09-30');
+    // #5481 recorded the after-visit text WITHOUT the rate sentence under v12;
+    // the revised text must not share that label.
+    expect(AFTER_VISIT_CONSENT_VERSION).toBe('v13_2026-10-01');
+    expect(AFTER_VISIT_CONSENT_VERSION).not.toBe(CONSENT_VERSION);
     // payment_method_consents.consent_text_version is varchar(20)
     expect(AFTER_VISIT_CONSENT_VERSION.length).toBeLessThanOrEqual(20);
     expect(consentVersionQualifiesForEnrollment(AFTER_VISIT_CONSENT_VERSION)).toBe(true);
@@ -50,6 +55,15 @@ describe('after-visit consent variants', () => {
       expect(t).toContain('first service visit is completed');
       expect(t).not.toMatch(/charge it now|debit .* now/);
       expect(t).toContain('billing@wavespestcontrol.com');
+    }
+  });
+
+  test('every after-visit text discloses the rate review (v12 sentence) and never reads as an immediate prepay charge', () => {
+    for (const t of [AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT]) {
+      expect(t).toContain(RATE_IN_EFFECT_SENTENCE);
+      // The immediate-charge marker the prepay recovery sweep matches on
+      // must not match a consent that charges nothing today.
+      expect(t).not.toContain(PREPAY_CONSENT_MARKER);
     }
   });
 
@@ -88,25 +102,25 @@ describe('recordConsent stores the variant snapshot under its own label', () => 
 
   const base = { customerId: 'c1', paymentMethodId: 'pm-1', stripePaymentMethodId: 'pm_x', source: 'estimate_accept' };
 
-  test('no variant: v11 + base card text (unchanged)', async () => {
+  test('no variant: the global label + base card text', async () => {
     const insert = stubInsert();
     await recordConsent({ ...base });
     expect(insert.mock.calls[0][0]).toMatchObject({ consent_text_version: CONSENT_VERSION, consent_text_snapshot: CARD_CONSENT_TEXT });
   });
 
-  test('prepay_card: still v11 (unchanged)', async () => {
+  test('prepay_card: the global label + prepay card text', async () => {
     const insert = stubInsert();
     await recordConsent({ ...base, consentVariant: 'prepay_card' });
     expect(insert.mock.calls[0][0]).toMatchObject({ consent_text_version: CONSENT_VERSION, consent_text_snapshot: PREPAY_CARD_CONSENT_TEXT });
   });
 
-  test('after_visit_card: v12 + after-visit card text', async () => {
+  test('after_visit_card: the v12 label + after-visit card text', async () => {
     const insert = stubInsert();
     await recordConsent({ ...base, consentVariant: 'after_visit_card' });
     expect(insert.mock.calls[0][0]).toMatchObject({ consent_text_version: AFTER_VISIT_CONSENT_VERSION, consent_text_snapshot: AFTER_VISIT_CARD_CONSENT_TEXT });
   });
 
-  test('after_visit_prepay card and ACH: v12 + the matching text', async () => {
+  test('after_visit_prepay card and ACH: the v12 label + the matching text', async () => {
     const insert = stubInsert();
     await recordConsent({ ...base, consentVariant: 'after_visit_prepay' });
     await recordConsent({ ...base, methodType: 'us_bank_account', consentVariant: 'after_visit_prepay' });
@@ -120,5 +134,19 @@ describe('recordConsent stores the variant snapshot under its own label', () => 
       ...base, consentTextSnapshot: 'signed text', consentTextVersion: 'agreement_v3', evidenceContractId: 'ct-1',
     });
     expect(insert.mock.calls[0][0]).toMatchObject({ consent_text_version: 'agreement_v3', consent_text_snapshot: 'signed text' });
+  });
+
+  // GitHub Codex #5481 r5 P1: a recovery records the text the accept persisted
+  // as shown, verbatim, even if today's copy for that variant changed.
+  test('renderedConsent: the shown text + version are recorded verbatim, never re-derived', async () => {
+    const insert = stubInsert();
+    await recordConsent({ ...base, consentVariant: 'after_visit_card', renderedConsent: { text: 'OLDER SHOWN TEXT', version: 'v12_2026-09-30' } });
+    expect(insert.mock.calls[0][0]).toMatchObject({ consent_text_version: 'v12_2026-09-30', consent_text_snapshot: 'OLDER SHOWN TEXT' });
+  });
+
+  test('renderedConsent needs text and a v<N> version (never an agreement label)', async () => {
+    stubInsert();
+    await expect(recordConsent({ ...base, renderedConsent: { text: 'x', version: 'agreement_v3' } })).rejects.toThrow(/rendered consent/);
+    await expect(recordConsent({ ...base, renderedConsent: { text: '', version: 'v11_2026-08-25' } })).rejects.toThrow(/rendered consent/);
   });
 });

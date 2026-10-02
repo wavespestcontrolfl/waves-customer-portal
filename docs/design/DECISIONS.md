@@ -2729,6 +2729,75 @@ referee's own quality verdict joins `photoReadFor` and an unusable referee
 read merges nothing, and admin-only `internal.referee` diagnostics. Full
 detail: `docs/photo-id/plant-engine.md`'s "Referee" section.
 
+## 2026-09-29 — Fast Complete customer text: one fixed template, server-built (dark)
+
+Fast Complete (`FastCompleteSheet.jsx`, pest re-service, `GATE_RESERVICE_FAST_COMPLETE`)
+pinned `sendCompletionSms`, `requestReview` and `includePayLink` to `false`, so a
+re-service closed through it sent the customer nothing. This is PR D of the
+Fast Complete scope (`~/fast-complete-scope-20260926.md`), building the adopted
+decision 5: the customer text is one fixed template, never AI, never signed.
+
+New dark gate `GATE_FAST_COMPLETE_RECAP` (registry key `fastCompleteRecap`, exact
+`true`, read at load). It rides the schedule payload per service as
+`fastCompleteRecapEnabled`, like `reserviceFastCompleteEnabled`, and reaches the
+sheet as `service.recapEnabled`. Kill switch: unset the variable.
+
+The sheet, with the gate on, posts `sendCompletionSms: true`,
+`customerRecapMode: 'reservice_fixed'`, `requestReview: false` and
+`includePayLink: false` (the scope says leave the review ask off on
+re-services), and no `customerRecap`. No customer wording lives on the client.
+`completeScheduledService` honors the mode only while both dark gates are on
+server-side and the live completion profile is `pest_re_service`. A request that
+is not honored sends no completion text at all, never the templated one, so a
+stale sheet cannot cause a second kind of text.
+
+The one text, built in `services/reservice-fixed-recap.js` from the saved
+facts and sent through the existing send path (consent, STOP, opt-out and phone
+checks unchanged; message type stays the completion family's, template key
+`reservice_fixed_recap`):
+
+> Your re-service at 1234 Oak Bend Dr is done. We treated inside and outside for
+> ants. Keep kids and pets off treated areas until dry; your technician confirms the timing. Details: <report link>
+
+- Address: the visit's stamped street, else the customer's.
+- Where: from `areas_serviced` (inside, outside, "inside and outside", the
+  garage, joined naturally). Pests: the product rows' saved targets, deduplicated
+  and lowercased; a name that is too long, has symbols or trips the banned
+  customer-copy screen is dropped.
+- "Keep kids and pets off treated areas until dry; your technician confirms the
+  timing." (the AGENTS.md compliance idiom) only when a saved product row went
+  down wet: spray-class by the report module's own classifier
+  (`isSprayApplicationMethod`, so soil drench, fog and pin stream count) and not
+  a dry granular broadcast. Bait, station and trunk-injection rows leave it out.
+- The street comes from the completion's frozen `reportIdentitySnapshot` (the
+  same source the linked report uses), falling back to the current rows only
+  when the record has no snapshot. The stored and displayed body is the
+  provider-normalized one (https scheme stripped, GSM punctuation), and
+  `customerText` carries the recorded channel, so an app push reads "Sent to the
+  customer's app" rather than "Text sent".
+- A clause whose fact is missing is dropped whole: no pests gives "We treated
+  inside."; no areas and no pests gives "Your re-service at X is done. Details:
+  <link>" plus the safety line where it applies.
+- It replaces the templated `service_complete` text, the AI recap and the
+  review suffix on this path: exactly one text. It is not built with
+  `completion-recap.js smsRecap`, so no "- Waves" sign-off (the no-signature
+  ruling). The sent body is stored on `structured_notes.completionSmsBody`
+  (with `completionSmsRecapMode`); `completionSmsStatus` carries the outcome.
+  A held (quiet-hours) replay row records the same `reservice_fixed_recap`
+  template key as an in-window send.
+
+After Complete the `/complete` response carries `customerText` (only when the
+sheet asked): `{ sent, body }` with the exact text, `{ queued, body }` when the
+send window holds it, or `{ sent: false, reason }` (no phone, opted out or
+blocked, failed, gate off). The sheet shows the text as sent, or "No text sent:
+<reason>." Gate off, either gate, is byte-identical to before.
+
+Visit-facts registry: `reservice_pest.fast_complete_customer_text` moves from
+`status: 'gap'` to a real fact (storage `structured_notes.completionSmsStatus`,
+writers `complete-scheduled-service.js` and, gated, the sheet via
+`customerRecapMode`, reader `closeout-status.js`), and its Known-gaps bullet is
+removed.
+
 ## 2026-09-29 — Lawn visit assessment backup: GPT-6 Sol replaces Astra
 
 Owner ruling 2026-09-29. The lawn visit assessment
@@ -2850,3 +2919,39 @@ units, footage, percentages, "per visit", other company names, "safe" words,
 "chemical" and active ingredients (a common list plus this visit's catalog
 actives) through the existing retry and provider fallback. Generation-time only:
 the completion-time recheck is unchanged. Kill switch: unset the gate.
+
+## 2026-10-01 — Office-booked re-service: "Customer's words" suggestion (dark)
+
+When the office books a pest or lawn re-service (`pest_re_service` /
+`lawn_re_service`) in the New Appointment modal, a "Customer's words" section
+offers the customer's latest INBOUND text (`sms_log`) or call note
+(`call_log`: the caller's own service-request quotes from the VALIDATED V2
+extraction's evidence, never V1 `pain_points` / `call_summary`, per the
+AGENTS.md downstream-composer rule; no valid V2 = no call suggestion) from the
+last 72 hours, whichever is newest, labeled with its source and age ("Text,
+3 h ago" / "Call, yesterday") and a "Use this" button, above an editable box
+(400 characters, the call processor's own cap). Optional: an empty box saves
+nothing. The words land in `scheduled_services.customer_request` /
+`customer_request_source` (migration 20260927100000, no new migration) on the
+primary inserted row only, never on recurring children or boosters;
+`customer_request_pests` is untouched.
+
+`GATE_RESERVICE_OFFICE_REQUEST` (registry key `reserviceOfficeRequest`, off
+unless exactly `true`, dark in every environment). Gate off: the suggestion
+route answers `{ enabled: false, suggestion: null }`, the modal shows nothing
+new, and `POST /api/admin/schedule` ignores `customerRequest` — byte-identical
+to before. The modal learns the gate from that route's `enabled` answer, the
+same probe pattern as the annual-prepay and card-link controls, and only asks
+once a re-service line is on the form. Kill switch: unset the gate.
+
+Source rule (owner ruling 2026-09-26: exact words may be quoted, a call
+paraphrase is shown without quotes), decided on the SERVER and never taken
+from the client. The client names the suggestion it filled from
+(`suggestionId` + `suggestionKind`); the server re-reads that row, which must
+belong to this customer, be inbound and sit inside the 72-hour window, and
+keeps `text` / `call` only when the trimmed saved words equal the suggestion
+exactly. Anything typed or edited by staff, a forged, stale, outbound or
+another customer's id, or a failed lookup is `office`, which is never quoted.
+The suggestion skips empty bodies, STOP / HELP / opt-in keywords and
+natural-language opt-outs (the inbound opt-out detector's own rules), and
+spam or voicemail calls. Nothing is sent to a customer.

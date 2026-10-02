@@ -1511,9 +1511,11 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
 
   // Contract delta 2026-09-26 #1: an unapproved climb's safety line is
   // always assembled from fixed clauses (never per-node authored wording)
-  // whenever anything under the answered node keeps its distance.
+  // whenever anything the read named (or its catalog look-alikes) keeps its
+  // distance. Owner 2026-10-01: the fire ant's pet clause came only from the
+  // little fire ant, a sibling neither named nor paired with it.
   test.each([
-    ['fire-ant', lineOf('base', 'general', 'allergen', 'pets')],
+    ['fire-ant', lineOf('base', 'general', 'allergen')],
     ['black-widow', VENOMOUS_BITE_LINE],
     ['tussock-moth-caterpillar', STINGING_CATERPILLAR_LINE],
     ['cuban-treefrog', TREEFROG_LINE],

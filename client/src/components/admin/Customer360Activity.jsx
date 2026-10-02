@@ -2,6 +2,7 @@ import { useId } from "react";
 import { CalendarDays, CreditCard, History, FileText, MessageSquare, Phone, Search, ShieldCheck, Star, StickyNote } from "lucide-react";
 import { Button, Card, Input, Select } from "../ui";
 import { formatETDate, formatETDateOnly } from "../../lib/timezone";
+import { useCanAccessCalls } from "../../hooks/useStaffCallAccess";
 
 const ACTIVITY_TYPES = {
   sms: { label: "Texts", Icon: MessageSquare },
@@ -18,6 +19,8 @@ const ACTIVITY_TYPES = {
 
 export default function Customer360Activity({ timeline, filter, onFilter, search = "", onSearch, error, retrying, onRetry, missingSources = [], loading = false, hasMore = false, onLoadOlder }) {
   const id = useId();
+  // The call behind a history entry is admin-only (no calls for technicians).
+  const canOpenCall = useCanAccessCalls();
   const terms = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
   // The server searches the full history, including source fields that are
   // formatted differently in the display (for example payment amounts).
@@ -46,7 +49,7 @@ export default function Customer360Activity({ timeline, filter, onFilter, search
           const { Icon } = ACTIVITY_TYPES[item.type] || ACTIVITY_TYPES.activity;
           const formatDate = ["service", "scheduled_service"].includes(item.type) || /^\d{4}-\d{2}-\d{2}$/.test(item.date) ? formatETDateOnly : formatETDate;
           const meta = item.metadata || {};
-          const href = meta.callId ? `/admin/communications#tab=calls&call=${encodeURIComponent(meta.callId)}` : meta.invoiceId ? `/admin/invoices?invoice=${encodeURIComponent(meta.invoiceId)}` : meta.estimateId ? `/admin/estimates?estimateId=${encodeURIComponent(meta.estimateId)}` : null;
+          const href = meta.callId ? (canOpenCall ? `/admin/communications#tab=calls&call=${encodeURIComponent(meta.callId)}` : null) : meta.invoiceId ? `/admin/invoices?invoice=${encodeURIComponent(meta.invoiceId)}` : meta.estimateId ? `/admin/estimates?estimateId=${encodeURIComponent(meta.estimateId)}` : null;
           return <details className="c360-activity-event" key={item.id || `${item.type}-${item.date}-${index}`}>
             <summary>
               <span className="c360-activity-icon"><Icon size={17} /></span>

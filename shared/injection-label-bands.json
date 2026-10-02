@@ -1,0 +1,66 @@
+[
+  {
+    "product": "PHOSPHO-jet",
+    "source": "PHOSPHO-jet label, EPA 74578-3 (arborjet.com PHOSPHO-jet_websitelabel_8.5x11_1072020.pdf): trees, 3.5 mL per inch DBH in trees less than 12 in; 3.5 to 5.0 for trees 12 to 24 in; 5.0 to 7.0 in trees greater than 24 in. Palms are dosed per palm by canopy spread (label's palm table), not per inch.",
+    "match": "\\bphospho[\\s-]*jet\\b",
+    "basis": "inch",
+    "pick": "Plant",
+    "bands": [
+      {
+        "key": "tree",
+        "label": "Tree (hardwood or conifer)",
+        "low": 3.5,
+        "high": 7,
+        "sizes": [
+          {
+            "below": 12,
+            "low": 3.5,
+            "high": 3.5
+          },
+          {
+            "from": 12,
+            "through": 24,
+            "low": 3.5,
+            "high": 5
+          },
+          {
+            "above": 24,
+            "low": 5,
+            "high": 7
+          }
+        ]
+      },
+      {
+        "key": "palm",
+        "label": "Palm: dose from the label's canopy-spread table",
+        "palm": true
+      }
+    ]
+  },
+  {
+    "product": "Mn-jet Fe",
+    "source": "Mn-jet Fe insert rev 8.2017 (arborjet.com): trees, Low Rate 5 mL/inch DBH (growing season, after leaves harden off); High Rate 10-15 mL/inch DBH (only late summer or fall). Palms are dosed per palm by canopy spread (label's palm table), not per inch.",
+    "match": "\\bmn[\\s-]*jet\\b",
+    "basis": "inch",
+    "pick": "Plant and season",
+    "bands": [
+      {
+        "key": "tree_low",
+        "label": "Tree, growing season (low rate)",
+        "low": 5,
+        "high": 5
+      },
+      {
+        "key": "tree_late",
+        "label": "Tree, late summer or fall (high rate)",
+        "low": 10,
+        "high": 15
+      },
+      {
+        "key": "palm",
+        "label": "Palm: dose from the label's canopy-spread table",
+        "palm": true
+      }
+    ]
+  }
+]

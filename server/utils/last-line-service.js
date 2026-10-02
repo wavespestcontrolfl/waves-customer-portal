@@ -66,7 +66,9 @@ async function loadRecentLineServices(db, customerId, serviceType, { limit = 5, 
       .orderBy('id', 'desc')
       .offset(offset)
       .limit(PAGE_SIZE)
-      .select('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'started_at', 'pressure_index', 'technician_notes');
+      .select('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'started_at', 'pressure_index', 'technician_notes',
+        // customerSafeVisitNotes reads the record, not the note alone.
+        'structured_notes', 'service_data', 'completion_source');
     if (offset === 0) last = rows[0] || null;
     for (const r of rows) {
       if ((String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === visitLine) {

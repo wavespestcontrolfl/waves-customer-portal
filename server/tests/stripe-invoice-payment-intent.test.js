@@ -243,6 +243,29 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(result.paymentIntentId).toBe('pi_fresh');
   });
 
+  // codex #5434 r1 P1 (pre-push hook r6): the consent-version stamp is a
+  // create parameter, so the deterministic key is salted with it — a
+  // save-the-method mint retried across a copy change (or across the stamp's
+  // own rollout) gets a fresh key instead of a changed-parameters rejection.
+  test('a save-the-method mint stamps the attested consent version and salts the idempotency key with it', async () => {
+    const StripeService = require('../services/stripe');
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    // A save-the-method mint resolves the Stripe customer first.
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: true, consentTextVersion: CONSENT_VERSION });
+    const [params, opts] = stripeClient.paymentIntents.create.mock.calls[0];
+    expect(params.metadata).toEqual(expect.objectContaining({ save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION }));
+    expect(opts.idempotencyKey).toContain(`_cv-${CONSENT_VERSION}`);
+  });
+
+  test('a non-saving mint carries an empty stamp (clears any stale one) and keeps the nocv key part', async () => {
+    const StripeService = require('../services/stripe');
+    await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: false });
+    const [params, opts] = stripeClient.paymentIntents.create.mock.calls[0];
+    expect(params.metadata).toEqual(expect.objectContaining({ save_card_opt_in: 'false', consent_text_version: '' }));
+    expect(opts.idempotencyKey).toMatch(/_nocv$/);
+  });
+
   test('does not return a canceled idempotency replay when replacing an invoice PaymentIntent', async () => {
     const StripeService = require('../services/stripe');
     const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);
@@ -304,6 +327,122 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       // rationale as the fresh-PI path.
       updated_at: 'NOW',
     });
+  });
+
+  test('a reused open PI whose consent stamp differs is canceled and replaced (a stale secret cannot confirm under the newer stamp)', async () => {
+    // Pre-push Codex on #5434: tab A minted this PI under the previous
+    // consent text (or before the stamp existed) and still holds its client
+    // secret; tab B opens the same invoice on the current text. An in-place
+    // update would re-stamp the PI tab A can confirm straight with Stripe
+    // (Express Checkout), and the webhook would record the NEWER version
+    // against text tab A never rendered. Replace instead: tab A's secret dies.
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    invoiceRow.stripe_payment_intent_id = 'pi_open';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_open',
+      status: 'requires_payment_method',
+      amount: 7500,
+      metadata: { waves_invoice_id: invoiceRow.id, save_card_opt_in: 'true', consent_text_version: 'v11_2026-09-01' },
+    });
+    stripeClient.paymentIntents.cancel.mockResolvedValueOnce({ id: 'pi_open', status: 'canceled' });
+    stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({
+      id: 'pi_fresh',
+      status: 'requires_payment_method',
+      client_secret: 'pi_fresh_secret',
+    });
+
+    const StripeService = require('../services/stripe');
+    // A save-the-method mint resolves the Stripe customer first.
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: true, consentTextVersion: CONSENT_VERSION });
+
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_open');
+    expect(result.paymentIntentId).toBe('pi_fresh');
+    expect(result.clientSecret).toBe('pi_fresh_secret');
+    const [params, createOpts] = stripeClient.paymentIntents.create.mock.calls[0];
+    // The fresh mint is the full /setup block — the webhook mirrors' keys ride along.
+    expect(params.metadata).toEqual(expect.objectContaining({
+      save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION, waves_customer_id: 'cust_123', waves_invoice_id: invoiceRow.id,
+    }));
+    // The retired intent stays in the replacement's idempotency key (codex
+    // local max-effort review on #5434): save on → off → on within Stripe's
+    // idempotency window must never replay the first, now-canceled mint.
+    expect(createOpts.idempotencyKey).toContain('_pi_open_');
+    expect(createOpts.idempotencyKey).not.toContain('_new_');
+  });
+
+  test('a save-card round trip (off → on → off) never reuses the original mint key', async () => {
+    // Third /setup in the cycle: the active PI (the saving replacement, stamped)
+    // is retired for a no-save mint whose key would otherwise equal the very
+    // first `_new_…_nocv` key and replay that canceled intent.
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    invoiceRow.stripe_payment_intent_id = 'pi_saving';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_saving',
+      status: 'requires_payment_method',
+      amount: 7500,
+      metadata: { waves_invoice_id: invoiceRow.id, save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION },
+    });
+    stripeClient.paymentIntents.cancel.mockResolvedValueOnce({ id: 'pi_saving', status: 'canceled' });
+    stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({ id: 'pi_third', status: 'requires_payment_method', client_secret: 'pi_third_secret' });
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: false });
+    expect(result.paymentIntentId).toBe('pi_third');
+    const [, createOpts] = stripeClient.paymentIntents.create.mock.calls[0];
+    expect(createOpts.idempotencyKey).toContain('_pi_saving_');
+    expect(createOpts.idempotencyKey).toMatch(/_nocv$/);
+    expect(createOpts.idempotencyKey).not.toContain('_new_');
+  });
+
+  test('a PI minted before the consent stamp existed is replaced, not re-stamped, when a save-the-method tab reuses it', async () => {
+    // Rollout window: the open PI has save_card_opt_in but no stamp at all.
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    invoiceRow.stripe_payment_intent_id = 'pi_open';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_open',
+      status: 'requires_payment_method',
+      amount: 7500,
+      metadata: { waves_invoice_id: invoiceRow.id, save_card_opt_in: 'true' },
+    });
+    stripeClient.paymentIntents.cancel.mockResolvedValueOnce({ id: 'pi_open', status: 'canceled' });
+    stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({
+      id: 'pi_fresh',
+      status: 'requires_payment_method',
+      client_secret: 'pi_fresh_secret',
+    });
+
+    const StripeService = require('../services/stripe');
+    // A save-the-method mint resolves the Stripe customer first.
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: true, consentTextVersion: CONSENT_VERSION });
+
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_open');
+    expect(result.paymentIntentId).toBe('pi_fresh');
+  });
+
+  test('a reused open PI with the SAME consent stamp is still updated in place (no churn)', async () => {
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    invoiceRow.stripe_payment_intent_id = 'pi_open';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_open',
+      status: 'requires_payment_method',
+      amount: 7500,
+      metadata: { waves_invoice_id: invoiceRow.id, save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION },
+    });
+
+    const StripeService = require('../services/stripe');
+    // A save-the-method mint resolves the Stripe customer first.
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, { saveCard: true, consentTextVersion: CONSENT_VERSION });
+
+    expect(result.paymentIntentId).toBe('pi_open');
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_open', expect.objectContaining({
+      metadata: expect.objectContaining({ consent_text_version: CONSENT_VERSION }),
+    }));
   });
 
   test('fresh-PI create params carry no activity stamp (idempotent replay must not see changed parameters)', async () => {
@@ -903,10 +1042,12 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
 
     expect(result.surcharge).toBe(0);
-    // No read-then-write window: the clear rides the same update that
-    // attaches the PM, so a concurrent credit attempt's stranded surcharge
-    // can never survive into this confirm.
-    expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
+    // No read-then-write window for amount_details: the clear rides the same
+    // update that attaches the PM, so a concurrent credit attempt's stranded
+    // surcharge can never survive into this confirm. The single retrieve is
+    // the consent-stamp fence (pre-push Codex on #5434) — its amount_details
+    // are never consulted.
+    expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledTimes(1);
     const [, params, updateOpts] = stripeClient.paymentIntents.update.mock.calls[0];
     expect(params.amount).toBe(7500);
     expect(params.amount_details).toBe('');
@@ -916,12 +1057,41 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     expect(confirmOpts).toEqual({ apiVersion: expect.any(String) });
   });
 
+  test('finalize refuses (409, reload) when the live consent stamp differs from the one it would write — never a re-stamp in place', async () => {
+    // Pre-push Codex on #5434: the customer ticked Save after the quote while
+    // the page skipped its /update-amount sync (or the PI predates stamps);
+    // an in-place re-stamp would leave an older tab's secret confirmable
+    // under text it never displayed should this confirm fail.
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({ id: 'pi-public', status: 'requires_payment_method', amount_details: null, metadata: {} });
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    await expect(StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor(), { saveCard: true, consentTextVersion: CONSENT_VERSION }))
+      .rejects.toMatchObject({ statusCode: 409, staleBalance: true });
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
+  });
+
+  test('finalize proceeds when the live consent stamp matches the one it writes', async () => {
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi-public', status: 'requires_payment_method', amount_details: null, metadata: { save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION },
+    });
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor(), { saveCard: true, consentTextVersion: CONSENT_VERSION });
+    expect(result.surcharge).toBe(0);
+    const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
+    expect(params.metadata).toEqual(expect.objectContaining({ save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION, waves_customer_id: 'cust-1' }));
+    expect(stripeClient.paymentIntents.confirm).toHaveBeenCalledTimes(1);
+  });
+
   test('credit finalize applies the surcharge breakdown', async () => {
     stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm-card', type: 'card', card: { funding: 'credit' } });
     const StripeService = require('../services/stripe');
     const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
 
-    expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledTimes(1); // the consent-stamp fence only
     expect(result.surcharge).toBe(2.17);
     const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
     expect(params.amount).toBe(7717);
@@ -950,7 +1120,8 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     expect(fallbackParams.amount).toBe(7500);
     expect(fallbackParams.amount_details).toBeUndefined();
     expect(fallbackOpts).toBeUndefined();
-    const [, , verifyOpts] = stripeClient.paymentIntents.retrieve.mock.calls[0];
+    // The LAST retrieve is the post-unset verify (the first is the consent-stamp fence).
+    const [, , verifyOpts] = stripeClient.paymentIntents.retrieve.mock.calls.at(-1);
     expect(verifyOpts).toEqual({ apiVersion: expect.any(String) });
     expect(stripeClient.paymentIntents.confirm).toHaveBeenCalled();
   });
@@ -1087,6 +1258,71 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'),
     ).rejects.toThrow(/does not belong/);
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('a consent-stamp change on update-amount replaces the PaymentIntent instead of re-stamping it in place', async () => {
+    // Pre-push Codex on #5434: during rollout an older tab's UNSTAMPED PI is
+    // reused by a current tab with saveCard:false ('' = ''), which then
+    // enables saving — an in-place re-stamp would let the older tab confirm
+    // via Express Checkout and the webhook record current consent text it
+    // never displayed. The stamp change must cancel/replace, like /setup.
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_invoice',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      // What the /setup mint stamped (the webhook mirrors key on waves_customer_id).
+      metadata: { waves_invoice_id: 'inv_123', waves_customer_id: 'cust_123', save_card_opt_in: 'false', pay_session_touched_at: '1700000000', custom_mark: 'keep' },
+    });
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card', { saveCard: true, consentTextVersion: CONSENT_VERSION });
+
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_invoice');
+    const [params] = stripeClient.paymentIntents.create.mock.calls[0];
+    // A SUPERSET of the old PI's metadata (GH Codex r5 P1): everything the
+    // webhook mirrors read survives the swap, this update's values win.
+    expect(params.metadata).toEqual(expect.objectContaining({
+      waves_invoice_id: 'inv_123',
+      waves_customer_id: 'cust_123',
+      custom_mark: 'keep',
+      consent_text_version: CONSENT_VERSION,
+      save_card_opt_in: 'true',
+      replaced_from: 'pi_invoice',
+    }));
+    expect(params.customer).toBe('cus_test');
+    expect(params.setup_future_usage).toBe('off_session');
+    // The tender the replacement is locked to rides the response so the page
+    // re-mounts its form on it (codex local max-effort review on #5434).
+    expect(result).toMatchObject({ paymentIntentId: 'pi_replacement', replaced: true, clientSecret: 'cs_replacement', methodCategory: 'card' });
+  });
+
+  test('an in-place update-amount stamps waves_customer_id too (same block a replacement is minted from)', async () => {
+    const StripeService = require('../services/stripe');
+    await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_invoice', expect.objectContaining({
+      metadata: expect.objectContaining({ waves_customer_id: 'cust_123', waves_invoice_id: 'inv_123' }),
+    }));
+  });
+
+  test('update-amount with an UNCHANGED consent stamp still updates the PaymentIntent in place', async () => {
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_invoice', status: 'requires_payment_method', metadata: { save_card_opt_in: 'true', consent_text_version: CONSENT_VERSION },
+    });
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_test');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card', { saveCard: true, consentTextVersion: CONSENT_VERSION });
+
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_invoice', expect.objectContaining({
+      metadata: expect.objectContaining({ consent_text_version: CONSENT_VERSION }),
+    }));
+    expect(result.replaced).toBeUndefined();
   });
 
   test('a stale id that IS the replaced lineage with a matching tender replays onto the CURRENT PI (lost-response retry recovery)', async () => {

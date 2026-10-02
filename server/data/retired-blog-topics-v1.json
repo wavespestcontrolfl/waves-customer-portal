@@ -1,0 +1,371 @@
+{
+  "_comment": "Blog posts retired in the 2026-10-01 prune (owner approved D1). Each 301s to merged_into on the hub. The topic-targeting gate refuses a NEW blog on a retired URL or topic; grow merged_into as a refresh instead. 45 of the 51 first proposed: get-rid-of-bagworms became the outdoor-bagworm winner, get-rid-of-webworms (fall webworms) and get-rid-of-crickets-in-lakewood-ranch-fl (house crickets) have no matching live page, and the Sarasota-spoke sarasota-active-pests-by-neighborhood stays live (owner 10-01); pest-transmitted-diseases stays live (owner 10-01: 3 backlinks, no fitting page); venice-dollar-spot-fungus-lawn-treatment stays live (no live page covers dollar spot management; Codex on astro #650) as a `live: true` row: its URL is not refused (refreshes are the point) but its topic still is, so the engine grows the live post instead of writing a sibling. kid-safe-lawn, get-rid-of-boxelder-bugs and gutter-pest-control are deleted with NO redirect (redirected: false; merged_into is the closest live page to refresh). Add a row whenever a post is merged away. `topics` are the canonical phrasings the gate matches (with the slug leaf); an empty list = URL protection only (too generic to match on).",
+  "retired_on": "2026-10-01",
+  "posts": [
+    {
+      "url": "/lawn-care/get-rid-of-lawn-pest/",
+      "merged_into": "/lawn-care/lawn-pests-in-venice-fl/",
+      "topics": []
+    },
+    {
+      "url": "/lawn-care/grass-care-tips/",
+      "merged_into": "/lawn-care/mowing-height-by-grass-type/",
+      "topics": [
+        "grass care tips",
+        "mowing tips",
+        "lawn mowing height"
+      ]
+    },
+    {
+      "url": "/lawn-care/healthy-soil/",
+      "merged_into": "/lawn-care/soil-test-parrish-fl/",
+      "topics": [
+        "healthy lawn soil",
+        "improve lawn soil"
+      ]
+    },
+    {
+      "url": "/lawn-care/kid-safe-lawn/",
+      "merged_into": "/pest-control/what-pest-control-is-safe-for-pets/",
+      "redirected": false,
+      "topics": [
+        "kid safe lawn",
+        "child safe lawn treatment",
+        "is lawn fertilizer safe for kids"
+      ]
+    },
+    {
+      "url": "/lawn-care/lawn-care-hacks/",
+      "merged_into": "/lawn-care/mowing-height-by-grass-type/",
+      "topics": [
+        "lawn care hacks",
+        "lawn hacks"
+      ]
+    },
+    {
+      "url": "/lawn-care/lawn-watering-tips/",
+      "merged_into": "/lawn-care/overwatering-lawn-vs-underwatering/",
+      "topics": [
+        "lawn watering tips",
+        "how long to water lawn",
+        "best time to water lawn",
+        "how often to water lawn"
+      ]
+    },
+    {
+      "url": "/lawn-care/st-augustine-lawn-care-bradenton-fl/",
+      "merged_into": "/lawn-care/st-augustine-grass-parrish-fl/",
+      "topics": [
+        "st augustine lawn care",
+        "st augustine lawn care schedule",
+        "st augustine fertilizer schedule"
+      ]
+    },
+    {
+      "url": "/lawn-care/venice-dollar-spot-fungus-lawn-treatment/",
+      "merged_into": "/lawn-care/venice-dollar-spot-fungus-lawn-treatment/",
+      "live": true,
+      "topics": [
+        "dollar spot",
+        "dollar spot fungus",
+        "dollar spot treatment"
+      ]
+    },
+    {
+      "url": "/lawn-care/water-grass-guide-sarasota-fl/",
+      "merged_into": "/lawn-care/overwatering-lawn-vs-underwatering/",
+      "topics": [
+        "water grass",
+        "water grass weed"
+      ]
+    },
+    {
+      "url": "/pest-control/bed-bug-treatment-bradenton/",
+      "merged_into": "/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/",
+      "topics": [
+        "bed bug treatment",
+        "bed bug heat treatment",
+        "bed bug exterminator"
+      ]
+    },
+    {
+      "url": "/pest-control/bed-bug-treatment-cost/",
+      "merged_into": "/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/",
+      "topics": [
+        "bed bug treatment cost",
+        "bed bug exterminator cost"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-bagworm-moths-bradenton/",
+      "merged_into": "/pest-control/get-rid-of-bagworms/",
+      "topics": [
+        "bagworm moths"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-black-ants/",
+      "merged_into": "/pest-control/get-rid-of-ants/",
+      "topics": [
+        "black ants",
+        "little black ants"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-boxelder-bugs/",
+      "merged_into": "/pest-control/get-rid-of-stink-bugs/",
+      "redirected": false,
+      "topics": [
+        "boxelder bugs"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-carpenter-ants/",
+      "merged_into": "/pest-control/dangerous-ants-in-florida/",
+      "topics": [
+        "carpenter ants"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-crazy-ants/",
+      "merged_into": "/pest-control/dangerous-ants-in-florida/",
+      "topics": [
+        "crazy ants",
+        "tawny crazy ants"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-earwigs/",
+      "merged_into": "/pest-control/silverfish-earwig-booklice-identification/",
+      "topics": [
+        "earwigs"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-fire-ants/",
+      "merged_into": "/pest-control/fire-ant-treatment-bradenton-fl/",
+      "topics": [
+        "fire ants",
+        "fire ant mounds"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-hornets/",
+      "merged_into": "/pest-control/get-rid-of-wasps/",
+      "topics": [
+        "hornets",
+        "hornet nest"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-mole-crickets-sarasota-fl/",
+      "merged_into": "/lawn-care/mole-crickets-bahia-sarasota-fl/",
+      "topics": [
+        "mole crickets"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-norway-rats/",
+      "merged_into": "/pest-control/get-rid-of-roof-rats-lakewood-ranch/",
+      "topics": [
+        "norway rats",
+        "brown rats",
+        "sewer rats"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-paper-wasps/",
+      "merged_into": "/pest-control/get-rid-of-wasps/",
+      "topics": [
+        "paper wasps"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-pests/",
+      "merged_into": "/pest-control/local-pest-control-tips/",
+      "topics": []
+    },
+    {
+      "url": "/pest-control/get-rid-of-pharaoh-ants/",
+      "merged_into": "/pest-control/tiny-ant-identification-florida/",
+      "topics": [
+        "pharaoh ants"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-roaches/",
+      "merged_into": "/pest-control/can-cockroaches-play-dead/",
+      "topics": [
+        "roaches",
+        "cockroaches"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-rodents-lakewood-ranch/",
+      "merged_into": "/pest-control/get-rid-of-roof-rats-lakewood-ranch/",
+      "topics": [
+        "rodents",
+        "rodent control"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-spiders/",
+      "merged_into": "/pest-control/florida-spiders-identification-guide/",
+      "topics": [
+        "spiders",
+        "spiders in house"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-sugar-ants/",
+      "merged_into": "/pest-control/how-do-i-get-rid-of-sugar-ants/",
+      "topics": [
+        "sugar ants"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-wasp-nest/",
+      "merged_into": "/pest-control/get-rid-of-wasps/",
+      "topics": [
+        "wasp nest",
+        "wasp nest removal",
+        "paper wasp nest"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-white-footed-ants/",
+      "merged_into": "/pest-control/get-rid-of-ants/",
+      "topics": [
+        "white footed ants"
+      ]
+    },
+    {
+      "url": "/pest-control/get-rid-of-yellow-jackets/",
+      "merged_into": "/pest-control/yellow-jacket-vs-wasp/",
+      "topics": [
+        "yellow jackets",
+        "yellow jacket nest"
+      ]
+    },
+    {
+      "url": "/pest-control/gutter-pest-control/",
+      "merged_into": "/pest-control/local-pest-control-tips/",
+      "redirected": false,
+      "topics": [
+        "gutter pests",
+        "bugs in gutters"
+      ]
+    },
+    {
+      "url": "/pest-control/hurricane-season-pest-control/",
+      "merged_into": "/pest-control/pest-prevention/",
+      "topics": [
+        "hurricane season pests",
+        "pests after hurricane"
+      ]
+    },
+    {
+      "url": "/pest-control/midge-fly-parrish-fl/",
+      "merged_into": "/pest-control/get-rid-of-aquatic-midge-flies-sarasota-fl/",
+      "topics": [
+        "midge flies",
+        "blind mosquitoes"
+      ]
+    },
+    {
+      "url": "/pest-control/pest-control-in-lakewood-ranch/",
+      "merged_into": "/pest-control/local-pest-control-tips/",
+      "topics": [
+        "new homeowner pest control checklist"
+      ]
+    },
+    {
+      "url": "/pest-control/rainy-season-pest-control/",
+      "merged_into": "/seasonal/florida-pest-pressure-by-season/",
+      "topics": [
+        "rainy season pests",
+        "bugs after rain"
+      ]
+    },
+    {
+      "url": "/pest-control/rodent-control-guide-lakewood-ranch-fl/",
+      "merged_into": "/pest-control/get-rid-of-roof-rats-lakewood-ranch/",
+      "topics": [
+        "rodent control guide",
+        "rodent exterminator"
+      ]
+    },
+    {
+      "url": "/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/",
+      "merged_into": "/pest-control/is-it-worth-getting-an-exterminator/",
+      "topics": [
+        "diy pest control vs pro",
+        "diy pest control vs professional",
+        "diy vs professional pest control"
+      ]
+    },
+    {
+      "url": "/pest-control/what-do-exterminators-get-rid-of/",
+      "merged_into": "/pest-control/difference-between-pest-control-and-extermination/",
+      "topics": [
+        "what do exterminators get rid of",
+        "what does an exterminator do"
+      ]
+    },
+    {
+      "url": "/pest-control/what-is-the-difference-between-pest-control-and-exterminator/",
+      "merged_into": "/pest-control/difference-between-pest-control-and-extermination/",
+      "topics": [
+        "difference between pest control and exterminator",
+        "pest control vs exterminator"
+      ]
+    },
+    {
+      "url": "/seasonal/august-pest-invasion-in-bradenton/",
+      "merged_into": "/seasonal/florida-pest-pressure-by-season/",
+      "topics": [
+        "august pests",
+        "summer pest invasion"
+      ]
+    },
+    {
+      "url": "/termite/drywood-termites-in-palmetto-fl/",
+      "merged_into": "/termite/drywood-termites-bradenton-fl/",
+      "topics": [
+        "drywood termites"
+      ]
+    },
+    {
+      "url": "/termite/termite-infestation-in-parrish/",
+      "merged_into": "/termite/termite-infestation-in-venice/",
+      "topics": [
+        "termite infestation",
+        "signs of termite infestation"
+      ]
+    },
+    {
+      "url": "/termite/termite-prevention-in-bradenton/",
+      "merged_into": "/termite/termite-infestation-lakewood-ranch/",
+      "topics": [
+        "termite prevention",
+        "how to prevent termites"
+      ]
+    },
+    {
+      "url": "/termite/termite-trenching-in-bradenton-fl/",
+      "merged_into": "/termite/termite-liquid-treatment-venice-fl/",
+      "topics": [
+        "termite trenching",
+        "trench and treat termites"
+      ]
+    },
+    {
+      "url": "/termite/the-cost-of-termite-damage-in-bradenton-homes/",
+      "merged_into": "/termite/termite-damage-sarasota-fl/",
+      "topics": [
+        "termite damage cost",
+        "cost of termite damage"
+      ]
+    }
+  ]
+}

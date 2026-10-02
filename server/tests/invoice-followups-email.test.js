@@ -93,6 +93,7 @@ function setDbQueues(queues) {
     const queue = tableQueues.get(table);
     if ((!queue || !queue.length) && table === 'notification_prefs') return chain({ first: undefined });
     if ((!queue || !queue.length) && table === 'collections_contact_ledger') return chain({ result: [] });
+    if ((!queue || !queue.length) && table === 'customer_dunning_schedules') return chain({ result: [] });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
@@ -174,6 +175,9 @@ describe('invoice follow-up email sidecar', () => {
     // fireStep claims inside a transaction that locks the invoice row —
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
+    // fireStep takes the customer's dunning key (SHARED) and reads ownership
+    // (customer_dunning_schedules) under it; no schedule rows here.
+    db.raw = jest.fn(async () => ({ rows: [] }));
     // Every sequence UPDATE stamps updated_at via knex's `.fn.now()` (the
     // ownership-change checks read that column), so the stub connection
     // needs the same surface the real knex instance exposes.

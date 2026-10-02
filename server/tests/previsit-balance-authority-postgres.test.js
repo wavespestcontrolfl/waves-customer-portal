@@ -100,7 +100,9 @@ postgres('previsit billing quote authority (PostgreSQL)', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 5 } });
     writer = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 6 } });
     for (const table of ['customers', 'scheduled_services', 'invoices', 'payments', 'activity_log', 'invoice_followup_sequences',
-      'collections_flags', 'messaging_suppression', 'collections_contact_ledger', 'call_log', 'notification_prefs', 'sms_log', 'payers']) {
+      'collections_flags', 'messaging_suppression', 'collections_contact_ledger', 'call_log', 'notification_prefs', 'sms_log', 'payers',
+      // freshOverdueRecurringInvoices reads the customer-level schedule's last touch (dunning consolidation §8)
+      'customer_dunning_schedules']) {
       await mockPg.raw('CREATE TABLE ?? (LIKE ?? INCLUDING ALL)', [table, `public.${table}`]);
     }
     await mockPg.raw('ALTER TABLE scheduled_services ADD CONSTRAINT previsit_visit_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id)');

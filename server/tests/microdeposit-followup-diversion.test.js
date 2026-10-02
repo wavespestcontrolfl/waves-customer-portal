@@ -75,6 +75,7 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
+    if ((!queue || !queue.length) && table === 'customer_dunning_schedules') return chain({ result: [] });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
@@ -110,6 +111,9 @@ describe('invoice-followups micro-deposit diversion', () => {
     // fireStep claims inside a transaction that locks the invoice row —
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
+    // fireStep takes the customer's dunning key (SHARED) and reads ownership
+    // (customer_dunning_schedules) under it; no schedule rows here.
+    db.raw = jest.fn(async () => ({ rows: [] }));
     // Sequence UPDATEs stamp updated_at via knex's .fn.now() (the
     // touched-since signal), so the stub connection needs that surface too.
     db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
@@ -161,6 +165,54 @@ describe('invoice-followups micro-deposit diversion', () => {
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     // The touch still counted (cadence advanced), so the re-nudge repeats on schedule.
     expect(result.sent).toBe(1);
+  });
+
+  // Pre-push audit P1 (#5503): the nudge of an invoice on a customer's combined schedule claims only its own
+  // row. Its progress write must not overwrite a landing a release wrote during the send.
+  describe('a verification nudge for a customer on a combined schedule (ownedMicrodeposit)', () => {
+    const queues = (progress) => ({
+      customers: [chain({ first: customer })],
+      invoices: [
+        chain({ first: { id: 'inv-1', customer_id: 'cust-1', status: 'viewed', token: 'token-1' } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { total: '129.00', credit_applied: null, status: 'viewed', title: 'Quarterly Pest Control', token: 'token-1', due_date: '2026-05-10', invoice_number: 'WPC-2026-1042' } }),
+      ],
+      notification_prefs: [chain({ first: {} })],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ updateResult: 1 }), // claim
+        progress, // cadence advance
+        chain({ updateResult: 1 }), // claim clear
+      ],
+      customer_interactions: [chain()],
+    });
+    const owned = () => { db.raw = jest.fn(async (sql) => ({ rows: /customer_dunning_schedules/.test(sql) ? [{ id: 'sched-1' }] : [] })); };
+
+    test('the cadence advance is guarded on its own claim, step and status', async () => {
+      owned();
+      const progress = chain({ updateResult: 1 });
+      setDbQueues(queues(progress));
+      await InvoiceFollowUps._test.fireStep({ ...row }, { ownedMicrodeposit: true });
+      expect(renderSmsTemplate).toHaveBeenCalledWith('bank_verification_incomplete', expect.anything(), expect.anything());
+      const claimStamp = progress.where.mock.calls[0][0].touch_claimed_at;
+      expect(claimStamp).toBeInstanceOf(Date);
+      expect(progress.where.mock.calls[0][0]).toEqual({ id: 'seq-1', touch_claimed_at: claimStamp, step_index: 0, status: 'active' });
+      expect(progress.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+    });
+
+    test('the row changed under the send (a release landed it): nothing overwritten, a warning', async () => {
+      owned();
+      setDbQueues(queues(chain({ updateResult: 0 })));
+      await InvoiceFollowUps._test.fireStep({ ...row }, { ownedMicrodeposit: true });
+      expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('not advanced after its verification nudge'));
+    });
+
+    test('an ordinary (unowned) touch keeps its unguarded advance, as before', async () => {
+      const progress = chain({ updateResult: 1 });
+      setDbQueues(queues(progress));
+      await InvoiceFollowUps._test.fireStep({ ...row });
+      expect(progress.where.mock.calls[0][0]).toEqual({ id: 'seq-1' });
+    });
   });
 
   test('non-micro-deposit invoice keeps the generic follow-up (no diversion)', async () => {

@@ -29,7 +29,6 @@ const {
   LEGACY_BARE_WRITE_TOOL_NAMES,
   CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   OUTSIDE_WRITE_TOOL_NAMES,
-  PREVIEW_ONLY_WRITE_TOOL_NAMES,
 } = require('./write-gates');
 
 const CONTRACT_VERSION = 1;
@@ -79,8 +78,11 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // comment are both public GitHub state, like submit_review_reply, once
   // posted only followed up, never unsent; a GSC sitemap submission has no
   // withdraw call. Pulling in the whole set (rather than hand-copying it)
-  // means a future outside-write tool inherits this by construction.
-  ...OUTSIDE_WRITE_TOOL_NAMES,
+  // means a future outside-write tool inherits this by construction. The
+  // feature switches are the exception (Codex r4 on #5514): the same tool
+  // flips them back, so their irreversibility is derived from the preview
+  // in buildContract instead.
+  ...[...OUTSIDE_WRITE_TOOL_NAMES].filter((name) => name !== 'set_railway_gate' && name !== 'set_growthbook_feature_environment'),
   // No un-cancel tool exists — once cancelled, that queued attempt is gone
   // for good (the original sender would need to queue a fresh one).
   'cancel_queued_message',
@@ -155,6 +157,7 @@ const ACTION_LABELS = {
   optimize_all_routes: 'Re-optimize all routes',
   optimize_tech_route: 'Re-optimize a technician route',
   update_lead_status: 'Change a lead status',
+  update_lead_contact: 'Update lead contact details',
   bulk_update_leads: 'Change status on multiple leads',
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
@@ -360,6 +363,24 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       before: preview.pinned_lead.current_status, after: params?.new_status,
     });
     pushLeadStatusDerivedEffects(push, params?.new_status);
+  }
+  // Lead contact edit: one before/after line per changed field, from the
+  // executor's preview diff (only fields that actually differ are written).
+  if (toolName === 'update_lead_contact' && preview?.changes && typeof preview.changes === 'object') {
+    const who = preview.lead_name ? `Lead ${preview.lead_name}` : 'Lead';
+    for (const [field, change] of Object.entries(preview.changes)) {
+      const from = change?.from == null ? '(empty)' : String(change.from);
+      const to = change?.to == null ? '(cleared)' : String(change.to);
+      push('customer', `${who}: ${humanKey(field)} ${from} → ${to}`, { before: from, after: to });
+    }
+    if (preview.changes.email) {
+      // Triage's emailDisagreementConfirmed needs a NON-EMPTY current email
+      // as well as the stamp (Codex r2 P2) — clearing does not resolve it.
+      push('operational', preview.changes.email.to == null
+        ? "Clearing the email also stamps the lead's email-confirmed time, but an open email-disagreement triage card on this lead stays open until a real address is saved"
+        : "The email change also stamps the lead's email-confirmed time, which counts as the correction for any open email-disagreement triage card on this lead");
+    }
+    push('operational', "A contact-updated entry is appended to the lead's activity history; a linked customer account is NOT changed");
   }
   // Pinned recipient (send_sms, reply_via_sms, trigger_review_request pin a
   // phone; send_email_reply pins the email the reply goes to).
@@ -953,12 +974,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // removes (voiding the draft leaves the visit "already handled").
       || (toolName === 'repair_closeout' && Array.isArray(preview?.steps) && preview.steps.some((st) => st.step === 'bill_visit'))
       || preview?.financial_effects?.revertible_from_queue === false
-      || cancelsStripeCheckoutSession(preview),
+      || cancelsStripeCheckoutSession(preview)
+      // A GrowthBook environment toggle and a Railway gate that was plain
+      // 'true' / 'false' are undone by confirming the opposite value. A gate
+      // that was unset or held another value cannot be put back by this
+      // tool (it never deletes a variable or writes anything but true/false).
+      || (toolName === 'set_railway_gate' && preview?.prior_kind !== 'boolean'),
     notifies_customer: notifiesCustomer,
     notifies_technician: cancelTechnicianNotice !== 'none',
-    // Shown, not confirmable: the card hides Confirm (write-gates.js
-    // PREVIEW_ONLY_WRITE_TOOL_NAMES; /confirm-action refuses them too).
-    ...(PREVIEW_ONLY_WRITE_TOOL_NAMES.has(toolName) ? { preview_only: true } : {}),
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)

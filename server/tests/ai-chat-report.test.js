@@ -22,6 +22,8 @@ jest.mock('../services/call-route-decisions', () => ({
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),
   requireTechOrAdmin: (req, res, next) => next(),
+  // The call-log routes mount with requireAdmin; the router needs it defined to load.
+  requireAdmin: (req, res, next) => next(),
 }));
 
 const express = require('express');

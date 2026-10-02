@@ -157,6 +157,30 @@ describe('step 2d — pre-draft topic-targeting gate', () => {
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
   });
 
+  test('a retired hub topic skips pre-draft with no corpus fetch; a spoke-only seed (signal_metadata.target_sites) is not judged against it', async () => {
+    const hubQueue = makeQueue({ id: 'opp_wasps', action_type: 'new_supporting_blog', query: 'paper wasps sarasota', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const hub = loadRunner({ queue: hubQueue, briefBuilder: blogBrief({ query: 'paper wasps sarasota' }), dispatcher: { runWithBrief: jest.fn() }, corpusError: 'github_down' });
+    const hubResult = await hub.runner.runNext();
+    expect(hubResult.skip_reason).toBe('topic_targeting:TOPIC_RETIRED');
+    expect(hubResult.topic_targeting_result.findings[0].merged_into).toBe('/pest-control/get-rid-of-wasps/');
+
+    const spokeRun = async () => {
+      const spokeQueue = makeQueue({ id: 'opp_sar2', action_type: 'new_supporting_blog', query: 'carpenter ants Sarasota', service: 'pest', claimed_at: claimedAt, signal_metadata: { target_sites: ['sarasotaflpestcontrol.com'] } });
+      const spoke = loadRunner({ queue: spokeQueue, briefBuilder: blogBrief({ query: 'carpenter ants Sarasota' }), dispatcher: { runWithBrief: jest.fn() }, corpusError: 'github_down' });
+      return spoke.runner.runNext();
+    };
+    // Spoke network ON: the seed publishes to the spoke only → not judged against hub retirements
+    // (past the retired check it needs the corpus, which is down here → held, not a retired skip).
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    try {
+      const on = await spokeRun();
+      expect((on.topic_targeting_result.findings || []).map((f) => f.code)).not.toContain('TOPIC_RETIRED');
+    } finally { delete process.env.SPOKE_BLOG_NETWORK_ENABLED; }
+    // Kill switch OFF: the publisher routes it to the hub, so the hub retirement applies.
+    const off = await spokeRun();
+    expect(off.skip_reason).toBe('topic_targeting:TOPIC_RETIRED');
+  });
+
   test('#490 shape: an entity a live post owns (Taexx → in-wall post) skips with the owner named; no writer spend', async () => {
     const queue = makeQueue({ id: 'opp_taexx', action_type: 'new_supporting_blog', query: 'house came with taexx', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
     const dispatcher = { runWithBrief: jest.fn() };

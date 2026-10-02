@@ -2644,6 +2644,26 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/customers/:id/dunning-schedule/{send-now,pause,resume,release}
+// — staff controls for the customer's open customer-level overdue reminder
+// schedule (dunning consolidation §8; services/customer-dunning/wiring.js).
+// send-now sends the schedule's CURRENT step and only while the live gate
+// covers the customer; a send already in flight is a 409.
+const dunningScheduleControl = (control) => async (req, res, next) => {
+  try {
+    const { controlCustomerSchedule } = require('../services/customer-dunning/wiring');
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 200) : '';
+    const { status, body } = await controlCustomerSchedule(req.params.id, control, {
+      adminId: req.technicianId || null, reason: reason || null,
+    });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+};
+router.post('/:id/dunning-schedule/send-now', requireAdmin, dunningScheduleControl('send-now'));
+router.post('/:id/dunning-schedule/pause', requireAdmin, dunningScheduleControl('pause'));
+router.post('/:id/dunning-schedule/resume', requireAdmin, dunningScheduleControl('resume'));
+router.post('/:id/dunning-schedule/release', requireAdmin, dunningScheduleControl('release'));
+
 // GET /api/admin/customers/:id/collection-holds — active collections holds
 // (B10). A dispute hold ("stops_charges") halts every off-session charge and
 // the customer was told billing follow-up is on hold; this is how staff see it.

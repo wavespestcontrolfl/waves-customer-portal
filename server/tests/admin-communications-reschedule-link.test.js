@@ -547,6 +547,33 @@ describe('POST /admin/communications/reschedule-link', () => {
     }
   });
 
+  test('a moved street-level hold (voice_agent, confirmed, customer_confirmed false) is never picked: the next visit is, or none', async () => {
+    const hold = {
+      id: 'svc-hold', customer_id: CUSTOMER_UUID, scheduled_date: '2099-07-29', window_start: '08:00:00', window_end: '10:00:00',
+      service_type: 'pest control', status: 'confirmed', source_action: 'voice_agent', customer_confirmed: false,
+    };
+    const next = {
+      id: 'svc-next', customer_id: CUSTOMER_UUID, scheduled_date: '2099-07-30', window_start: '09:00:00', window_end: '11:00:00',
+      service_type: 'pest control', status: 'confirmed', source_action: null, customer_confirmed: true,
+    };
+    wireDb({ customers: soloCustomer(), services: makeServicesBuilder([[hold, next]]) });
+    buildRescheduleLink.mockResolvedValue(GOOD_LINK);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).appointment.id).toBe('svc-next');
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-next', { customerId: CUSTOMER_UUID });
+    });
+    buildRescheduleLink.mockClear();
+    wireDb({ customers: soloCustomer(), services: makeServicesBuilder([[hold]]) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(404);
+      expect(buildRescheduleLink).not.toHaveBeenCalled();
+    });
+  });
+
   test('pages past a full batch of unusable placeholders instead of reporting no appointment', async () => {
     jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-28T20:00:00Z') });
     try {

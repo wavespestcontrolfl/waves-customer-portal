@@ -1,4 +1,5 @@
 const http = require('http');
+const { decodeHTML } = require('entities');
 const https = require('https');
 const db = require('../../models/db');
 const registry = require('./content-registry');
@@ -148,6 +149,135 @@ function visibleText(html) {
     .trim();
 }
 
+// THE soft-404 heading detector, shared by owned-page health and the citation auditor: a
+// branded "Page not found" served as 200 says so in its <title> or <h1>. Headings only, so
+// "404 reviews" or a 404-area-code phone in body copy is not a not-found page. Scripts,
+// styles, templates and comments never render, so an unused error template inside one is not
+// the page's heading. Entities are decoded before whitespace is collapsed (&nbsp;). "Not found"
+// counts only as the heading's opening words ("404 Not Found") or within a few words after a
+// page-like noun ("The page you requested was not found"),
+// so an article titled "Why Termites Were Not Found" is not an error page.
+const NOT_FOUND_HEADING_RE = /^(?:(?:oops|sorry|error|http|404)\W+)*not found\b|\b(?:page|file|url|resource|document|listing|profile|business|content)\b(?:\s+\S+){0,4}?\s+not found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
+// Raw-text and RCDATA elements: the tokenizer builds no tags inside them, so an <h1> written in
+// a script, iframe fallback or textarea is text, never a heading. They end at the first real
+// "</name" end tag, whatever quotes their text contains.
+const RAW_TEXT_TAGS = new Set(['script', 'style', 'iframe', 'textarea', 'xmp', 'noembed', 'noframes']);
+// Templates and elements marked `hidden` never render; SVG and MathML are foreign content,
+// where <title> is an icon's accessible name, not the document's. They nest, and inside them tags are still tokenized
+// (quotes and all) so only a real close tag ends them; a self-closing <svg/> is empty.
+const INERT_CONTAINERS = new Set(['template', 'svg', 'math']);
+const TAG_NAME_RE = /[a-z][a-z0-9-]*/y;
+const TAG_DELIM_RE = /[\s/>]/;
+const headingText = (text) => decodeHTML(text).replace(/[   ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+// The '>' that ends a tag whose name ends just before `from`, as the tokenizer finds it: a
+// quoted attribute value ("if (n > 0) show('<h1>…')") is skipped whole. Infinity when the tag
+// never closes. Each call reads only its own tag, and tags never overlap.
+function tagClose(src, from) {
+  let j = from;
+  while (j < src.length && src[j] !== '>') {
+    j += 1;
+    if (src[j - 1] !== '=') continue;
+    while (/\s/.test(src[j] || '')) j += 1;
+    if (src[j] === '"' || src[j] === "'") j = indexAt(src, src[j], j + 1) + 1;
+  }
+  return j < src.length ? j : Infinity;
+}
+const indexAt = (s, needle, from) => { const k = s.indexOf(needle, from); return k === -1 ? Infinity : k; };
+
+// Where raw-text element `name` closes, searching from `from`: the first real "</name" end tag
+// ({ start: its '<', end: just past its '>' }; Infinity when it never closes).
+function rawTextClose(lower, name, from) {
+  const needle = `</${name}`;
+  let start = indexAt(lower, needle, from);
+  while (start < lower.length && !TAG_DELIM_RE.test(lower[start + needle.length] || '>')) start = indexAt(lower, needle, start + 1);
+  return { start, end: indexAt(lower, '>', start + needle.length) + 1 };
+}
+
+// The next token at or after `from`, as the HTML tokenizer reads it: a comment, a bogus comment
+// ("<!doctype>", "<?xml>", "</ >"), or a start or end tag; a '<' that starts none of these is
+// text and is passed over. `start` is its '<' (the text before it is the caller's), `end` just
+// past it; at the end of input start = length and end = Infinity. Only foreign elements (svg,
+// math) honor "/>"; on an HTML element such as <template/> it is ignored, as in browsers.
+function nextToken(lower, from) {
+  for (let lt = indexAt(lower, '<', from); lt < lower.length; lt = indexAt(lower, '<', lt + 1)) {
+    if (lower.startsWith('<!--', lt)) return { start: lt, end: indexAt(lower, '-->', lt + 4) + 3 };
+    const closing = lower[lt + 1] === '/';
+    TAG_NAME_RE.lastIndex = lt + (closing ? 2 : 1);
+    const m = TAG_NAME_RE.exec(lower);
+    if (m) {
+      const gt = tagClose(lower, TAG_NAME_RE.lastIndex);
+      const name = m[0];
+      const selfClosing = VOID_TAGS.has(name) || (FOREIGN_TAGS.has(name) && lower[gt - 1] === '/');
+      // A container that never renders: template, foreign content, or an element marked hidden.
+      const inert = INERT_CONTAINERS.has(name) || HIDDEN_ATTR_RE.test(lower.slice(TAG_NAME_RE.lastIndex, gt).replace(QUOTED_VALUE_RE, '='));
+      return { start: lt, end: gt + 1, name, closing, selfClosing, inert };
+    }
+    if (/[!?/]/.test(lower[lt + 1] || '')) return { start: lt, end: indexAt(lower, '>', lt) + 1 };
+  }
+  return { start: lower.length, end: Infinity };
+}
+const FOREIGN_TAGS = new Set(['svg', 'math']);
+const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+// The boolean `hidden` attribute, read with quoted values blanked so title="… hidden …" is not it.
+const QUOTED_VALUE_RE = /=\s*(?:"[^"]*"?|'[^']*'?)/g;
+const HIDDEN_ATTR_RE = /(?:^|[\s/])hidden(?=[\s=/]|$)/;
+
+// Open inert containers, innermost last, with a per-name count so "is one open" is O(1) and
+// closing pops back to it (each push pops once: linear overall).
+function inertStack() {
+  const stack = [];
+  const open = new Map();
+  return {
+    get size() { return stack.length; },
+    push(name) { stack.push(name); open.set(name, (open.get(name) || 0) + 1); },
+    popTo(name) {
+      if (!open.get(name)) return false;
+      let top;
+      do { top = stack.pop(); open.set(top, open.get(top) - 1); } while (top !== name);
+      return true;
+    },
+  };
+}
+
+// Text of every <title>/<h1>, by one forward tokenizer pass (linear on any input up to the
+// 600 KB fetch cap): comments, raw-text bodies and inert containers are skipped, tags inside a
+// heading contribute no text, and a heading left open runs to the end of the document, as it
+// renders. Outside foreign content <title> is RCDATA: its text is read up to </title> as written.
+function headingTexts(html) {
+  const src = String(html || '');
+  const lower = src.toLowerCase();
+  const out = [];
+  const inert = inertStack();
+  let heading = null; // { parts } of the open <h1>
+  const text = (from, to) => { if (heading && !inert.size) heading.parts.push(src.slice(from, to)); };
+  let i = 0;
+  while (i < src.length) {
+    const tok = nextToken(lower, i);
+    text(i, tok.start);
+    i = tok.end;
+    const { name } = tok;
+    if (!name) continue;
+    if (tok.closing) {
+      if (!inert.popTo(name) && !inert.size && heading && name === 'h1') { out.push(heading.parts.join(' ')); heading = null; }
+    } else if (RAW_TEXT_TAGS.has(name) || (name === 'title' && !inert.size)) {
+      const close = rawTextClose(lower, name, i);
+      if (name === 'title') out.push(src.slice(i, close.start)); // a <title>, even misplaced in an h1, is read on its own
+      i = close.end;
+    } else if ((tok.inert || inert.size) && !tok.selfClosing) {
+      inert.push(name); // inside an inert container every element is tracked, so its own close pairs up
+    } else if (name === 'h1' && !inert.size && !heading) {
+      heading = { parts: [] };
+    }
+  }
+  if (heading) out.push(heading.parts.join(' '));
+  return out.map(headingText);
+}
+
+function notFoundHeading(html) {
+  return headingTexts(html).some((t) => NOT_FOUND_HEADING_RE.test(t));
+}
+
 /**
  * Computed once per fetched body; harmless (and unused) for a non-2xx page.
  * Challenge and non-document detection are the shared page-body classifier's
@@ -163,7 +293,7 @@ function computeBodySignals(html, contentType) {
     title,
     challenge: kind === 'challenge',
     nonHtml: kind === 'non_html',
-    softNotFound: SOFT_404_RE.test(title) || SOFT_404_RE.test(String(html || '').slice(0, 4000)),
+    softNotFound: notFoundHeading(html) || SOFT_404_RE.test(title) || SOFT_404_RE.test(String(html || '').slice(0, 4000)),
     visibleTextLength: visibleText(html).length,
   };
 }
@@ -688,6 +818,7 @@ module.exports = {
   visibleText,
   computeBodySignals,
   SOFT_404_RE,
+  notFoundHeading,
   classifyLiveStatus,
   classifyRedirectLiveStatus,
   safeFetchImpl,

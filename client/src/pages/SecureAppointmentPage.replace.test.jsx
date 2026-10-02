@@ -51,7 +51,9 @@ function installFetch({ replace = jsonResponse({ success: true, replaced: true, 
     const u = String(url);
     if (u.endsWith('/replace-intent')) return typeof replace === 'function' ? replace(url, opts) : replace;
     if (u.endsWith('/complete')) return jsonResponse({ success: true });
-    if (/\/secure-card\/[A-Za-z]+$/.test(u)) return jsonResponse(READY_REPLAY);
+    // The page GET attests the consent text version the bundle renders
+    // (?consentTextVersion=…, codex #5434 r1 P1).
+    if (/\/secure-card\/[A-Za-z]+\?consentTextVersion=v\d+_\d{4}-\d{2}-\d{2}$/.test(u)) return jsonResponse(READY_REPLAY);
     throw new Error(`unexpected fetch ${u}`);
   });
   global.fetch = fetchMock;
@@ -68,9 +70,11 @@ describe('SecureAppointmentPage — use a different payment method', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Use a different payment method' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/replace-intent'))).toBe(true));
     const [, opts] = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/replace-intent'));
+    // The replacement is a fresh mint: it attests the bundle's consent version.
+    expect(JSON.parse(opts.body).consentTextVersion).toMatch(/^v\d+_\d{4}-\d{2}-\d{2}$/);
     // The retired capture is named so the server can stamp it.
     expect(opts.method).toBe('POST');
-    expect(JSON.parse(opts.body)).toEqual({ setupIntentId: 'seti_saved' });
+    expect(JSON.parse(opts.body)).toMatchObject({ setupIntentId: 'seti_saved' });
     // The capture remounts on the fresh intent: element path, no saved panel,
     // consent reset.
     await waitFor(() => expect(screen.queryByText('Your card is already saved for this visit.')).not.toBeInTheDocument());

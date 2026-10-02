@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -255,6 +255,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // revalidate quoted OPEN TIMES windows at dispatch, threaded from
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+          ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
           // Codex round-43 P2: the already-booked re-service callback(s) the drafted reply may refer to ({ lane: { date, windowStart } }) —
           // rechecked live before provider entry (reserviceBookedHandoffCheck), same snapshot the manual / scheduled seams read.
           ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
@@ -308,7 +309,9 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
     return {
-      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, reserviceBookedSnapshot,
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot, reserviceBookedSnapshot,
+      // what the LABEL FACTS send-time check needs to read the question: the customer's own text and the prompt family
+      inboundMessage,
       // Independent review finding (PR #5334): carried in-memory so
       // dispatchClaimedSend's pre-send LIVE ETA recheck needs no round trip
       // through the row it just inserted.
@@ -492,9 +495,11 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 // round-46 P2): the boundary predicate reports LIVE_ETA_CHECK_FAILED_AT_BOUNDARY (retryable) — from
 // either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
 // the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
+// The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2).
+const RETRYABLE_BOUNDARY_CODES = new Set(['LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY']);
 function isRetryableEtaBoundaryRefusal(result) {
   return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
-    && result.retryable === true && result.code === 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY';
+    && result.retryable === true && RETRYABLE_BOUNDARY_CODES.has(result.code);
 }
 
 // Release a claim that never reached the provider WITHOUT recording a failed auto-send (the row
@@ -798,9 +803,12 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     // gratitude handoff) LAST, so no other state can change after the final guard and before
     // the provider request; the repeatable parts re-run in the same order after the marker.
     providerPreSendCheck: (() => {
-      const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
+        // LABEL FACTS (Codex #5416 P1): the latest visit is re-read here too, so a visit completed after the
+        // executor's own recheck cannot let the previous visit's timing through.
+        labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply }),
         laneFields.providerPreSendCheck,
       );
     })(),
@@ -897,6 +905,31 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
         }
       }
     }
+    // LABEL FACTS send-time recheck: a reply that copies a label sentence
+    // must still be backed by the customer's CURRENT latest performed visit
+    // (a newer visit, a visit today, a changed label all refuse). Same
+    // supersede-via-failClaim refusal as the open-times recheck above.
+    // Every real-answers dispatch runs the reply guard (snapshot or not: "Yes, they can go out." copies no sentence and still
+    // answers a label question); older-prompt drafts run it only when they carry a snapshot.
+    if (claim.labelFactsSnapshot || (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12'))) {
+      const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot || null, body: reply, inbound: claim.inboundMessage });
+      if (labelReason && require('./agent-decision-send-checks').isLabelRecheckInfrastructureFailure(labelReason)) {
+        // The latest visit could not be READ (Codex #5416 r31 P2): nothing is known to be stale, so the claim is RELEASED
+        // like the live-ETA case below - reservation settled, parked siblings reopened, the draft falls through to a
+        // human-visible suggestion that the reviewer-send seam rechecks again. Never recorded as a failed auto-send.
+        logger.warn(`[sms-auto-send] label facts recheck unreadable (decision ${claim.decisionId}); releasing the claim (retryable)`);
+        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+        await releaseClaim(claim.decisionId);
+        await reopenParked('Auto-send paused: the label timing could not be rechecked — suggestion reopened.');
+        return { sent: false, reason: labelReason, retryable: true };
+      }
+      if (labelReason) {
+        logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
+        const outcome = await notSent(labelReason);
+        await reopenParked('Auto-send held: the label timing in the draft is no longer current — suggestion reopened.');
+        return outcome;
+      }
+    }
     // LIVE ETA send-time recheck (independent review + Codex round-1
     // finding, PR #5334): the SAME shared check the immediate /sms send and
     // the scheduler's queued-send path run (sms-eta-freshness) — claim's
@@ -981,10 +1014,11 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
     // Same release path as the early executor check: release the claim (never auto_send_failed),
     // settle the reservation, reopen parked siblings; the verified draft falls through to a
     // human-visible suggestion that the reviewer-send seam rechecks again.
-    logger.warn(`[sms-auto-send] live ETA recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    const what = result.code === 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'the label timing' : 'the live ETA';
+    logger.warn(`[sms-auto-send] ${what === 'the label timing' ? 'label facts' : 'live ETA'} recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
     await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
     await releaseClaim(claim.decisionId);
-    await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
+    await reopenParked(`Auto-send paused: ${what} could not be rechecked — suggestion reopened.`);
     return { sent: false, reason: result.code, retryable: true };
   }
 

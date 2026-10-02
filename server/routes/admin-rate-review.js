@@ -4,23 +4,29 @@
  * step 2). Admin-only; dark behind GATE_RATE_REVIEW (rateReviewLive(), read
  * per request — off = 404 on every route, nothing read or written).
  *
- *   GET  /api/admin/rate-review/batches             every batch with counts
- *   GET  /api/admin/rate-review/batches/:key        rows + summary + the batch's references
- *   POST /api/admin/rate-review/batches/:key/build  recompute (refused 409 once any row was sent)
- *   POST /api/admin/rate-review/batches/:key/schedule  draft notice rows for the batch's
+ *   GET  /api/admin/rate-review/batches                    every batch with counts + the config
+ *   GET  /api/admin/rate-review/batches/:key               rows + summary + digest + the batch's references
+ *   POST /api/admin/rate-review/batches/:key/build         recompute (refused 409 once any row was sent,
+ *                                                          approved, or scheduled)
+ *   PUT  /api/admin/rate-review/batches/:key/rows/:id      proposed amount / green ↔ skipped (409 once sent, on a locked
+ *                                                          row, or on an exception without includeException)
+ *   POST /api/admin/rate-review/batches/:key/approve       { expectedDigest } → green rows become 'approved' (NO send)
+ *   PUT  /api/admin/rate-review/config                     the knobs + the owner's cost block (audit_log row)
+ *   POST /api/admin/rate-review/batches/:key/schedule      draft notice rows for the batch's
  *        approved rows (services/rate-review-apply.js scheduleNoticeRows —
  *        NOTHING is sent; 409 when nothing is approved); body
  *        { plannedSendDate?: 'YYYY-MM-DD' } (default today) — the 30-day
  *        rule is measured from it
- *   DELETE /api/admin/rate-review/batches/:key/schedule  retire the batch's DRAFT
+ *   DELETE /api/admin/rate-review/batches/:key/schedule    retire the batch's DRAFT
  *        (never delivered) notice rows and unlink their ranking rows — the undo
  *        before the send, and what a rebuild of a scheduled batch needs first
- *   GET  /api/admin/rate-review/apply-holds         rate-review notices the nightly
+ *   GET  /api/admin/rate-review/apply-holds                rate-review notices the nightly
  *        apply refused, with the reason
  *
- * No sends and no approval parsing here — approval is the admin screen's
- * POST (UI PR), the notices are sent by the comms PR, and the nightly apply
- * lives in services/rate-review-apply.js (scheduler 3:10 AM ET).
+ * No customer sends here — the notices are sent by the comms PR, and the
+ * nightly apply lives in services/rate-review-apply.js (scheduler 3:10 AM ET).
+ * The admin screen is client/src/pages/admin/RateReviewPage.jsx (Pricing hub →
+ * Rate review).
  */
 const express = require('express');
 const router = express.Router();
@@ -63,10 +69,78 @@ function validBatchKey(req, res) {
 
 router.get('/batches', async (req, res) => {
   try {
-    res.json({ enabled: true, batches: await rateReview.listBatches(), config: await rateReview.loadConfig() });
+    res.json({ enabled: true, batches: await rateReview.listBatches(), config: await rateReview.readConfig() });
   } catch (err) {
     logger.error(`[admin-rate-review] list failed: ${err.message}`);
     res.status(500).json({ error: 'Could not list rate review batches' });
+  }
+});
+
+// Service refusals → HTTP: conflicts are 409, a missing row/batch 404, bad
+// input 400. The reason rides along so the screen can word its feedback.
+const REASON_STATUS = {
+  batch_has_sent_rows: 409,
+  row_locked: 409,
+  row_is_exception: 409,
+  no_visits_per_year: 409,
+  digest_mismatch: 409,
+  row_not_found: 404,
+  batch_not_found: 404,
+};
+
+function refuse(res, result) {
+  const status = REASON_STATUS[result.reason] || 400;
+  const body = { error: result.error || 'Request refused', reason: result.reason };
+  if (result.approvalDigest) body.approvalDigest = result.approvalDigest;
+  if (result.errors) body.errors = result.errors;
+  return res.status(status).json(body);
+}
+
+router.put('/batches/:key/rows/:id', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  try {
+    const result = await rateReview.updateRow({
+      batchKey: key,
+      rowId: String(req.params.id || ''),
+      proposedRateCents: body.proposed_rate_cents != null ? body.proposed_rate_cents : null,
+      status: body.status != null ? String(body.status) : null,
+      includeException: body.includeException === true,
+      actorId: req.technicianId || null,
+    });
+    if (!result.ok) return refuse(res, result);
+    return res.json({ ok: true, row: result.row, summary: result.summary, approvalDigest: result.approvalDigest });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] row update failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not update the rate review row' });
+  }
+});
+
+router.post('/batches/:key/approve', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  const expectedDigest = req.body && req.body.expectedDigest != null ? String(req.body.expectedDigest) : '';
+  try {
+    const result = await rateReview.approveBatch({ batchKey: key, expectedDigest, actorId: req.technicianId || null });
+    if (!result.ok) return refuse(res, result);
+    return res.json({ ok: true, approved: result.approved, annual_delta_cents: result.annual_delta_cents, approved_at: result.approved_at, approvalDigest: result.approvalDigest, summary: result.summary });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] approve failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not approve the rate review batch' });
+  }
+});
+
+router.put('/config', async (req, res) => {
+  try {
+    const result = await rateReview.updateConfig({ patch: req.body, actorId: req.technicianId || null });
+    if (!result.ok) return refuse(res, { ...result, error: (result.errors && result.errors[0]) || 'Settings refused' });
+    return res.json({ ok: true, config: result.config, changed: result.changed });
+  } catch (err) {
+    logger.error(`[admin-rate-review] config update failed: ${err.message}`);
+    return res.status(500).json({ error: 'Could not save the rate review settings' });
   }
 });
 
@@ -80,6 +154,15 @@ router.get('/batches/:key', async (req, res) => {
     res.status(500).json({ error: 'Could not read the rate review batch' });
   }
 });
+
+// A build the service refused → 409, worded for the owner where the reason
+// is a decision of theirs (anything else keeps the generic line).
+const BUILD_REFUSALS = {
+  batch_has_sent_rows: 'This batch already has rows that were sent to customers — it cannot be recomputed.',
+  batch_has_approved_rows: 'This batch has rows you approved — it cannot be recomputed over your decision.',
+  batch_changed: 'This batch was edited while it was being recomputed — build it again.',
+  batch_has_scheduled_rows: 'This batch has notice rows scheduled — retire its draft notices first (DELETE …/schedule), then recompute.',
+};
 
 router.post('/batches/:key/build', async (req, res) => {
   const key = validBatchKey(req, res);
@@ -115,13 +198,7 @@ router.post('/batches/:key/build', async (req, res) => {
     }, { recordHealth: false, waitForSlot: false });
     if (wasLockSkipped(locked)) return lockBusy(res, locked);
     const { result, digest, digestStatus } = locked;
-    if (!result.ok && result.reason === 'batch_has_sent_rows') {
-      return res.status(409).json({ error: 'This batch already has rows that were sent to customers — it cannot be recomputed.', reason: result.reason });
-    }
-    if (!result.ok && result.reason === 'batch_has_scheduled_rows') {
-      return res.status(409).json({ error: 'This batch has notice rows scheduled — retire its draft notices first (DELETE …/schedule), then recompute.', reason: result.reason });
-    }
-    if (!result.ok) return res.status(409).json({ error: 'Rate review batch could not be built', reason: result.reason });
+    if (!result.ok) return res.status(409).json({ error: BUILD_REFUSALS[result.reason] || 'Rate review batch could not be built', reason: result.reason });
     const built = { batchKey: result.batchKey, window: result.window, rows: result.rows, summary: result.summary, allowances: result.allowances, digest };
     // The rebuild landed but the owner's updated digest did not. The batch
     // now carries no delivery marker, so a later rebuild sees nothing to
@@ -205,7 +282,10 @@ router.post('/batches/:key/digest', async (req, res) => {
     if (wasLockSkipped(locked)) return lockBusy(res, locked);
     const sent = locked || {};
     if (sent.skipped === 'no_batch') return res.status(404).json({ error: 'No rate review batch has that key', reason: 'no_batch' });
-    return res.json({ ok: true, batchKey: key, sent: !!sent.sent, stamped: !!sent.stamped, skipped: sent.skipped || null, subject: sent.subject || null });
+    // channel: where a sent digest went — 'email' (contact@) or 'in_app' (the
+    // admin bell, GATE_OPS_DIGESTS_IN_APP) — so the screen never claims an inbox
+    // delivery the bell took.
+    return res.json({ ok: true, batchKey: key, sent: !!sent.sent, stamped: !!sent.stamped, channel: sent.sent ? sent.channel || null : null, skipped: sent.skipped || null, subject: sent.subject || null });
   } catch (err) {
     const status = Number.isInteger(err && err.status) ? err.status : 'network';
     logger.error(`[admin-rate-review] digest for ${key} could not be sent (status ${status})`);

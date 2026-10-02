@@ -10,6 +10,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),
   requireTechOrAdmin: (req, res, next) => next(),
+  // The call-log routes mount with requireAdmin; the router needs it defined to load.
+  requireAdmin: (req, res, next) => next(),
 }));
 jest.mock('../middleware/auth', () => ({ authenticate: (req, res, next) => next() }));
 jest.mock('../services/ai-assistant/assistant', () => ({}));
@@ -300,13 +302,14 @@ describe('route_decisions writers and the shared listed-decision predicate', () 
   });
 
   test('the list and the verdict writer share one definition of the listed decision', () => {
-    const { isListedRouteDecision, routeDecisionsListedScope, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+    const { isListedRouteDecision, routeDecisionsListedScope, V2_DECISION_VERSIONS_WITH_REVISIONS } = require('../services/call-routing-gates');
     expect(isListedRouteDecision({ mode: 'enforce', decision_version: 'v2-1.50.0' })).toBe(true);
     expect(isListedRouteDecision({ mode: 'shadow', decision_version: 'v2-1.50.0' })).toBe(false);
     expect(isListedRouteDecision({ mode: 'enforce', decision_version: 'legacy-call-v1' })).toBe(false);
     const knex = require('knex')({ client: 'pg' });
     const q = routeDecisionsListedScope(knex('route_decisions')).toSQL();
-    expect(q.bindings).toEqual([...V2_DECISION_VERSIONS, 'enforce']);
+    expect(q.bindings).toEqual([...V2_DECISION_VERSIONS_WITH_REVISIONS, 'enforce']); // base + '+r1' revision versions
+    expect(isListedRouteDecision({ mode: 'enforce', decision_version: 'v2-1.50.0+r1' })).toBe(true);
     const triage = fs.readFileSync(path.join(root, 'routes/admin-triage.js'), 'utf8');
     expect(triage).toMatch(/routeDecisionsListedScope\(db\('route_decisions'\)/);
     // Only the auto-routed review is scoped to the listed set; a triage-card verdict

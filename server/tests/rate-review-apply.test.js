@@ -1134,7 +1134,7 @@ describe('scheduling races', () => {
     expect(mockDb.transaction).toHaveBeenCalled();
     const lockCall = mockDb.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock/.test(sql));
     expect(lockCall).toBeTruthy();
-    expect(lockCall[1]).toEqual(['rate-review-batch', BATCH_KEY]);
+    expect(lockCall[1]).toEqual([`rate_review_batch:${BATCH_KEY}`]);
     const fs = require('fs');
     const path = require('path');
     const migration = fs.readFileSync(path.join(__dirname, '../models/migrations/20260930230000_rate_review_apply.js'), 'utf8');

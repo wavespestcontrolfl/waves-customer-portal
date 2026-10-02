@@ -65,7 +65,7 @@ const { runSweep } = require('../services/previsit-balance-reminder');
 function chain({ result = [], first } = {}) {
   const q = {};
   [
-    'where', 'whereIn', 'whereNull', 'whereNotNull', 'whereBetween',
+    'where', 'whereIn', 'whereNull', 'whereNotNull', 'whereBetween', 'whereRaw',
     'join', 'leftJoin', 'orderBy', 'select', 'count', 'limit',
   ].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
@@ -80,6 +80,8 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
+    // The customer-level reminder schedule's recent-touch read (dunning consolidation §8): no schedule here.
+    if ((!queue || !queue.length) && table === 'customer_dunning_schedules') return chain({ first: undefined });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });

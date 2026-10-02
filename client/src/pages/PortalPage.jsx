@@ -13110,6 +13110,23 @@ function ReferTab({ customer, onSwitchTab }) {
     );
   }
 
+  // Server says this profile can't be enrolled yet: its phone already
+  // belongs to another account's referral record (a staff data question,
+  // not an outage — GET /api/referrals answers 200 with enrolled:false).
+  // Plain copy, no share link: a code the server never issued must not be
+  // built from customer.referralCode here.
+  if (data?.enrolled === false) {
+    return (
+      <PortalStatePanel
+        icon="waves"
+        eyebrow="Referrals"
+        titleAs="h1"
+        title="Referral sharing isn't connected yet"
+        message="This account's phone number is already linked to another referral record. Text or call us and we'll connect it, then your share link will be ready here."
+      />
+    );
+  }
+
   const referralCode = data?.referralCode || customer?.referralCode || '';
   const shareLink = data?.referralLink || data?.shareLink || (referralCode ? `https://portal.wavespestcontrol.com/r/${referralCode}` : 'https://portal.wavespestcontrol.com');
   const stats = data?.stats || { totalReferrals: 0, converted: 0, totalEarned: 0 };
@@ -16199,7 +16216,51 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
 // =========================================================================
 // AI CHAT WIDGET
 // =========================================================================
-function ChatWidget({ customer, onClose, initialQuestion }) {
+// Buttons the assistant may show under a reply. The server builds every label
+// and target; only a self-serve reschedule page or a known portal tab renders.
+const CHAT_ACTION_TABS = ['billing', 'schedule', 'services', 'plan', 'documents', 'refer'];
+const CHAT_ACTION_BUTTON = { ...PORTAL_SECONDARY_ACTION, padding: '11px 18px', fontSize: 14 };
+function chatActionsOf(actions) {
+  if (!Array.isArray(actions)) return [];
+  return actions.filter((a) => a && typeof a.label === 'string' && a.label && (
+    (a.type === 'link' && typeof a.href === 'string' && /^\/reschedule\/[A-Za-z0-9_-]+$/.test(a.href))
+    || (a.type === 'tab' && CHAT_ACTION_TABS.includes(a.tab))
+  )).slice(0, 9);
+}
+
+// A /ai/chat response as the chat rows it adds: the assistant's reply (with
+// its buttons), then the "team notified" line only when the server says the
+// bell rang (teamNotified false = the request is saved but nobody was paged,
+// and the reply itself tells the customer to call).
+function chatRowsFor(data) {
+  // Only model-generated replies are reportable — the greeting and the
+  // hardcoded fallback/error strings are not AI output.
+  const rows = [{
+    role: 'assistant',
+    content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.",
+    reportable: !!data.reply && data.canReport !== false,
+    actions: chatActionsOf(data.actions),
+  }];
+  if (data.escalated && data.teamNotified !== false) {
+    rows.push({ role: 'system', content: 'A team member has been notified and will follow up shortly.' });
+  }
+  return rows;
+}
+
+function ChatActions({ actions, onNavigate }) {
+  if (!actions?.length) return null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, marginTop: 8 }}>
+      {actions.map((a) => (a.type === 'link' ? (
+        <a key={a.href} href={a.href} data-glass-accent="" style={{ ...CHAT_ACTION_BUTTON, textDecoration: 'none' }}>{a.label}</a>
+      ) : (
+        <button key={a.tab} type="button" onClick={() => onNavigate?.(a.tab)} data-glass-accent="" style={CHAT_ACTION_BUTTON}>{a.label}</button>
+      )))}
+    </div>
+  );
+}
+
+function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   // Rendered only while open — lock the page behind the chat overlay.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
@@ -16267,12 +16328,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         method: 'POST',
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
       });
-      // Only model-generated replies are reportable — the greeting and the
-      // hardcoded fallback/error strings are not AI output.
-      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.", reportable: !!data.reply && data.canReport !== false }]);
-      if (data.escalated) {
-        setMessages(prev => [...prev, { role: 'system', content: 'A team member has been notified and will follow up shortly.' }]);
-      }
+      setMessages(prev => [...prev, ...chatRowsFor(data)]);
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: "Connection issue — please try again or call us at (941) 297-5749." }]);
     }
@@ -16371,6 +16427,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               }}>
                 {msg.content}
               </div>
+              <ChatActions actions={msg.actions} onNavigate={onNavigate} />
               {msg.reportable && (
                 reportState[i] === 'done' ? (
                   <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontFamily: FONTS.body, marginTop: 4, paddingLeft: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -17430,7 +17487,7 @@ export default function PortalPage() {
       />
 
       {/* AI Chat Widget */}
-      {showChat && <ChatWidget customer={customer} initialQuestion={chatPrompt} onClose={() => { setShowChat(false); setChatPrompt(null); }} />}
+      {showChat && <ChatWidget customer={customer} initialQuestion={chatPrompt} onClose={() => { setShowChat(false); setChatPrompt(null); }} onNavigate={(tab) => { setShowChat(false); setChatPrompt(null); switchTab(tab); }} />}
 
       {/* Report Issue Overlay */}
       <ReportIssueOverlay
@@ -17457,4 +17514,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

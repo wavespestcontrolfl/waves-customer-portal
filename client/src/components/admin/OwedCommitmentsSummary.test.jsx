@@ -117,3 +117,18 @@ describe("SMS follow-up controls", () => {
     expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
   });
 });
+
+describe("OwedCommitmentsSummary note", () => {
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  it("shows the office's note on a promise, with what a technician marked still left", async () => {
+    localStorage.setItem("waves_admin_token", "t");
+    const note = "Customer prefers mornings\nPartly done at the October 1 visit. Still left: the left side.";
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ commitments: [{ ...rowFor("A"), channel: "sms", human_note: note }], enabled: true }),
+    })));
+    render(<OwedCommitmentsSummary customerId="A" source="sms" />);
+    await screen.findByText("Call A back");
+    expect(screen.getByText(/Still left: the left side\./)).toBeInTheDocument();
+  });
+});

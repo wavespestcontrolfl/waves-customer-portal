@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, CheckCircle2, ClipboardList } from 'lucide-react';
 import { Button, Sheet, SheetBody, SheetFooter, SheetHeader } from '../ui';
-import { CompletionPanel, completionReconcilePrompt, createCompletionIdempotencyKey } from '../../pages/admin/SchedulePage';
+import { CompletionPanel, completionPromiseMarksPrompt, completionReconcilePrompt, completionReportRulesPrompt, createCompletionIdempotencyKey } from '../../pages/admin/SchedulePage';
 import { adminFetch } from '../../utils/admin-fetch';
 import { deleteCompletionDraft, deleteVisitCompletionDraft, getVisitCompletionDraft, putVisitCompletionDraft } from '../../lib/completion-resume-store';
 import { completionDraftKey } from '../../lib/completion-drafts';
@@ -128,12 +128,38 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
     } catch (err) {
       const form = candidate.forms[err.details?.serviceId];
       const prompt = completionReconcilePrompt(err);
+      // Edit heads-up on a four-section report: same confirm-and-resubmit
+      // shape as the reconciliation prompt; it never blocks.
+      const rulesPrompt = completionReportRulesPrompt(err);
+      // A promise a member marked changed after its report was written (the
+      // promise check, Codex #5516): OK sends that member as is; Cancel puts
+      // its form back to be marked again on the promises as they now stand.
+      const promisePrompt = completionPromiseMarksPrompt(err);
       if (!packet && form && !form.body.reportReconcileConfirmed && prompt) {
         if (window.confirm(prompt)) {
           confirmedDraft = { ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: {
             ...form, body: { ...form.body, reportReconcileConfirmed: true },
           } } };
           setDraft(confirmedDraft);
+        }
+      } else if (!packet && form && !form.body.reportRulesConfirmed && rulesPrompt) {
+        if (window.confirm(rulesPrompt)) {
+          confirmedDraft = { ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: {
+            ...form, body: { ...form.body, reportRulesConfirmed: true },
+          } } };
+          setDraft(confirmedDraft);
+        }
+      } else if (!packet && form && !form.body.promiseMarksConfirmed && promisePrompt) {
+        if (window.confirm(promisePrompt)) {
+          confirmedDraft = { ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: {
+            ...form, body: { ...form.body, promiseMarksConfirmed: true },
+          } } };
+          setDraft(confirmedDraft);
+        } else {
+          const reopened = { ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: { ...form, body: null } } };
+          await putVisitCompletionDraft(visitId, reopened, scope);
+          setDraft(reopened);
+          setError('A promise changed. Open that service again to mark it, then complete the visit.');
         }
       } else {
         setError(err.name === 'TypeError'
@@ -212,7 +238,9 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
             : 'Review each service form, then close out the visit once. Only eligible completed work is included in the shared invoice.'}</p>
           <div className="space-y-3">
             {services.map((service) => {
-              const form = draft?.forms?.[service.id];
+              // A form put back to be marked again keeps its saved inputs
+              // (reopened through `preparedDraft`) but no prepared body.
+              const form = draft?.forms?.[service.id]?.body ? draft.forms[service.id] : null;
               return <section key={service.id} className="rounded-sm border border-hairline border-zinc-200 p-4">
                 <div className="flex items-start gap-3">
                   {form || packet ? <CheckCircle2 size={22} className="shrink-0 text-zinc-700" /> : <ClipboardList size={22} className="shrink-0 text-zinc-500" />}

@@ -9,7 +9,8 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -50,6 +51,7 @@ const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { isReService } = require('../services/re-service');
+const reserviceOfficeRequest = require('../services/reservice-office-request');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
@@ -5085,6 +5087,9 @@ async function loadLinkedProjectsByServiceId(serviceIds) {
 
 async function loadProjectCompletionContextByServiceId(services) {
   const rows = Array.isArray(services) ? services : [];
+  // GATE_TS_FAST_COMPLETE alone: every tech completes T&S on the Fast Complete
+  // sheet (owner 2026-10-01, no per-tech flag).
+  const treeShrubFastCompleteEnabled = tsFastCompleteLive();
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
@@ -5108,6 +5113,16 @@ async function loadProjectCompletionContextByServiceId(services) {
       // Fast Complete sheet instead of ServiceRecapModal. Same "ride the
       // schedule payload, no new endpoint" pattern as inspectionCreditAvailable above.
       reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
+      // Tree & Shrub Fast Complete: gate AND the requesting tech's user flag.
+      treeShrubFastCompleteEnabled,
+      // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
+      // lawn re-service sheet (instead of the typed Dispatch form) when on.
+      // Read at call time; no per-tech flag.
+      lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
+      // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
+      // the Fast Complete sheet sends the customer completion text instead
+      // of pinning the send flags off. Only read while the gate above is on.
+      fastCompleteRecapEnabled: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -6228,6 +6243,10 @@ router.get('/', async (req, res, next) => {
         inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
         // GATE_RESERVICE_FAST_COMPLETE (PR C) — see loadProjectCompletionContextByServiceId.
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+        treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
+        lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+        // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
+        fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6817,6 +6836,9 @@ router.get('/week', async (req, res, next) => {
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
           // Same field as the day view above (PR C).
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
+          treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
+          lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+          fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -8160,6 +8182,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const resolvedIsCallback = isCallback
       || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
 
+    // Office "Customer's words" on a pest/lawn re-service (GATE_RESERVICE
+    // _OFFICE_REQUEST): trimmed + capped here, source decided by re-reading
+    // the suggestion the client named — never taken from the client. Only the
+    // primary row below is stamped; null = nothing saved (gate off, not a
+    // pest/lawn re-service, or empty words).
+    const officeCustomerRequest = (isEnabled('reserviceOfficeRequest')
+      && resolvedIsCallback
+      && reserviceOfficeRequest.isOfficeRequestServiceKey(serviceRecord?.service_key)
+      && req.body.customerRequest && typeof req.body.customerRequest === 'object')
+      ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
+      : null;
+
     // A recurring booking that creates WaveGuard plan coverage IS the
     // membership sale — let the "any member" discount floor see that, since
     // the customer row's tier is only stamped after the series commits.
@@ -8623,6 +8657,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
+      if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
+        insertData.customer_request = officeCustomerRequest.text;
+        insertData.customer_request_source = officeCustomerRequest.source;
+      }
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
       if (cols.source_estimate_id && insertLinkId) insertData.source_estimate_id = insertLinkId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
@@ -10718,6 +10756,30 @@ function seriesAckMatches(body, preview) {
   const ok = want.size === have.size && [...want].every((id) => have.has(id));
   return { ok, changed: !ok };
 }
+// GATE_SERIES_MOVE_CARRIES_VISIT: a later occurrence in a grouped visit
+// would be CARRIED by the series writer, which can still refuse (a frozen
+// visit, an unmovable partner, the partner plan's own day) after the
+// update-details handler has committed the other field edits — a partial
+// save. That surface moves no grouped stop: refuse before anything is
+// written; the schedule board moves the whole stop with its partners.
+async function refuseCarriedStopInEditMove(ackedIds) {
+  if (!require('../config/feature-gates').seriesMoveCarriesVisitLive()) return;
+  const visitIds = [...new Set((await db('scheduled_services').whereIn('id', ackedIds).whereNotNull('visit_id')
+    .select('visit_id')).map((r) => String(r.visit_id)))];
+  for (const visitId of visitIds) {
+    // NULL-safe: a legacy member with no status is live.
+    const live = await db('scheduled_services').where({ visit_id: visitId })
+      .where((q) => q.whereNull('status').orWhereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show']))
+      .count({ n: '*' }).first();
+    if (Number(live?.n || 0) >= 2) {
+      throw Object.assign(
+        httpError(409, 'A later visit in this plan is grouped with another service at the same stop. Move the plan from the schedule (each stop moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
+        { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+      );
+    }
+  }
+}
+
 async function planCollectiveEditDateMove(req) {
   const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
   if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
@@ -10799,6 +10861,7 @@ async function planCollectiveEditDateMove(req) {
     }
     ackedIds = preview.occurrenceIds.map(String);
   }
+  await refuseCarriedStopInEditMove(ackedIds);
   let win = { start: null, end: null };
   const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
   if (!clearWindow && intake.windowStart) {
@@ -10840,6 +10903,9 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // Never carries grouped partners (refuseCarriedStopInEditMove's
+        // promise holds even if a stop is grouped after that preflight).
+        carryVisit: false,
         actorId: req.technicianId || null,
         notifyRequested: notifyCustomer === true,
         // The acknowledged occurrence set, enforced against the locked sweep.
@@ -20878,6 +20944,11 @@ router.put('/:id/status', async (req, res, next) => {
         // The hold guard again UNDER the row lock: a concurrent call pass may promote this booking to a
         // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
         if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
+        // The office's approval of an address hold records the address it is for (same transaction, same
+        // row lock), so a later retry of the activation cannot release the hold for a changed address.
+        if (isOfficeReviewConfirm && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
+          await require('../services/street-level-hold').recordApprovedAddressWitness(trx, svc.id);
+        }
         // Re-validate technician ownership INSIDE the transaction, row-
         // locked: the predicate on the pre-transaction SELECT alone leaves
         // a window where dispatch reassigns the visit and the former
@@ -22338,6 +22409,25 @@ router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) 
       enabled: isEnabled('prepayOnBook'),
       switchEnabled: isEnabled('onsitePrepaySwitch'),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/reservice-request-suggestion?customerId= — the
+// New Appointment modal's "Customer's words" suggestion for a pest/lawn
+// re-service (GATE_RESERVICE_OFFICE_REQUEST): this customer's latest inbound
+// text or call note from the last 72 hours, whichever is newer, with its kind
+// and time so the modal can label it ("Text, 3 h ago"). Read-only. Gate off
+// answers {enabled:false, suggestion:null} — the modal renders nothing new.
+// requireAdmin like the booking route the suggestion feeds.
+router.get('/reservice-request-suggestion', requireAdmin, async (req, res, next) => {
+  try {
+    if (!isEnabled('reserviceOfficeRequest')) return res.json({ enabled: false, suggestion: null });
+    const customerId = String(req.query.customerId || '');
+    if (!reserviceOfficeRequest.isUuid(customerId)) {
+      return res.status(400).json({ error: 'customerId required' });
+    }
+    const suggestion = await reserviceOfficeRequest.pickSuggestion(db, customerId);
+    res.json({ enabled: true, suggestion });
   } catch (err) { next(err); }
 });
 
@@ -23909,6 +23999,11 @@ async function generateReportCopyWithFallback({
   // the visit's own product records — codex r4). Returning a truthy reason
   // rejects the copy and drives the same retry/cross-provider machinery.
   extraRejection = null,
+  // The four-section report (writer rules) runs longer than the paragraph.
+  maxTokens = 800,
+  // Under the writer rules only the four-section report is accepted; the
+  // deterministic fallback keeps the two-section shape.
+  requireSections = false,
   providers = [
     {
       name: MODELS.TEXT_POLICIES.report.primary.provider,
@@ -23952,7 +24047,7 @@ async function generateReportCopyWithFallback({
           system: systemPrompt,
           text: userMessage,
           jsonMode: false,
-          maxTokens: 800,
+          maxTokens,
           timeoutMs: Math.min(remainingMs, REPORT_CALL_TIMEOUT_MS),
         });
       } catch (err) {
@@ -23976,8 +24071,9 @@ async function generateReportCopyWithFallback({
       // response can still trip its parser-only screens (bare 'infestation',
       // 'safe', …), which return { body: null }. Only parser-approved copy
       // may replace the notes (AGENTS.md report egress; codex r15).
+      const parsed = technicianReportCustomerCopy(report);
       const rejection = reportCopyRejection(report)
-        || (technicianReportCustomerCopy(report)?.body ? null : 'malformed_shape')
+        || (parsed?.body && (!requireSections || parsed.sections) ? null : 'malformed_shape')
         || (typeof extraRejection === 'function' ? extraRejection(report) : null);
       if (!rejection) {
         return { ok: true, report, provider: provider.name, model: provider.model, failures };
@@ -24277,10 +24373,15 @@ const TYPED_SCORE_WORDS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4
 // (correctly) rejects any "N/5" as numeric_rating. The prompt block keeps the
 // number: it is model INPUT, and the system prompt already orders ratings to
 // be worded, never quoted.
-function typedActivityLine(findingsType, score, { words = false } = {}) {
+function typedActivityLine(findingsType, score, { words = false, gauge = false } = {}) {
   if (!Number.isInteger(score) || score < 0 || score > 5) return null;
   const indicator = ActivityIndicators.ACTIVITY_INDICATORS[findingsType];
   const label = indicator?.label || 'Recorded activity';
+  // Under the writer rules the form's score is a gauge the report prints,
+  // set from the recorded answers, not a severity the technician chose
+  // (outside review 2026-10-01: "active termites present" read as "rated
+  // high" beside "light feeding").
+  if (gauge) return `${label} gauge on the report, set by the form from the recorded answers (never restate it, and never call it high or low): ${score}/5`;
   return words
     ? `${label}: ${TYPED_SCORE_WORDS[score]}`
     : `${label}: ${score}/5 (${TYPED_SCORE_WORDS[score]})`;
@@ -24345,11 +24446,12 @@ function copyActivityScore(type, values, submitted) {
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, companionFindings = [],
   allowedCompanionTypes = [], activityScore = null, withholdProductRecord = false,
+  activityGauge = false,
 }) {
   const primarySections = findingsType
     ? typedFindingsPromptSections(findingsType, values)
     : { work: [], observations: [], products: [], advice: [], customer: [] };
-  const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
+  const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore, { gauge: activityGauge }) : null;
   if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
   const primaryParts = renderTypedGroupLines(primarySections, { withholdProductRecord });
   const allowed = new Set(allowedCompanionTypes);
@@ -24369,7 +24471,7 @@ function buildTypedFindingsPromptBlock({
       const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
         ? entry.values : {};
       const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
-      const activityLine = typedActivityLine(entry.type, entry?.activityScore);
+      const activityLine = typedActivityLine(entry.type, entry?.activityScore, { gauge: activityGauge });
       if (activityLine) sections.observations.push(activityLine);
       const parts = renderTypedGroupLines(sections, { withholdProductRecord });
       if (!parts.length) return null;
@@ -24403,6 +24505,8 @@ router.post('/generate-report', async (req, res) => {
       includeCustomerComms,
       structuredFindings, companionFindings, typedActivityScore,
       treeShrubReview,
+      // The promise check: [{ id, mark, stillLeft? }] (visit-promises.js).
+      promiseMarks,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -24567,6 +24671,10 @@ router.post('/generate-report', async (req, res) => {
       || ratingNum !== null
       || typedHasFindingInput
       || hasValidLawnAssessment
+      // Provisional, like companion input: submitted promise marks keep the
+      // request alive to grounding, and only marks that resolve against the
+      // customer's open promises open generation (re-checked below).
+      || (Array.isArray(promiseMarks) && promiseMarks.length > 0)
       || suppliedTreeShrubReview
       || cappedPhotoCaptions.length > 0;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
@@ -24856,7 +24964,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         // in the projection the flag reads undefined and callback visits on
         // one-time keys would ground differently than /complete scores them
         // (codex P2 r2).
-        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
+        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => 'lookup_failed');
       // A transient service-row lookup failure on a typed request would leave
       // typedFindingsBlock empty while primaryTypedInput still opens the
@@ -24954,6 +25062,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
             companions = [],
           } = completionProfile || {};
           const synthesizedGeneric = completionProfile?.synthesized === true && !serviceKey;
+          // 'one_time' is the explicit not-a-series marker (visit-prep.js),
+          // never recurring lineage (Codex #5500).
+          const recurringPattern = svc.recurring_pattern && svc.recurring_pattern !== 'one_time' ? svc.recurring_pattern : null;
           reportPromptContext = profileResolutionFailed
             ? { requireCanonical: false }
             : {
@@ -24963,6 +25074,22 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
               serviceModel,
               isCallback: svc.is_callback === true,
               isBundled: customerFacingCompanionTypes(companions).length > 0,
+              // Writer rules: a re-service or callback, a one-time service
+              // (one-time billing and no recurring lineage), or a recurring
+              // plan visit. Decides the reach-out date (owner 2026-10-01:
+              // one-time services and re-services).
+              // Recurring only on positive evidence (a recurring billing
+              // type or recurring lineage); an unresolved or synthesized
+              // profile stays unknown (Codex #5500).
+              serviceKind: (serviceKey === 'pest_re_service' || svc.is_callback === true)
+                ? 're_service'
+                : (String(serviceModel || '').toLowerCase() === 'one_time'
+                  && svc.is_recurring !== true && !svc.recurring_parent_id && !recurringPattern)
+                  ? 'one_time'
+                  : (String(serviceModel || '').toLowerCase() === 'recurring'
+                    || svc.is_recurring === true || Boolean(svc.recurring_parent_id) || Boolean(recurringPattern))
+                    ? 'recurring'
+                    : null,
             };
           if (completionProfile) {
             fallbackServiceType = serviceName || (serviceKey ? 'scheduled service' : groundingServiceType);
@@ -25037,6 +25164,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
               allowedCompanionTypes,
               activityScore: typedActivityScoreNum,
               withholdProductRecord: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
+              activityGauge: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
             });
             // The deterministic last-resort copy can't read the prompt block,
             // so a typed-only request during a double-provider miss needs the
@@ -25111,7 +25239,21 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       || hasValidLawnAssessment
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
       || cappedPhotoCaptions.length > 0;
-    if (!baseHasReportInput && !companionCustomerInput) {
+    // The technician's promise marks, resolved against this customer's open
+    // promises (owner "ok yes add these" 2026-10-01): with the writer rules
+    // on a grounded visit only. Fail-soft: no record, no mention. Resolved
+    // before the input check: a validated mark is visit detail on its own
+    // (Codex #5516).
+    let visitPromises = [];
+    if (writerRulesOn && groundingCustomerId && Array.isArray(promiseMarks) && promiseMarks.length) {
+      try {
+        visitPromises = await require('../services/service-report/visit-promises')
+          .resolveVisitPromiseMarks(db, { customerId: groundingCustomerId, marks: promiseMarks });
+      } catch (promiseErr) {
+        logger.warn(`[generate-report] promise marks not loaded (${require('../services/service-report/visit-promises').errorCode(promiseErr)})`);
+      }
+    }
+    if (!baseHasReportInput && !companionCustomerInput && !visitPromises.length) {
       return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     }
 
@@ -25121,6 +25263,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let contextText = '';
     let contextSignals = {};
     let deterministicApplications = [];
+    let writerAllowedPhrases = [];
+    let writerAllowedDates = [];
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
@@ -25140,13 +25284,31 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         productNames: fallbackProductNames,
         serviceDate: groundingServiceDate,
         writerRules: writerRulesOn,
+        findingsType: reportPromptContext.findingsType || null,
+        serviceKind: reportPromptContext.serviceKind || null,
+        visitPromises,
       });
       contextText = ctx.contextText || '';
+      writerAllowedPhrases = Array.isArray(ctx.writerAllowedPhrases) ? ctx.writerAllowedPhrases : [];
+      writerAllowedDates = Array.isArray(ctx.writerAllowedDates) ? ctx.writerAllowedDates : [];
       contextSignals = ctx.signals || {};
       deterministicApplications = Array.isArray(ctx.deterministicApplications)
         ? ctx.deterministicApplications : [];
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
+    }
+
+    // A request grounded by promise marks alone lives or dies by them: when
+    // the marks were the only substantive input and never reached the
+    // writer's context (the context build failed), there is nothing real to
+    // write from. Reject retryably rather than return copy that leaves the
+    // marked promise out (Codex #5516), as the assessment-only path does.
+    if (visitPromises.length && !baseHasReportInput && !companionCustomerInput && !contextSignals.hasVisitPromises) {
+      return res.status(503).json({
+        error: 'The promises you marked could not be loaded right now — try Generate again in a moment.',
+        code: 'promise_grounding_unavailable',
+        retryable: true,
+      });
     }
 
     if (Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
@@ -25374,12 +25536,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       }
     }
     const writerRulesScreen = (text) => (writerRulesOn
-      ? writerRulesRejection(text, { activeIngredients: visitActiveIngredients })
+      ? writerRulesRejection(text, {
+        activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
+      })
       : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
+      ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic
@@ -26978,3 +27143,6 @@ module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
 // address resolver, so "same property" can never mean something different
 // in the duplicate guard than it does in the pest-rides-lawn preview.
 module.exports.topUpScopeInput = topUpScopeInput;
+// Test surface for the per-service completion payload fields (the T&S Fast
+// Complete flag needs the gate AND the requesting user's flag).
+module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;
