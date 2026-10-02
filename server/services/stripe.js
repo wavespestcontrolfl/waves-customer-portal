@@ -821,7 +821,7 @@ const StripeService = {
 
     try {
       const stripeCustomer = await stripe.customers.create({
-        name: `${customer.first_name} ${customer.last_name}`,
+        name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || undefined,
         email: customer.email || undefined,
         phone: customer.phone || undefined,
         address: {

@@ -85,6 +85,9 @@ jest.mock('../services/sms-suggest-mode', () => ({
   SUGGEST_WORKFLOW: 'sms_house_voice_suggest',
   // bodyNeedsPaymentRecheck (the send seam's gate) asks this; an absent export reads as "unknowable => recheck" (fail closed)
   hasPriceQuote: jest.fn(() => false),
+  // GATE_SMS_SCHEDULING_SUGGEST rollback filter: a pass-through here; its SQL
+  // is covered in sms-scheduling-suggest.test.js.
+  excludeGatedSchedulingSuggestions: jest.fn((query) => query),
   HUMAN_REPLY_TYPES: ['manual', 'ai_approved', 'ai_revised'],
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),

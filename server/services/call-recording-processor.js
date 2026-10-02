@@ -891,6 +891,7 @@ const CONFIRM_REASON_TEXT = {
   service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
+  missing_first_name: "no first name on file for this customer — get the account holder's first name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
   on_file_house_number_conflict: 'caller gave a different house number on the same street as the address on file — confirm which number before sending the estimate or dispatching',
@@ -3821,6 +3822,111 @@ async function avAddressUniqueOwner(matches, opts) {
   }
 }
 
+// ── First-name advisory: exact address match ───────────────────────────────
+
+// An accepted Address Validation verdict for an in-area PREMISE-level address
+// (PREMISE and SUB_PREMISE both qualify, as in the canonical validator
+// address-validation/index.js).
+const PREMISE_LEVEL_GRANULARITIES = new Set(['PREMISE', 'SUB_PREMISE']);
+function verdictAcceptsAddress(av) {
+  return ['validated_accept', 'corrected'].includes(av?.status) && av.inServiceArea === true
+    && PREMISE_LEVEL_GRANULARITIES.has(av.granularity);
+}
+
+// "Book only on an exact match" (owner ruling 2026-10-02). ONE rule for both customer
+// creation and the booking hold: the address the call STORED (line 1, line 2, city,
+// ZIP-5) must equal the address the verdict's Address Validation RAN ON, after basic
+// cleanup only — case, whitespace, punctuation, ZIP+4 -> ZIP-5, and the street-suffix
+// alias table (St/Street, Lp/Loop). Nothing else is interpreted: a unit spelled
+// differently (Apt vs Unit vs bare), a building split across lines, a missing piece,
+// or a verdict input that recovery rewrote all mean "not exact" and the call goes to
+// the office through the existing hold / card. Pure.
+function addressesExactlyMatch(stored = {}, verdictInput = {}) {
+  const { STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
+  const clean = (v) => String(v || '').toLowerCase().replace(/[.,#]/g, ' ').replace(/\s+/g, ' ').trim();
+  const street = (v) => clean(v).split(' ').map((w) => String(STREET_SUFFIX_ALIASES[w] || w).toLowerCase()).join(' ');
+  const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+  const mine = [street(stored.address_line1), clean(stored.address_line2), clean(stored.city), zip5(stored.zip)];
+  const theirs = [street(verdictInput?.street_line_1), clean(verdictInput?.street_line_2), clean(verdictInput?.city), zip5(verdictInput?.postal_code)];
+  // Line 2 may be empty on both sides; line 1, city and ZIP must be present.
+  return [0, 2, 3].every((i) => mine[i] && theirs[i]) && mine.every((v, i) => v === theirs[i]);
+}
+
+// GATE_CALL_FIRST_NAME_ADVISORY: a last-name-only customer is created — and booked —
+// only when the verdict is an accepted in-area premise AND the stored address exactly
+// matches BOTH the address the verdict ran on (`verdictInput`: the caller's raw V2
+// service_address; a street recovery that rewrote it is not exact) AND the verdict's own
+// normalized address (street, city, ZIP — Google's form carries no unit). Only a
+// `validated_accept` verdict qualifies: a `corrected` one changed some component of what
+// the caller said — possibly the unit, which the normalized form cannot show — so it
+// holds for the office (codex #5559 r13 pre-push P1, r16 P1). Used by customer creation
+// and by the booking hold, so neither can re-judge what the other accepted. Pure.
+function firstNameAdvisoryAddressOk(av, extracted = {}, verdictInput = null) {
+  const n = av?.normalized;
+  return av?.status === 'validated_accept' && verdictAcceptsAddress(av) && !!verdictInput && !!n
+    && addressesExactlyMatch(extracted, verdictInput)
+    && addressesExactlyMatch({ ...extracted, address_line2: null },
+      { street_line_1: n.street_line_1, street_line_2: null, city: n.city, postal_code: n.postal_code });
+}
+
+// The missing_first_name card: ONE open card per call (the unique index stays) whose
+// payload.customer_ids lists EVERY customer the call left owing a first name (a card
+// filed before the list shape carries the scalar customer_id, read as a one-element
+// list). Filed at customer creation AND on the booking path:
+//   - a customer already listed on an OPEN card, or on a card the office DISMISSED, is
+//     never duplicated or re-opened; one listed only on a RESOLVED card is owed again (we
+//     file only while the name is blank, so the name was cleared since) and gets a fresh
+//     card (codex #5559 r16);
+//   - while the call's card is open / claimed, a NEW owed customer (a relink or rebook to
+//     another blank-name customer) is APPENDED to its list — never replacing one;
+//   - when the call's cards are all terminal, a new owed customer gets a fresh card.
+// Advisory; the list is what Resolve, the sweep and the office link read.
+// Returns true when a customer was newly listed (filed or appended).
+async function fileMissingFirstNameCard(conn, { callLogId, customerId, extraction, extracted = {} }) {
+  const { owedCustomerIds } = require('../utils/missing-first-name-card');
+  const stamp = customerId ? String(customerId) : null;
+  const heard = { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null };
+  // EVERYTHING — dedup, append, fresh insert — runs inside one transaction under the per-call
+  // triage lock (the global lock order), taken BEFORE the first read: a Resolve / Dismiss /
+  // sweep that closes the card, and a concurrent filer, serialize with this decision, so a
+  // newly owed customer is never dropped by a stale read or an ignored insert conflict.
+  return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    const rows = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
+      .select('id', 'status', 'payload');
+    if (rows.some((row) => stamp && ['open', 'in_progress', 'dismissed'].includes(row.status)
+      && owedCustomerIds(row.payload).includes(stamp))) return false;
+    const live = rows.find((row) => ['open', 'in_progress'].includes(row.status));
+    if (live) {
+      const ids = owedCustomerIds(live.payload);
+      if (!stamp) return false;
+      await trx('triage_items').where({ id: live.id }).forUpdate().first('id');
+      await trx('triage_items').where({ id: live.id }).update({
+        payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ customer_ids: [...ids, stamp] })]),
+        updated_at: new Date(),
+      });
+      return true;
+    }
+    await trx('triage_items').insert(buildTriageItem({
+      callLogId,
+      flag: 'missing_first_name',
+      extraction,
+      severity: 'advisory',
+      extraPayload: { customer_ids: stamp ? [stamp] : [], heard_name_v1: heard },
+    }));
+    return true;
+  });
+}
+
+// Is the call's missing_first_name card still an open task (open or claimed)? Read under
+// the finalization triage lock so a concurrent close is seen. Pure of side effects.
+async function missingFirstNameCardStillOpen(conn, callLogId) {
+  const card = await conn('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
+    .whereIn('status', ['open', 'in_progress']).first('id');
+  return !!card;
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
@@ -6696,6 +6802,22 @@ function hasUsablePhone(value) {
   return String(value || '').replace(/\D/g, '').length >= 10;
 }
 
+// Outside enforce mode canAutoRoute's address-trust gate never runs, so a booking
+// that lacks the email — or, under GATE_CALL_FIRST_NAME_ADVISORY, the first name —
+// must still have its ACTUAL destination positively validated (the verdict must
+// validate the street/unit being booked, not just some address V2 heard).
+// Returns the advisory fields that put the booking on hold; [] = no hold. Pure.
+function advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking } = {}) {
+  if (!customerValidation?.ok) return [];
+  const advisory = customerValidation.advisory || [];
+  return [
+    // Enforce mode exempts only the email advisory (canAutoRoute owns that address trust);
+    // the first-name waiver's exact-match rule applies in EVERY mode.
+    ...(advisory.includes('email') && !enforceModeActive && !avPositiveForBooking ? ['email'] : []),
+    ...(advisory.includes('first_name') && !exactAddressForBooking ? ['first_name'] : []),
+  ];
+}
+
 function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
   // A service-contact slot email satisfies the email requirement: it is a
   // deliverable account email (appointment-email's resolveRecipients includes
@@ -6730,7 +6852,13 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   };
 
   const missing = [];
-  if (!String(merged.firstName || '').trim()) missing.push('first_name');
+  // GATE_CALL_FIRST_NAME_ADVISORY (owner ruling 2026-10-02): a caller who
+  // gave only a last name still books; the missing first name is ADVISORY
+  // (the missing_first_name card asks the office for it), like the last name.
+  // Gate off: first_name stays required, byte-identical to before.
+  const firstNameAdvisory = require('../config/feature-gates').callFirstNameAdvisoryLive();
+  // The waiver needs a surname: a caller with neither name never auto-books.
+  if (!String(merged.firstName || '').trim() && !(firstNameAdvisory && String(merged.lastName || '').trim())) missing.push('first_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
@@ -6758,6 +6886,9 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   }
   if (!String(merged.lastName || '').trim()) {
     advisory.push('last_name');
+  }
+  if (firstNameAdvisory && !String(merged.firstName || '').trim()) {
+    advisory.push('first_name');
   }
 
   return { ok: missing.length === 0, missing, advisory, details: merged };
@@ -10004,6 +10135,12 @@ const CallRecordingProcessor = {
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
     let v2AddressValidation = null;
+    // The caller's own V2 service address, frozen BEFORE address validation and the
+    // routing-path normalization rewrite v2Result.extraction (and `extracted`) with
+    // Google's form. The first-name advisory exact-match compares against THIS, so a
+    // `corrected` verdict that changed the house number, unit, city or ZIP holds
+    // (codex #5559 r12 P1). Null unless the extraction is valid.
+    let v2StatedServiceAddressRaw = null;
     if (CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2StartedAt = Date.now();
@@ -10026,6 +10163,8 @@ const CallRecordingProcessor = {
         // recorded for the promotion-readiness gate and reused by the routing
         // gate below without a second API call.
         if (v2Result?.status === 'valid' && v2Result.extraction) {
+          const rawServiceAddress = v2Result.extraction.property?.service_address;
+          v2StatedServiceAddressRaw = rawServiceAddress ? Object.freeze({ ...rawServiceAddress }) : null;
           try {
             // Gate off (GATE_CALL_ADDRESS_ONFILE_ASSIST): the wrapper makes the
             // same validateAddress call this site always made. Gate on, a
@@ -12037,6 +12176,17 @@ const CallRecordingProcessor = {
       }
     }
 
+    // GATE_CALL_FIRST_NAME_ADVISORY (owner ruling 2026-10-02): a caller who
+    // gave only a LAST name still becomes a customer when the call otherwise
+    // qualifies — a validated, in-service-area premise address (the caller is
+    // on the line to book it). The missing first name rides an advisory card.
+    // Every other creation guard (phone, voicemail, non-customer nature)
+    // still applies at the branch below. Gate off: first_name is required.
+    const firstNameAdvisoryCreate = !extracted.first_name
+      && require('../config/feature-gates').callFirstNameAdvisoryLive()
+      && !!String(extracted.last_name || '').trim()
+      && !addressRecovery?.recovered
+      && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
@@ -12089,7 +12239,7 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if (extracted.first_name && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+      } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
         // incident: first name + mangled address became a "real" customer).
@@ -12138,7 +12288,7 @@ const CallRecordingProcessor = {
           // Lazy require: route module from a service (load-cycle risk).
           const { ensureCustomerAccount } = require('../routes/admin-customers');
           const account = await ensureCustomerAccount(db, {
-            firstName: extracted.first_name,
+            firstName: extracted.first_name || '',
             lastName: extracted.last_name || null,
             phone,
             email: extracted.email || null,
@@ -12167,7 +12317,10 @@ const CallRecordingProcessor = {
               account_id: account.accountId,
               is_primary_profile: !account.existingCustomer,
               profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-              first_name: extracted.first_name,
+              // customers.first_name is NOT NULL: the advisory-create path
+              // (last name only) stores '' — every greeting falls back to
+              // "there" (see the audit in the PR notes).
+              first_name: extracted.first_name || '',
               last_name: extracted.last_name || null,
               phone,
               email: extracted.email || null,
@@ -12214,6 +12367,18 @@ const CallRecordingProcessor = {
           customerId = newCust.id;
           createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);
+
+          // A customer created on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) gets
+          // its owed-first-name card NOW, so every blank-name customer has one whether
+          // or not a booking follows. Fail-soft: a card failure never undoes the create.
+          if (!String(extracted.first_name || '').trim()) {
+            try {
+              await fileMissingFirstNameCard(db, { callLogId: call.id, customerId, extraction: v2CanonicalExtraction || undefined, extracted });
+              if (!bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
+            } catch (cardErr) {
+              logger.warn(`[call-proc] first-name card insert failed for ${maskSid(callSid)}: ${cardErr.code || cardErr.name || 'db_error'}`);
+            }
+          }
 
           // Both default rows (notification_prefs + property_preferences),
           // onConflict-ignore inside the helper.
@@ -13932,7 +14097,7 @@ const CallRecordingProcessor = {
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
-    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -16882,6 +17047,21 @@ const CallRecordingProcessor = {
             await fileLastNameAdvisoryCard(db)
               .catch((err) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
           }
+          // First-name advisory (GATE_CALL_FIRST_NAME_ADVISORY, owner ruling
+          // 2026-10-02): the same ONE card per call the customer-create branch
+          // files (fileMissingFirstNameCard is idempotent across both sites).
+          const fileFirstNameAdvisoryCard = (conn) => fileMissingFirstNameCard(conn, {
+            callLogId: call.id, customerId, extraction: v2ApprovedExtraction || undefined, extracted,
+          }).catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });
+          if (customerValidation.advisory?.includes('first_name')) {
+            await fileFirstNameAdvisoryCard(db)
+              .catch((err) => logger.warn(`[call-proc] first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
+            // The call is under review while that card is open (filed now or by the
+            // create branch); the finalizer's lock-time recheck drops the reason if
+            // the card is closed meanwhile.
+            if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
+              && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
+          }
           // Email-less bookings in SHADOW/LEGACY mode still require a
           // positively validated address (codex round-7 P1). canAutoRoute's
           // central address-trust gate only runs in enforce mode — and
@@ -16969,12 +17149,15 @@ const CallRecordingProcessor = {
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
             && effectiveAddressValidation.inServiceArea === true
             && avValidatesBookedAddress;
-          const emailAdvisoryHold = !enforceModeActive
-            && customerValidation.ok
-            && !!customerValidation.advisory?.includes('email')
-            && !avPositiveForBooking;
+          // A last-name-only booking needs the SAME exact-match rule customer creation used
+          // (a recovery-rewritten verdict input is never exact); the email advisory keeps its
+          // own long-standing validated-address bar above.
+          const exactAddressForBooking = !addressRecovery?.recovered
+            && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2ForAddressCheck ? v2StatedServiceAddressRaw : null);
+          const advisoryHoldFields = advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking });
+          const emailAdvisoryHold = advisoryHoldFields.length > 0;
           if (!customerValidation.ok || emailAdvisoryHold) {
-            const missingFields = customerValidation.ok ? ['email'] : customerValidation.missing;
+            const missingFields = customerValidation.ok ? advisoryHoldFields : customerValidation.missing;
             appointmentResult = {
               service: serviceResolution.service,
               dateTime: extracted.preferred_date_time,
@@ -16985,10 +17168,23 @@ const CallRecordingProcessor = {
             };
             logger.warn(
               `[call-proc] Skipping appointment auto-create for ${callSid}: missing required customer fields ` +
-              missingFields.join(', ') + (emailAdvisoryHold ? ' (email-less booking outside enforce mode requires a validated address)' : '')
+              missingFields.join(', ') + (emailAdvisoryHold ? ' (a booking with no email or no first name outside enforce mode requires a validated address)' : '')
             );
+            // The first-name exact-address hold skipped a confirmed booking: outside enforce
+            // mode nothing else files a scheduling task, and the first-name card closes as soon
+            // as the name is typed in — so the office gets the booking task too (codex #5559 r13).
+            if (customerValidation.ok && advisoryHoldFields.includes('first_name') && !enforceModeActive) {
+              await fileSkippedBookingCard({
+                call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                skippedReason: 'first_name_exact_address_hold',
+                preferredDateTime: extracted.preferred_date_time,
+                serviceType: serviceResolution.service, bridgeNeedsConfirmation, callSid,
+              });
+            }
           } else {
-            const firstName = customerValidation.details.firstName || '';
+            // 'there' when no first name is on file (advisory-create path):
+            // a confirmation must never read "Hello !" or "Hello null!".
+            const firstName = customerValidation.details.firstName || 'there';
             const serviceType = callBookingCatalogRow?.name || serviceResolution.service;
             // Price: transcript-quoted (what the agent and caller agreed)
             // first, catalog list price fallback (one_time services only).
@@ -17076,6 +17272,11 @@ const CallRecordingProcessor = {
           // missed fence changes nothing about the booking.
           let bookingFence = null;
           let followUpFence = null;
+          // The fenced reread found the customer owes a first name. The card is NEVER filed
+          // inside the booking transaction — any later throw (hold, geo veto, insert failure)
+          // would roll it back — but once the try below settles, committed or not
+          // (codex #5559 r12 + r14).
+          let fencedFirstNameOwed = false;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -17377,6 +17578,19 @@ const CallRecordingProcessor = {
                   // (codex #4991 r2).
                   if (freshValidation.advisory?.includes('last_name')) {
                     await fileLastNameAdvisoryCard(trx);
+                  }
+                  // The fresh row may have LOST its first name (merge-undo) since the pre-fence
+                  // validation passed: re-apply the same advisory address hold, so a
+                  // last-name-only booking never proceeds without the exact validated address.
+                  const freshHoldFields = advisoryBookingAddressHoldFields({
+                    enforceModeActive, customerValidation: freshValidation, avPositiveForBooking, exactAddressForBooking,
+                  });
+                  if (freshValidation.advisory?.includes('first_name')) fencedFirstNameOwed = true;
+                  if (freshHoldFields.includes('first_name')) {
+                    fencedFirstNameOwed = true;
+                    const firstNameErr = new Error('customer lost its first name while waiting on the comms fence (merge-undo) — the booking needs the exact validated address; held for office review');
+                    firstNameErr.firstNameHold = true;
+                    throw firstNameErr;
                   }
                   // Geographic veto re-runs on the fenced row (Codex #5403
                   // r6): when the call stated no locality, the pre-fence
@@ -19470,6 +19684,31 @@ const CallRecordingProcessor = {
                 });
               }
             }
+            // A fenced first-name hold is a HOLD too, surfaced like the pre-fence hold (its
+            // first-name card is filed after this catch, with every other fenced outcome).
+            if (schedErr.firstNameHold) {
+              appointmentResult = {
+                ...appointmentResult, scheduleCreated: false,
+                skippedReason: 'missing_required_customer_fields', missingFields: ['first_name'],
+              };
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+                await fileSkippedBookingCard({
+                  call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                  skippedReason: 'first_name_exact_address_hold',
+                  preferredDateTime: extracted.preferred_date_time,
+                  serviceType, bridgeNeedsConfirmation, callSid,
+                });
+              }
+            }
+          }
+          // The owed first-name card from the fenced reread, filed on its own connection now
+          // that the booking transaction has committed or rolled back (no locks held), and
+          // counted toward review while it stays open (the finalizer rechecks under the lock).
+          if (fencedFirstNameOwed) {
+            await fileFirstNameAdvisoryCard(db)
+              .catch((err) => logger.warn(`[call-proc] fenced first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
+            if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
+              && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
           }
 
           // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
@@ -21236,8 +21475,14 @@ const CallRecordingProcessor = {
       // it, and a stale reason must not reopen a call with no open card.
       const streetLevelStillHeld = !bridgeNeedsConfirmation.includes('street_level_address_review')
         || (!!appointmentResult?.scheduledServiceId && await isStreetLevelHoldVisit(appointmentResult.scheduledServiceId, trx));
+      // …and the same for the owed-first-name reason: an office Resolve / Dismiss (or the
+      // auto-resolve sweep) may have closed the card since this pass filed it, and a
+      // closed card's reason must not reopen review. Judged under the lock just taken.
+      const firstNameStillOwed = !bridgeNeedsConfirmation.includes('missing_first_name')
+        || await missingFirstNameCardStillOpen(trx, call.id);
       const reviewReasonCount = bridgeNeedsConfirmation
-        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;
+        .filter((r) => (r !== 'street_level_address_review' || streetLevelStillHeld)
+          && (r !== 'missing_first_name' || firstNameStillOwed)).length;
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
@@ -22560,9 +22805,14 @@ CallRecordingProcessor._test = {
   unclearServiceAssessmentActive,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
+  advisoryBookingAddressHoldFields,
+  addressesExactlyMatch,
+  fileMissingFirstNameCard,
+  missingFirstNameCardStillOpen,
   slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
+  firstNameAdvisoryAddressOk,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,

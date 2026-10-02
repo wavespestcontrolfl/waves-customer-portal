@@ -126,6 +126,7 @@ import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
 
 import BestTimeHint from "../../components/schedule/BestTimeHint";
+import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning } from "../../components/schedule/AvailabilityStrip";
 import IntelligenceBarShell from "../../components/admin/IntelligenceBarShell";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
 import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
@@ -2122,8 +2123,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // and the range chip would move the finished (or cancelled / skipped /
   // no-show) visit onto a live day (update-details allows the edit) — no
   // hint at all (Codex #4120 r4 P2, r5 P2).
-  const { bestTimes, picked, bestInRange } = useBestTimes({
+  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
+    // Availability strip (GATE_RESCHEDULE_AVAILABILITY): one search over the
+    // days around the picked date. Gate off = no `availability`, and the
+    // three-line hint below renders exactly as before.
+    summary: true,
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
@@ -2145,6 +2150,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
   });
+  const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
+  // A VERIFIED miss only (never "could not check"): Save stays enabled —
+  // the strip is advisory — but says what it is about to do.
+  const routeMissVerdict = availabilityVerdict(availability, stripCurrent)?.tone === "miss";
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
   // modal and the appointment detail sheet show. The endpoint resolves the
@@ -4821,7 +4830,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save & take payment"}
+              {saving ? "Saving..." : (routeMissVerdict ? "Save & take payment anyway" : "Save & take payment")}
             </button>{" "}
             <button
               onClick={() => handleSave()}
@@ -4839,7 +4848,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save"}
+              {saving ? "Saving..." : (routeMissVerdict ? "Save anyway" : "Save")}
             </button>{" "}
             <button
               onClick={closeEditor}
@@ -5833,7 +5842,32 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <SlotConflictNotice
-                conflicts={slotConflicts}
+                // The strip states the route problem itself; the
+                // double-booking notice (no `warning`) always stays.
+                conflicts={stripCoversRouteWarning(availability, stripCurrent)
+                  ? slotConflicts.filter((conflict) => !conflict.warning)
+                  : slotConflicts}
+                style={{ marginTop: -2, marginBottom: 14 }}
+              />{" "}
+              <AvailabilityStrip
+                availability={availability}
+                currentDate={form.scheduledDate}
+                currentStart={form.windowStart}
+                currentTechnicianId={form.technicianId}
+                onPick={(slot) =>
+                  // Same adoption rule as the hint chips below: an
+                  // unassigned visit takes the technician the hour was
+                  // scored for; an assigned visit's technician never changes.
+                  setForm((f) => ({
+                    ...f,
+                    scheduledDate: slot.date,
+                    windowStart: slot.start,
+                    windowEnd: slot.end,
+                    technicianId: !f.technicianId && slot.technicianId
+                      ? slot.technicianId
+                      : f.technicianId,
+                  }))
+                }
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <BestTimeHint
@@ -8994,7 +9028,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   });
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start select, never submits the reschedule.
-  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange } = useBestTimes({
+  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange, availability: manualAvailability } = useBestTimes({
+    summary: true,
     // Same route check as the manual save and the edit form: under
     // GATE_ADMIN_ARRIVAL_WINDOWS the verdict and the chips must not endorse
     // an hour the save would refuse for another customer's window
@@ -9185,6 +9220,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       manualBestTimes={manualBestTimes}
       manualPicked={manualPicked}
       manualBestInRange={manualBestInRange}
+      manualAvailability={manualAvailability}
       onClose={onClose}
     />
   );
@@ -20426,6 +20462,9 @@ export function CompletionPanel({
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
                     serviceId={service.id}
+                    // The property this form loaded the visit at: a save that lands after
+                    // the office moved the visit is refused (Codex #5538).
+                    expectedPropertyId={'propertyId' in service ? (service.propertyId ?? null) : undefined}
                     customerName={service.customerName || "Customer"}
                     address={service.address || ""}
                     lat={service.lat ?? service.customer_latitude}
@@ -22307,6 +22346,9 @@ export function CompletionPanel({
               {zoneMapOpen && (
                 <TechTreatmentZoneModal
                   serviceId={service.id}
+                  // The property this form loaded the visit at: a save that lands after
+                  // the office moved the visit is refused (Codex #5538).
+                  expectedPropertyId={'propertyId' in service ? (service.propertyId ?? null) : undefined}
                   customerName={service.customerName || "Customer"}
                   address={service.address || ""}
                   lat={service.lat ?? service.customer_latitude}

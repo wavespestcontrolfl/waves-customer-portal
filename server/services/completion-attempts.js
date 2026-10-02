@@ -222,6 +222,20 @@ async function claimSideEffectsRun(row, requestHash, knex = db) {
   };
 }
 
+// Whether this service already has an attempt under this key. The pre-claim
+// prompts answer before any claim, so a recorded attempt's request already got
+// past them, and a same-key retry is that same request (Codex #5538: a retry
+// that newly met the edit heads-up would have to carry reportRulesConfirmed,
+// a different request than the attempt it resumes).
+async function hasCompletionAttemptForKey(serviceId, idempotencyKey, knex = db) {
+  const key = String(idempotencyKey || '').trim().slice(0, 120);
+  if (!key) return false;
+  const attempt = await knex('service_completion_attempts')
+    .where({ service_id: serviceId, idempotency_key: key })
+    .first();
+  return Boolean(attempt);
+}
+
 // True when committed evidence exists for the service — a succeeded or
 // side-effects-phase attempt, or a service record. The reconciliation
 // prompt (GATE_REPORT_RECONCILE_PROMPT) must never intercept a retry of
@@ -829,6 +843,7 @@ module.exports = {
   claimCompletionAttempt,
   completionStatusForService,
   hashCompletionRequest,
+  hasCompletionAttemptForKey,
   withoutPhotoBytes,
   hasCommittedCompletionAttempt,
   // The single timer-vs-operator classification rule, shared with the

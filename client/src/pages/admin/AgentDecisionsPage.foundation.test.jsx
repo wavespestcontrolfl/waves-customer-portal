@@ -44,6 +44,41 @@ it('preserves the decision correction payload from the shared review fields', as
   await waitFor(() => expect(correctButton).not.toHaveAttribute('aria-busy', 'true'));
 });
 
+it('sends the tapped one-tap reason with a correction, and a second tap clears it', async () => {
+  adminFetch.mockImplementation(async (url, options) => {
+    if (options?.method) return {};
+    if (url.endsWith('/context')) return { context: {} };
+    return { decisions: [{ id: 'fixture-decision', status: 'pending', customerName: 'Fixture customer', recommendedActions: ['call_customer'] }] };
+  });
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  await screen.findByLabelText('Corrected actions');
+  const chip = screen.getByRole('button', { name: 'Wrong fact' });
+  fireEvent.click(chip);
+  expect(chip).toHaveAttribute('aria-pressed', 'true');
+  fireEvent.change(screen.getByLabelText('Review reason'), { target: { value: 'Quoted last year\'s price' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Correct', exact: true }));
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/agent-decisions/fixture-decision/review', {
+    method: 'POST', body: JSON.stringify({ verdict: 'corrected', correctedActions: ['call_customer'], correctionNote: 'Quoted last year\'s price', reason: 'wrong_fact' }),
+  }));
+  fireEvent.click(chip);
+  expect(chip).toHaveAttribute('aria-pressed', 'false');
+});
+
+it('a reviewed decision shows its saved reason pressed, and re-confirming it keeps that reason', async () => {
+  adminFetch.mockImplementation(async (url, options) => {
+    if (options?.method) return {};
+    if (url.endsWith('/context')) return { context: {} };
+    return { decisions: [{ id: 'reviewed-decision', status: 'corrected', humanVerdict: 'corrected', correctionReason: 'wrong_tone', customerName: 'Fixture customer', recommendedActions: ['call_customer'] }] };
+  });
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+  await screen.findByLabelText('Corrected actions');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Wrong tone' })).toHaveAttribute('aria-pressed', 'true'));
+  fireEvent.click(screen.getByRole('button', { name: 'Correct', exact: true }));
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/agent-decisions/reviewed-decision/review', {
+    method: 'POST', body: JSON.stringify({ verdict: 'corrected', correctedActions: ['call_customer'], correctionNote: '', reason: 'wrong_tone' }),
+  }));
+});
+
 it('keeps in-progress review text when a pending background read resolves', async () => {
   let resolveBackground;
   let listReads = 0;
