@@ -112,6 +112,15 @@ describe('reservice report card payload', () => {
     expect(JSON.parse(JSON.stringify(rest))).toEqual(JSON.parse(JSON.stringify(off)));
   });
 
+  test('no gauge on the report, no pressure word on the card (Codex r12)', async () => {
+    on();
+    const { DEFAULT_CONFIG } = require('../services/pest-pressure/config');
+    const hidden = { ...DEFAULT_CONFIG, enabledServiceLines: ['mosquito'] };
+    const data = await buildReportV1Data(pestCallback(), 'tok-card-hidden', makeKnex(fixtures()), { pestPressureConfig: hidden });
+    expect(data.pestPressure).toBeNull();
+    expect(data.reserviceReportCard.whatWeDid.found).toBeNull();
+  });
+
   test('gate on, performed pest callback: frozen words, summary, safety line, still-seeing topic', async () => {
     on();
     const data = await buildReportV1Data(pestCallback(), 'tok-card-1', makeKnex(fixtures()));

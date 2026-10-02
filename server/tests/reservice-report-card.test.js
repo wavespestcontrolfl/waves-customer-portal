@@ -379,12 +379,11 @@ describe('PDF cache key component', () => {
     expect(reserviceReportRenderedSignature({ reserviceReport: block, reserviceReportCard: { version: 1 } }, member)).toBe('-rs2nt-rcd1');
   });
 
-  test('the printed activity label is part of the key: a Pest Pressure relabel re-renders the PDF (Codex r4)', () => {
+  test('the activity word needs no key part: it is the persisted score label (score writes clear the PDF) (Codex r12)', () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     process.env.GATE_RESERVICE_REPORT_CARD = 'true';
     const withLabel = (label) => reserviceReportRenderedSignature({ reserviceReport: block, reserviceReportCard: { version: 1, whatWeDid: { found: { rating: 3, label } } } }, member);
-    expect(withLabel('Moderate')).toMatch(/^-rs2nt-rcd1-a[0-9a-f]{8}$/);
-    expect(withLabel('Moderate')).not.toBe(withLabel('Medium'));
+    expect(withLabel('Moderate')).toBe('-rs2nt-rcd1');
     expect(reserviceReportRenderedSignature({ reserviceReport: block, reserviceReportCard: { version: 1, whatWeDid: null } }, member)).toBe('-rs2nt-rcd1');
   });
 
@@ -609,10 +608,10 @@ describe('Codex r8 (#5542)', () => {
       spy.mockRestore();
     }
   });
-  test('the cache lookup reads the persisted score row (the config only for its customer switches)', () => {
+  test('the cache lookup never reads the label config or the score row', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'reservice-report.js'), 'utf8');
-    expect(src).toContain('loadScoreForServiceRecord(');
-    expect(src).not.toContain('config?.labels');
+    expect(src).not.toContain('loadActiveConfig(');
+    expect(src).not.toContain('loadScoreForServiceRecord(');
   });
   test('"a combination of ants and roaches" survives the production scrub; access combinations do not', () => {
     const words = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: scrubCustomerText })?.youToldUs?.text ?? null;
@@ -680,17 +679,9 @@ describe('Codex r11 (#5542)', () => {
   });
 });
 
-describe('pre-push P1 after r11 (#5542): Pest Pressure hidden from customers', () => {
-  const { pestPressureShownToCustomers } = require('../services/service-report/reservice-report-card');
-  test('either global switch off hides the pressure word; null config falls back to the default', () => {
-    expect(pestPressureShownToCustomers({ enabled: true, showOnCustomerReport: true })).toBe(true);
-    expect(pestPressureShownToCustomers({ enabled: false, showOnCustomerReport: true })).toBe(false);
-    expect(pestPressureShownToCustomers({ enabled: true, showOnCustomerReport: false })).toBe(false);
-    const { DEFAULT_CONFIG } = require('../services/pest-pressure/config');
-    expect(pestPressureShownToCustomers(null)).toBe(Boolean(DEFAULT_CONFIG.enabled && DEFAULT_CONFIG.showOnCustomerReport));
-  });
-  test('the payload passes no score row while hidden', () => {
+describe('Codex r12 (#5542): the pressure word follows the gauge', () => {
+  test('the payload passes the score row only when the report shows its own gauge', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
-    expect(src).toContain('pestPressureScore: pestPressureShownToCustomers(pestPressureConfig) ? (pestPressureRow || null) : null,');
+    expect(src).toContain('pestPressureScore: pestPressure !== null ? (pestPressureRow || null) : null,');
   });
 });
