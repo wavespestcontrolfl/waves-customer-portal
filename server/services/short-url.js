@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
 const { isBotUserAgent } = require('../utils/bot-ua');
+const { shortlinkLegacyExpireLive } = require('../config/feature-gates');
 
 // Lowercase alphanum, no ambiguous chars (0/o/1/l/i) — the code shows up in
 // SMS and occasionally gets read over the phone to support.
@@ -24,13 +25,21 @@ const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
 // 10 chars over the 31-char alphabet ≈ 49.5 bits — unguessable at any
 // polite request rate (5 chars was ~24.8 bits ≈ 28.6M, enumerable; security
-// review 2026-08-07). Old 5-char codes still resolve — lookups are by DB
-// value, never by shape.
+// review 2026-08-07). Old 5-char codes still resolve unless
+// GATE_SHORTLINK_LEGACY_EXPIRE is on — lookups are by DB value, never by shape.
 function generateCode(length = 10) {
   const bytes = crypto.randomBytes(length);
   let out = '';
   for (let i = 0; i < length; i++) out += ALPHABET[bytes[i] % ALPHABET.length];
   return out;
+}
+
+// Codes of 1-7 chars predate the 10-char mint (the 5-char space ran
+// 2026-04-19..2026-08-07). Prefixed readable codes (invoice) are always longer.
+const LEGACY_CODE_MAX_LENGTH = 7;
+
+function isLegacyShortCode(code) {
+  return typeof code === 'string' && code.length >= 1 && code.length <= LEGACY_CODE_MAX_LENGTH;
 }
 
 function sanitizeCodePart(value, maxLength = 48) {
@@ -146,6 +155,7 @@ async function resolveShortCode(code, { ip, userAgent, recordClick = true } = {}
   const row = await db('short_codes').where({ code }).first();
   if (!row) return null;
   if (row.expires_at && new Date(row.expires_at).getTime() < Date.now()) return null;
+  if (shortlinkLegacyExpireLive() && isLegacyShortCode(code)) return null;
 
   // Fire-and-forget — redirect latency matters more than telemetry durability.
   db('short_codes').where({ id: row.id }).update({
@@ -230,12 +240,15 @@ async function createTrackedShortLink(longUrl, opts = {}) {
 // not read the short codes" — the stranded-send reconciliation searches the
 // provider for this link, so an unreadable code has to read as unknown
 // rather than as an absent one (local audit).
+// Legacy 1-7 char codes are never reused (always, ungated): a re-send for an
+// entity whose only code is legacy mints a fresh 10-char one instead.
 async function existingShortUrlFor({ kind, entityType, entityId, purpose = null, rethrow = false }) {
   if (!kind || !entityType || !entityId) return null;
   try {
     const lookup = db('short_codes')
       .where({ kind, entity_type: entityType, entity_id: String(entityId) });
     if (purpose) lookup.where({ purpose });
+    lookup.whereRaw('char_length(code) > ?', [LEGACY_CODE_MAX_LENGTH]);
     const row = await lookup
       .orderBy('created_at', 'asc')
       .first('code');
@@ -259,4 +272,6 @@ module.exports = {
   resolveShortCode,
   shortenOrPassthrough,
   invoiceShortCodePrefix,
+  LEGACY_CODE_MAX_LENGTH,
+  isLegacyShortCode,
 };
