@@ -254,7 +254,9 @@ function checkTimeAndTech(dated, families, { firstDay, byId, todayET }) {
 // cents. Skipped, never guessed: a row with no price (the unpriced-series
 // alert's), a prepaid row (prepay coverage bills it), a first visit (the
 // first-application invoice's), and any row whose accepted price is unknown.
-function checkPrices(dated, families, prices) {
+function checkPrices(dated, families, prices, { timeTechOnly = false } = {}) {
+  // The hourly urgent pass is about time and technician only.
+  if (timeTechOnly) return [];
   const off = new Map();
   for (const row of dated) {
     const price = billedServicePrice(row);
@@ -297,8 +299,8 @@ function checkPrices(dated, families, prices) {
 // brings the invoice down to estimated_price (never up). So, with no add-ons,
 // the service bills min(primary, estimated_price); with add-ons it bills the
 // primary only when no adjustment is needed (an adjustment across service and
-// add-ons cannot be apportioned). With no primary stamp, estimated_price is
-// the service only when there are no add-ons. null when it cannot be read:
+// add-ons cannot be apportioned). With no primary stamp the service is
+// estimated_price less the add-ons, as invoicing derives it. null when it cannot be read:
 // those cases, any line / appointment discount, or an authoritative $0
 // (billing-lane.js hasAuthoritativeZeroPrice: a fully discounted application
 // frozen at $0, or a stamped $0 under GATE_STAMPED_ZERO_FREE), which invoicing
@@ -310,7 +312,9 @@ function billedServicePrice(row) {
   if (discounted || hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) return null;
   const estimated = Number(row.estimated_price);
   const addons = Number(row.addon_total) || 0;
-  if (row.primary_line_price == null || row.primary_line_price === '') return addons > 0 ? null : estimated;
+  // No primary stamp: invoicing derives the service as the visit price less
+  // the add-ons, which then add back up to it exactly (no adjustment).
+  if (row.primary_line_price == null || row.primary_line_price === '') return estimated - addons;
   const primary = Number(row.primary_line_price);
   if (!(estimated > 0) || primary + addons <= estimated + 0.005) return primary;
   return addons > 0 ? null : estimated;
@@ -375,7 +379,7 @@ function evaluateCombinedBooking(ctx) {
   const byId = new Map(allRows.map((row) => [String(row.id), row]));
   const problems = [
     ...checkTimeAndTech(dated, families, { firstDay, byId, todayET }),
-    ...checkPrices(dated, families, plan.prices),
+    ...checkPrices(dated, families, plan.prices, { timeTechOnly: ctx.timeTechOnly }),
   ];
   // Families whose accepted price is unknown: their prices were not checked,
   // so a standing price finding about one is kept (the runner's heldProblems).
@@ -434,8 +438,9 @@ async function markPrepayCovered(conn, rows) {
   for (const row of rows) {
     row.prepay_covered = false;
     const paid = Number(row.prepaid_amount);
-    // The visit's charge, however it is stored (a primary-only visit included).
-    const charge = Math.max(Number(row.estimated_price) || 0, Number(row.primary_line_price) || 0);
+    // The charge completion bills (billing-lane.js completionInvoiceAmount
+    // precedence): a positive estimated_price, else the primary line.
+    const charge = Number(row.estimated_price) > 0 ? Number(row.estimated_price) : Number(row.primary_line_price) || 0;
     if (!(charge > 0)) continue;
     if (paid > 0 && hasOutOfBandPrepaidStamp(row)) { row.prepay_covered = paid + 0.005 >= charge; continue; }
     // The coverage authority also covers an UNSTAMPED termite renewal visit
@@ -500,11 +505,12 @@ async function loadContext(conn, estimate) {
 
 // `coverage` is the classifier's { skipped, onHold } for this estimate;
 // undefined when it did not judge the estimate (never declared OK then).
-async function checkEstimate(conn, estimate, { scheduleGaps = [], coverage, todayET = null } = {}) {
+async function checkEstimate(conn, estimate, { scheduleGaps = [], coverage, todayET = null, timeTechOnly = false } = {}) {
   const ctx = {
     ...await loadContext(conn, estimate),
     scheduleGaps,
     todayET,
+    timeTechOnly,
     scheduleSkippedFamilies: coverage ? coverage.skipped : new Set(),
     scheduleOnHoldFamilies: coverage ? coverage.onHold : new Set(),
     scheduleUnjudged: !coverage,
@@ -672,7 +678,8 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
           })
           .where('s.scheduled_date', '>=', todayET)
           .modify((query) => { if (lastDay) query.where('s.scheduled_date', '<=', lastDay); })
-          .whereNotIn('s.status', [...NOT_LIVE])
+          // A NULL status is a live visit (the watchdog reads it so too).
+          .where((live) => live.whereNull('s.status').orWhereNotIn('s.status', [...NOT_LIVE]))
           .where(function untimedOrPriced() {
             this.whereNull('s.window_start').orWhereNull('s.technician_id');
             // The daily run also judges every upcoming PRICED series child
@@ -686,7 +693,8 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
               this.orWhere((priced) => priced.whereNotNull('s.recurring_parent_id')
                 .where((anyPrice) => anyPrice.where('s.estimated_price', '>', 0).orWhere('s.primary_line_price', '>', 0))
                 .whereRaw(`((SELECT COUNT(DISTINCT COALESCE(r.service_id::text, r.service_type)) FROM scheduled_services r
-                  WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL) >= 2
+                  WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL
+                    AND r.is_recurring IS TRUE) >= 2
                   OR EXISTS (SELECT 1 FROM scheduled_services r LEFT JOIN services cat ON cat.id = r.service_id
                     WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL
                       AND (COALESCE(cat.service_key, r.service_key_snapshot) = ANY(?) OR r.service_type = ANY(?)))
@@ -791,6 +799,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         scheduleGaps: gaps.filter((gap) => String(gap.estimateId) === id),
         coverage: coverage.get(id),
         todayET,
+        timeTechOnly: urgentOnly,
       });
       const { outcome, problems } = outcomeOf(checked?.verdict, known?.problems);
       if (outcome !== 'problems') {

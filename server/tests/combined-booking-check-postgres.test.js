@@ -543,6 +543,51 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('visits with no status are still live price candidates', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      await trx('scheduled_services').whereIn('id', rows.map((row) => row.id)).update({ status: null });
+      const lawnChild = rows.find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 90 });
+      await runCombinedBookingCheck({ conn: trx });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.body).toMatch(/1 lawn visits priced \$90\.00, accepted \$100\.00/);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a one-time root beside one recurring series does not make a booking multi-service', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      const lawnRoot = rows.find((row) => !row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').whereIn('id', rows.filter((row) => /lawn/i.test(row.service_type) && row.id !== lawnRoot.id).map((row) => row.id)).del();
+      await trx('scheduled_services').where({ id: lawnRoot.id }).update({ is_recurring: false });
+      const pestChild = rows.find((row) => row.recurring_parent_id && /pest/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ estimated_price: 140 });
+      await runCombinedBookingCheck({ conn: trx });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
+      // The same booking with the lawn root recurring is a candidate and rings.
+      await trx('scheduled_services').where({ id: lawnRoot.id }).update({ is_recurring: true });
+      await runCombinedBookingCheck({ conn: trx });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(1);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a booking that kept an existing series for one service is still price-checked on the new one', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

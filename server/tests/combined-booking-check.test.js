@@ -252,7 +252,7 @@ describe('visit prices', () => {
   test('the billed service price is compared: primary_line_price when stamped; add-ons or a discount skip the visit', () => {
     const lawn = priced(lawnRows(), 175).map((row, i) => {
       if (i === 1) return { ...row, primary_line_price: 100, addon_total: 75 }; // $100 service + $75 add-on = $175: correct
-      if (i === 2) return { ...row, addon_total: 75 }; // add-ons, no primary stamp: not readable, skipped
+      if (i === 2) return { ...row, addon_total: 75 }; // add-ons, no primary stamp: $175 - $75 = $100 service
       if (i === 5) return { ...row, addon_total: 75, primary_line_price: 100 }; // add-ons + stamped primary: the primary is checked
       if (i === 3) return { ...row, estimated_price: 90, line_discount_amount: 10 }; // discounted: skipped
       if (i === 4) return { ...row, estimated_price: 90, discount_id: 'disc-1' };
@@ -270,6 +270,12 @@ describe('visit prices', () => {
     expect(verdictFor(priced(pestRows(), 150), frozenFree).ok).toBe(true);
     const neverPriced = priced(lawnRows(), null).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90 } : row));
     expect(texts(verdictFor(priced(pestRows(), 150), neverPriced))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // No primary stamp: the service is the visit price less the add-ons ($165 - $75 = $90).
+    const derived = priced(lawnRows(), 165).map((row) => (row.recurring_parent_id ? { ...row, addon_total: 75 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), derived))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // The hourly urgent pass never reports prices.
+    const urgent = evaluateCombinedBooking({ estimate: estimate([PEST, LAWN]), rows: [...priced(pestRows(), 150), ...derived], timeTechOnly: true });
+    expect(urgent.problems).toEqual([]);
     // With add-ons and an adjustment needed, the service share cannot be read: skipped.
     const ambiguous = priced(lawnRows(), 150).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100, addon_total: 75 } : row));
     expect(verdictFor(priced(pestRows(), 150), ambiguous).ok).toBe(true);
@@ -321,10 +327,12 @@ describe('markPrepayCovered', () => {
       { id: 'plainlawn', catalog_service_key: 'lawn_care_recurring', estimated_price: 120 },
       // Priced only through primary_line_price: still asked / compared on that charge.
       { id: 'primaryonly', prepaid_amount: 120, prepaid_method: 'cash', primary_line_price: 120 },
+      // Completion bills the positive estimated_price ($90), so $90 paid covers it despite a $100 primary.
+      { id: 'estimatedwins', prepaid_amount: 90, prepaid_method: 'cash', estimated_price: 90, primary_line_price: 100 },
     ];
     await check.markPrepayCovered({}, rows);
     expect(Object.fromEntries(rows.map((row) => [row.id, row.prepay_covered]))).toEqual({
-      partial: false, full: true, live: true, stale: false, linkonly: false, plainlawn: false, primaryonly: true,
+      partial: false, full: true, live: true, stale: false, linkonly: false, plainlawn: false, primaryonly: true, estimatedwins: true,
     });
     // Asked for the annual stamps, the term link and the unstamped termite visit; never the plain lawn visit.
     expect(validator).toHaveBeenCalledTimes(4);
