@@ -206,6 +206,13 @@ export default function AdminLayoutV2() {
           setAuthStatus("error");
           return;
         }
+        // The field workspace keeps the retired /tech shell's flow: the
+        // verified session goes to the signed-in change-password page, which
+        // adminAuthenticate permits for a rotation (Codex #5573 r11).
+        if (profile.mustChangePassword && isFieldPath(locationRef.current.pathname)) {
+          navigate("/admin/change-password", { replace: true });
+          return;
+        }
         if (profile.mustChangePassword) {
           localStorage.removeItem("waves_admin_token");
           localStorage.removeItem("waves_admin_user");

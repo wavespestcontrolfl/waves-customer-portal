@@ -517,7 +517,9 @@ const OWNER_ONLY_NESTED_PATHS = [
 ];
 
 export function isPathAdminOnly(pathname) {
-  const p = String(pathname || "");
+  // React Router matches routes case-insensitively: so does this policy
+  // (Codex #5573 r11).
+  const p = String(pathname || "").toLowerCase();
   if (p === "/admin" || p === "/admin/") return false; // index redirects to dashboard
   if (
     OWNER_ONLY_NESTED_PATHS.some(

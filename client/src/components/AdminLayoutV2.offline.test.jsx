@@ -238,6 +238,26 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/admin/auth/me"))).toHaveLength(1);
   });
 
+  it("a technician who must rotate their password goes to the signed-in change page from Today (Codex #5573 r11)", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, { ...TECH, mustChangePassword: true, email: "tech@example.com" })));
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/today"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/today" element={<div>Saved route content</div>} />
+            </Route>
+            <Route path="/admin/change-password" element={<div>Change password page</div>} />
+            <Route path="/admin/forgot-password" element={<div>Forgot password page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText("Change password page")).toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);

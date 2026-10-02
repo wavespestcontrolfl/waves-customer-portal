@@ -100,6 +100,8 @@ const KNOWN_PAGE_KEYS = new Set([
 const KNOWN_SUBPAGE_WORDS = new Set([
   'new', 'import', 'map', 'directory', 'kanban', 'search', 'settings',
   'duplicates', 'pest-pressure', 'proposal', 'flags',
+  // /admin/today field workspace subpages (Codex #5573 r11).
+  'tools', 'more', 'estimate', 'protocols', 'documents', 'pay-growth', 'lawn-diagnostic', 'social-post',
 ]);
 
 /** '/admin/customers/8f14…e9b1/notes' → '/admin/customers/:id/notes'.

@@ -319,3 +319,11 @@ describe("role scoping (adminOnly)", () => {
     }
   });
 });
+
+import { isPathAdminOnly as isPathAdminOnlyCase } from "./adminNavigation";
+describe("isPathAdminOnly casing (Codex #5573 r11)", () => {
+  it("a case-variant Today deep link stays technician-allowed", () => {
+    expect(isPathAdminOnlyCase("/ADMIN/TODAY/PROTOCOLS")).toBe(isPathAdminOnlyCase("/admin/today/protocols"));
+    expect(isPathAdminOnlyCase("/ADMIN/TODAY/PROTOCOLS")).toBe(false);
+  });
+});
