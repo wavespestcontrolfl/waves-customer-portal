@@ -76,8 +76,29 @@ const PROVIDER_LIST_PATH_RE = /\b(compan(y|ies)|exterminators?|pros|contractors|
 // …and never a product roundup, even one naming a service ("best lawn care
 // products", "top pest control sprays").
 const PRODUCT_PATH_RE = /\b(products?|killers?|sprays?|repellents?|traps?|baits?|granules|fertilizers?|herbicides?|insecticides?|pesticides?|seeds?|mowers?|spreaders?|tools|equipment|devices?|gear|kits?|brands?|reviews?)\b/;
+// …and never a how-to, cost or identification article ("pest control cost",
+// "how to choose a pest control company", "signs of termites").
+const ARTICLE_PATH_RE = /\b(costs?|prices?|pricing|how|what|why|when|diy|signs|identify|tips|vs|versus)\b/;
 function isProviderListPath(words) {
-  return PROVIDER_LIST_PATH_RE.test(words) && !PRODUCT_PATH_RE.test(words);
+  return PROVIDER_LIST_PATH_RE.test(words) && !PRODUCT_PATH_RE.test(words) && !ARTICLE_PATH_RE.test(words);
+}
+
+/**
+ * isListPage(page, url) → whether the cited-page pitch fits this page. An
+ * editorial page whose path is about service providers (not products, not a
+ * cost or how-to article), read with tracking parameters stripped. A known
+ * editorial site (the classifier's editorial domains: smarfle, floridist,
+ * Today's Homeowner, local news) qualifies on that alone — owner 2026-10-01
+ * "loosen the rule" (smarfle.com/fl/bradenton/pest-control was left out). An
+ * unknown site the listicle heuristic promoted still needs a best / top /
+ * rated / near-me word: a company's own service-area page
+ * (greenteampest.com/service-areas/parrish) looks the same otherwise. Never a
+ * directory: a /biz/ profile is one company, and a directory is joined by
+ * signing up, not by a pitch.
+ */
+function isListPage(page, url) {
+  if (page.category !== 'editorial' || !isProviderListPath(pathWords(url))) return false;
+  return page.subtype !== 'listicle_candidate' || hasBestToken(displayUrl(url));
 }
 function pathWords(urlString) {
   try {
@@ -173,16 +194,9 @@ function finalizePage({ urlCounts, currentProviderNamed, ...p }) {
   return {
     ...p,
     url: displayUrl(topUrl),
-    // evidence about the PAGE, not the question that cited it: an editorial
-    // best / top / rated / near-me page about SERVICE PROVIDERS (its path names
-    // companies, exterminators or a service like pest control — never "best
-    // ant killer", a product list), read with tracking parameters
-    // stripped, so ?utm_campaign=best proves nothing), the roundup an editor
-    // can add Waves to. Never a directory (a /biz/ profile is one company, and
-    // a directory is joined by signing up, not by a pitch), never a listicle
-    // candidate on a place name alone, never a cost guide cited for "who
-    // should I hire".
-    listPage: p.category === 'editorial' && hasBestToken(displayUrl(topUrl)) && isProviderListPath(pathWords(topUrl)),
+    // evidence about the PAGE, not the question that cited it — a provider
+    // roundup an editor can add Waves to (isListPage)
+    listPage: isListPage(p, topUrl),
     tier: p.currentMisses > 0 ? 1 : currentProviderNamed > 0 ? 2 : 3,
     priorityCity: questions.some((q) => isPriorityCity(q.city)),
     engines: [...p.engines].sort(),

@@ -137,6 +137,24 @@ describe('rankCitedPages', () => {
     expect(guide).toMatchObject({ subtype: 'listicle_candidate', listPage: false });
   });
 
+  // owner 2026-10-01 "loosen the rule": a known editorial site's provider page
+  // qualifies without a best/top word in its address
+  test('a known editorial site\'s provider page is a list without best/top in the URL; how-to and unknown service pages are not', () => {
+    const urls = [
+      'https://www.smarfle.com/fl/bradenton/pest-control', // known editorial, no best word → list
+      'https://www.bobvila.com/articles/how-to-choose-a-pest-control-company/', // how-to article → not
+      'https://localsite.example/pest-control-parrish', // unknown site, no best word → not (looks like a company page)
+      'https://localsite.example/best-pest-control-companies-parrish', // unknown site WITH best word → list
+    ];
+    const byKey = Object.fromEntries(rankCitedPages([row({ query: Q1, urls })], []).map((p) => [p.key, p.listPage]));
+    expect(byKey).toEqual({
+      'smarfle.com/fl/bradenton/pest-control': true,
+      'bobvila.com/articles/how-to-choose-a-pest-control-company': false,
+      'localsite.example/pest-control-parrish': false,
+      'localsite.example/best-pest-control-companies-parrish': true,
+    });
+  });
+
   test('once eligible, a page counts every citation — a current cost answer citing it is current', () => {
     const LIST = 'https://localpicks.example/best-pest-control-companies-sarasota';
     const rows = [
