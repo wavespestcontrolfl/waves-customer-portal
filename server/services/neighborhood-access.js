@@ -15,6 +15,7 @@
 
 const db = require('../models/db');
 const { lookupCountyParcelByPoint, subdivisionBaseName } = require('./property-lookup/county-parcel-gis');
+const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 
 // The county module's subdivisionBaseName gives the estimator's base PLAT
 // (cut at PH/PHASE/UNIT/SEC/SECTION/PB) — deliberately narrow, because its
@@ -48,6 +49,16 @@ function neighborhoodNameFromSubdivision(raw) {
 
 function matchKey(county, name) {
   return `${String(county || '').toLowerCase()}|${String(name).toLowerCase()}`;
+}
+
+// The one county whose service-area ZIP set holds this ZIP, else none (a ZIP
+// that straddles a county line keeps the Manatee → Sarasota → Charlotte
+// fallback). A hint keeps an earlier county's slow layer from spending the
+// shared deadline before the right one is asked.
+function countyHint(zip) {
+  const z = String(zip || '').slice(0, 5);
+  const hits = Object.entries(SERVICE_AREA_COUNTY_ZIPS).filter(([, zips]) => zips.includes(z)).map(([county]) => county);
+  return hits.length === 1 ? hits[0] : undefined;
 }
 
 // A keypad code is digits with an optional leading/trailing # or *. Anything
@@ -369,7 +380,7 @@ async function fileOneSavedCode(customerId, lookup) {
   const hasPin = [snapshot.latitude, snapshot.longitude].every((v) => v !== null && v !== undefined && String(v).trim() !== '')
     && Number.isFinite(Number(snapshot.latitude)) && Number.isFinite(Number(snapshot.longitude));
   const parcel = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office' && hasPin
-    ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude))
+    ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude), { county: countyHint(snapshot.zip) })
     : null;
 
   return db.transaction(async (trx) => {
@@ -593,5 +604,6 @@ module.exports = {
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
   fileNeighborhoodCode,
+  countyHint,
   VALUE_HASH_SQL,
 };

@@ -127,6 +127,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     const lookup = jest.fn(async () => ({ county: 'Manatee', subdivision: 'HERON POINTE PH I PB1/1', situsAddress: '100 SYNTHETIC WAY', situsZip: '34202' }));
     const r = await sweepSavedGateCodes({ lookup });
     expect(lookup).toHaveBeenCalledTimes(1);
+    // The ZIP's one county goes along, so a slow earlier county cannot spend the shared deadline.
+    expect(lookup).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), { county: 'Manatee' });
     expect(r.tally).toEqual({ filed: 1 });
     const n = await trx('neighborhoods').where('name', 'Heron Pointe').first('id');
     expect(await accessRows(n.id)).toEqual([expect.objectContaining({ code: '2222#', status: 'active' })]);
