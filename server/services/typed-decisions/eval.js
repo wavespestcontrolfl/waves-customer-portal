@@ -291,6 +291,20 @@ function scoreRows(labeledRows = [], coverageRows = []) {
     else if (DEVELOPMENT.includes(row.sampled_for)) tally(g.development, g.type, row);
     else g.other += 1; // labeled outside any sample: shown, never scored
   }
+  // Every question of a registered package is part of its status, evidence or
+  // not: a package whose other questions were never labeled (or whose
+  // unlabeled answers a re-record replaced under a new model) is not cleared
+  // by one strong question (pre-push audit P1). Missing questions sit at tier 0.
+  const packages = new Map();
+  for (const g of groups.values()) {
+    packages.set(`${g.capability}|${g.packageId}|${g.servedModel || ''}`, { capability: g.capability, package_id: g.packageId, served_model: g.servedModel });
+  }
+  for (const ref of packages.values()) {
+    const registered = packageFor(ref.package_id);
+    if (!registered) continue;
+    for (const questionId of Object.keys(registered.questions)) ensure({ ...ref, question_id: questionId });
+  }
+
   const questions = [];
   for (const g of groups.values()) {
     const representative = metricsOf(g.type, g.representative);
@@ -328,10 +342,13 @@ function scoreRows(labeledRows = [], coverageRows = []) {
   const byCapability = new Map();
   for (const q of questions) {
     const key = `${q.capability}|${q.packageId}|${q.servedModel || ''}`;
-    if (!byCapability.has(key)) byCapability.set(key, { capability: q.capability, packageId: q.packageId, servedModel: q.servedModel, questions: [], tier: Infinity, blocker: null, nextTier: null });
+    if (!byCapability.has(key)) byCapability.set(key, { capability: q.capability, packageId: q.packageId, servedModel: q.servedModel, questions: [], weakest: null });
     const c = byCapability.get(key);
     c.questions.push(q);
-    if (q.tier < c.tier) { c.tier = q.tier; c.blocker = q.blocker; c.nextTier = q.nextTier; }
+    // The weakest question: lowest tier, then fewest representative labels
+    // (furthest from clearing), then id order (questions arrive sorted).
+    const w = c.weakest;
+    if (!w || q.tier < w.tier || (q.tier === w.tier && repLabeled(q) < repLabeled(w))) c.weakest = q;
   }
   return [...byCapability.values()].map((c) => ({
     capability: c.capability,
@@ -339,9 +356,9 @@ function scoreRows(labeledRows = [], coverageRows = []) {
     // false = the package has left the registry: history, not what runs now.
     registered: Boolean(packageFor(c.packageId)),
     servedModel: c.servedModel,
-    tier: c.tier === Infinity ? 0 : c.tier,
-    nextTier: c.nextTier,
-    blocker: c.blocker,
+    tier: c.weakest ? c.weakest.tier : 0,
+    nextTier: c.weakest ? c.weakest.nextTier : null,
+    blocker: c.weakest && c.weakest.blocker ? `${c.weakest.questionId}: ${c.weakest.blocker}` : null,
     labeled: {
       representative: c.questions.reduce((n, q) => n + q.representative.counts.labeled + q.representative.counts.unclear, 0),
       development: c.questions.reduce((n, q) => n + q.development.counts.labeled + q.development.counts.unclear, 0),
@@ -349,6 +366,8 @@ function scoreRows(labeledRows = [], coverageRows = []) {
     questions: c.questions,
   }));
 }
+
+const repLabeled = (q) => q.representative.counts.labeled;
 
 function clampDays(value) {
   const n = Number.parseInt(value, 10);

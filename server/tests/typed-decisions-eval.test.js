@@ -172,11 +172,24 @@ describe('scoreRows — tiers from the representative set only', () => {
       ...rows(5, { capability: 'call_judge', pkg: 'call_judge.v2', question: 'is_lead', p: 0.95 }),
     ];
     const [cap] = scoreRows(labeled, []);
-    expect(cap.questions.map((q) => [q.questionId, q.tier])).toEqual([['is_lead', 0], ['is_spam', 2]]);
+    // every registered question of call_judge.v2 is listed, evidence or not
+    expect(cap.questions.map((q) => [q.questionId, q.tier])).toEqual([
+      ['appointment_agreed', 0], ['complaint', 0], ['is_lead', 0], ['is_spam', 2], ['is_voicemail', 0], ['quote_promised', 0],
+    ]);
     expect(cap.tier).toBe(0);
     expect(cap.nextTier).toBe(1);
-    expect(cap.blocker).toMatch(/Tier 1 \(reviewed suggestions\): precision .* 5\/5/);
+    // the weakest question is named: lowest tier, then fewest representative labels
+    expect(cap.blocker).toMatch(/^appointment_agreed: No representative labels yet/);
+    expect(cap.questions.find((q) => q.questionId === 'is_lead').blocker).toMatch(/Tier 1 \(reviewed suggestions\): precision .* 5\/5/);
     expect(cap.labeled.representative).toBe(75);
+  });
+
+  test('one strong question never clears a registered package: 598 correct is_spam labels leave call_judge.v2 at tier 0 (pre-push audit P1)', () => {
+    const [cap] = scoreRows(rows(598, { capability: 'call_judge', pkg: 'call_judge.v2', question: 'is_spam', p: 0.95 }), []);
+    expect(cap.questions).toHaveLength(6);
+    expect(cap.questions.find((q) => q.questionId === 'is_spam').tier).toBe(3);
+    expect(cap.tier).toBe(0);
+    expect(cap.blocker).toMatch(/^appointment_agreed: No representative labels yet/);
   });
 
   test('coverage counts every recorded answer, labeled or not, and the confident share', () => {
