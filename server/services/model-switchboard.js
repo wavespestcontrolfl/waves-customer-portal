@@ -379,7 +379,7 @@ const LANES = [
   // miss OR Gemini is unsure / lists a runner-up of different risk. No Claude.
   // Customer app Photo ID (owner 2026-10-01, TEXT_POLICIES.photoIdPestV2):
   // one Gemini read answers; OpenAI only when Gemini returns nothing usable.
-  L('pest_id_app', 'Pest identification (customer app Photo ID)', 'photo-id-v2/pest-engine.js, routes/photo-id.js', 'multimodal', P('photoIdPestV2', 'primary'), P('photoIdPestV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-01); OpenAI stands in on a Gemini miss · PHOTO_ID_V2_LADDER=full restores the verify + escalation ladder' }),
+  L('pest_id_app', 'Pest identification (customer app Photo ID)', 'photo-id-v2/pest-engine.js, routes/photo-id.js', 'multimodal', P('photoIdPestV2', 'primary'), P('photoIdPestV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-01); OpenAI stands in on a Gemini miss' }),
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: P('photoIdVision', 'fallback'), note: `Gemini-first (owner 2026-09-26); OpenAI takes a second look when Gemini misses, scores itself under PHOTO_ID_ESCALATE_BELOW, or lists a runner-up of different risk · ${SHARED_GEMINI_PIN}` }),
   // Sequential ladder, same shape as pest_id above (owner ruling 2026-09-28,
   // TEXT_POLICIES.plantIdVision): identifyPlantV2 tries Gemini, then reaches
@@ -641,6 +641,7 @@ const LANE_AREA = {
   voice_relay_collections: 'voice',
   voice_relay_judge: 'voice',
   pest_id: 'photos',
+  pest_id_app: 'photos',
   plant_id: 'photos',
   plant_id_referee: 'photos',
   lawn_assessment_referee: 'photos',
@@ -791,6 +792,7 @@ const LANE_DESCRIBE = {
   voice_relay_collections: 'Speaks with customers on collections calls',
   voice_relay_judge: 'Grades Sandy\'s eval calls against each scenario\'s spec',
   pest_id: 'Identifies the pest in a customer photo',
+  pest_id_app: "Identifies the pest in a photo a customer takes in the app's Photo ID",
   plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
   plant_id_referee: 'Breaks a tie when the two photo models name different plants (dark)',
   typed_decisions: 'Answers fixed yes/no questions about a call or text, recorded for review only (dark)',

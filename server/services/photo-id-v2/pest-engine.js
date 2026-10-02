@@ -8,14 +8,15 @@
  * response shape, and the v1-column mapping). PR-2b wires this into
  * `server/routes/photo-id.js` behind `GATE_PHOTO_ID_V2`.
  *
- * Model calls: by default (owner 2026-10-01) Gemini candidates alone, with
- * OpenAI only when Gemini returns nothing (see `geminiOnly`). With
- * PHOTO_ID_V2_LADDER=full (steps 1–3): Gemini candidates → Gemini verify
+ * Model calls: the customer app route asks for `ladder: 'gemini_only'`
+ * (owner 2026-10-01): Gemini candidates alone, OpenAI only when Gemini
+ * returns nothing (see `geminiOnly`). Every other caller, the full ladder
+ * (steps 1–3): Gemini candidates → Gemini verify
  * (only when ≥1 catalog candidate) → OpenAI escalation (only when a trigger
  * fires),
  * SEQUENTIAL, never parallel, no Claude leg — the same deliberate departure
  * from the Claude-fallback rule as `lawn-visit-assessment.js`
- * (`MODELS.TEXT_POLICIES.photoIdPestV2`, else `photoIdVision` — this module
+ * (`MODELS.TEXT_POLICIES.photoIdPestV2` / `photoIdVision` — this module
  * reads it at call time so it builds and tests independently of whichever
  * lane lands first; an absent policy degrades every leg to `no_route`,
  * exactly like `dispatch()` already handles a missing route).
@@ -278,24 +279,20 @@ function derivedNodeCompatibility(nodeId) {
   };
 }
 
-// Owner 2026-10-01 ("lets just use Gemini for this"): Photo ID answers from
-// Gemini's one read. No verify leg, no OpenAI second opinion; OpenAI stands
-// in only when Gemini returns nothing usable (outage, cut-off reply), so a
-// customer never gets an error for a Gemini miss. Without a trait check the
-// answer tops out at "Likely". PHOTO_ID_V2_LADDER=full restores the
-// 2026-09-26 Gemini → verify → OpenAI ladder without a deploy.
-// A Gemini-only read uses the app engine's own policy (photoIdPestV2, else
-// photoIdVision when it is not registered); the full ladder keeps
-// photoIdVision, so visit-prep reads are unchanged (Codex #5560 r3 P1).
+// Owner 2026-10-01 ("lets just use Gemini for this"): the customer app's
+// Photo ID answers from Gemini's one read. No verify leg, no OpenAI second
+// opinion; OpenAI stands in only when Gemini returns nothing usable (outage,
+// cut-off reply), so a customer never gets an error for a Gemini miss.
+// Without a trait check the answer tops out at "Likely". That read uses the
+// app's own policy (photoIdPestV2) and ledger lane (pest_id_app); every other
+// caller (visit prep) keeps the full ladder on photoIdVision (Codex #5560 r3).
+// A missing policy is a `no_route` miss, never a silent swap (Codex r4).
 function photoIdPolicy(singleRead) {
-  return (singleRead && MODELS.TEXT_POLICIES?.photoIdPestV2) || MODELS.TEXT_POLICIES?.photoIdVision;
+  return singleRead ? MODELS.TEXT_POLICIES?.photoIdPestV2 : MODELS.TEXT_POLICIES?.photoIdVision;
 }
 
-// Only a caller that asks for it (the customer app route) gets the
-// Gemini-only read; PHOTO_ID_V2_LADDER=full puts that caller back on the
-// full ladder too. Every other caller keeps the full ladder.
 function geminiOnly(ladder) {
-  return ladder === 'gemini_only' && process.env.PHOTO_ID_V2_LADDER !== 'full';
+  return ladder === 'gemini_only';
 }
 
 function escalateBelow() {
@@ -545,7 +542,7 @@ async function callCandidatesModel(images, catalogEntries, timeoutMs, singleRead
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
     thinkingLevel: GEMINI_THINKING_LEVEL,
-    laneId: 'photo_id_v2_candidates',
+    laneId: singleRead ? 'pest_id_app' : 'photo_id_v2_candidates',
     promptVersion: PROMPT_VERSION,
   });
 }
@@ -576,7 +573,7 @@ async function callEscalationModel(images, catalogEntries, candidateContext, tim
     jsonSchema: ESCALATION_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'photo_id_v2_escalation',
+    laneId: singleRead ? 'pest_id_app' : 'photo_id_v2_escalation',
     promptVersion: PROMPT_VERSION,
   });
 }

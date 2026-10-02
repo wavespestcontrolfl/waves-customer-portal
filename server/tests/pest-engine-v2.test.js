@@ -29,6 +29,11 @@ jest.mock('../config/models', () => {
         primary: { provider: 'gemini', model: 'gemini-3.8-flash-test' },
         fallback: { provider: 'openai', model: 'gpt-6-astra-test' },
       },
+      photoIdPestV2: {
+        name: 'photoIdPestV2',
+        primary: { provider: 'gemini', model: 'gemini-3.6-flash-test' },
+        fallback: { provider: 'openai', model: 'gpt-6-astra-test' },
+      },
     },
   };
 });
@@ -1542,16 +1547,14 @@ describe('L1: pest engine reads only the pest section', () => {
 // for a Gemini-only read: OpenAI only stands in when Gemini returns nothing.
 describe('Gemini-only ladder (app route)', () => {
   const GEMINI_ONLY = { ladder: 'gemini_only' };
-  afterEach(() => {
-    delete process.env.PHOTO_ID_V2_LADDER;
-  });
 
   test('a confident Gemini read is the answer: one call, no verify, no escalation', async () => {
     dispatch.mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.92 }]));
 
     const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
     expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(dispatch.mock.calls[0][1]).toMatchObject({ laneId: 'photo_id_v2_candidates', thinkingLevel: 'LOW' });
+    expect(dispatch.mock.calls[0][0]).toMatchObject({ provider: 'gemini', model: 'gemini-3.6-flash-test' });
+    expect(dispatch.mock.calls[0][1]).toMatchObject({ laneId: 'pest_id_app', thinkingLevel: 'LOW' });
     expect(result.internal).toMatchObject({ ladder: 'gemini_only', escalation_triggered: false, escalation_reasons: [] });
     // No trait check ran, so the answer names the species at "Likely".
     expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fire-ant', wording: 'likely' });
@@ -1579,7 +1582,7 @@ describe('Gemini-only ladder (app route)', () => {
 
     const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
     expect(dispatch).toHaveBeenCalledTimes(2);
-    expect(dispatch.mock.calls[1][1].laneId).toBe('photo_id_v2_escalation');
+    expect(dispatch.mock.calls[1][1].laneId).toBe('pest_id_app');
     expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
     expect(result.ok).toBe(true);
   });
@@ -1614,17 +1617,7 @@ describe('Gemini-only ladder (app route)', () => {
       .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.92, traits_visible: [1, 2], traits_not_visible: [] }] } });
 
     const result = await identifyPestV2([PHOTO]);
-    expect(dispatch.mock.calls[1][1].laneId).toBe('photo_id_v2_verify');
-    expect(result.internal.ladder).toBe('full');
-  });
-
-  test('PHOTO_ID_V2_LADDER=full restores the verify leg', async () => {
-    process.env.PHOTO_ID_V2_LADDER = 'full';
-    dispatch
-      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.92 }]))
-      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.92, traits_visible: [1, 2], traits_not_visible: [] }] } });
-
-    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch.mock.calls[0][0].model).toBe('gemini-3.8-flash-test');
     expect(dispatch.mock.calls[1][1].laneId).toBe('photo_id_v2_verify');
     expect(result.internal.ladder).toBe('full');
   });
