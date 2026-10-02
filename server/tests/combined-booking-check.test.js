@@ -273,6 +273,10 @@ describe('visit prices', () => {
     // No primary stamp: the service is the visit price less the add-ons ($165 - $75 = $90).
     const derived = priced(lawnRows(), 165).map((row) => (row.recurring_parent_id ? { ...row, addon_total: 75 } : row));
     expect(texts(verdictFor(priced(pestRows(), 150), derived))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // Add-ons above the visit price ($50 visit, $75 add-ons): the service clamps to $0 and the
+    // total adjusts across lines, so the service share is not read (never a negative price).
+    const clamped = priced(lawnRows(), 50).map((row) => (row.recurring_parent_id ? { ...row, addon_total: 75 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), clamped))).toEqual([]);
     // The hourly urgent pass never reports prices.
     const urgent = evaluateCombinedBooking({ estimate: estimate([PEST, LAWN]), rows: [...priced(pestRows(), 150), ...derived], timeTechOnly: true });
     expect(urgent.problems).toEqual([]);
@@ -313,8 +317,10 @@ describe('visit prices', () => {
 
 describe('markPrepayCovered', () => {
   const renewals = require('../services/annual-prepay-renewals');
+  const payer = require('../services/payer');
   afterEach(() => jest.restoreAllMocks());
   test('a cash payment covers a visit only in full; an annual stamp only when the validator confirms a live term', async () => {
+    jest.spyOn(payer, 'resolveForInvoice').mockResolvedValue({ payerId: null });
     const validator = jest.spyOn(renewals, 'annualPrepayCoversVisit').mockImplementation(async (row) => row.id === 'live');
     const rows = [
       { id: 'partial', prepaid_amount: 10, prepaid_method: 'cash', estimated_price: 120 },
@@ -336,6 +342,23 @@ describe('markPrepayCovered', () => {
     });
     // Asked for the annual stamps, the term link and the unstamped termite visit; never the plain lawn visit.
     expect(validator).toHaveBeenCalledTimes(4);
+  });
+
+  test('a payer-billed visit is never covered by the homeowner\'s prepay; an unresolvable payer reads as payer-billed', async () => {
+    jest.spyOn(renewals, 'annualPrepayCoversVisit').mockResolvedValue(true);
+    jest.spyOn(payer, 'resolveForInvoice').mockImplementation(async ({ scheduledServiceId }) => {
+      if (scheduledServiceId === 'broken') throw new Error('payer read failed');
+      return { payerId: scheduledServiceId.startsWith('payer') ? 'p1' : null };
+    });
+    const rows = [
+      { id: 'payercash', prepaid_amount: 120, prepaid_method: 'cash', estimated_price: 120 },
+      { id: 'payerannual', prepaid_amount: 120, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1', estimated_price: 120 },
+      { id: 'broken', prepaid_amount: 120, prepaid_method: 'cash', estimated_price: 120 },
+      { id: 'selfpay', prepaid_amount: 120, prepaid_method: 'cash', estimated_price: 120 },
+    ];
+    await check.markPrepayCovered({}, rows);
+    expect(Object.fromEntries(rows.map((row) => [row.id, row.prepay_covered])))
+      .toEqual({ payercash: false, payerannual: false, broken: false, selfpay: true });
   });
 });
 

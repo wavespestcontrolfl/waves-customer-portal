@@ -313,8 +313,10 @@ function billedServicePrice(row) {
   const estimated = Number(row.estimated_price);
   const addons = Number(row.addon_total) || 0;
   // No primary stamp: invoicing derives the service as the visit price less
-  // the add-ons, which then add back up to it exactly (no adjustment).
-  if (row.primary_line_price == null || row.primary_line_price === '') return estimated - addons;
+  // the add-ons, which then add back up to it exactly (no adjustment). Add-ons
+  // above the visit price clamp the service to $0 and adjust across the lines:
+  // not apportionable, so not read.
+  if (row.primary_line_price == null || row.primary_line_price === '') return estimated >= addons ? estimated - addons : null;
   const primary = Number(row.primary_line_price);
   if (!(estimated > 0) || primary + addons <= estimated + 0.005) return primary;
   return addons > 0 ? null : estimated;
@@ -437,7 +439,20 @@ function composeAlert(verdict, { customerName, customerId, estimateId }) {
 // covers it only when it is at least the visit's price (completion bills the
 // rest of a partial one); an annual-prepay stamp only when annualPrepayCoversVisit
 // confirms it against a live, paid term, the same authority completion
-// trusts (fail-closed: unverifiable reads as not covered).
+// trusts (fail-closed: unverifiable reads as not covered). A visit billed to a
+// third-party payer is never covered by the homeowner's prepay (completion
+// still invoices the payer), so the payer is resolved first, fail-closed too.
+async function payerBilled(conn, row) {
+  try {
+    const resolved = await require('./payer').resolveForInvoice({ database: conn,
+      customerId: row.customer_id, scheduledServiceId: row.id, throwOnError: true });
+    return Boolean(resolved?.payerId);
+  } catch (err) {
+    logger.warn(`[combined-booking-check] payer unresolvable for a visit: ${err.message}`);
+    return true;
+  }
+}
+
 async function markPrepayCovered(conn, rows) {
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
   const { hasOutOfBandPrepaidStamp } = require('./schedule-integrity-watchdog');
@@ -448,11 +463,12 @@ async function markPrepayCovered(conn, rows) {
     // precedence): a positive estimated_price, else the primary line.
     const charge = Number(row.estimated_price) > 0 ? Number(row.estimated_price) : Number(row.primary_line_price) || 0;
     if (!(charge > 0)) continue;
+    const mayBeCovered = paid > 0 || row.annual_prepay_term_id || rowFamilies(row).includes('termite_bait');
+    if (!mayBeCovered || await payerBilled(conn, row)) continue;
     if (paid > 0 && hasOutOfBandPrepaidStamp(row)) { row.prepay_covered = paid + 0.005 >= charge; continue; }
     // The coverage authority also covers an UNSTAMPED termite renewal visit
     // during the payment-pending grace window, so a termite visit is asked
     // even with no stamp; any other unstamped visit has nothing to ask about.
-    if (!(paid > 0) && !row.annual_prepay_term_id && !rowFamilies(row).includes('termite_bait')) continue;
     try {
       row.prepay_covered = await annualPrepayCoversVisit(row, conn) === true;
     } catch (err) {
