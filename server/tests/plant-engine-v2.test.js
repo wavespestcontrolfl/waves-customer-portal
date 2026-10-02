@@ -2288,6 +2288,8 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
       expect(dispatch).toHaveBeenCalledTimes(3);
       expect(result.internal.escalation_reasons).toContain('no_identity_candidate');
+      // The stand-in's condition read reaches the workup too.
+      expect(result.v2.possibilities.map((p) => p.slug)).toContain('fixture-large-patch');
     });
 
     test('workup: an empty Call A with a usable Call C stays Gemini-only', async () => {

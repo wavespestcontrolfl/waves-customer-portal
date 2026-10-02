@@ -1799,6 +1799,12 @@ function singleReadEmptyWorkup(run, identity, conditions) {
     && conditions.possibilities.length === 0;
 }
 
+// An empty Gemini-only workup needs the stand-in's conditions too, not only
+// its identity, so the conditions scope counts as triggered.
+function conditionsReasonsFor(reasons, emptyWorkup) {
+  return emptyWorkup && !reasons.includes('gemini_missed') ? [...reasons, 'gemini_missed'] : reasons;
+}
+
 async function runEscalation(run, identity, conditions, { skip = false } = {}) {
   const triggers = skip ? mapSlots(() => []) : identitySlotTriggers(identity, run);
   const emptyWorkup = !skip && singleReadEmptyWorkup(run, identity, conditions);
@@ -1807,7 +1813,7 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
     ? [...triggers[slot], 'no_identity_candidate'] : triggers[slot]));
   const reasons = {
     identity: REASON_ORDER.filter((r) => IDENTITY_SLOTS.some((slot) => slotReasons[slot].includes(r))),
-    conditions: skip ? [] : conditionTriggerReasons(conditions, run.singleRead),
+    conditions: skip ? [] : conditionsReasonsFor(conditionTriggerReasons(conditions, run.singleRead), emptyWorkup),
   };
   const slotTriggered = mapSlots((slot) => slotReasons[slot].length > 0);
   const conditionsTriggered = reasons.conditions.length > 0;
