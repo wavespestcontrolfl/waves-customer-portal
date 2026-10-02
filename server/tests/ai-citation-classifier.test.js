@@ -132,6 +132,14 @@ describe('classifyUrl', () => {
     }
   });
 
+  // Owner 2026-10-01: Green Team Pest's Parrish service-area page was cited
+  // for a provider question and became a listicle candidate (an outreach
+  // target) — a competitor even under provider intent.
+  test('greenteampest.com is a competitor, never a listicle candidate', () => {
+    expect(classifyUrl('https://www.greenteampest.com/service-areas/parrish', { providerIntent: true }))
+      .toMatchObject({ category: 'competitor', rule: 'competitor_domain' });
+  });
+
   // Owner review 2026-09-28: real cited domains from competitor-gap-miner.js's
   // DEFAULT_COMPETITOR_DOMAINS (imported live via its `competitorDomains`
   // getter, never re-typed) were falling through to `other` — Turner is the
