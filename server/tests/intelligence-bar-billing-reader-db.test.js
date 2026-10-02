@@ -243,6 +243,10 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     }
     await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `${refundPi}:partial-refund:re_${run}`, customer_id: R, invoice_id: null, amount: 12, source: 'combined_pay_webhook',
       original_db_error: 'Partial refund on a combined balance charge — attribute and reconcile manually' });
+    await db('stripe_orphan_charges').insert([
+      { stripe_payment_intent_id: `${refundPi}:partial-dispute:dp_${run}`, customer_id: R, invoice_id: null, amount: 30, source: 'combined_pay_webhook', original_db_error: 'Partial dispute on a combined balance charge' },
+      { stripe_payment_intent_id: `${refundPi}:dispute-won:dp_${run}:${inv.r_a.id}`, customer_id: R, invoice_id: inv.r_a.id, amount: 80, source: 'combined_pay_webhook', original_db_error: 'Dispute won reinstated a share while a replacement owns the invoice' },
+    ]);
     // A packet invoice whose Bill-To moved AFTER it was sent: both payer columns stay null, only the withdrawal stamp records it.
     W = await customer(`Withdrawn${run}`, `Packet${run}`);
     await invoice('w_self', W, { total: 100 });
@@ -660,19 +664,20 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(clean.invoice.balance_due).toBe(25);
   });
 
-  test('review: an unallocated partial refund on a combined payment makes every covered invoice\'s net unknown, and is refund evidence not a charge', async () => {
+  test('review: an unallocated partial refund, partial dispute or dispute-won reinstatement on a combined payment makes every covered invoice\'s net unknown, and is refund evidence not a charge', async () => {
     for (const key of ['r_a', 'r_b']) {
       const detail = await read('get_invoice_detail', { invoice_id: inv[key].id });
-      const entry = detail.payments_timeline.find((e) => e.type === 'payment_refund_reconciliation');
-      expect(entry).toMatchObject({ received: false, reconciliation_required: true, refund_amount: 12 });
+      const entries = detail.payments_timeline.filter((e) => e.type === 'payment_reversal_reconciliation');
+      expect(entries.map((e) => e.kind).sort()).toEqual(['dispute', 'dispute_won', 'refund']);
+      expect(entries.find((e) => e.kind === 'refund')).toMatchObject({ received: false, reconciliation_required: true, reversal_amount: 12 });
       expect(detail.payments_timeline.some((e) => e.type === 'stripe_unreconciled_charge')).toBe(false);
-      expect(detail.payment_summary).toMatchObject({ received: true, recorded_payments_net: null, refund_reconciliation_required: 1, unreconciled_stripe_charges: 0 });
+      expect(detail.payment_summary).toMatchObject({ received: true, recorded_payments_net: null, reversal_reconciliation_required: 3, unreconciled_stripe_charges: 0 });
       expect(detail.payment_summary.statement).toMatch(/^Payment was received/);
       expect(detail.payment_summary.statement).toMatch(/net amount UNKNOWN/);
     }
     const list = await read('get_customer_invoices', { customer_id: R, limit: 50 });
     for (const key of ['r_a', 'r_b']) {
-      expect(list.invoices.find((i) => i.id === inv[key].id)).toMatchObject({ amount_paid: null, payment_recorded: true, refund_reconciliation_required: 1, unreconciled_stripe_charges: 0, balance_due: 0 });
+      expect(list.invoices.find((i) => i.id === inv[key].id)).toMatchObject({ amount_paid: null, payment_recorded: true, reversal_reconciliation_required: 3, unreconciled_stripe_charges: 0, balance_due: 0 });
     }
   });
 

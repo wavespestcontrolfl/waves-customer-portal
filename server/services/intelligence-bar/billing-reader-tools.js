@@ -458,7 +458,9 @@ async function readDisputeHold(customerId) {
 }
 
 const pgBase = (value) => (value ? String(value).split(':')[0] : null);
-const PARTIAL_REFUND_KEY = /:partial-refund:/;
+// Reversal records the webhook parks against a PaymentIntent that cannot be attributed to one invoice:
+// "<pi>:partial-refund:<id>", "<pi>:partial-dispute:<id>" and "<pi>:dispute-won:<id>:<invoice>".
+const REVERSAL_KEY = /:(partial-refund|partial-dispute|dispute-won):/;
 const STATEMENT_ORPHAN_MARKER = /^statement S-(\d+):/;
 
 // Unresolved stripe_orphan_charges for these invoices, by every linkage the webhook writes, shared by the list
@@ -466,13 +468,14 @@ const STATEMENT_ORPHAN_MARKER = /^statement S-(\d+):/;
 //   direct      invoice_id (a combined PaymentIntent is quarantined against the ANCHOR invoice only)
 //   shared      the orphan's PaymentIntent (before any ":<invoice id>" suffix) is the one stamped on the
 //               invoice: every invoice a combined PaymentIntent allocated carries it (pay-combined.js)
-//   refund      a partial refund parked as "<pi>:partial-refund:<refund id>" (invoice_id often NULL because a
-//               combined charge cannot attribute it to one share): refund evidence, never a charge
+//   reversal    a partial refund / partial dispute / dispute-won reinstatement parked under a suffixed key
+//               (invoice_id often NULL because a combined charge cannot attribute it to one share): reversal
+//               evidence, never a charge
 //   statement   customer_id and invoice_id NULL (a partial statement refund before settlement), tied to an
 //               invoice with payer_statement_id through the statement's PaymentIntent or its
 //               "statement S-<id>:" marker
 async function loadUnresolvedOrphans(invoices) {
-  const byInvoice = new Map(invoices.map((invoice) => [String(invoice.id), { orphans: [], statementOrphans: [], refundOrphans: [] }]));
+  const byInvoice = new Map(invoices.map((invoice) => [String(invoice.id), { orphans: [], statementOrphans: [], reversalOrphans: [] }]));
   if (!invoices.length) return { byInvoice, truncated: false };
   const ids = invoices.map((invoice) => String(invoice.id));
   const intents = [...new Set(invoices.map((invoice) => invoice.stripe_payment_intent_id).filter(Boolean))];
@@ -499,8 +502,8 @@ async function loadUnresolvedOrphans(invoices) {
     const marked = STATEMENT_ORPHAN_MARKER.exec(String(row.original_db_error || ''));
     for (const invoice of invoices) {
       const slot = byInvoice.get(String(invoice.id));
-      if (PARTIAL_REFUND_KEY.test(String(row.stripe_payment_intent_id || ''))) {
-        if ((row.invoice_id != null && String(row.invoice_id) === String(invoice.id)) || (base && base === invoice.stripe_payment_intent_id)) slot.refundOrphans.push(row);
+      if (REVERSAL_KEY.test(String(row.stripe_payment_intent_id || ''))) {
+        if ((row.invoice_id != null && String(row.invoice_id) === String(invoice.id)) || (base && base === invoice.stripe_payment_intent_id)) slot.reversalOrphans.push(row);
       } else if (row.invoice_id != null && String(row.invoice_id) === String(invoice.id)) slot.orphans.push({ ...row, linked_by: 'invoice_id' });
       else if (row.invoice_id != null && base && base === invoice.stripe_payment_intent_id) slot.orphans.push({ ...row, linked_by: 'shared_payment_intent' });
       else if (row.invoice_id == null && row.customer_id == null && invoice.payer_statement_id != null) {
@@ -630,7 +633,7 @@ function paymentPlanFromList(row) {
 // `heldIds` is null when the per-invoice hold lookup failed (unknown, never false); `unconfirmed` is the
 // invoice's unresolved charge evidence { orphans, attempts } (stripe_orphan_charges rows and the fence's
 // claimed / ambiguous attempts), or null when that lookup failed.
-function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unconfirmed = { orphans: [], attempts: [], statementOrphans: [], refundOrphans: [] }) {
+function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unconfirmed = { orphans: [], attempts: [], statementOrphans: [], reversalOrphans: [] }) {
   const allPayments = ledger.get(String(row.id)) || [];
   const payerFunded = allPayments.filter((payment) => payment.payer_funded);
   const payments = allPayments.filter((payment) => !payment.payer_funded);
@@ -690,11 +693,11 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unc
   if (sharedRows.length) {
     unknown.push(`Stripe accepted a combined payment ($${fromCents(sharedRows.reduce((total, orphan) => total + cents(orphan.amount), 0)).toFixed(2)} across several invoices) that covers this invoice and the portal has not recorded it: this invoice's share may already have been charged, so amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail for the evidence.`);
   }
-  const refundOrphanRows = unconfirmed ? unconfirmed.refundOrphans || [] : [];
-  if (refundOrphanRows.length) {
+  const reversalOrphanRows = unconfirmed ? unconfirmed.reversalOrphans || [] : [];
+  if (reversalOrphanRows.length) {
     amountPaid = null;
-    basis = 'unknown: a partial refund on the covering payment is not yet allocated to an invoice';
-    unknown.push(`${refundOrphanRows.length} partial refund(s) on the payment that covers this invoice are not yet allocated to an invoice: the net amount paid is unknown (reconciliation required).`);
+    basis = 'unknown: a refund or dispute on the covering payment is not yet allocated to an invoice';
+    unknown.push(`${reversalOrphanRows.length} refund or dispute record(s) on the payment that covers this invoice are not yet allocated to an invoice: the net amount paid is unknown (reconciliation required).`);
   }
   const statementOrphanRows = unconfirmed ? unconfirmed.statementOrphans || [] : [];
   if (statementOrphanRows.length) {
@@ -728,7 +731,7 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unc
     unreconciled_stripe_charges: unconfirmedUnknown ? null : orphanRows.length,
     unresolved_charge_attempts: unconfirmedUnknown ? null : unresolvedAttempts,
     statement_reconciliation_required: unconfirmedUnknown ? null : statementOrphanRows.length,
-    refund_reconciliation_required: unconfirmedUnknown ? null : refundOrphanRows.length,
+    reversal_reconciliation_required: unconfirmedUnknown ? null : reversalOrphanRows.length,
     payer_funded_payments: payerFunded.length,
     has_active_payment_plan: Boolean(paymentPlanFromList(row)),
     payment_plan: paymentPlanFromList(row),
@@ -781,7 +784,7 @@ async function getCustomerInvoices(input, actionContext) {
     const attemptRows = ids.length
       ? await db('stripe_invoice_charge_attempts').whereIn('invoice_id', ids).whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at').select('id', 'invoice_id', 'status')
       : [];
-    const slot = (id) => { if (!unconfirmedMap.has(String(id))) unconfirmedMap.set(String(id), { orphans: [], attempts: [], statementOrphans: [], refundOrphans: [] }); return unconfirmedMap.get(String(id)); };
+    const slot = (id) => { if (!unconfirmedMap.has(String(id))) unconfirmedMap.set(String(id), { orphans: [], attempts: [], statementOrphans: [], reversalOrphans: [] }); return unconfirmedMap.get(String(id)); };
     for (const [invoiceId, found] of loadedOrphans.byInvoice) Object.assign(slot(invoiceId), found);
     for (const attempt of attemptRows) slot(attempt.invoice_id).attempts.push(attempt);
     if (loadedOrphans.truncated) {
@@ -799,7 +802,7 @@ async function getCustomerInvoices(input, actionContext) {
   return {
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     account_summary: summary,
-    invoices: page.invoices.map((row) => invoiceItem(row, today, ledger, heldIds, paymentsTruncated, unconfirmedMap ? unconfirmedMap.get(String(row.id)) || { orphans: [], attempts: [], statementOrphans: [], refundOrphans: [] } : null)),
+    invoices: page.invoices.map((row) => invoiceItem(row, today, ledger, heldIds, paymentsTruncated, unconfirmedMap ? unconfirmedMap.get(String(row.id)) || { orphans: [], attempts: [], statementOrphans: [], reversalOrphans: [] } : null)),
     returned_count: returned,
     total_matching: page.total,
     has_more: hasMore,
@@ -874,17 +877,20 @@ function orphanEntry(row) {
 }
 
 // A partial payer-statement refund recorded before the statement settled: the settlement row cannot know it.
-// A partial refund on a payment that could not be attributed to one invoice: the payment amounts were left
+// A refund or dispute on a payment that could not be attributed to one invoice: the payment amounts were left
 // unchanged, so the net received on every invoice the payment covers is unknown until it is allocated.
-function refundReconciliationEntry(row) {
+function reversalReconciliationEntry(row) {
+  const match = REVERSAL_KEY.exec(String(row.stripe_payment_intent_id || ''));
+  const kind = match ? match[1].replace('partial-', '').replace('-', '_') : 'reversal';
   return {
-    type: 'payment_refund_reconciliation',
+    type: 'payment_reversal_reconciliation',
     id: row.id,
     at: iso(row.created_at),
+    kind,
     received: false,
     reconciliation_required: true,
-    refund_amount: money(row.amount),
-    state_note: 'A partial refund on the payment that covers this invoice has not been allocated to an invoice: the recorded payment amounts are unchanged, so the net amount received is unknown. This record is refund evidence, not a charge.',
+    reversal_amount: money(row.amount),
+    state_note: `A ${kind.replace('_', ' ')} on the payment that covers this invoice has not been allocated to an invoice: the recorded payment amounts are unchanged, so the net amount received is unknown. This record is reversal evidence, not a charge.`,
     stripe_payment_intent_id: pgBase(row.stripe_payment_intent_id),
   };
 }
@@ -947,8 +953,8 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
     && !(entry.type === 'stripe_unreconciled_charge' && receivedIntents.has(entry.stripe_payment_intent_id)));
   const disputed = entries.filter((entry) => entry.status === 'disputed');
   const statementReconciliation = entries.filter((entry) => entry.type === 'payer_statement_reconciliation');
-  const refundReconciliation = entries.filter((entry) => entry.type === 'payment_refund_reconciliation');
-  const netUnknown = refundReconciliation.length > 0;
+  const reversalReconciliation = entries.filter((entry) => entry.type === 'payment_reversal_reconciliation');
+  const netUnknown = reversalReconciliation.length > 0;
   const payerFunded = entries.filter((entry) => entry.type === 'payer_payment');
   const payerNames = [...new Set(payerFunded.map((entry) => entry.funded_by.name).filter(Boolean))];
   // Pending (a bank payment in flight) is not received YET. An unknown outcome (a charge handed to Stripe
@@ -982,8 +988,8 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
 
   const parts = [];
   const refundedTotal = fromCents(recorded.reduce((total, entry) => total + cents(entry.refunded_amount), 0));
-  if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, ${netUnknown ? 'net amount UNKNOWN (an unallocated partial refund exists)' : `net $${netRecorded.toFixed(2)}`}${!netUnknown && refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
-  if (netUnknown) parts.push(`${refundReconciliation.length} partial refund(s) on the covering payment not yet allocated to an invoice (reconciliation required)`);
+  if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, ${netUnknown ? 'net amount UNKNOWN (an unallocated refund or dispute exists)' : `net $${netRecorded.toFixed(2)}`}${!netUnknown && refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
+  if (netUnknown) parts.push(`${reversalReconciliation.length} refund or dispute record(s) on the covering payment not yet allocated to an invoice (reconciliation required)`);
   if (stripeConfirmed.length) parts.push(`${stripeConfirmed.length} Stripe charge(s) that succeeded and are not confirmed in the payments table (needs reconciling)`);
   if (pending.length) parts.push(`${pending.length} payment(s) still processing (not received yet)`);
   if (unknownOutcome.length) parts.push(`${unknownOutcome.length} charge attempt(s) with an unknown outcome (Stripe may have charged the customer: receipt NOT confirmed)`);
@@ -1012,7 +1018,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   return {
     received: provenOrUnknown(receivedAny),
     recorded_payments_net: netUnknown ? null : netRecorded,
-    refund_reconciliation_required: refundReconciliation.length,
+    reversal_reconciliation_required: reversalReconciliation.length,
     stripe_succeeded_not_in_ledger: stripeConfirmed.length,
     unreconciled_stripe_charges: unreconciled.length,
     attempts_in_flight_or_unknown: inFlight.length,
@@ -1055,7 +1061,7 @@ async function getInvoiceDetail(input, actionContext) {
   const { rows: attempts, truncated: attemptsTruncated } = await newestRows(db('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id })
     .select('id', 'status', 'amount', 'credit_applied_delta', 'stripe_payment_intent_id', 'idempotency_key', 'error_message', 'decline_code', 'submitted_at', 'resolved_at', 'created_at'));
   const loadedOrphans = await loadUnresolvedOrphans([invoice]);
-  const { orphans, statementOrphans, refundOrphans } = loadedOrphans.byInvoice.get(String(invoice.id));
+  const { orphans, statementOrphans, reversalOrphans } = loadedOrphans.byInvoice.get(String(invoice.id));
   const orphansTruncated = loadedOrphans.truncated;
   const { rows: credits, truncated: creditsTruncated } = await newestRows(db('customer_credit_ledger').where({ invoice_id: invoice.id })
     .select('id', 'delta', 'balance_after', 'source', 'note', 'created_by', 'created_at'));
@@ -1081,7 +1087,7 @@ async function getInvoiceDetail(input, actionContext) {
     ...attempts.map((row) => attemptEntry(row, ledgerStates, !loadedPayments.truncated)),
     ...orphans.map(orphanEntry),
     ...statementOrphans.map(statementReconciliationEntry),
-    ...refundOrphans.map(refundReconciliationEntry),
+    ...reversalOrphans.map(reversalReconciliationEntry),
     ...credits.map((row) => ({
       type: 'credit_movement',
       id: row.id,
