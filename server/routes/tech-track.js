@@ -1478,7 +1478,16 @@ router.post('/:id/treatment-zone', upload.fields([
       snapshotPngBuffer: snapshotFile?.buffer || null,
       maskPngBuffer: maskFile?.buffer || null,
       captureMode: payload.captureMode,
+      // Rechecked under the visit row's lock at the write (the read above is
+      // unlocked): a move that commits in between is refused too.
+      ...(Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId') ? { expectedPropertyId: payload.expectedPropertyId ?? null } : {}),
+    }).catch((err) => {
+      if (err?.code === 'visit_property_changed') return { refused: err };
+      throw err;
     });
+    if (row?.refused) {
+      return res.status(409).json({ error: row.refused.message, code: 'visit_property_changed' });
+    }
 
     logger.info(
       `[tech-track] treatment zone saved service=${svc.id} tech=${req.technicianId} ` +

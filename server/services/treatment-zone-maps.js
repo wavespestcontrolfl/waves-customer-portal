@@ -61,6 +61,36 @@ function normalizePathPoints(raw) {
   });
 }
 
+// The visit must still be at the property the caller loaded it at, read
+// under its row lock at the write itself, so an office move that commits
+// after the route's own read is refused too (Codex #5538).
+async function assertVisitProperty(conn, scheduledServiceId, expectedPropertyId) {
+  const visit = await conn('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .forUpdate()
+    .first('property_id');
+  if (!visit || String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
+    throw Object.assign(
+      operationalError('This visit moved to another property. Close it and reopen it from the schedule.', 409),
+      { code: 'visit_property_changed' },
+    );
+  }
+}
+
+// One visit's row: the keys it replaces, then the upsert.
+async function upsertZoneRow(conn, scheduledServiceId, buildRecord) {
+  const existing = await conn('treatment_zone_maps')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .first('id', 'snapshot_s3_key', 'mask_s3_key');
+  const record = buildRecord(existing);
+  const [row] = await conn('treatment_zone_maps')
+    .insert(record)
+    .onConflict('scheduled_service_id')
+    .merge()
+    .returning('*');
+  return { row, existing, record };
+}
+
 async function saveTreatmentZoneMap({
   scheduledServiceId,
   customerId = null,
@@ -77,6 +107,11 @@ async function saveTreatmentZoneMap({
   // report animates this over the snapshot (owner 2026-07-30).
   maskPngBuffer = null,
   captureMode = null,
+  // Optional: the property the caller loaded the visit at (the Fast Complete
+  // report flow). Checked under the visit row's lock at the write itself, so
+  // an office move that commits after the route's read still refuses the
+  // save. Undefined (every other caller) writes exactly as before.
+  expectedPropertyId,
   knex = db,
 }) {
   if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
@@ -125,11 +160,8 @@ async function saveTreatmentZoneMap({
     );
   }
 
-  const existing = await knex('treatment_zone_maps')
-    .where({ scheduled_service_id: scheduledServiceId })
-    .first('id', 'snapshot_s3_key', 'mask_s3_key');
-
-  const record = {
+  // The saved row's fields, from the keys it replaces.
+  const buildRecord = (existing) => ({
     scheduled_service_id: scheduledServiceId,
     customer_id: customerId || null,
     created_by_technician_id: technicianId || null,
@@ -163,13 +195,29 @@ async function saveTreatmentZoneMap({
       return mode;
     })(),
     updated_at: knex.fn.now(),
+  });
+  const persist = async (conn) => {
+    if (expectedPropertyId !== undefined) await assertVisitProperty(conn, scheduledServiceId, expectedPropertyId);
+    return upsertZoneRow(conn, scheduledServiceId, buildRecord);
   };
 
-  const [row] = await knex('treatment_zone_maps')
-    .insert(record)
-    .onConflict('scheduled_service_id')
-    .merge()
-    .returning('*');
+  let saved;
+  try {
+    saved = expectedPropertyId !== undefined ? await knex.transaction(persist) : await persist(knex);
+  } catch (err) {
+    // A refused save leaves no orphaned upload behind (best effort).
+    if (err?.code === 'visit_property_changed') {
+      for (const key of [snapshotKey, maskKey].filter(Boolean)) {
+        try {
+          await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+        } catch (deleteErr) {
+          logger.warn(`[treatment-zone] refused upload delete failed: ${deleteErr.message}`);
+        }
+      }
+    }
+    throw err;
+  }
+  const { row, existing, record } = saved;
 
   // Replaced snapshot: drop the orphaned object, best effort only.
   if (snapshotKey && existing?.snapshot_s3_key && existing.snapshot_s3_key !== snapshotKey) {

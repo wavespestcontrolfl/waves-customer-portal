@@ -338,7 +338,10 @@ export function factsHold(facts) {
   if (facts.unclearSpray) {
     return 'It isn’t clear how you sprayed. Say plainly whether you sprayed around the house, sprayed spots, or didn’t spray, then write it again.';
   }
-  return facts.areas.length ? '' : 'Say where you treated (inside, outside or garage) in your note, then write it again.';
+  if (!facts.areas.length) return 'Say where you treated (inside, outside or garage) in your note, then write it again.';
+  // Every product goes on the record with the pests it was for, as the
+  // re-service sheet requires a pest; none heard means none would be recorded.
+  return facts.pests?.length ? '' : 'Say what pest you treated for (ants, roaches, spiders…) in your note, then write it again.';
 }
 
 const SPRAY_HEARD = { perimeter: 'perimeter spray', spot: 'spot spraying' };
@@ -471,7 +474,10 @@ function billLine(result) {
   if (result.invoiceStatus === 'processing') return 'Bill: payment processing.';
   // invoiceTotal is the amount still due, so a paid bill names no amount.
   const due = Number(result.invoiceTotal);
-  return result.invoiceTotal != null && Number.isFinite(due) && due > 0 ? `Bill: ${money(due)} due.` : null;
+  if (!(result.invoiceTotal != null && Number.isFinite(due) && due > 0)) return null;
+  // A third-party Bill-To invoice is the payer's to pay, never collected from
+  // the customer at the door.
+  return result.invoicePayerBilled === true ? `Bill: ${money(due)}, sent to the payer on file.` : `Bill: ${money(due)} due.`;
 }
 
 // Which promises marked Done the completion closed: marks are applied before

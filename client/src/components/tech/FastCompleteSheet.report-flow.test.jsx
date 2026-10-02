@@ -305,10 +305,10 @@ describe('generate and read', () => {
   });
 
   test('a note that says no spraying holds the send while a spray is still on the visit (GitHub Codex P1)', async () => {
-    const request = makeRequest({ facts: { available: true, status: 'read', areas: ['Inside'], unclearAreas: [], pests: [], spray: null, noSpray: true } });
+    const request = makeRequest({ facts: { available: true, status: 'read', areas: ['Inside'], unclearAreas: [], pests: ['ants'], spray: null, noSpray: true } });
     await openSheet(request);
-    await generate({ note: "Didn't spray today; placed bait inside along the counter." });
-    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated inside · no spraying');
+    await generate({ note: "Didn't spray today; placed bait inside along the counter for ants." });
+    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated inside · no spraying · for ants');
     expect(screen.getByText('Your note says you didn’t spray, but Taurus SC is a spray. Remove it or change how it went down, then write it again.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
@@ -320,6 +320,13 @@ describe('generate and read', () => {
     fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
     expect(screen.getByText('Loading promises…')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+  });
+
+  test('a note that names no pest holds the send: every product would go on the record for nothing (Codex #5538)', async () => {
+    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: [] } }));
+    await generate({ note: 'Sprayed spots outside.' });
+    expect(screen.getByText('Say what pest you treated for (ants, roaches, spiders…) in your note, then write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
   test('a note too long to read holds the send and says to shorten it', async () => {
@@ -484,6 +491,15 @@ describe('complete and send', () => {
     expect(screen.getByRole('heading', { name: 'Service complete' })).toBeTruthy();
     expect(screen.getByText('The report went to the customer.')).toBeTruthy();
     expect(screen.getByText('Bill: $95.00 due.')).toBeTruthy();
+  });
+
+  test('a bill to a third-party payer is never shown as the customer\'s balance (Codex #5538)', async () => {
+    await openSheet(makeRequest({ complete: [{ success: true, completionSmsStatus: 'sent', invoiceId: 'inv-1', invoiceTotal: 95, invoiceStatus: 'sent', invoicePayerBilled: true }] }));
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(screen.getByText('Bill: $95.00, sent to the payer on file.')).toBeTruthy();
+    expect(screen.queryByText('Bill: $95.00 due.')).toBeNull();
   });
 
   test('a text the server held back says so, with its reason', async () => {

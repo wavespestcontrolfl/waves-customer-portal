@@ -286,6 +286,64 @@ describe('saveTreatmentZoneMap', () => {
   });
 });
 
+// Codex #5538: the Fast Complete report flow binds a trace to the property it
+// loaded the visit at, rechecked under the visit row's lock at the write.
+describe('saveTreatmentZoneMap bound to a property', () => {
+  function lockedKnex({ propertyId }) {
+    const knex = makeKnex();
+    const locks = [];
+    knex.transaction = async (work) => {
+      const trx = (table) => {
+        if (table === 'scheduled_services') {
+          return {
+            where: () => ({
+              forUpdate: () => {
+                locks.push(table);
+                return { first: () => Promise.resolve(propertyId === undefined ? null : { property_id: propertyId }) };
+              },
+            }),
+          };
+        }
+        return knex(table);
+      };
+      return work(trx);
+    };
+    knex.locks = locks;
+    return knex;
+  }
+  const args = (knex, expectedPropertyId) => ({
+    scheduledServiceId: 'svc-1',
+    pathPoints: VALID_POINTS,
+    linearFt: 120,
+    snapshotPngBuffer: Buffer.from('png-bytes'),
+    expectedPropertyId,
+    knex,
+  });
+
+  beforeEach(() => {
+    mockS3Send.mockClear();
+    mockS3Send.mockResolvedValue({});
+  });
+
+  test('a visit moved to another property is refused under the lock, with nothing written and the upload removed', async () => {
+    const knex = lockedKnex({ propertyId: 'prop-2' });
+    await expect(saveTreatmentZoneMap(args(knex, 'prop-1'))).rejects.toMatchObject({ code: 'visit_property_changed', statusCode: 409 });
+    expect(knex.locks).toEqual(['scheduled_services']);
+    expect(knex.state.inserted).toBeNull();
+    const put = mockS3Send.mock.calls.find(([cmd]) => cmd.commandType === 'put')[0].input.Key;
+    expect(mockS3Send.mock.calls.some(([cmd]) => cmd.commandType === 'delete' && cmd.input.Key === put)).toBe(true);
+  });
+
+  test('the same property writes inside the lock; no property bound writes as before', async () => {
+    const knex = lockedKnex({ propertyId: 'prop-1' });
+    const row = await saveTreatmentZoneMap(args(knex, 'prop-1'));
+    expect(knex.locks).toEqual(['scheduled_services']);
+    expect(row.id).toBe('row-1');
+    const plain = makeKnex();
+    expect((await saveTreatmentZoneMap(args(plain, undefined))).id).toBe('row-1');
+  });
+});
+
 describe('getTreatmentZoneMapForScheduledService', () => {
   test('returns null for a falsy id without querying', async () => {
     const knex = makeKnex();

@@ -14403,6 +14403,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // from the service recipient. Keep id/status/total for display only.
       // (mirrors the track-public.js token suppression)
       invoiceToken: invoice && !invoice.payer_id ? (invoice.token || null) : null,
+      // The same Bill-To read, for display: a payer-billed invoice is the
+      // payer's (AP) to pay, so the tech sheet never shows it as the
+      // customer's balance.
+      invoicePayerBilled: !!invoice?.payer_id,
       invoiceStatus: invoice?.status || null,
       reportUrl,
       invoicePaymentActionRequired,

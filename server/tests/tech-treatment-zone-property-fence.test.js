@@ -98,6 +98,16 @@ describe('treatment-zone save bound to the loaded property', () => {
     expect(mockSave).toHaveBeenCalledTimes(2);
   });
 
+  test('a move that commits after the route read is refused at the write (the lock answers 409)', async () => {
+    mockSave.mockRejectedValue(Object.assign(new Error('This visit moved to another property. Close it and reopen it from the schedule.'), { code: 'visit_property_changed', statusCode: 409 }));
+    await withServer(async (baseUrl) => {
+      const res = await saveTrace(baseUrl, { expectedPropertyId: 'prop-2' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('visit_property_changed');
+    });
+    expect(mockSave).toHaveBeenCalledWith(expect.objectContaining({ expectedPropertyId: 'prop-2' }));
+  });
+
   test('a visit with no property matches a sheet that loaded none', async () => {
     mockFirst.mockImplementation(async () => ({
       id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', service_id: 'cat-1', service_type: 'Quarterly Pest Control', property_id: null,
