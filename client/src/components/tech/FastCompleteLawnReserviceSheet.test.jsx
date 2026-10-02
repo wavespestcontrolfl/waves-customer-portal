@@ -7,8 +7,9 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import FastCompleteLawnReserviceSheet, {
-  LAWN_CONDITION_OPTIONS, TURF_ISSUE_OPTIONS, WEED_PRESSURE_OPTIONS,
+  AREA_OPTIONS, LAWN_CONDITION_OPTIONS, TURF_ISSUE_OPTIONS, WEED_PRESSURE_OPTIONS,
 } from './FastCompleteLawnReserviceSheet';
+import { LAWN_TARGET_SUGGESTIONS } from '../../lib/lawn-targets';
 import { PROJECT_TYPES } from '../../../../server/services/project-types.js';
 
 // Each test mounts the whole sheet and taps through it: slow on a busy runner.
@@ -95,6 +96,11 @@ const enterAmount = (name, amount) => fireEvent.change(within(editorFor(name)).g
 const issue = (name) => within(screen.getByRole('heading', { name: 'Treating for' }).closest('section')).getByRole('button', { name });
 // What one product was applied against, on its own row.
 const forTarget = (product, name) => fireEvent.click(within(within(editorFor(product)).getByRole('group', { name: 'For' })).getByRole('button', { name }));
+// A Where chip (visit level: the findings' spot_treatment_areas and each row's applicationArea).
+const where = (...names) => {
+  const section = screen.getByRole('heading', { name: 'Where' }).closest('section');
+  for (const name of names.length ? names : ['Front lawn']) fireEvent.click(within(section).getByRole('button', { name }));
+};
 const completeButton = () => screen.getByRole('button', { name: 'Complete lawn re-service' });
 const completeBody = async (request) => {
   fireEvent.click(completeButton());
@@ -110,6 +116,7 @@ async function readyVisit(request) {
   forTarget('Celsius WG', 'Dollarweed');
   fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
   fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+  where();
 }
 
 describe('the typed form\'s option lists', () => {
@@ -118,7 +125,8 @@ describe('the typed form\'s option lists', () => {
     expect(TURF_ISSUE_OPTIONS).toEqual(fields.turf_issues.options);
     expect(WEED_PRESSURE_OPTIONS).toEqual(fields.weed_pressure.options);
     expect(LAWN_CONDITION_OPTIONS).toEqual(fields.lawn_condition.options);
-    expect(TURF_ISSUE_OPTIONS.some((option) => option.includes(','))).toBe(false);
+    expect(AREA_OPTIONS).toEqual(fields.spot_treatment_areas.options);
+    for (const option of [...TURF_ISSUE_OPTIONS, ...AREA_OPTIONS]) expect(option.includes(',')).toBe(false);
   });
 });
 
@@ -292,7 +300,7 @@ describe('application method and area', () => {
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.products.find((p) => p.productId === 'headway')).toEqual({
-      productId: 'headway', applicationMethod: 'spot_treatment', totalAmount: 6, amountUnit: 'oz', targets: ['Dollarweed'],
+      productId: 'headway', applicationMethod: 'spot_treatment', totalAmount: 6, amountUnit: 'oz', applicationArea: 'Front lawn', targets: ['Dollarweed'],
     });
   });
 
@@ -323,7 +331,7 @@ describe('application method and area', () => {
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.products[0]).toEqual({
-      productId: 'celsius', applicationMethod: 'broadcast_spray', totalAmount: 1.5, amountUnit: 'oz', targets: ['Dollarweed'], areaValue: 3200, areaUnit: 'sqft',
+      productId: 'celsius', applicationMethod: 'broadcast_spray', totalAmount: 1.5, amountUnit: 'oz', applicationArea: 'Front lawn', targets: ['Dollarweed'], areaValue: 3200, areaUnit: 'sqft',
     });
   });
 
@@ -353,7 +361,7 @@ describe('application method and area', () => {
     expect(areaInput('Celsius WG').value).toBe('6400');
     fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Spot treatment' }));
     const body = await completeBody(request);
-    expect(body.products[0]).toEqual({ productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: ['Dollarweed'] });
+    expect(body.products[0]).toEqual({ productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', applicationArea: 'Front lawn', targets: ['Dollarweed'] });
   });
 
   test('a context with no methods cannot complete a product (nothing is guessed)', async () => {
@@ -364,6 +372,191 @@ describe('application method and area', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
     expect(screen.getByText('Pick how Celsius WG went down.')).toBeTruthy();
     expect(completeButton().disabled).toBe(true);
+  });
+});
+
+describe('targets use the full form\'s vocabulary', () => {
+  const otherTarget = (product, name) => fireEvent.change(within(editorFor(product)).getByLabelText(`Other target for ${product}`), { target: { value: name } });
+
+  test('every Treating-for target name is one of the full form\'s LAWN_TARGET_SUGGESTIONS, with the canonical names', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    fireEvent.click(tile('Celsius WG'));
+    const picks = {
+      'Chinch bug damage': 'Southern chinch bugs', 'Sod webworm signs': 'Tropical sod webworms', 'Armyworm signs': 'Fall armyworms',
+      'Grub activity': 'White grubs', Sedge: 'Nutsedge / sedge', 'Large patch': 'Large patch', 'Gray leaf spot': 'Gray leaf spot',
+      Dollarweed: 'Dollarweed', Crabgrass: 'Crabgrass', 'Broadleaf weeds': 'Broadleaf weeds',
+    };
+    for (const [issueLabel, name] of Object.entries(picks)) {
+      expect(LAWN_TARGET_SUGGESTIONS).toContain(name);
+      fireEvent.click(issue(issueLabel));
+      forTarget('Celsius WG', issueLabel);
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    where();
+    const body = await completeBody(request);
+    expect(new Set(body.products[0].targets)).toEqual(new Set(Object.values(picks)));
+  });
+
+  test('"Other target" lists every LAWN_TARGET_SUGGESTIONS entry; a pick is a removable chip and is sent by its canonical name', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    fireEvent.click(tile('Celsius WG'));
+    const select = within(editorFor('Celsius WG')).getByLabelText('Other target for Celsius WG');
+    expect([...select.querySelectorAll('option')].map((o) => o.value).filter(Boolean)).toEqual(LAWN_TARGET_SUGGESTIONS);
+    // Not required to pick a Treating-for chip's weed: another target satisfies the row.
+    fireEvent.click(issue('Crabgrass'));
+    otherTarget('Celsius WG', 'Green kyllinga');
+    const chips = within(editorFor('Celsius WG')).getByRole('group', { name: 'Other targets for Celsius WG' });
+    expect(within(chips).getByRole('button', { name: 'Green kyllinga' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    where();
+    expect(completeButton().disabled).toBe(false);
+    // Clearing the Treating-for chip leaves the other target alone.
+    fireEvent.click(issue('Crabgrass'));
+    fireEvent.click(issue('Dollarweed'));
+    expect(within(editorFor('Celsius WG')).getByRole('button', { name: 'Green kyllinga' })).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products[0].targets).toEqual(['Green kyllinga']);
+  });
+
+  test('removing the only other target, with no Treating-for pick on the row, blocks Complete again', async () => {
+    await openSheet();
+    fireEvent.click(tile('Celsius WG'));
+    fireEvent.click(issue('Dollarweed'));
+    otherTarget('Celsius WG', 'Clover');
+    expect(screen.queryByText('Pick what Celsius WG was for.')).toBeNull();
+    fireEvent.click(within(editorFor('Celsius WG')).getByRole('button', { name: 'Clover' }));
+    expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
+  });
+});
+
+describe('where', () => {
+  test('is required, and goes out as the findings value and as every active row\'s applicationArea, in option order', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(tile('Talak 7.9%'));
+    forTarget('Talak 7.9%', 'Dollarweed');
+    where('Slope / drainage area', 'Fence line');
+    const body = await completeBody(request);
+    const expected = 'Front lawn, Fence line, Slope / drainage area';
+    expect(body.structuredFindings.values.spot_treatment_areas).toBe(expected);
+    expect(body.products.map((p) => p.applicationArea)).toEqual([expected, expected]);
+  });
+
+  test('without a Where chip Complete is disabled with the reason, and no area is preselected', async () => {
+    await openSheet();
+    for (const label of AREA_OPTIONS) {
+      expect(within(screen.getByRole('heading', { name: 'Where' }).closest('section')).getByRole('button', { name: label }).getAttribute('aria-pressed')).toBe('false');
+    }
+    fireEvent.click(tile('Celsius WG'));
+    fireEvent.click(issue('Dollarweed'));
+    forTarget('Celsius WG', 'Dollarweed');
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    expect(screen.getByText('Select where you treated.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+  });
+});
+
+describe('rate (mirrors the pest sheet)', () => {
+  const RATED = [
+    { id: 'celsius', name: 'Celsius WG', category: 'herbicide', default_rate_per_1000: '0.0850', default_unit: 'oz', max_label_rate_per_1000: '0.1' },
+    { id: 'talak', name: 'Talak 7.9%', category: 'insecticide', default_rate_per_1000: '0.2', default_unit: 'fl_oz' },
+    { id: 'headway', name: 'Headway G', category: 'fungicide', default_unit: 'percent_solution' },
+    { id: 'empty', name: 'Empty Jug Surfactant', category: 'adjuvant', default_unit: 'fl_oz', default_rate_per_1000: '0.5' },
+  ];
+  const withLast = (products, extra = {}) => ({ ...CONTEXT, products: RATED, ...extra, lastVisit: { ...CONTEXT.lastVisit, products } });
+  const rateInput = (name) => within(editorFor(name)).getByLabelText(`${name} rate`);
+
+  test('a last-visit rate seeds the input, labeled "last time", and goes out with its unit', async () => {
+    const request = makeRequest({ context: withLast([
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: 0.25, rateUnit: 'oz/1000sf' },
+    ]) });
+    await readyVisit(request);
+    expect(rateInput('Celsius WG').value).toBe('0.25');
+    expect(within(editorFor('Celsius WG')).getAllByText('last time').length).toBe(2);
+    const body = await completeBody(request);
+    expect(body.products[0]).toMatchObject({ productId: 'celsius', rate: 0.25, rateUnit: 'oz/1000sf' });
+  });
+
+  test('no recorded rate: the catalog label rate prefills (unlabeled); a typed rate wins and overrides', async () => {
+    const request = makeRequest({ context: withLast([
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+    ]) });
+    await readyVisit(request);
+    const input = rateInput('Celsius WG');
+    expect(Number(input.value)).toBeGreaterThan(0);
+    expect(within(editorFor('Celsius WG')).getAllByText('last time').length).toBe(1);
+    fireEvent.change(input, { target: { value: '0.2' } });
+    expect(screen.getByText(/label max/)).toBeTruthy();
+    const body = await completeBody(request);
+    expect(body.products[0].rate).toBe(0.2);
+    expect(typeof body.products[0].rateUnit).toBe('string');
+  });
+
+  test('the last rate applies only at the method it was recorded at; changing the method drops it', async () => {
+    const request = makeRequest({ context: withLast([
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: 0.25, rateUnit: 'oz/1000sf' },
+    ]) });
+    await readyVisit(request);
+    fireEvent.click(within(within(editorFor('Celsius WG')).getByRole('group', { name: 'How' })).getByRole('button', { name: 'Broadcast spray' }));
+    expect(within(editorFor('Celsius WG')).queryByText('last time', { selector: 'p' })).not.toBeNull(); // the amount's own label stays
+    expect(rateInput('Celsius WG').value).not.toBe('0.25');
+  });
+
+  test('a rate is never required: clearing it sends no rate, and a unit /complete would refuse leaves no rate input', async () => {
+    const request = makeRequest({ context: withLast([
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+      { productId: 'headway', name: 'Headway G', totalAmount: 2, amountUnit: 'lb', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+    ]) });
+    await readyVisit(request);
+    fireEvent.click(tile('Headway G'));
+    forTarget('Headway G', 'Dollarweed');
+    expect(within(editorFor('Headway G')).queryByLabelText('Headway G rate')).toBeNull();
+    fireEvent.change(rateInput('Celsius WG'), { target: { value: '' } });
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products[0]).not.toHaveProperty('rate');
+    expect(body.products[1]).not.toHaveProperty('rate');
+    expect(body.products[1]).not.toHaveProperty('rateUnit');
+  });
+
+  test('an added product has a rate only in its label unit and only what the tech types', async () => {
+    const request = makeRequest({ context: withLast([
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+    ]) });
+    await readyVisit(request);
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /Empty Jug Surfactant/ }));
+    expect(rateInput('Empty Jug Surfactant').value).toBe('');
+  });
+});
+
+describe('+ Other product is lawn-aware', () => {
+  test('the last visit\'s products lead, lawn products are listed, everything else waits behind Show other products', async () => {
+    const catalog = [
+      ...CATALOG,
+      { id: 'fert', name: 'Palm Fertilizer 8-2-12', category: 'fertilizer' },
+      { id: 'wet', name: 'Wetting Agent X', category: 'wetting agent' },
+      { id: 'bait', name: 'Ant Bait Station', category: 'bait' },
+      { id: 'sign', name: 'Yard Sign', category: 'supplies' },
+    ];
+    await openSheet(makeRequest({ context: { ...CONTEXT, products: catalog } }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    const picker = screen.getByRole('dialog', { name: 'Add a product' });
+    const group = (title) => within(picker).getByRole('group', { name: title });
+    expect(within(group('Used on the last lawn visit')).getByRole('button', { name: /Celsius WG/ })).toBeTruthy();
+    expect(within(group('Lawn products')).getByRole('button', { name: /Palm Fertilizer 8-2-12/ })).toBeTruthy();
+    expect(within(group('Lawn products')).getByRole('button', { name: /Wetting Agent X/ })).toBeTruthy();
+    expect(within(picker).queryByText('Ant Bait Station')).toBeNull();
+    expect(within(picker).queryByText('Yard Sign')).toBeNull();
+    fireEvent.click(within(picker).getByRole('button', { name: 'Show other products' }));
+    expect(within(group('Other products')).getByRole('button', { name: /Ant Bait Station/ })).toBeTruthy();
+    expect(within(picker).queryByText('Yard Sign')).toBeNull();
   });
 });
 
@@ -390,7 +583,7 @@ describe('what the customer said', () => {
 });
 
 describe('required taps', () => {
-  test('Complete waits for a product with an amount, one treating-for chip, pressure and condition, in that order', async () => {
+  test('Complete waits for a product with an amount, a treating-for chip, where, pressure and condition, in that order', async () => {
     await openSheet();
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     fireEvent.click(tile('Celsius WG'));
@@ -398,6 +591,8 @@ describe('required taps', () => {
     fireEvent.click(issue('Sedge'));
     expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
     forTarget('Celsius WG', 'Sedge');
+    expect(screen.getByText('Select where you treated.')).toBeTruthy();
+    where('Back lawn');
     expect(screen.getByText('Select the weed pressure.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     expect(screen.getByText('Select the lawn condition.')).toBeTruthy();
@@ -452,13 +647,13 @@ describe('the /complete body', () => {
         scheduledDate: '2026-10-04', address: { line1: '123 Main St' },
       },
       products: [
-        { productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: ['Dollarweed'] },
-        { productId: 'talak', applicationMethod: 'broadcast_spray', totalAmount: 4, amountUnit: 'fl_oz', targets: ['Chinch bugs'], areaValue: 5200, areaUnit: 'sqft' },
+        { productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', applicationArea: 'Front lawn', targets: ['Dollarweed'] },
+        { productId: 'talak', applicationMethod: 'broadcast_spray', totalAmount: 4, amountUnit: 'fl_oz', applicationArea: 'Front lawn', targets: ['Southern chinch bugs'], areaValue: 5200, areaUnit: 'sqft' },
       ],
       structuredFindings: {
         type: 'one_time_lawn_treatment',
         // Chips in the form's own option order, comma-joined.
-        values: { lawn_condition: 'Fair', weed_pressure: 'Moderate', turf_issues: 'Chinch bug damage, Dollarweed, Drought stress' },
+        values: { lawn_condition: 'Fair', weed_pressure: 'Moderate', turf_issues: 'Chinch bug damage, Dollarweed, Drought stress', spot_treatment_areas: 'Front lawn' },
       },
       technicianNotes: 'Spot-treated the driveway edge.',
       sendCompletionSms: true,
@@ -522,6 +717,7 @@ describe('the /complete body', () => {
     forTarget('Celsius WG', 'Dollarweed');
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    where();
     fireEvent.click(completeButton());
     expect(await screen.findByText('Celsius WG · Dollarweed')).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Lawn re-service complete' })).toBeTruthy();

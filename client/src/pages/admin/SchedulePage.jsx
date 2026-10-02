@@ -145,6 +145,7 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { LAWN_TARGET_SUGGESTIONS } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -24241,36 +24242,6 @@ const PEST_TARGET_SUGGESTIONS = [
   "House mice",
   "Mosquitoes",
   "Scorpions",
-];
-
-// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
-// what a lawn tech actually enters as a product's target, not structural pests.
-const LAWN_TARGET_SUGGESTIONS = [
-  "Broadleaf weeds",
-  "Crabgrass",
-  "Nutsedge / sedge",
-  "Green kyllinga",
-  "Dollarweed",
-  "Doveweed",
-  "Chamberbitter",
-  "Spurge",
-  "Clover",
-  "Goosegrass",
-  "Torpedograss",
-  "Annual bluegrass (Poa annua)",
-  "Southern chinch bugs",
-  "Fall armyworms",
-  "Tropical sod webworms",
-  "White grubs",
-  "Tawny mole crickets",
-  "Fire ants",
-  "Nematodes",
-  "Large patch",
-  "Dollar spot",
-  "Gray leaf spot",
-  "Take-all root rot",
-  "Fairy ring",
-  "Pythium root rot",
 ];
 
 // Tree & shrub / palm targets: the SWFL ornamental pests a T&S tech actually

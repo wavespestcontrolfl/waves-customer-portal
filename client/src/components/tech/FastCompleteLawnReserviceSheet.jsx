@@ -46,6 +46,9 @@ import {
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
+import { isSendableRateUnit } from './FastCompleteSheet';
+import { prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
+import { LAWN_TARGET_SUGGESTIONS } from '../../lib/lawn-targets';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
   SheetHeader, VisitNote, toggleInSet, useProductPicker, visitChangedSinceSchedule,
@@ -63,17 +66,17 @@ export const TURF_ISSUE_OPTIONS = [
 ];
 // The Treating-for issues a product can be applied against, and the target
 // name each records (service_products.targets → the compliance ledger's
-// target_pest). The rest of the list (drought stress, scalping, shade,
+// target_pest). Every name is one of the full form's LAWN_TARGET_SUGGESTIONS. The rest of the list (drought stress, scalping, shade,
 // compaction, pet damage) are conditions, never an application's target.
 const TARGET_NAME_BY_ISSUE = {
-  'Chinch bug damage': 'Chinch bugs',
-  'Sod webworm signs': 'Sod webworms',
-  'Armyworm signs': 'Armyworms',
-  'Grub activity': 'Grubs',
+  'Chinch bug damage': 'Southern chinch bugs',
+  'Sod webworm signs': 'Tropical sod webworms',
+  'Armyworm signs': 'Fall armyworms',
+  'Grub activity': 'White grubs',
   'Large patch': 'Large patch',
   'Gray leaf spot': 'Gray leaf spot',
   Dollarweed: 'Dollarweed',
-  Sedge: 'Sedge',
+  Sedge: 'Nutsedge / sedge',
   Crabgrass: 'Crabgrass',
   'Broadleaf weeds': 'Broadleaf weeds',
 };
@@ -92,6 +95,22 @@ const targetIssuesOf = (form) => TURF_ISSUE_OPTIONS.filter((issue) => TARGET_NAM
 // A row's targets as sent: only issues still selected for the visit (a chip
 // the tech later clears drops off every row).
 const rowTargetIssues = (row, form) => targetIssuesOf(form).filter((issue) => (row.targets || []).includes(issue));
+// Every target a pesticide row records, as canonical names: its picked
+// Treating-for issues, then any other target picked on the row.
+const rowTargetNames = (row, form) => [...new Set([
+  ...rowTargetIssues(row, form).map((issue) => TARGET_NAME_BY_ISSUE[issue]),
+  ...(row.otherTargets || []),
+])];
+
+// Where the work was done: the typed form's spot_treatment_areas options (the
+// server rejects anything else). Sent as the findings value and as each product
+// row's applicationArea, the way the pest sheet sends its Where.
+export const AREA_OPTIONS = [
+  'Entire lawn', 'Front lawn', 'Back lawn', 'Side lawns', 'Landscape beds',
+  'Thin / stressed turf areas', 'Weed breakthrough areas', 'Insect activity areas',
+  'Disease-affected areas', 'Along driveway / sidewalk', 'Fence line',
+  'Slope / drainage area', 'Other',
+];
 
 export const WEED_PRESSURE_OPTIONS = ['None observed', 'Light', 'Moderate', 'Heavy'];
 export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Recovering', 'Stressed'];
@@ -138,11 +157,39 @@ function productRow(product, { last = null, added = false, ctx }) {
     areaLast,
     area: '',
     areaFrom: '',
+    // The rate that visit recorded for this product, good only at that method.
+    lastRate: !added && Number(last?.applicationRate) > 0
+      ? { rate: Number(last.applicationRate), rateUnit: String(last.rateUnit || '').trim(), method: last.method || '' }
+      : null,
+    rateInput: null,
+    otherTargets: [],
   }, ctx);
 }
 
 const methodChoice = (ctx, value) => ctx.methods.find((choice) => choice.value === value) || null;
 const needsSqft = (ctx, row) => methodChoice(ctx, row.method)?.requiresSqft === true;
+
+// The row's rate, the way the pest sheet resolves it (FastCompleteSheet rowRate)
+// but for the lawn line and the row's own method. Order: what that product
+// recorded last time (only while the row is on the method it was recorded at,
+// labeled "last time"), then the catalog's label rate, else blank. The unit is
+// the recorded one when /complete accepts it, else the label's own; a unit
+// /complete would refuse (or one in mL) leaves the row without a rate. An
+// added product has a rate only in its label's own unit and only what the tech
+// types. A rate is never required: it is sent when it is above zero with a unit.
+function rowRate(row) {
+  const resolved = resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
+  const labelUnit = String(row.product?.default_unit || row.product?.rate_unit || '').trim();
+  const labelRate = !(row.added && !labelUnit);
+  const last = row.lastRate && row.lastRate.method === row.method && isSendableRateUnit(row.lastRate.rateUnit) ? row.lastRate : null;
+  const rateUnit = last ? last.rateUnit : (labelRate && isSendableRateUnit(resolved.rateUnit) ? resolved.rateUnit : '');
+  let prefill = '';
+  let from = '';
+  if (last) { prefill = String(last.rate); from = 'last time'; }
+  else if (!row.added && Number(resolved.rate) > 0 && rateUnit) prefill = String(Number(resolved.rate));
+  const max = prefillRateCeiling(resolved, row.product);
+  return { rate: row.rateInput ?? prefill, rateUnit, max, from: row.rateInput == null ? from : '' };
+}
 
 // A row whose method needs square feet and has none yet starts from a fact:
 // what the product recorded last time, else the property's lawn size. Nothing
@@ -267,6 +314,8 @@ function useProductRows(ctx) {
         ...('totalAmount' in patch || 'amountUnit' in patch ? { fromLast: false } : {}),
         ...('area' in patch ? { areaFrom: '' } : {}),
       };
+      // A rate typed for one method doesn't carry to another.
+      if ('method' in patch && patch.method !== row.method) next.rateInput = null;
       return 'method' in patch ? withAreaSeed(next, ctx) : next;
     }));
   }, [ctx]);
@@ -299,7 +348,7 @@ function missingRequirement({ form, rows, ctx, dictationPending }) {
   const missingMethod = active.find((row) => !methodChoice(ctx, row.method));
   const missingArea = active.find((row) => needsSqft(ctx, row) && !(Number(row.area) > 0));
   // A pest-control product needs what it was applied against; nothing else does.
-  const missingTarget = active.find((row) => isPesticideRow(row) && !rowTargetIssues(row, form).length);
+  const missingTarget = active.find((row) => isPesticideRow(row) && !rowTargetNames(row, form).length);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -310,6 +359,7 @@ function missingRequirement({ form, rows, ctx, dictationPending }) {
     [missingArea, missingArea && `Enter the square feet treated for ${missingArea.name}.`],
     [!form.issues.size, 'Select what you treated for.'],
     [missingTarget, missingTarget && `Pick what ${missingTarget.name} was for.`],
+    [!form.areas.size, 'Select where you treated.'],
     [!form.pressure, 'Select the weed pressure.'],
     [!form.condition, 'Select the lawn condition.'],
   ].find(([missing]) => missing) || [];
@@ -322,15 +372,20 @@ function completionBody({ form, rows, ctx }) {
     ...(ctx.visitIdentity ? { expectedVisit: ctx.visitIdentity } : {}),
     products: rows.filter((row) => row.active).map((row) => {
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
+      const { rate, rateUnit } = rowRate(row);
       return {
         productId: row.productId,
         applicationMethod: row.method,
         totalAmount,
         amountUnit,
+        // Where it went down, comma-joined: the same string the findings carry.
+        applicationArea: inOptionOrder(AREA_OPTIONS, form.areas),
+        // Only a rate the tech can see and /complete accepts.
+        ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
         // What this product was applied against, picked on its own row:
         // service_products.targets feeds the compliance ledger's target_pest
         // and the report's per-product facts. A non-pesticide row sends none.
-        targets: isPesticideRow(row) ? rowTargetIssues(row, form).map((issue) => TARGET_NAME_BY_ISSUE[issue]) : [],
+        targets: isPesticideRow(row) ? rowTargetNames(row, form) : [],
         // Only a method /complete needs an area for sends one.
         ...(needsSqft(ctx, row) ? { areaValue: Number(row.area), areaUnit: 'sqft' } : {}),
       };
@@ -341,6 +396,7 @@ function completionBody({ form, rows, ctx }) {
         lawn_condition: form.condition,
         weed_pressure: form.pressure,
         turf_issues: inOptionOrder(TURF_ISSUE_OPTIONS, form.issues),
+        spot_treatment_areas: inOptionOrder(AREA_OPTIONS, form.areas),
       },
     },
     technicianNotes: form.note.trim(),
@@ -414,15 +470,19 @@ function LawnForm({ ctx, service, submission, locked, dictationPending, onDictat
     setField('issues', toggleInSet(form.issues, label));
   };
   const { rows } = products;
-  const [form, setForm] = useState({ note: '', issues: new Set(), pressure: '', condition: '' });
+  const [form, setForm] = useState({ note: '', issues: new Set(), areas: new Set(), pressure: '', condition: '' });
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
   const appendNote = useCallback((text) => {
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
+  const lastVisitCommon = useMemo(() => (Array.isArray(ctx.lastVisit?.products) ? ctx.lastVisit.products : [])
+    .map((p) => ({ productId: p.productId, usualUnit: p.amountUnit || null, usualAmount: p.totalAmount ?? null })), [ctx.lastVisit]);
   const picker = useProductPicker({
+    line: 'lawn',
     products: ctx.products,
-    commonProducts: [],
+    // The last lawn visit's products lead the picker, with their recorded amount.
+    commonProducts: lastVisitCommon,
     rows,
     locked: locked || dictationPending,
     isMobile,
@@ -463,6 +523,11 @@ function LawnForm({ ctx, service, submission, locked, dictationPending, onDictat
           <ChoiceSection title="Treating for" columns={2}>
             {TURF_ISSUE_OPTIONS.map((label) => (
               <Chip disabled={locked} key={label} label={label} pressed={form.issues.has(label)} onClick={() => toggleIssue(label)} />
+            ))}
+          </ChoiceSection>
+          <ChoiceSection title="Where" columns={2}>
+            {AREA_OPTIONS.map((label) => (
+              <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
             ))}
           </ChoiceSection>
           <ChoiceSection title="Pressure seen" columns={2}>
@@ -528,7 +593,7 @@ function ProductsSection({ ctx, form, products, locked, other, popover }) {
         ))}
       </div>
       {rows.filter((row) => row.active).map((row) => (
-        <ProductEditor key={row.productId} row={row} methods={ctx.methods} sqft={needsSqft(ctx, row)} targetIssues={isPesticideRow(row) ? targetIssuesOf(form) : null} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
+        <ProductEditor key={row.productId} row={row} methods={ctx.methods} sqft={needsSqft(ctx, row)} targetIssues={isPesticideRow(row) ? targetIssuesOf(form) : null} rate={rowRate(row)} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
       <OtherProductButton {...other} popover={popover} />
     </section>
@@ -569,12 +634,14 @@ function ProductTile({ row, locked, onClick }) {
 // An applied product: how much (blank until the tech enters it, or last
 // time's amount, labeled), how it went down (the tech's tap), and the area
 // when that method needs one.
-function ProductEditor({ row, methods, sqft, targetIssues, locked, onChange, onRemove }) {
+function ProductEditor({ row, methods, sqft, targetIssues, rate, locked, onChange, onRemove }) {
   const nameId = useId();
   const amountId = useId();
   const methodId = useId();
   const areaId = useId();
   const forId = useId();
+  const rateId = useId();
+  const overLabel = rate.max != null && parseFloat(rate.rate) > rate.max;
   // An older context without `common` shows every method as a button.
   const hasCommon = methods.some((choice) => choice.common);
   const common = hasCommon ? methods.filter((choice) => choice.common) : methods;
@@ -587,6 +654,27 @@ function ProductEditor({ row, methods, sqft, targetIssues, locked, onChange, onR
       </div>
       <AmountEntry id={amountId} row={row} locked={locked} onChange={onChange} />
       {row.fromLast && <p className="tech-visit-muted">last time</p>}
+      {rate.rateUnit ? (
+        <div>
+          <label htmlFor={rateId} className="tech-product-editor-label">{`${row.name} rate`}</label>
+          <div className="tech-product-editor-amount">
+            <Input
+              id={rateId}
+              className="tech-visit-control tech-product-amount-input"
+              type="number"
+              inputMode="decimal"
+              min="0"
+              step="any"
+              disabled={locked}
+              value={rate.rate ?? ''}
+              onChange={(e) => onChange({ rateInput: e.target.value })}
+            />
+            <span className="tech-visit-muted">{String(rate.rateUnit).replace(/_/g, ' ')}</span>
+          </div>
+          {rate.from && <p className="tech-visit-muted">{rate.from}</p>}
+          {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
+        </div>
+      ) : null}
       <div>
         <span id={methodId} className="tech-product-editor-label">How</span>
         <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid">
@@ -611,15 +699,37 @@ function ProductEditor({ row, methods, sqft, targetIssues, locked, onChange, onR
       {targetIssues && (
         <div>
           <span id={forId} className="tech-product-editor-label">For</span>
-          {targetIssues.length ? (
+          {targetIssues.length > 0 && (
             <div role="group" aria-labelledby={forId} className="tech-visit-tile-grid">
               {targetIssues.map((issue) => (
                 <Chip disabled={locked} key={issue} label={issue} pressed={(row.targets || []).includes(issue)} onClick={() => onChange({ targets: toggleInList(row.targets || [], issue) })} />
               ))}
             </div>
-          ) : (
-            <p className="tech-visit-muted">Pick the weeds, insects or disease under Treating for.</p>
           )}
+          {/* Any other target the full form offers, added as a removable chip. */}
+          {(row.otherTargets || []).length > 0 && (
+            <div role="group" aria-label={`Other targets for ${row.name}`} className="tech-visit-tile-grid">
+              {row.otherTargets.map((name) => (
+                <Chip disabled={locked} key={name} label={name} pressed onClick={() => onChange({ otherTargets: row.otherTargets.filter((item) => item !== name) })} />
+              ))}
+            </div>
+          )}
+          {!targetIssues.length && !(row.otherTargets || []).length && (
+            <p className="tech-visit-muted">Pick the weeds, insects or disease under Treating for, or add another target.</p>
+          )}
+          <Select
+            aria-label={`Other target for ${row.name}`}
+            className="tech-visit-control"
+            disabled={locked}
+            value=""
+            onChange={(e) => {
+              const name = e.target.value;
+              if (name && !(row.otherTargets || []).includes(name)) onChange({ otherTargets: [...(row.otherTargets || []), name] });
+            }}
+          >
+            <option value="">Other target</option>
+            {LAWN_TARGET_SUGGESTIONS.map((name) => <option key={name} value={name}>{name}</option>)}
+          </Select>
         </div>
       )}
       {sqft && (

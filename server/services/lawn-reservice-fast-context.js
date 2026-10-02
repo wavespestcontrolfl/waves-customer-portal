@@ -149,7 +149,8 @@ async function loadLastVisit(svc, knex, visitDate, catalogIds, methodValues = ne
   const rows = await knex('service_products')
     .where('service_record_id', record.id)
     .orderBy('created_at')
-    .select('product_id', 'product_name', 'total_amount', 'amount_unit', 'application_method', 'area_value', 'area_unit');
+    .select('product_id', 'product_name', 'total_amount', 'amount_unit', 'application_method', 'area_value', 'area_unit',
+      'application_rate', 'rate_unit');
   const seen = new Set();
   const products = [];
   for (const row of rows) {
@@ -170,6 +171,10 @@ async function loadLastVisit(svc, knex, visitDate, catalogIds, methodValues = ne
       // The area recorded with it, as recorded (the sheet reads sqft only).
       areaValue,
       areaUnit: areaValue ? String(row.area_unit || '').trim() || null : null,
+      // The rate recorded with it (service_products.application_rate / rate_unit),
+      // as recorded: the sheet only pre-fills a unit /complete accepts.
+      applicationRate: positiveOrNull(row.application_rate),
+      rateUnit: positiveOrNull(row.application_rate) ? String(row.rate_unit || '').trim() || null : null,
     });
   }
   return {

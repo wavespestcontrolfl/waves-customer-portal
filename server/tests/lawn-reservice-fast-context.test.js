@@ -165,8 +165,8 @@ describe('buildLawnReserviceFastContext', () => {
     expect(ctx.lastVisit).toEqual({
       serviceRecordId: 'rec-legacy', serviceDate: '2026-09-20', serviceType: 'Lawn Care Treatment',
       products: [
-        { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null },
-        { productId: 'talak', name: 'Talak 7.9%', totalAmount: 4, amountUnit: 'fl_oz', method: 'broadcast_spray', areaValue: null, areaUnit: null },
+        { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+        { productId: 'talak', name: 'Talak 7.9%', totalAmount: 4, amountUnit: 'fl_oz', method: 'broadcast_spray', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
       ],
     });
   });
@@ -200,8 +200,8 @@ describe('buildLawnReserviceFastContext', () => {
       ],
     }));
     expect(ctx.lastVisit.products).toEqual([
-      { productId: 'headway', name: 'Headway G', totalAmount: null, amountUnit: null, method: null, areaValue: null, areaUnit: null },
-      { productId: 'celsius', name: 'Celsius WG', totalAmount: 3, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null },
+      { productId: 'headway', name: 'Headway G', totalAmount: null, amountUnit: null, method: null, areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 3, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
     ]);
   });
 
@@ -330,7 +330,21 @@ describe('methods, areas and lawn size', () => {
     expect(ctx.lawnSqft).toBe(6400);
     expect(ctx.lastVisit.products).toEqual([
       expect.objectContaining({ productId: 'talak', method: 'broadcast_spray', areaValue: 5200, areaUnit: 'sqft' }),
-      expect.objectContaining({ productId: 'celsius', method: 'spot_treatment', areaValue: null, areaUnit: null }),
+      expect.objectContaining({ productId: 'celsius', method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null }),
+    ]);
+  });
+
+  test('the recorded rate and its unit come back per product; a missing or zero rate is null with no unit', async () => {
+    const ctx = await build({
+      'service_records as sr': lawnRecord,
+      service_products: [
+        { product_id: 'talak', product_name: 'Talak', total_amount: '4', amount_unit: 'fl_oz', application_method: 'broadcast_spray', application_rate: '0.5000', rate_unit: 'fl_oz/1000sqft' },
+        { product_id: 'celsius', product_name: 'Celsius', total_amount: '1', amount_unit: 'oz', application_method: 'spot_treatment', application_rate: null, rate_unit: 'oz/gal' },
+        { product_id: 'headway', product_name: 'Headway', total_amount: '2', amount_unit: 'lb', application_method: null, application_rate: '0', rate_unit: 'lb/1000sqft' },
+      ],
+    });
+    expect(ctx.lastVisit.products.map((p) => [p.productId, p.applicationRate, p.rateUnit])).toEqual([
+      ['talak', 0.5, 'fl_oz/1000sqft'], ['celsius', null, null], ['headway', null, null],
     ]);
   });
 
