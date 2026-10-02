@@ -177,6 +177,28 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
   });
 
+  it("an old login's late 401 neither redirects nor clears a newer login (pre-push P1)", async () => {
+    const NEW_TOKEN = staffJwt(undefined, "newer-signature");
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    let answerOld;
+    const calls = [];
+    vi.stubGlobal("fetch", vi.fn((_url, options = {}) => {
+      const auth = options.headers?.Authorization || "";
+      calls.push(auth);
+      if (auth.endsWith(LIVE_TOKEN)) return new Promise((resolve) => { answerOld = () => resolve(response(401, { error: "revoked" })); });
+      return Promise.resolve(response(200, { ...TECH, id: "tech-2", name: "Newer Tech" }));
+    }));
+    const hrefBefore = window.location.href;
+    renderAt();
+    await act(async () => {});
+    localStorage.setItem("waves_admin_token", NEW_TOKEN);
+    await act(async () => { answerOld(); });
+    expect(window.location.href).toBe(hrefBefore);
+    expect(localStorage.getItem("waves_admin_token")).toBe(NEW_TOKEN);
+    expect(await screen.findByText("Saved route content")).toBeInTheDocument();
+    expect(calls.some((a) => a.endsWith(NEW_TOKEN))).toBe(true);
+  });
+
   it("ends the session when any staff API call is answered 401 for the current token", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);
