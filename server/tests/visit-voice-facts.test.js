@@ -591,6 +591,16 @@ describe('validateVoiceFacts', () => {
     }, note);
     expect(facts).toMatchObject({ unclearAreas: [], unclearPests: [], unclearSpray: false });
     expect(facts.pests.map((pest) => pest.name)).toEqual(['ants']);
+    // Nor when the reading quotes the plan without its future words: the
+    // note decides where the quote stands (pre-push P1 on #5538).
+    const trimmed = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Treated outside for ants' }, { area: 'inside', quote: 'spray inside' }],
+      pests: [{ name: 'ants', quote: 'Treated outside for ants' }],
+      spray: { method: 'spot', quote: 'spray inside' },
+    }, "Treated outside for ants. Will spray inside tomorrow. I'll treat the garage next time.");
+    expect(placeIn(trimmed, 'Inside')).toBe('unclear');
+    expect(placeIn(trimmed, 'Garage')).toBe('none');
+    expect(trimmed).toMatchObject({ spray: null, unclearSpray: true });
     // Nor when the reading itself quotes the plan.
     const planned = validateVoiceFacts({
       areas: [{ area: 'inside', quote: 'Will spray inside next time' }],

@@ -156,8 +156,8 @@ function clauseBounds(quote, offset) {
 const spanOf = (match) => (match ? { offset: match.index, length: match[0].length } : null);
 // Work said as not done yet is never a treatment done today: "will spray
 // inside next time", "need to treat for roaches" (codex local r24 on #5538).
-const FUTURE_BEFORE_RE = /\b(?:will|won'?t|shall|going\s+to|gonna|plan(?:s|ned|ning)?\s+to|needs?\s+to|ha(?:ve|s)\s+to|should|would|could|might|may|wants?\s+to)\s+(?:(?:also|then|come\s+back\s+and)\s+)?$/;
-const FUTURE_CLAUSE_RE = /\bnext\s+(?:time|visit|service|month|week|quarter)\b/;
+const FUTURE_BEFORE_RE = /\b(?:\w+'ll|will|won'?t|shall|going\s+to|gonna|plan(?:s|ned|ning)?\s+to|needs?\s+to|ha(?:ve|s)\s+to|should|would|could|might|may|wants?\s+to)\s+(?:(?:also|then|come\s+back\s+and)\s+)?$/;
+const FUTURE_CLAUSE_RE = /\b(?:tomorrow|next\s+(?:time|visit|service|month|week|quarter|year))\b/;
 function notDoneYet(text, at) {
   const { from, to } = clauseBounds(text, at);
   return FUTURE_BEFORE_RE.test(text.slice(from, at)) || FUTURE_CLAUSE_RE.test(text.slice(from, to));
@@ -194,7 +194,11 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
   let at = note.indexOf(quote);
   if (at < 0) return true;
   while (at >= 0) {
-    const denied = DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at + from)) || denialAfter.test(note.slice(at + to));
+    // Said for later where it stands in the note ("will spray inside
+    // tomorrow" quoted as "spray inside") reads as not done (pre-push P1 on
+    // #5538).
+    const denied = DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at + from)) || denialAfter.test(note.slice(at + to))
+      || (!!span && notDoneYet(note, at + from));
     if (!denied) return false;
     at = note.indexOf(quote, at + 1);
   }
@@ -495,11 +499,7 @@ function pestName(name, quote) {
 // the quote, else the quote and whether the note denies it there.
 function readQuote(quote, note, fact) {
   const grounded = groundedQuote(quote, note);
-  if (!grounded) return null;
-  const span = fact.assertion(grounded);
-  const denied = deniedInNote(grounded, note, fact) || undoneInQuote(grounded, fact)
-    || (!!span && notDoneYet(grounded, span.offset));
-  return { quote: grounded, denied };
+  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note, fact) || undoneInQuote(grounded, fact) } : null;
 }
 const listOf = (value) => (Array.isArray(value) ? value : []);
 
