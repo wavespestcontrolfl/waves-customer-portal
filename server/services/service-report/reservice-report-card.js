@@ -144,6 +144,13 @@ function withPeriod(text) {
   return /[.!?…]$/.test(text) ? text : `${text}.`;
 }
 
+// Physical access: where a key / lockbox / spare is, or a door/gate/garage
+// code mention without the digits (the shared scrub masks code-shaped tokens).
+const KEY_LOCATION_RE = /\b(?:keys?|spare\s+key|key\s*box|lock\s*box|lockbox|hide-?a-?key|(?:gate|door|garage|alarm|entry|access)\s+codes?|(?:under|beneath|behind)\s+(?:the\s+)?(?:door\s*)?mat|doormat|combination)\b/i;
+// Any pesticide-safety claim: "safe", "pet-safe", "kid friendly", "non-toxic",
+// "harmless", "chemical-free" (AGENTS.md: customer copy never claims safety).
+const SAFETY_CLAIM_RE = /\b(?:safe(?:ty|ly|r|st)?|(?:pet|child|kid|family|people|eco|environment(?:ally)?)[-\s]?(?:safe|friendly)|non-?toxic|harmless|chemical-?free|all-?natural|organic)\b/i;
+
 function scrubbedWords(raw, scrub, lane) {
   if (typeof scrub !== 'function') return '';
   let words = '';
@@ -152,6 +159,13 @@ function scrubbedWords(raw, scrub, lane) {
   } catch {
     return '';
   }
+  if (!words) return '';
+  // The card is a permanent, forwardable public page: a sentence that says
+  // where a key is, or makes a pesticide-safety claim in any form (the shared
+  // screens only catch codes and claims tied to re-entry timing), is dropped.
+  words = words.split(/(?<=[.!?])\s+/)
+    .filter((sentence) => !KEY_LOCATION_RE.test(sentence) && !SAFETY_CLAIM_RE.test(sentence))
+    .join(' ').trim();
   if (!words) return '';
   // Our own safety/timing claims never ride on the customer's behalf.
   if (ActivityIndicators.findBannedCustomerCopy(words).length) return '';

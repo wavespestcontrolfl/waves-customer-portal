@@ -24,6 +24,7 @@ const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('./cockroach-report-v2');
 const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature } = require('./reservice-report');
+const { reserviceReportCardGateOn } = require('./reservice-report-card');
 const { reportPhotoSetPdfSignature } = require('./photo-set-signature');
 const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
@@ -228,6 +229,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // Same contract for the re-service block (reservice-report.js): the store
   // key carries the billing outcome the render actually printed.
   let reserviceRenderedSignature = '';
+  let cardGateAtRender = null;
   // Trend-exclusion key component captured BEFORE the render: a callback
   // inserted or reclassified mid-render would otherwise store the OLD chart
   // under the NEW signature and serve it as current (codex #3623 r5 P1).
@@ -297,6 +299,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // resolvePestWeekWeather / resolvePestWeekWeatherForBuild is the ONE
     // canonical fetch+freeze every caller of buildReportV1Data shares — no
     // separate preflight fetch left here to disagree with the render).
+    // The browser fetches its own /data: a card-gate flip mid-render would
+    // put a card-less PDF under '-rcd1' (or the reverse). Checked after.
+    cardGateAtRender = reserviceReportCardGateOn();
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
@@ -416,6 +421,10 @@ async function renderAndStoreServiceReportPdf(recordId, {
     const laAfter = await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled });
     if (laAfter !== laSignature) {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
+      return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
+    }
+    if (reserviceReportCardGateOn() !== cardGateAtRender) {
+      logger.warn(`[service-report-pdf] re-service card gate changed during render for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
     }
     // A photo the browser could not load rendered as its placeholder, and

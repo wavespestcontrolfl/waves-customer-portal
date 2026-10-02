@@ -176,11 +176,12 @@ describe('You told us: hidden / scrubbed / capped', () => {
     expect(out.youToldUs).toBeNull();
   });
 
-  test('our own timing/safety claims in the words are dropped', () => {
+  test('our own timing/safety claims in the words are dropped (only that sentence)', () => {
     const out = card(frozenService({
       version: 1, text: 'Ants in the kitchen. It is safe to re-enter at 4 PM.', source: 'call', pests: [],
     }), { scrub: (t) => t });
-    expect(out.youToldUs).toBeNull();
+    expect(out.youToldUs).toMatchObject({ lead: 'On your call, you mentioned', text: 'ants in the kitchen.' });
+    expect(out.youToldUs.text).not.toMatch(/safe|re-enter/i);
   });
 
   test('long words are capped at a word boundary with an ellipsis', () => {
@@ -515,5 +516,21 @@ describe('Codex r3 (#5542)', () => {
     expect(project).toMatch(/String\(lockedVisit\.status \|\| ''\) !== 'completed'\) \{\s*const currentData/);
     expect(project).toMatch(/&& String\(lockedVisit\.status \|\| ''\) !== 'completed'\s*\? require\('\.\/service-report\/reservice-report-card'\)\.freezeReserviceRequest\(lockedVisit\)/);
     expect(project).toContain("if (frozenRequest) update.service_data = serializeJsonb({ ...currentData, reserviceRequest: frozenRequest });");
+  });
+});
+
+describe('Codex r5 (#5542): customer words on a public permanent page', () => {
+  const words = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: scrubCustomerText })?.youToldUs?.text ?? null;
+  test.each([
+    ['Ants are by the back door and the key is under the mat.', null],
+    ['Ants are by the back door. The spare key is in the lockbox.', 'Ants are by the back door.'],
+    ['The pet-safe spray did not stop the ants.', null],
+    ['Roaches in the kitchen. Is it safe for my dog?', 'Roaches in the kitchen.'],
+    ['I want a non-toxic option for the ants.', null],
+  ])('%p -> %p', (text, expected) => {
+    expect(words(text)).toBe(expected);
+  });
+  test('a plain complaint is untouched', () => {
+    expect(words('Ants are back in the kitchen.')).toBe('Ants are back in the kitchen.');
   });
 });
