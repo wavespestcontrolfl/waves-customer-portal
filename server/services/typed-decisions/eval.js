@@ -22,8 +22,14 @@
  * correct_value (a yes/no row without one is read as the opposite answer);
  * unclear (label_status disagreement) → excluded from every rate and counted.
  *
- * Provider-agnostic: rows are grouped by served_model, so a second provider
- * recording into the same table reports beside the first with no code change.
+ * Rows are grouped by package version and served model, so a new package
+ * version, or a newly pinned model version, earns its tier on its own labels
+ * (§9 rule 1: per capability, per version) and a retired version's weak
+ * question never holds the current one back. Comparing two PROVIDERS on the
+ * same subjects is NOT possible from this table yet: decision_reviews keeps
+ * one row per subject and question, whichever model answered, so that needs a
+ * provider column in its unique key and ships with the second provider's
+ * adapter (Codex r1 on #5546).
  * Rows carry ids and answers only; no message text is read here.
  */
 const db = require('../../models/db');
@@ -248,7 +254,8 @@ function tierOf(metrics, representativeLabeled) {
  * Pure scorer. `labeledRows` are decision_reviews rows with a label (any
  * label_status but unreviewed); `coverageRows` are grouped counts of every
  * recorded answer ({ capability, package_id, question_id, served_model,
- * answered, confident }). Returns one entry per question per served model.
+ * answered, confident }). Returns one status per capability, package version
+ * and served model, each with its questions.
  */
 function scoreRows(labeledRows = [], coverageRows = []) {
   const groups = new Map();
@@ -311,23 +318,27 @@ function scoreRows(labeledRows = [], coverageRows = []) {
       note: g.type === 'noul' ? null : 'No yes class: precision and recall are the accuracy of the chosen option.',
     });
   }
-  questions.sort((a, b) => a.capability.localeCompare(b.capability) || a.questionId.localeCompare(b.questionId) || String(a.servedModel).localeCompare(String(b.servedModel)));
+  questions.sort((a, b) => a.capability.localeCompare(b.capability) || a.packageId.localeCompare(b.packageId)
+    || a.questionId.localeCompare(b.questionId) || String(a.servedModel).localeCompare(String(b.servedModel)));
 
-  // A capability's tier is the lowest of its questions (one weak question
-  // holds the whole package), and its blocker is that question's.
+  // One status per capability, PACKAGE VERSION and served model: its tier is
+  // the lowest of that package's questions (one weak question holds the whole
+  // package) and its blocker is that question's. Keyed on the package so a
+  // retired version still in the window cannot drag the current one to 0.
   const byCapability = new Map();
   for (const q of questions) {
-    const key = `${q.capability}|${q.servedModel || ''}`;
-    if (!byCapability.has(key)) byCapability.set(key, { capability: q.capability, servedModel: q.servedModel, packageIds: new Set(), questions: [], tier: Infinity, blocker: null, nextTier: null });
+    const key = `${q.capability}|${q.packageId}|${q.servedModel || ''}`;
+    if (!byCapability.has(key)) byCapability.set(key, { capability: q.capability, packageId: q.packageId, servedModel: q.servedModel, questions: [], tier: Infinity, blocker: null, nextTier: null });
     const c = byCapability.get(key);
-    c.packageIds.add(q.packageId);
     c.questions.push(q);
     if (q.tier < c.tier) { c.tier = q.tier; c.blocker = q.blocker; c.nextTier = q.nextTier; }
   }
   return [...byCapability.values()].map((c) => ({
     capability: c.capability,
+    packageId: c.packageId,
+    // false = the package has left the registry: history, not what runs now.
+    registered: Boolean(packageFor(c.packageId)),
     servedModel: c.servedModel,
-    packageIds: [...c.packageIds].sort(),
     tier: c.tier === Infinity ? 0 : c.tier,
     nextTier: c.nextTier,
     blocker: c.blocker,

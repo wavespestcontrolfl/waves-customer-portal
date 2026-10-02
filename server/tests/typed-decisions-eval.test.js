@@ -87,7 +87,7 @@ describe('scoreRows — tiers from the representative set only', () => {
     expect(q.tier).toBe(1);
     expect(q.nextTier).toBe(2);
     expect(q.blocker).toMatch(/Tier 2 \(reversible internal automation\): precision 1 \(lower bound 0\.9278, 40\/40\) is below 0\.95; about 19 more/);
-    expect(cap).toMatchObject({ capability: 'sms_courtesy', servedModel: 'jev-1.13.0', tier: 1, nextTier: 2, packageIds: ['sms_courtesy.v1'] });
+    expect(cap).toMatchObject({ capability: 'sms_courtesy', packageId: 'sms_courtesy.v1', registered: true, servedModel: 'jev-1.13.0', tier: 1, nextTier: 2 });
     expect(cap.labeled).toEqual({ representative: 60, development: 0 });
   });
 
@@ -146,10 +146,24 @@ describe('scoreRows — tiers from the representative set only', () => {
     expect(m.actionableRecall).toMatchObject({ numerator: 10, denominator: 20 });
   });
 
-  test('a second provider on the same question reports beside the first, keyed by served model', () => {
-    const caps = scoreRows([...rows(10, { model: 'jev-1.13.0' }), ...rows(10, { model: 'clef-flash' })], []);
-    expect(caps.map((c) => c.servedModel).sort()).toEqual(['clef-flash', 'jev-1.13.0']);
+  test('a newly pinned model version earns its tier on its own labels (§9: per capability, per version)', () => {
+    const caps = scoreRows([...rows(10, { model: 'jev-1.13.0' }), ...rows(10, { model: 'jev-1.14.0' })], []);
+    expect(caps.map((c) => c.servedModel).sort()).toEqual(['jev-1.13.0', 'jev-1.14.0']);
     expect(caps.every((c) => c.questions[0].representative.counts.labeled === 10)).toBe(true);
+  });
+
+  test('package versions roll up separately: a retired version\'s weak question cannot drag the current package to tier 0 (Codex r1 on #5546)', () => {
+    const labeled = [
+      ...rows(70, { p: 0.95 }), // current registered package: tier 2 on its own
+      ...rows(5, { pkg: 'sms_courtesy.v0', p: 0.95 }), // retired version still inside the window
+    ];
+    const caps = scoreRows(labeled, []);
+    expect(caps.map((c) => [c.packageId, c.registered, c.tier])).toEqual([
+      ['sms_courtesy.v0', false, 0],
+      ['sms_courtesy.v1', true, 2],
+    ]);
+    expect(caps[1].blocker).toMatch(/Tier 3/);
+    expect(caps[1].labeled).toEqual({ representative: 70, development: 0 });
   });
 
   test('a capability takes the lowest tier of its questions and that question\'s blocker', () => {
@@ -176,7 +190,7 @@ describe('scoreRows — tiers from the representative set only', () => {
 
   test('a choice question (no yes class) reports accuracy as precision and recall, and says so; the type is read from the answer when the package is unregistered', () => {
     const choice = (verdict, correct = null) => ({
-      capability: 'routing', package_id: 'routing.v0', question_id: 'team', served_model: 'clef-flash', sampled_for: 'random_audit',
+      capability: 'routing', package_id: 'routing.v0', question_id: 'team', served_model: 'jev-1.13.0', sampled_for: 'random_audit',
       label_status: status[verdict], jev_answer: JSON.stringify({ choice: 'billing', confidence: 0.9, probabilities: {}, confident: true }), label: label(verdict, correct),
     });
     const labeled = [choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_wrong', 'technical')];
