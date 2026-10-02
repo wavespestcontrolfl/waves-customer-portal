@@ -96,8 +96,8 @@ function SubjectText({ subject }) {
 }
 
 // Whose answer a row holds, as the reviewer should read it (the server sends
-// providerLabel: Jev, Clef). Rows from before the provider column are Jev's.
-const modelName = (review) => review?.providerLabel || "Jev";
+// providerLabel: Jev, Clef); the server names it on every row.
+const modelName = (review) => review?.providerLabel || review?.provider || "";
 
 function AnswersBlock({ review }) {
   const baselines = Object.entries(review.baselineAnswers || {});

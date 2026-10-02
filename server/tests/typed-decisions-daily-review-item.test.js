@@ -20,7 +20,7 @@ beforeEach(() => {
 afterAll(() => { if (original === undefined) delete process.env.GATE_TYPED_DECISIONS; else process.env.GATE_TYPED_DECISIONS = original; });
 
 const review = (over = {}) => ({
-  id: 'r', capability: 'call_judge', question_id: 'is_spam', created_at: new Date('2026-09-30T20:00:00Z'),
+  id: 'r', provider: 'typesafe', capability: 'call_judge', question_id: 'is_spam', created_at: new Date('2026-09-30T20:00:00Z'),
   jev_answer: JSON.stringify({ p: 0.93, yes: true, confident: true }),
   baseline_answers: JSON.stringify({ production: false, deep_judge: false }),
   ...over,
@@ -140,6 +140,7 @@ test('a row is described by the provider that answered it: a Clef row never read
   const row = { capability: 'sms_courtesy', question_id: 'is_courtesy_only', jev_answer: JSON.stringify({ p: 0.2, yes: false, confident: false }), baseline_answers: JSON.stringify({ rules: true }) };
   expect(describeRow({ ...row, provider: 'cloudflare' })).toBe('sms_courtesy is_courtesy_only: Clef no (p 0.20) vs rules yes');
   expect(describeRow({ ...row, provider: 'typesafe' })).toBe('sms_courtesy is_courtesy_only: Jev no (p 0.20) vs rules yes');
-  expect(describeRow(row)).toBe('sms_courtesy is_courtesy_only: Jev no (p 0.20) vs rules yes'); // rows from before the column
+  // provider is NOT NULL on the table: a row without one is malformed and is refused, never described as Jev's (Codex r8)
+  expect(() => describeRow(row)).toThrow(/unknown decision provider/);
 });
 

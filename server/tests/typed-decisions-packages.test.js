@@ -74,7 +74,8 @@ describe('decision providers', () => {
     expect(providerLabel('typesafe')).toBe('Jev');
     expect(providerLabel('cloudflare')).toBe('Clef');
     // rows from before the column, and anything unknown, read as the default: never an object key
-    expect(providerLabel(undefined)).toBe('Jev');
-    expect(providerLabel('constructor')).toBe('Jev');
+    // provider is NOT NULL and registry-constrained: an unknown value is malformed data, never shown as Jev's
+    expect(() => providerLabel(undefined)).toThrow(/unknown decision provider/);
+    expect(() => providerLabel('constructor')).toThrow(/unknown decision provider/);
   });
 });

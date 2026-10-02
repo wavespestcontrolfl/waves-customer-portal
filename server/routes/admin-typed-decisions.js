@@ -77,7 +77,7 @@ function mapReview(row, subject) {
     baselineAnswers: parse(row.baseline_answers),
     sampledFor: row.sampled_for,
     servedModel: row.served_model,
-    provider: row.provider || 'typesafe',
+    provider: row.provider,
     // The name the reviewer sees for whose answer this is (Jev, Clef).
     providerLabel: providerLabel(row.provider),
     label: parse(row.label),

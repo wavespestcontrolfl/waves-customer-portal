@@ -144,10 +144,11 @@ const DEFAULT_DECISION_PROVIDER = 'typesafe';
 // What the review workflow calls each provider's model: the queue, the daily
 // item and the Typed tab name whose answer a row holds (Codex r1 on #5555).
 const DECISION_PROVIDER_LABELS = Object.freeze({ typesafe: 'Jev', cloudflare: 'Clef' });
+// provider is NOT NULL and registry-constrained on the table, so a value this
+// does not know is malformed data, refused rather than shown as Jev's (Codex r8).
 function providerLabel(provider) {
-  return Object.prototype.hasOwnProperty.call(DECISION_PROVIDER_LABELS, provider)
-    ? DECISION_PROVIDER_LABELS[provider]
-    : DECISION_PROVIDER_LABELS[DEFAULT_DECISION_PROVIDER];
+  if (!Object.prototype.hasOwnProperty.call(DECISION_PROVIDER_LABELS, provider)) throw new Error(`unknown decision provider: ${provider}`);
+  return DECISION_PROVIDER_LABELS[provider];
 }
 
 // How much of a call transcript call_judge is given (call-self-audit.js). The

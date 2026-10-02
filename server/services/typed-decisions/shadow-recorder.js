@@ -15,9 +15,9 @@
  * out: label, label_status, labeled_by and labeled_at are never touched, and a
  * labeled row keeps the answers its label was given against. sampled_for moves
  * WITH the answers (a re-run that turns an agreement into a disagreement puts
- * the row in the queue; the reverse takes it out only on a coordinated write,
- * one that carries every sibling provider's answers, so a write for one
- * provider alone never un-samples a stored disagreement); its random-audit draw is
+ * the row in the queue, and the reverse takes it out, except that a write for
+ * one provider alone keeps a stored verdict while a sibling provider's row
+ * exists for the case: that verdict may be the pair's disagreement); its random-audit draw is
  * a stable hash of the row's key, drawn before the disagreement check, so
  * re-running never re-rolls it and the audit stays a population sample.
  *
@@ -174,15 +174,22 @@ function buildRows({ capability, pkg, provider, subjectType, subjectId, result, 
  * Throws only on a database error (callers wrap shadow work in try/catch).
  */
 // What a re-record writes over an unlabeled row. Every answer column follows
-// the new write; sampled_for does too ONLY when the write is coordinated, that
-// is, it carries the other providers' answers for this subject, so the queue
+// the new write. sampled_for does too when the write is coordinated, that is,
+// it carries the other providers' answers for this subject, so the queue
 // verdict was computed with complete sibling results. A write for one provider
-// alone (its sibling failed, or there is only one) keeps a stored disagreement:
-// recomputing it without the sibling would clear the pair's review and leave
-// the other provider's row in the queue by itself (Codex r7, #5555).
+// alone takes a new verdict (a baseline disagreement found now), and when it
+// computes NO verdict it clears a stored one ONLY if no sibling row exists for
+// the same subject and question: with a sibling on record the stored value may
+// be the pair's disagreement, and recomputing it without the sibling's answer
+// would leave that row in the queue by itself (Codex r7 + r8, #5555). A single
+// provider's resolved baseline disagreement therefore clears as before.
+const SIBLING_ROW_EXISTS = `EXISTS (SELECT 1 FROM ${TABLE} s WHERE s.capability = EXCLUDED.capability AND s.package_id = EXCLUDED.package_id`
+  + ' AND s.subject_type = EXCLUDED.subject_type AND s.subject_id = EXCLUDED.subject_id AND s.question_id = EXCLUDED.question_id AND s.provider <> EXCLUDED.provider)';
 function mergeSet(conn, coordinated) {
   const set = Object.fromEntries(MERGE_COLUMNS.map((column) => [column, conn.raw(`EXCLUDED.${column}`)]));
-  if (!coordinated) set.sampled_for = conn.raw(`COALESCE(EXCLUDED.sampled_for, ${TABLE}.sampled_for)`);
+  if (!coordinated) {
+    set.sampled_for = conn.raw(`CASE WHEN EXCLUDED.sampled_for IS NOT NULL THEN EXCLUDED.sampled_for WHEN ${SIBLING_ROW_EXISTS} THEN ${TABLE}.sampled_for ELSE NULL END`);
+  }
   return set;
 }
 

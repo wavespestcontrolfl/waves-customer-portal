@@ -12,6 +12,8 @@ afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 const yesNoRow = (over = {}) => ({
   id: 'r1',
+  provider: 'typesafe',
+  providerLabel: 'Jev',
   capability: 'sms_wants_callback',
   question: 'Does the customer want a call back?',
   subjectType: 'sms_log',
