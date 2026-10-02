@@ -5661,7 +5661,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // here because the progress block never leaves this process. Handed to
       // the lead (applyLawnReportReconciliation) the same non-enumerable way,
       // so the payload gains a key only through reportV2.lead.sinceLast.
-      if (reportV2 && visitMemorySinceLast && featureGates.lawnSinceLastLive()) {
+      // LIVE VIEWS ONLY: the PDF and static builds mount the same lead card,
+      // and their cache key does not vary on this gate, the expectation rows'
+      // approvals or the photo confidence these lines depend on, so a stored
+      // PDF never carries the block (codex P1 #5597 r1).
+      if (reportV2 && visitMemorySinceLast && opts.mode === 'live' && featureGates.lawnSinceLastLive()) {
         try {
           const sinceLastCopy = buildSinceLastCopy({
             sinceLast: visitMemorySinceLast,

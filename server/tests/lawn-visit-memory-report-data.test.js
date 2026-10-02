@@ -667,9 +667,9 @@ describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
   };
   const ALL = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_SINCE_LAST'];
   // What the public route does with the built payload before it serializes it.
-  const served = async (recs, patch = {}) => {
+  const served = async (recs, patch = {}, mode = 'live') => {
     const { knex } = withRecords({ ...fixtures(), ...patch }, recs);
-    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-since-last', knex, {});
+    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-since-last', knex, mode ? { mode } : {});
     applyLawnReportReconciliation(data, null);
     return data;
   };
@@ -705,6 +705,20 @@ describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
     expect(JSON.stringify(data)).not.toMatch(/"lines":\["Last visit/);
     if (data.reportV2.lead) expect(Object.prototype.hasOwnProperty.call(data.reportV2.lead, 'sinceLast')).toBe(false);
   });
+
+  // The PDF and static renders mount the same lead card, and the PDF cache
+  // key does not vary on this gate or on what the lines depend on.
+  test.each([['pdf', 'pdf'], ['static', 'static'], ['the PDF queue (no mode)', null]])(
+    'a %s build never carries the block: its payload is the live one minus lead.sinceLast',
+    async (_label, mode) => {
+      setHistory([PRIOR, CUR]);
+      live(...ALL);
+      const data = await served(records(), PHOTOS, mode);
+      expect(Object.getOwnPropertyDescriptor(data.reportV2, 'sinceLastCopy')).toBeUndefined();
+      expect(data.reportV2.lead).toBeTruthy();
+      expect(Object.prototype.hasOwnProperty.call(data.reportV2.lead, 'sinceLast')).toBe(false);
+    },
+  );
 
   test('photos that cannot support a comparison: the applied line only, never a direction or a state', async () => {
     setHistory([PRIOR, CUR]);

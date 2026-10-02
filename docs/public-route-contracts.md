@@ -2084,9 +2084,11 @@ a failure cannot break a render.
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
-`{ priorDate: 'YYYY-MM-DD', lines: string[] }` and the web report prints it in
-the lead as "Since your last visit, <Mon D>" above "What we applied today" (the
-PDF does not print the lead, so its content and cache signature are unchanged).
+`{ priorDate: 'YYYY-MM-DD', lines: string[] }` on LIVE views only
+(`mode: 'live'`), and the web report prints it in the lead as "Since your last
+visit, <Mon D>" above "What we applied today". PDF and static builds mount the
+same lead card but never carry the key, so PDF content and its cache signature
+are unchanged by this gate.
 Every line is a fixed sentence selected by key in
 `server/services/service-report/lawn-since-last-copy.js`; no model writes it and
 it carries no product name, active ingredient, number, date or timing word. In
