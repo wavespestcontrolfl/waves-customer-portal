@@ -384,6 +384,17 @@ async function assertVisitStillOwned(req, trx, serviceId) {
   if (!owned) throw Object.assign(new Error('serviceId not found'), { status: 404, statusCode: 404, isOperational: true });
 }
 
+// The same fence for a row with no visit: some current visit of this
+// technician's for the customer, under its row lock.
+async function assertCustomerVisitStillOwned(req, trx, customerId) {
+  if (!isTechnicianRequest(req)) return;
+  const owned = customerId ? await technicianCurrentVisitFilter(
+    req,
+    trx('scheduled_services').where('scheduled_services.customer_id', customerId),
+  ).forUpdate().first('scheduled_services.id') : null;
+  if (!owned) throw Object.assign(new Error('Assessment not found'), { status: 404, statusCode: 404, isOperational: true });
+}
+
 // =========================================================================
 // GET /customers — list lawn care customers (active lawn service)
 // =========================================================================
@@ -1264,9 +1275,13 @@ router.post('/confirm', async (req, res, next) => {
     // transaction, first (the /assess lock order: visit row, then baseline),
     // so a reassignment between the check above and the write cannot let the
     // former technician's confirmation commit (codex #5568 r8 P1).
-    const assertOwned = assessment.service_id && isTechnicianRequest(req)
-      ? (trx) => assertVisitStillOwned(req, trx, assessment.service_id)
-      : undefined;
+    // A legacy row with no service_id is fenced on the customer instead: a
+    // current visit of this technician's for that customer, locked inside the
+    // transaction (codex #5568 r11 P1).
+    const assertOwned = !isTechnicianRequest(req) ? undefined
+      : assessment.service_id
+        ? (trx) => assertVisitStillOwned(req, trx, assessment.service_id)
+        : (trx) => assertCustomerVisitStillOwned(req, trx, assessment.customer_id);
     const visitRun = await visitRuns.loadRun(assessmentId, db);
     let updated;
     let confirmation;

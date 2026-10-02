@@ -22,8 +22,10 @@ const { technicianMayReach, TECHNICIAN_ALLOW_LIST } = require('../server/middlew
 // Core staff mounts: every route counts. Mixed mounts (customer + staff
 // routers, or a staff router under a public prefix): only routes that run
 // adminAuthenticate (directly, via the router, or via an authStack) count.
-const STAFF_PREFIX = /^\/api\/(admin|tech|dispatch|knowledge|ai)(\/|$)/;
-const MIXED_MOUNTS = new Set(['/api', '/api/stripe/terminal', '/api/service/records', '/api/badges']);
+const STAFF_PREFIX = /^\/api\/(admin|tech|dispatch|knowledge)(\/|$)/;
+// /api/ai carries customer-authenticated routes (/chat) beside staff ones:
+// only its adminAuthenticate routes are staff reach (codex #5568 r11).
+const MIXED_MOUNTS = new Set(['/api', '/api/ai', '/api/stripe/terminal', '/api/service/records', '/api/badges']);
 
 function readIndexMounts() {
   const src = fs.readFileSync(INDEX, 'utf8');

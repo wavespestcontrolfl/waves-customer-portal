@@ -49,3 +49,13 @@ describe('project creation', () => {
     expect(technicianVisitRowInScope(actor, { technician_id: 'tech-A', status: 'confirmed', scheduled_date: '2020-01-01' })).toBe(false);
   });
 });
+
+describe('legacy confirmation fence (codex #5568 r11)', () => {
+  test('a row with no service_id is fenced on a locked current visit for the customer', () => {
+    const src = read('routes/admin-lawn-assessment.js');
+    const confirm = src.slice(src.indexOf("router.post('/confirm'"));
+    expect(confirm).toMatch(/: \(trx\) => assertCustomerVisitStillOwned\(req, trx, assessment\.customer_id\);/);
+    const fn = src.slice(src.indexOf('async function assertCustomerVisitStillOwned('));
+    expect(fn.slice(0, 600)).toMatch(/where\('scheduled_services\.customer_id', customerId\),\s*\)\.forUpdate\(\)\.first\('scheduled_services\.id'\)/);
+  });
+});
