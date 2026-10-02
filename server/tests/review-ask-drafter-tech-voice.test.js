@@ -617,6 +617,28 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(v('Good to see you today, I know you had to get to work. Google review: {review_url}')).toBeNull();
   });
 
+  test('#5524 r16 P1: a weekday must be the cited line\'s weekday, and "last <weekday>" within the past week', () => {
+    const { timingUnsupported } = Drafter.__private;
+    const et = require('../utils/datetime-et').etCalendarDayOf;
+    const recent = et(new Date(Date.now() - 3 * 86400000));
+    const wd = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(`${recent}T12:00:00Z`).getUTCDay()];
+    const lines = ['- [customer, 2026-09-04] I mentioned ants by the door', `- [customer, ${recent}] ants again by the lanai`];
+    expect(timingUnsupported('You mentioned ants last Friday.', ['I mentioned ants by the door'], lines, '2026-09-04')).toBe(true); // a month-old Friday
+    expect(timingUnsupported(`You mentioned ants last ${wd}.`, ['ants again by the lanai'], lines, '2026-09-04')).toBe(false);
+    expect(timingUnsupported('You mentioned ants on Tuesday.', ['I mentioned ants by the door'], lines, '2026-09-04')).toBe(true); // 09-04 was a Friday
+  });
+
+  test('#5524 r16 P1: completion verbs are result claims ("I stopped the ants")', () => {
+    const rec = 'I need to go to work.';
+    const v = (body) => Drafter.verifyTechVoiceDraft(
+      { body, details: [{ text: 'had to get to work', source_quote: 'I need to go to work' }] },
+      { channel: 'sms', firstName: 'Marta', techName: 'Adam', termite: false, corpus: rec, ownWords: rec },
+    );
+    for (const phrase of ['I stopped the ants', 'I cleared the nest', 'I handled the roaches', 'the ants vanished']) {
+      expect(v(`I know you had to get to work, and ${phrase}. Google review: {review_url}`)).toBe('result_claim');
+    }
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);

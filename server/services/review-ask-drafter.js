@@ -745,7 +745,7 @@ const TERM_ALIAS = { roach: "cockroach" };
 // result claims). Matching words against the record cannot tell "please fix
 // the sink" or "moisture under the sink" from "I fixed the sink", so these
 // are refused outright rather than grounded.
-const RESULT_CLAIM_RE = /\b(?:fix(?:e[sd]|ing)?|repair(?:s|ed|ing)?|replac(?:e|es|ed|ing)|install(?:s|ed|ing)?|seal(?:s|ed|ing)?|caulk(?:s|ed|ing)?|kill(?:s|ed|ing)?|eliminat(?:e|es|ed|ing)|remov(?:e|es|ed|ing|al)|solv(?:e|es|ed|ing)|resolv(?:e|es|ed|ing)|gone|cur(?:e|es|ed)|prevent(?:s|ed|ing)?|reduc(?:e|es|ed|ing|tion)|improv(?:e|es|ed|ing|ement)|better|settl(?:e|es|ed|ing)|fewer|healthier|greener|thicker|barrier|protect(?:s|ed|ing|ion)?|worked|results?|difference)\b|\b(?:took|taken|take|takes|taking) care of\b|\bgot rid of\b|\bsorted(?: out)?\b|\bno (?:more|longer)\b|\bunder control\b|\bclear(?:s|ed|ing)? (?:up|out)\b|\bknock(?:s|ed|ing)? (?:back|down|out)\b|\bwip(?:e|es|ed|ing) out\b|\b(?:die|dies|died|dying) off\b|\bless activity\b|\b(?:is|it's|keeps?|keeping|start(?:s|ed)?) working\b|\bdoes its (?:job|work)\b|\bdid the (?:job|trick)\b|\bshould (?:stop|see|be|calm|settle|clear|drop|go|help|work|notice|start|look)\b/i;
+const RESULT_CLAIM_RE = /\b(?:fix(?:e[sd]|ing)?|repair(?:s|ed|ing)?|replac(?:e|es|ed|ing)|install(?:s|ed|ing)?|seal(?:s|ed|ing)?|caulk(?:s|ed|ing)?|kill(?:s|ed|ing)?|eliminat(?:e|es|ed|ing)|remov(?:e|es|ed|ing|al)|solv(?:e|es|ed|ing)|resolv(?:e|es|ed|ing)|gone|cur(?:e|es|ed)|prevent(?:s|ed|ing)?|reduc(?:e|es|ed|ing|tion)|improv(?:e|es|ed|ing|ement)|better|stop(?:s|ped|ping)?|clear(?:s|ed|ing)?|handled|eradicat\w*|exterminat\w*|wiped|vanished|disappeared|dealt\s+with|knocked\s+out|took\s+out|taken\s+out|settl(?:e|es|ed|ing)|fewer|healthier|greener|thicker|barrier|protect(?:s|ed|ing|ion)?|worked|results?|difference)\b|\b(?:took|taken|take|takes|taking) care of\b|\bgot rid of\b|\bsorted(?: out)?\b|\bno (?:more|longer)\b|\bunder control\b|\bclear(?:s|ed|ing)? (?:up|out)\b|\bknock(?:s|ed|ing)? (?:back|down|out)\b|\bwip(?:e|es|ed|ing) out\b|\b(?:die|dies|died|dying) off\b|\bless activity\b|\b(?:is|it's|keeps?|keeping|start(?:s|ed)?) working\b|\bdoes its (?:job|work)\b|\bdid the (?:job|trick)\b|\bshould (?:stop|see|be|calm|settle|clear|drop|go|help|work|notice|start|look)\b/i;
 // Health, money, products/chemicals and household members' role in the visit
 // stay out of review texts (owner rules), even when the record holds them:
 // the fact check also judges these as a class (off_limits); this list is the
@@ -1046,6 +1046,34 @@ function timingUnsupported(sentence, quotes, recordLines, visitDay) {
   }
   VISIT_WEEK_RE.lastIndex = 0;
   if (OTHER_RELATIVE_RE.test(rest)) return true;
+  // A weekday ("last Friday", "thanks for Sunday") must be the weekday of a
+  // cited line's date (undated report lines: the visit day).
+  const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const named = (rest.toLowerCase().match(/\b(?:sun|mon|tues|wednes|thurs|fri|satur)day\b/g) || []);
+  if (named.length) {
+    const dayOfLine = (q) => {
+      const nq = normalizeForMatch(q);
+      const line = recordLines.find((l) => normalizeForMatch(l).includes(nq));
+      const dated = line && /\b(\d{4}-\d{2}-\d{2})\b/.exec(line);
+      const day = dated ? dated[1] : visitDay;
+      return day ? WEEKDAYS[new Date(`${day}T12:00:00Z`).getUTCDay()] : null;
+    };
+    const quoted = new Set(quotes.map(dayOfLine).filter(Boolean));
+    if (named.some((d) => !quoted.has(d))) return true;
+    // "last / this / past Friday" is the most recent one: the cited line must
+    // also be dated within the past week.
+    if (/\b(?:last|this|past)\s+(?:sun|mon|tues|wednes|thurs|fri|satur)day\b/i.test(rest)) {
+      const recent = quotes.some((q) => {
+        const nq = normalizeForMatch(q);
+        const line = recordLines.find((l) => normalizeForMatch(l).includes(nq));
+        const dated = line && /\b(\d{4}-\d{2}-\d{2})\b/.exec(line);
+        const day = dated ? dated[1] : visitDay;
+        const age = day ? Math.round((Date.parse(`${today}T12:00:00Z`) - Date.parse(`${day}T12:00:00Z`)) / 86400000) : null;
+        return age != null && age >= 0 && age <= 7;
+      });
+      if (!recent) return true;
+    }
+  }
   const required = SAME_DAY_RE.test(rest) ? today
     : YESTERDAY_RE.test(rest) ? etCalendarDayOf(new Date(Date.parse(`${today}T12:00:00Z`) - 86400000)) : null;
   if (!required) return false;
