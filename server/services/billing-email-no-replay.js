@@ -61,6 +61,8 @@ function isFinalSenderRenderedEmail(message) {
   return [
     'billing_late_payment_90_day', 'invoice.followup_90_day', 'invoice.followup_combined_90_day',
     'billing.previsit_balance',
+    // Single-shot: no later stage re-sends the rate review letter.
+    'billing.rate_review_notice',
   ].includes(key);
 }
 

@@ -595,6 +595,11 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen }) {
   }
 }
 
+async function stillOwned(dbh, noticeIds, customerId) {
+  const rows = await dbh('price_change_notices').whereIn('id', noticeIds).select('id', 'customer_id');
+  return rows.length === noticeIds.length && rows.every((r) => String(r.customer_id) === String(customerId));
+}
+
 async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId }) {
   const claimed = await claimLines(dbh, entry);
   if (!claimed) return { outcome: 'in_flight' };
@@ -611,6 +616,14 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
   const payload = letterPayload({ customer, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   await freezeLetter(dbh, entry, frozen);
+  // Ownership is re-read right before each provider leg: a merge undo
+  // that repointed a claimed notice stops the send (the fence itself can't
+  // be held across the call — the SMS sender takes it on its own
+  // connection, which would deadlock).
+  if (!(await stillOwned(dbh, claimed, entry.customerId))) {
+    await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen });
+    return { outcome: 'in_flight' };
+  }
   const email = await PriceChangeNotices.sendNoticeEmail({
     customer,
     idempotencyKeyBase: `rate_review:${batchKey}:${entry.customerId}:${claimKey}`,
@@ -619,7 +632,7 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     categories: ['billing', 'rate_review_notice'],
     expectedContentHash: templateHash,
   });
-  const sms = await PriceChangeNotices.sendNoticeSms({
+  const sms = !(await stillOwned(dbh, claimed, entry.customerId)) ? { sent: false, attempted: false } : await PriceChangeNotices.sendNoticeSms({
     customer,
     vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
     actorId,
@@ -641,10 +654,11 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
   await dbh.transaction(async (trx) => {
     for (const l of entry.lines) {
       const { pending_letter: _p, ...meta } = parseJson(l.notice.metadata, {});
-      await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).update({
+      const stamped = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).update({
         status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
         metadata: JSON.stringify({ ...meta, letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
       });
+      if (!stamped) continue; // repointed away mid-send: its ranking row is not this letter's
       await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });
     }
   });
@@ -834,13 +848,16 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   }));
 }
 
-// A prepaid term the customer declined to renew (renewal_decision cancel,
-// or the term cancelled) never renews at the new rate — not upcoming.
+// A prepaid term with a renewal decision recorded, or cancelled, never
+// renews at the noticed amount — not sent, not upcoming.
 async function declinedPrepayTermIds(dbh, rows) {
   const termIds = rows.filter((n) => n.billing_lane === 'annual_prepay').map((n) => parseJson(n.metadata, {}).term_id).filter(Boolean);
   if (!termIds.length) return new Set();
   const terms = await dbh('annual_prepay_terms').whereIn('id', termIds).select('id', 'status', 'renewal_decision');
-  return new Set(terms.filter((t) => String(t.renewal_decision) === 'cancel' || String(t.status) === 'cancelled').map((t) => String(t.id)));
+  // Any recorded renewal decision (cancel, switch_plan, …) means the term
+  // does not renew at the noticed amount — the apply holds on it too
+  // (term_not_live).
+  return new Set(terms.filter((t) => (t.renewal_decision != null && String(t.renewal_decision) !== '') || String(t.status) === 'cancelled').map((t) => String(t.id)));
 }
 
 module.exports = {

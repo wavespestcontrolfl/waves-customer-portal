@@ -352,7 +352,7 @@ describe('sendBatch', () => {
       metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', term_end: '2027-05-14' },
     });
     const b = book({ notices: [prepay] });
-    b.annual_prepay_terms = [{ id: 'term-1', status: 'active', renewal_decision: 'cancel' }];
+    b.annual_prepay_terms = [{ id: 'term-1', status: 'active', renewal_decision: 'switch_plan' }];
     mockDb.reset(b);
     const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
     expect(preview.customers[0].suppressedLines[0].reason).toBe('renewal_declined');
@@ -412,6 +412,8 @@ describe('the letter (real renderer over the seeded template)', () => {
   test('the letter is never replayed from a stored copy (single-shot, gate-checked at the send)', () => {
     const { isSenderRenderedEmail } = require('../services/billing-email-no-replay');
     expect(isSenderRenderedEmail({ template_key: 'billing.rate_review_notice' })).toBe(true);
+    // no later stage re-sends it: a provider block raises the final-notice alert
+    expect(require('../services/billing-email-no-replay').isFinalSenderRenderedEmail({ template_key: 'billing.rate_review_notice' })).toBe(true);
   });
 
   test('the seeded template carries no banned wording', () => {
