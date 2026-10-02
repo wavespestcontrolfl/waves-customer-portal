@@ -148,15 +148,15 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | W2 | `get_schedule_view` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_conversation_thread` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_open_commitments` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
-| W3 | `update_lead_contact` | two_step_card | direct | direct when lead_id alone | card | card | card | refused | refused |
-| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields | card | card | card | refused | refused |
-| W4 | `add_customer_property` | two_step_card | direct | direct when no label | card | card | card | refused | refused |
-| W4 | `update_customer_property` | two_step_card | direct | direct when no label | card | card | card | refused | refused |
+| W3 | `update_lead_contact` | two_step_card | direct | direct when lead_id alone (differs) | card | card | card | refused | refused |
+| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields (differs) | card | card | card | refused | refused |
+| W4 | `add_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
+| W4 | `update_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
 | W4 | `set_primary_property` | two_step_card | direct | direct | card | card | card | refused | refused |
 | W4 | `switch_appointment_property` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
 | W5 | `find_available_slots` | read | direct | direct | direct | direct | direct | refused | refused |
 | W5 | `create_appointment` | bare_write_card | card | card | card | card | card | refused | refused |
-| W6 | `reschedule_appointment` | bare_write_card | direct | direct when the pinned visit is ungrouped | card | card | card | refused | refused |
+| W6 | `reschedule_appointment` | bare_write_card | direct | direct when the pinned visit is ungrouped (differs) | card | card | card | refused | refused |
 | W6/W7 | `send_sms` | bare_write_card | card | card | card | card | card | scoped | refused (differs) |
 | W7 | `draft_sms` | read | direct | direct | direct | direct | direct | n/a | refused |
 | W7 | `list_queued_messages` | read | direct | direct | direct | direct | direct | n/a | refused |
@@ -178,7 +178,7 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 ### Findings from the matrix
 
 1. **Owner-direct is merged and the owner cells now come from it.** Gate off, the owner is an ordinary admin: every write is a card. Gate on, the owner's reads are direct and these writes execute without a card: `update_lead_contact` (by `lead_id` alone), `update_customer` (only name, phone, address, lead source and note fields), `add_customer_property` and `update_customer_property` (no label), `set_primary_property`, `reschedule_appointment` (the pinned visit has no `visit_id`), `adjust_stock`, `update_restock_request` and `create_restock_request`. Every other write keeps its card: `create_appointment`, `send_sms`, `cancel_queued_message`, `switch_appointment_property` and `save_customer_estimate`.
-2. **Two owner cells differ from the scope hypothesis.** The scope expected `switch_appointment_property` and `save_customer_estimate` to execute directly for the owner; the merged policy keeps both on a card (a property move on a grouped visit relocates every service line sharing it; the estimate writers are money). Notes and lead source are direct because both are on `DIRECT_CUSTOMER_FIELDS`; a labelled property add or edit keeps its card.
+2. **Seven owner cells differ from the scope hypothesis.** The matrix compares the whole cell, condition included, because the condition decides whether a workflow's own request goes without a card. Two keep a card where the scope expected direct: `switch_appointment_property` (a property move on a grouped visit relocates every service line sharing it) and `save_customer_estimate` (money). Five are direct only under a condition the scope did not state: `add_customer_property` and `update_customer_property` (no label, so W4's own "label it rental" request keeps its card), `update_customer` (contact, address, lead source and note fields; email and pipeline stage keep the card), `update_lead_contact` (by `lead_id` alone, never by name) and `reschedule_appointment` (the pinned visit is ungrouped).
 3. **Technician reach is narrower on main than the scope expects.** Every tool outside `tech-tools.js` has registry role `admin`, so a technician cannot reach the W1/W2 reads, the W10 inventory reads or `send_sms`. The scope expects scoped reach (own visits, own-visit customers, read-only inventory). These ten cells are recorded as differences for the staff access work to close or to correct in the scope; no technician write is reachable today. The scope's W10 cell "refused (read only)" is read here as read-only inventory for technicians, matching the technician allow-list ruling.
 4. **`send_sms` and the move/booking tools are legacy bare writes.** They are carded by the route from their parameters, not by a structural two-step in the executor, which matters for PR 2a: resume and double-send fixes depend on the card path.
 5. **`needs_me` has no browser page of its own on this commit.** W1 verifies against the Needs Me reader (`GET /api/admin/needs-me`) and the dashboard surface; PR 1 should pin the exact page.

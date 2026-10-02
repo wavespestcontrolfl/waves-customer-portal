@@ -102,7 +102,7 @@ describe('execution-mode matrix on main', () => {
   });
 
   test('the owner cells that differ from the scope are exactly the recorded findings', () => {
-    const differing = rows.filter((r) => matrix.differs(r.owner, matrix.baseCell(r.actual.ownerOn))).map((r) => `${r.tool}:owner`).sort();
+    const differing = rows.filter((r) => matrix.differs(r.owner, r.actual.ownerOn)).map((r) => `${r.tool}:owner`).sort();
     expect(differing).toEqual([...matrix.OWNER_KNOWN_DIFFERENCES].sort());
   });
 

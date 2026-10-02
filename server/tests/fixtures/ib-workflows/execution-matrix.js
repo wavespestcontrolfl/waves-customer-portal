@@ -113,15 +113,30 @@ function ownerGateOnCell(ownerDirect, tool) {
   return `direct when ${OWNER_DIRECT_CONDITIONS[tool] || 'UNDOCUMENTED CONDITION'}`;
 }
 
-const baseCell = (cell) => String(cell).replace(/ when .*$/, '');
 
 // Owner cells (gate on) where owner-direct.js differs from the scope hypothesis,
-// as "tool:owner". The scope expected both to execute without a card; the
-// merged policy keeps a card on them (switch_appointment_property relocates
-// every service line sharing a visit; the estimate writers are money).
+// as "tool:owner". The full cell is compared, condition included: a scope
+// "direct" against a code "direct when <condition>" is a difference, because the
+// condition decides whether the workflow's own request goes without a card.
+//   - switch_appointment_property, save_customer_estimate: the scope expected
+//     direct; the merged policy keeps a card (a property move on a grouped
+//     visit relocates every service line sharing it; the estimate writers are
+//     money)
+//   - add_customer_property, update_customer_property: direct only with no
+//     label, so W4's own "label it rental" request keeps its card
+//   - update_customer: direct only for contact, address, lead source and note
+//     fields; email and pipeline stage keep the card (the scope named name,
+//     phone and address)
+//   - update_lead_contact: direct only by lead_id alone, never by name
+//   - reschedule_appointment: direct only when the pinned visit is ungrouped
 const OWNER_KNOWN_DIFFERENCES = [
   'switch_appointment_property:owner',
   'save_customer_estimate:owner',
+  'add_customer_property:owner',
+  'update_customer_property:owner',
+  'update_customer:owner',
+  'update_lead_contact:owner',
+  'reschedule_appointment:owner',
 ];
 
 function classify(name, action, gates) {
@@ -159,7 +174,7 @@ function renderTable(rows) {
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
   ];
   for (const r of rows) {
-    const ownerMark = differs(r.owner, baseCell(r.actual.ownerOn)) ? ' (differs)' : '';
+    const ownerMark = differs(r.owner, r.actual.ownerOn) ? ' (differs)' : '';
     const adminMark = differs(r.admin, r.actual.admin) ? ' (differs)' : '';
     const techMark = differs(r.tech, r.actual.tech) ? ' (differs)' : '';
     lines.push(`| ${r.workflow} | \`${r.tool}\` | ${r.actual.cls} | ${r.owner} | ${r.actual.ownerOn}${ownerMark} | ${r.actual.ownerOff} | ${r.admin} | ${r.actual.admin}${adminMark} | ${r.tech} | ${r.actual.tech}${techMark} |`);
@@ -169,5 +184,5 @@ function renderTable(rows) {
 
 module.exports = {
   MATRIX, KNOWN_DIFFERENCES, OWNER_KNOWN_DIFFERENCES, OWNER_DIRECT_CONDITIONS,
-  computeActual, renderTable, differs, baseCell, ownerPolicyProbe, ownerGateOnCell,
+  computeActual, renderTable, differs, ownerPolicyProbe, ownerGateOnCell,
 };
