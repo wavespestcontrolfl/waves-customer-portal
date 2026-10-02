@@ -47,7 +47,7 @@ const isStringArray = (v) => Array.isArray(v) && v.every(isNonEmptyString);
 // A case is scored on its LAST step: the final correction if there are any,
 // otherwise the initial request.
 const finalOutcome = (c) => (c.corrections.length ? c.corrections[c.corrections.length - 1].expected.outcome : c.expected.outcome);
-// A step whose answer must show a confirmation card is marked card:true (a card is presented; it is confirmed only when the outcome is completed or submitted).
+// A write step whose answer must show a confirmation card is marked card:true (a card is presented; it is confirmed only when the outcome is completed or submitted). Reads never show one, even when the answer is about payment cards.
 const mentionsCard = (say) => /\bcard(?:ed)?\b/i.test(say || '') && !/\b(no|without|uncarded)\b[^.]{0,12}\bcard(?:ed)?\b/i.test(say || '');
 const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
 
@@ -111,7 +111,8 @@ describe('case shape', () => {
     expect(c.negative).toBe(!SCORED_OUTCOMES.includes(finalOutcome(c)));
     // card expectations agree with what the step says it must show
     for (const step of [c.expected, ...c.corrections.map((x) => x.expected)]) {
-      if (mentionsCard(step.say)) expect(step.card).toBe(true);
+      if (c.kind === 'read') expect(step.card).toBe(false); // a read never shows a confirmation card
+      else if (mentionsCard(step.say)) expect(step.card).toBe(true);
     }
     // with the owner-direct gate off, an owner write that completes went through a card
     if (c.kind === 'write' && c.actor === 'owner' && c.mode === 'owner_direct_off' && SCORED_OUTCOMES.includes(c.expected.outcome)) {

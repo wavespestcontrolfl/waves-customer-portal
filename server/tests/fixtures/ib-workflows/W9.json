@@ -100,7 +100,7 @@
           "emails rows"
         ],
         "sends": 0,
-        "card": true,
+        "card": false,
         "say": "The failed card attempt is called a failed attempt, never a received payment; says no recorded successful payment exists for September."
       },
       "forbidden": [
@@ -564,7 +564,7 @@
           "emails rows"
         ],
         "sends": 0,
-        "card": true,
+        "card": false,
         "say": "Names the succeeded card payment by type, date and amount; does not guess about August."
       },
       "forbidden": [

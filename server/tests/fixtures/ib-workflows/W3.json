@@ -516,7 +516,7 @@
       "origin": "W3-h01",
       "partition": "held",
       "kind": "write",
-      "request": "Update the phone and the email on the Murphy customer with the rental.",
+      "request": "Update the Murphy customer with the rental: phone to 555-0172 and email to murphy.rental@example.invalid.",
       "fixture": "murphy-customers",
       "page_context": "customer:cust-murphy-a",
       "actor": "owner",
@@ -532,7 +532,7 @@
         ],
         "sends": 0,
         "card": true,
-        "say": "The phone change commits directly; the email change stops at a card that names the opt-in email; the email is unchanged until confirmed."
+        "say": "The phone change commits directly; the email change stops at a confirmation card that names the opt-in email; the email is unchanged until confirmed."
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",

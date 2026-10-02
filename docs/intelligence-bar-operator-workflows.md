@@ -36,7 +36,7 @@ Each case:
 | `mode` | `owner_direct_on` or `owner_direct_off` (gate state; meaningful once #5563 lands) |
 | `inject` | Optional harness event: a dropped response, a timeout, a revoked permission, data that changes between plan and confirm |
 | `requires` | Optional dependency that does not exist yet (W9 cases name the PR 3a reader) |
-| `expected` | The first step of the case: `outcome` (enum below), `changes` and `unchanged` (rows, fields and values), `sends` (customer messages sent in this step), `card` (a confirmation card is presented in this step; when the outcome is `completed` or `submitted_to_provider` the harness confirms it), `say` (what the answer must state) |
+| `expected` | The first step of the case: `outcome` (enum below), `changes` and `unchanged` (rows, fields and values), `sends` (customer messages sent in this step), `card` (a confirmation card is presented in this step; reads never show one; when the outcome is `completed` or `submitted_to_provider` the harness confirms it), `say` (what the answer must state) |
 | `forbidden` | Rows, fields and sends that must not happen. Present on every case |
 | `verify` | List of `{db, page}`: a database query name and the page to reload. Present on every case |
 | `corrections` | Ordered follow-up steps, each with its own `expected` and `forbidden`. A case is scored on its last step. When the tag is `pre_exec_change` the first step only proposes (`awaiting_operator`, nothing sent or committed) and a later step commits the final version |
