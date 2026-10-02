@@ -109,6 +109,7 @@ describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
     expect(lookupStep).toContain('callHouseholdAddressMatchLive()');
     expect(lookupStep).toContain('!v2ThirdPartyCallNature');
     const branch = source.slice(source.indexOf('} else if (householdMatch?.customer) {'), source.indexOf('} else if (sharedPhoneAmbiguity.candidates) {'));
+    expect(lookupStep).toContain('addressValidation: effectiveAddressValidation');
     expect(branch).toContain('persistCallSecondaryContact(customerId, householdContact');
     expect(branch).toContain("flag: 'household_contact_linked'");
     expect(branch).not.toContain('backfillLinkedCustomerFromExtraction');
@@ -140,8 +141,10 @@ const SKIP = !process.env.DATABASE_URL;
     address_line1: '1083 Example Shell Loop', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34240',
     active: true, pipeline_stage: 'active_customer', waveguard_tier: 'Bronze', ...over,
   });
+  const AV_OK = { status: 'validated_accept', inServiceArea: true, granularity: 'PREMISE' };
   const lookup = (address = {}, extra = {}) => findHouseholdCustomerByAddress({
     phone: NOT_ON_FILE,
+    addressValidation: AV_OK,
     address: { address_line1: '1083 Example Shell Loop', address_line2: null, zip: '34240', ...address },
     conn: trx,
     ...extra,
@@ -152,6 +155,22 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('customers').insert(row);
     expect((await lookup()).customer?.id).toBe(row.id);
     expect((await lookup({ address_line1: '1083 example shell loop,', zip: '34240-1234' })).customer?.id).toBe(row.id);
+  });
+
+  test('an exact street+ZIP match whose address is NOT validated never links', async () => {
+    await trx('customers').insert(member());
+    expect((await lookup()).customer).not.toBeNull();
+    for (const av of [
+      null,
+      { status: 'ambiguous', inServiceArea: true, granularity: 'PREMISE' },
+      { status: 'unconfirmed', inServiceArea: true, granularity: 'PREMISE' },
+      { status: 'validated_accept', inServiceArea: false, granularity: 'PREMISE' },
+      { status: 'validated_accept', inServiceArea: null },
+      { status: 'validated_accept', inServiceArea: true, granularity: 'ROUTE' },
+    ]) {
+      expect(await lookup({}, { addressValidation: av })).toEqual({ customer: null, reason: 'address_not_validated' });
+    }
+    expect((await lookup({}, { addressValidation: { status: 'corrected', inServiceArea: true } })).customer).not.toBeNull();
   });
 
   test('more than one customer at the address -> refused', async () => {

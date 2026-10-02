@@ -3737,10 +3737,20 @@ async function avAddressUniqueOwner(matches, opts) {
 // a different account). Commercial accounts are refused. Anything weaker
 // returns { customer: null, reason } and the caller falls back to today's
 // behaviour. Never throws.
-async function findHouseholdCustomerByAddress({ phone, address = {}, commercialCall = false, conn = db } = {}) {
+async function findHouseholdCustomerByAddress({ phone, address = {}, commercialCall = false, addressValidation = null, conn = db } = {}) {
   const refuse = (reason) => ({ customer: null, reason });
   try {
     if (commercialCall) return refuse('commercial_call');
+    // A mis-transcribed street must never link a caller to someone else's
+    // account: the call's address must be Address-Validation accepted — the same
+    // predicate as the first-name advisory create (accepted or corrected, in
+    // the service area) and, when the verdict carries it, PREMISE granularity.
+    const av = addressValidation || {};
+    if (!['validated_accept', 'corrected'].includes(av.status)
+      || av.inServiceArea !== true
+      || (av.granularity && av.granularity !== 'PREMISE')) {
+      return refuse('address_not_validated');
+    }
     const key = phoneKey(phone);
     const street = String(address.address_line1 || '').trim();
     const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
@@ -12059,6 +12069,7 @@ const CallRecordingProcessor = {
             address_line2: extracted.address_line2 || null,
             zip: extracted.zip,
           },
+          addressValidation: effectiveAddressValidation,
           commercialCall: v2CanonicalExtraction?.property?.property_type === 'commercial'
             || v2CanonicalExtraction?.property?.hoa_common_area_service === true,
         })
