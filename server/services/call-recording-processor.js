@@ -13770,10 +13770,12 @@ const CallRecordingProcessor = {
       // the scan: a later party already on record still gets its on-site ask.
       const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       for (const secondaryEntry of callSecondaryContacts) {
+      let onSitePath = false;
       try {
         // Pre-persist: only entries that could be asked need the slot-phone read.
         const onSitePhoneFromV2 = onSiteV2PhoneKeys.has(lastTen(secondaryEntry.phone));
         const onSitePreAsk = onSiteOptinAskTrigger(secondaryEntry) && !v2DoNotContact && optinRailLive && onSitePhoneFromV2;
+        onSitePath = onSitePreAsk;
         let onSiteBlockedBeforeWrite = false;
         let onSiteAlreadyConfirmed = false;
         if (onSitePreAsk) {
@@ -13913,6 +13915,10 @@ const CallRecordingProcessor = {
       } catch (e) {
         // Code/name only — a DB error message can echo the contact's phone/email.
         logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+        // An on-site contact's setup (blocking row, status reads, slot write)
+        // must not be dropped on a transient error — the call would finalize
+        // with the person never saved or asked. Fail the pass so it retries.
+        if (onSitePath) throw e;
       }
       }
     }
@@ -18824,6 +18830,9 @@ const CallRecordingProcessor = {
                       // Only a FAILED ask restarts as undispatched; a pending ask
                       // that already went out keeps its marker (never re-sent).
                       dispatched_at: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.dispatched_at END"),
+                      // A reclaimed failed ask drops its old SID: a late failure
+                      // callback for the old send must not flip the new row.
+                      provider_sid: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.provider_sid END"),
                       updated_at: new Date(),
                     });
                     // (A failure of THIS write propagates: the call-processing

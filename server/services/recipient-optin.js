@@ -477,6 +477,9 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
       .where((q) => { if (claim.visitId) q.where({ visit_id: claim.visitId }); })
       .where((q) => { if (leaseAt) q.where({ dispatch_lease_at: leaseAt }); });
+    const markAttempted = () => claimRow()
+      .update({ dispatched_at: new Date(), dispatch_lease_at: null, updated_at: new Date() })
+      .catch(() => {});
     try {
       // An on-site ask takes a DISPATCH LEASE first (dispatch_lease_at, while
       // undispatched, bound to this visit and not already leased): a newer
@@ -615,10 +618,11 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         }
       }
       // A provider timeout resolves as UNCERTAIN: the ask may have gone out,
-      // so it is never released — it stays pending (an on-site ask keeps its
-      // lease until stale) for the sweep's sms_log reconcile.
+      // so it counts as ATTEMPTED — marked dispatched (no SID): the
+      // recipient's YES is honored and no sweep re-sends it.
       if (result?.deliveryOutcome === 'uncertain') {
-        logger.warn(`[recipient-optin] ask for ***${claim.key.slice(-4)} has an uncertain outcome; left pending for reconcile`);
+        await markAttempted();
+        logger.warn(`[recipient-optin] ask for ***${claim.key.slice(-4)} has an uncertain outcome; marked attempted`);
         continue;
       }
       if (result.blocked || result.sent === false || result.suppressed === true || sentinelSid) {
@@ -659,7 +663,8 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         continue;
       }
       if (outcome?.deliveryOutcome === 'uncertain') {
-        logger.warn(`[recipient-optin] ask for ***${claim.key.slice(-4)} has an uncertain outcome; left pending for reconcile: ${err.message}`);
+        await markAttempted();
+        logger.warn(`[recipient-optin] ask for ***${claim.key.slice(-4)} has an uncertain outcome; marked attempted: ${err.message}`);
         continue;
       }
       await claimRow().update({ status: 'ask_failed', dispatch_lease_at: null, updated_at: new Date() }).catch(() => {});
@@ -757,8 +762,14 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       const { isFailureStatus } = require('./twilio-failure-alerts');
       const priorSend = priorSendRow && !isFailureStatus(priorSendRow.status) ? priorSendRow : null;
       if (priorSend) {
+        // Bound to the snapshot (same visit, still undispatched, no live
+        // lease): a booking that rebound the row meanwhile is never marked
+        // dispatched with this older ask's SID.
         await db('recipient_optin')
           .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
+          .where((q) => { if (row.visit_id) q.where({ visit_id: row.visit_id }); else q.whereNull('visit_id'); })
+          .whereNull('dispatched_at')
+          .where(leaseFree)
           .update({
             dispatched_at: new Date(),
             dispatch_lease_at: null,

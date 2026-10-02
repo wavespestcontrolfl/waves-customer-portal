@@ -477,7 +477,7 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
     expect(done.patch.dispatched_at).toBeInstanceOf(Date);
   });
 
-  test('an uncertain sender error leaves the ask pending under its lease for reconcile', async () => {
+  test('an uncertain sender error counts as an attempted ask (dispatched, never ask_failed)', async () => {
     const { optin, writes, send } = load();
     send.mockImplementation(async () => {
       const err = new Error('provider timeout');
@@ -485,13 +485,17 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
       throw err;
     });
     await optin.dispatchRecipientOptins([claim], { id: 'c1' });
-    expect(writes.some((w) => w.patch && (w.patch.status === 'ask_failed' || w.patch.dispatch_lease_at === null))).toBe(false);
+    expect(writes.some((w) => w.patch && w.patch.status === 'ask_failed')).toBe(false);
+    // Counted as attempted: dispatched (a YES is honored, no sweep re-send).
+    expect(writes.some((w) => w.patch && w.patch.dispatched_at instanceof Date && !w.patch.provider_sid)).toBe(true);
   });
 
-  test('a RESOLVED uncertain outcome (provider timeout) is never released to ask_failed', async () => {
+  test('a RESOLVED uncertain outcome (provider timeout) counts as attempted, never ask_failed', async () => {
     const { optin, writes } = load({ sendResult: { sent: false, deliveryOutcome: 'uncertain' } });
     expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(0);
-    expect(writes.some((w) => w.patch && (w.patch.status === 'ask_failed' || w.patch.dispatch_lease_at === null))).toBe(false);
+    expect(writes.some((w) => w.patch && w.patch.status === 'ask_failed')).toBe(false);
+    // Counted as attempted: dispatched (a YES is honored, no sweep re-send).
+    expect(writes.some((w) => w.patch && w.patch.dispatched_at instanceof Date && !w.patch.provider_sid)).toBe(true);
   });
 
   test('an office-review hold returns the lease (pending, for the sweep); nothing sent', async () => {
