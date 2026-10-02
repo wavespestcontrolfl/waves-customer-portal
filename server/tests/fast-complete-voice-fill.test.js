@@ -991,3 +991,22 @@ describe('Codex #5580 round 3: lone common-word names', () => {
     }
   });
 });
+
+describe('Codex #5580 round 3 pre-push audit', () => {
+  const taurus = (over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Taurus', ...over });
+
+  test('a dose the tech negated or corrected is not the amount; the one they meant is', () => {
+    const negated = 'Used Taurus, not four ounces, just two ounces.';
+    expect(validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: negated })] }), ctx, negated).products[0].amount).toBeNull();
+    expect(validateFill(answer({ products: [taurus({ amount: 2, unit: 'fl_oz', heard: negated })] }), ctx, negated).products[0].amount).toBe(2);
+    const corrected = 'Taurus, four ounces, no wait, five ounces.';
+    expect(validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: corrected })] }), ctx, corrected).products[0].amount).toBeNull();
+  });
+
+  test('a sentence said only to the office stays out of the customer note even without its label', () => {
+    const transcript = 'Treated the kitchen for roaches. Note for the office: customer is disputing the invoice.';
+    const out = validateFill(answer({ customerNote: 'Treated the kitchen for roaches. Customer is disputing the invoice.' }), ctx, transcript);
+    expect(out.customerNote).toBe('Treated the kitchen for roaches.');
+    expect(out.officeNote).toBe('Customer is disputing the invoice.');
+  });
+});

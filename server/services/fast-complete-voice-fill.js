@@ -474,8 +474,25 @@ function isCarrierVolume(tokens, start, end, unit) {
 // start / end are token positions (end is past the unit word); nameAt is where a
 // name would begin if the quantity is joined to it by "of" ("four ounces of
 // Taurus", "five of Talstar"), else null.
+// A number the tech took back: negated just before it ("not four ounces") or
+// corrected just after it ("four ounces, no wait, five").
+const RETRACT_BEFORE = 3;
+const CORRECTION_AFTER = 3;
+const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
+function isRetracted(tokens, breaks, start, end) {
+  for (let j = start - 1; j >= 0 && start - j <= RETRACT_BEFORE; j -= 1) {
+    if (isNegationAt(tokens, j)) return true;
+    if (breaks[j]) break;
+  }
+  for (let j = end; j < tokens.length && j - end < CORRECTION_AFTER; j += 1) {
+    if (readSpokenNumber(tokens, j)) break;
+    if (CORRECTION_CUES.some((cue) => cue.every((w, k) => tokens[j + k] === w))) return true;
+  }
+  return false;
+}
+
 function quantitiesIn(text) {
-  const tokens = tokensOf(text);
+  const { tokens, breaks } = tokenize(text);
   const found = [];
   for (let i = 0; i < tokens.length;) {
     const number = readSpokenNumber(tokens, i);
@@ -486,7 +503,7 @@ function quantitiesIn(text) {
     // "three or four", "three to four", "between three and four": a range, so
     // neither number is the one that was meant.
     const joiner = tokens[end] === 'or' || tokens[end] === 'to' || (tokens[end] === 'and' && tokens[i - 1] === 'between');
-    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
+    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit), retracted: isRetracted(tokens, breaks, i, end), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
     i = Math.max(end, i + 1);
   }
   // "three or four": neither number is the one that was meant. "four ounces of
@@ -531,8 +548,8 @@ function amountValue(raw) {
   return Number.isFinite(value) && value > 0 ? { value } : { reason: 'amount_invalid' };
 }
 
-// The unambiguous spoken quantities among `quantities` that EQUAL the value.
-const equalQuantities = (value, quantities) => quantities.filter((q) => !q.ambiguous && Math.abs(q.value - value) < 1e-6);
+// The unambiguous, not taken back, spoken quantities among `quantities` that EQUAL the value.
+const equalQuantities = (value, quantities) => quantities.filter((q) => !q.ambiguous && !q.retracted && Math.abs(q.value - value) < 1e-6);
 
 // Linear feet: a quantity the tech SAID with a distance unit word after it
 // ("180 linear feet", "two hundred ft"), found in the transcript itself, equal
@@ -1082,20 +1099,41 @@ const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|\b(note|tell|let|ask)\s+(fo
 // "treat") were said; anything else is the model's own wording and becomes a Check.
 const NOTE_STOPWORDS = new Set(['there', 'their', 'that', 'this', 'with', 'from', 'were', 'have', 'been', 'will', 'your', 'they', 'them', 'some', 'into', 'also', 'just', 'what', 'when', 'today', 'about']);
 const stemOf = (word) => word.slice(0, 5);
+const noteWords = (sentence) => tokensOf(sentence).filter((w) => w.length >= 4 && !NOTE_STOPWORDS.has(w) && !/^\d/.test(w));
+const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 function noteSentenceHeard(sentence, saidStems) {
-  const words = tokensOf(sentence).filter((w) => w.length >= 4 && !NOTE_STOPWORDS.has(w) && !/^\d/.test(w));
+  const words = noteWords(sentence);
   if (!words.length) return true;
   return words.filter((w) => saidStems.has(stemOf(w))).length * 2 >= words.length;
 }
 
+// Stems the tech said ONLY in sentences addressed to the office ("Note for the
+// office: customer is disputing the invoice"), so a model that drops the label
+// cannot carry that sentence into the customer note.
+function officeOnlyStems(transcript, COMPLETION_ACCESS_CODE_RE) {
+  const office = new Set();
+  const elsewhere = new Set();
+  for (const sentence of String(transcript).split(SENTENCE_SPLIT_RE)) {
+    const toOffice = OFFICE_ADDRESSED_RE.test(sentence) || COMPLETION_ACCESS_CODE_RE.test(sentence);
+    for (const w of noteWords(sentence)) (toOffice ? office : elsewhere).add(stemOf(w));
+  }
+  for (const stem of elsewhere) office.delete(stem);
+  return office;
+}
+const isOfficeContent = (sentence, officeStems) => {
+  const words = noteWords(sentence);
+  return words.length > 0 && words.filter((w) => officeStems.has(stemOf(w))).length * 2 >= words.length;
+};
+
 function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   const { COMPLETION_ACCESS_CODE_RE } = require('./complete-scheduled-service');
   const saidStems = new Set(tokensOf(transcript).map(stemOf));
+  const officeStems = officeOnlyStems(transcript, COMPLETION_ACCESS_CODE_RE);
   const customer = [];
   const office = [];
-  for (const sentence of String(customerRaw ?? '').split(/(?<=[.!?])\s+|\n+/)) {
+  for (const sentence of String(customerRaw ?? '').split(SENTENCE_SPLIT_RE)) {
     if (!sentence.trim()) continue;
-    if (COMPLETION_ACCESS_CODE_RE.test(sentence) || OFFICE_ADDRESSED_RE.test(sentence)) office.push(sentence.trim());
+    if (COMPLETION_ACCESS_CODE_RE.test(sentence) || OFFICE_ADDRESSED_RE.test(sentence) || isOfficeContent(sentence, officeStems)) office.push(sentence.trim());
     else if (noteSentenceHeard(sentence, saidStems)) customer.push(sentence.trim());
     else pushUnclear(unclear, sentence.trim(), 'note_not_heard');
   }
