@@ -55,8 +55,8 @@ test('renders the Billing tab rows as a card, adds Open Billing, and tells the m
   expect(JSON.stringify(cards)).not.toContain('stripe.com');
 });
 
-test('a status the card cannot label is left off and the model is told to hand off', async () => {
-  listPortalPayments.mockResolvedValue({ payments: [{ ...PAYMENTS[0], status: 'disputed' }] });
+test('any payment the card cannot label means no card: a disputed newest payment never lets an older paid one read as the latest', async () => {
+  listPortalPayments.mockResolvedValue({ payments: [{ ...PAYMENTS[0], status: 'disputed' }, PAYMENTS[2]] });
   const actions = []; const cards = [];
   const result = await executeToolCall('show_recent_payments', {}, 'cust-1', actions, cards);
   expect(cards).toEqual([]);

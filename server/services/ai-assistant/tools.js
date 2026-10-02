@@ -299,12 +299,13 @@ async function showRecentPayments(customerId, actions, cards) {
     logger.warn(`[ai-assistant] recent payments read failed for ${customerId}: ${err.message}`);
     return NOT_SHOWN;
   }
-  const rows = [];
-  let otherStatuses = 0;
-  for (const p of page.payments) {
+  // Any payment the card cannot label means no card at all: a card that
+  // skipped the newest (say, disputed) payment would present an older one
+  // as the latest, and the model would confirm a payment that did not land.
+  const unlabeled = page.payments.some((p) => !PAYMENT_STATUS_LABELS[String(p.status || '').toLowerCase()]);
+  const rows = unlabeled ? [] : page.payments.map((p) => {
     const statusLabel = PAYMENT_STATUS_LABELS[String(p.status || '').toLowerCase()];
-    if (!statusLabel) { otherStatuses += 1; continue; }
-    rows.push({
+    return {
       id: String(p.id),
       description: String(p.description || 'Payment').replace(/\s+[—-]\s+per (application|visit)\s*$/i, ''),
       dateLabel: longDateLabel(p.date),
@@ -312,14 +313,14 @@ async function showRecentPayments(customerId, actions, cards) {
       statusLabel: p.refundAmount > 0 && statusLabel === 'Paid' ? `Paid, ${moneyLabel(p.refundAmount)} refunded` : statusLabel,
       methodLabel: methodLabel(p),
       receiptUrl: p.receiptUrl || null,
-    });
-  }
+    };
+  });
   addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
   if (!rows.length) {
     return {
       shown: false,
       count: 0,
-      instruction: otherStatuses
+      instruction: unlabeled
         ? 'The recent payments are in a state the card cannot show. Tell the customer the Billing page has the details and offer to pass the question to the team.'
         : 'No payments are on record for this customer. Say so plainly and show the Billing page.',
     };
