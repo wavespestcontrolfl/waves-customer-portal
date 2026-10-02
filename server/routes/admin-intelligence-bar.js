@@ -3106,6 +3106,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         prompt: redactPii ? redactNote : prompt,
         response: redactPii ? redactNote : finalResponse.substring(0, 5000),
         tool_calls: JSON.stringify(persistedToolCalls),
+        // Who asked. A staff id only (never an email); null when the request
+        // carries no staff identity, so a tally never groups under a made-up id.
+        operator_id: String(req.technicianId || req.technician?.id || '') || null,
         created_at: new Date(),
       });
     } catch {
