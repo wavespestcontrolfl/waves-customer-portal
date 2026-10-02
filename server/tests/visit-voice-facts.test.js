@@ -86,7 +86,9 @@ describe('validateVoiceFacts', () => {
       areas: [{ area: 'garage', quote: 'treated the garage' }],
       pests: [{ name: 'spiders', quote: 'spiders in the eaves' }],
     }, NOTE);
-    expect(facts).toEqual({ areas: [], unclearAreas: [], pests: [], spray: null });
+    // A place heard on a quote the note does not hold is unresolved (the
+    // sheet holds), never recorded and never silently dropped.
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Garage'], pests: [], spray: null });
   });
 
   test('a species the technician did not say never stands', () => {
@@ -166,6 +168,17 @@ describe('validateVoiceFacts', () => {
     // A denied area is never recorded and never silently dropped: the sheet
     // asks for it plainly.
     expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside'], pests: [], spray: null });
+  });
+
+  test('an inexact quote for a place never drops it silently', () => {
+    const note = 'Baited the kitchen counter. Sprayed around the outside of the house.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'inside', quote: 'baited inside the kitchen' }, { area: 'outside', quote: 'Sprayed around the outside of the house' }],
+      pests: [],
+      spray: { method: 'perimeter', quote: 'Sprayed around the outside of the house' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside']);
+    expect(facts.unclearAreas).toEqual(['Inside']);
   });
 
   test('a turn of the sentence starts a new clause', () => {

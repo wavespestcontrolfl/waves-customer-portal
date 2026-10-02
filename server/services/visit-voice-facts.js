@@ -198,14 +198,16 @@ function validateVoiceFacts(json, note) {
   const answer = json && typeof json === 'object' ? json : {};
   const grounding = matchText(note);
   const heardAreas = new Map();
-  const deniedAreas = new Set();
+  const unresolvedAreas = new Set();
   for (const entry of listOf(answer.areas)) {
-    const read = AREA_LABELS[entry?.area] && readQuote(entry.quote, grounding);
-    // Heard, but the note's clause denies it: never recorded, and never
-    // silently dropped either, since a missed indoor treatment loses the
-    // customer's indoor wait. The sheet holds until the tech says it plainly.
-    if (read?.denied) deniedAreas.add(entry.area);
-    else if (read && !heardAreas.has(entry.area)) heardAreas.set(entry.area, read.quote);
+    if (!AREA_LABELS[entry?.area]) continue;
+    const read = readQuote(entry.quote, grounding);
+    // Heard, but the note does not hold the quote or denies it there: never
+    // recorded, and never silently dropped either, since a missed indoor
+    // treatment loses the customer's indoor wait. The sheet holds until the
+    // note is read again or the tech says it plainly.
+    if (!read || read.denied) unresolvedAreas.add(entry.area);
+    else if (!heardAreas.has(entry.area)) heardAreas.set(entry.area, read.quote);
   }
   const pests = new Map();
   for (const entry of listOf(answer.pests)) {
@@ -218,7 +220,7 @@ function validateVoiceFacts(json, note) {
   const sprayRead = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding);
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
-    unclearAreas: AREA_ORDER.filter((area) => deniedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
+    unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
     pests: [...pests].slice(0, MAX_PESTS).map(([name, quote]) => ({ name, quote })),
     spray: sprayRead && !sprayRead.denied ? { method: spray.method, quote: sprayRead.quote } : null,
   };
@@ -260,7 +262,7 @@ async function readVoiceFacts(note) {
   return {
     status: 'read',
     areas: heard.areas.map((entry) => entry.area),
-    // Heard, but the note's clause denies it: the sheet asks for it plainly.
+    // Heard, but not held up by the note: the sheet asks for it plainly.
     unclearAreas: heard.unclearAreas,
     pests: heard.pests.map((entry) => entry.name),
     // 'perimeter' | 'spot' | null (not said)
