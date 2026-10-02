@@ -139,7 +139,7 @@ describe('validateVoiceFacts', () => {
         { name: 'ants', quote: 'Treated for ants along the patio' },
         { name: 'spiders', quote: 'Checked for spiders, none found' },
       ],
-      spray: { method: 'none', quote: '' },
+      spray: { method: 'not_said', quote: '' },
     }, note);
     expect(facts.pests.map((pest) => pest.name)).toEqual(['ants']);
   });
@@ -249,7 +249,7 @@ describe('validateVoiceFacts', () => {
     const facts = validateVoiceFacts({
       areas: [{ area: 'inside', quote: 'Inside' }, { area: 'garage', quote: 'The garage' }, { area: 'outside', quote: 'Nothing outside' }],
       pests: [{ name: 'spiders', quote: 'Checked for spiders' }],
-      spray: { method: 'none', quote: '' },
+      spray: { method: 'not_said', quote: '' },
     }, note);
     expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside', 'Garage'], pests: [], spray: null, unclearSpray: false, noSpray: false });
   });
@@ -269,7 +269,7 @@ describe('validateVoiceFacts', () => {
 
   test('a fact said twice stands when one saying is not denied', () => {
     const note = 'Did not treat inside yesterday. Today we treat inside the kitchen.';
-    const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'treat inside' }], pests: [], spray: { method: 'none', quote: '' } }, note);
+    const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'treat inside' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
     expect(facts.areas.map((entry) => entry.area)).toEqual(['Inside']);
   });
 
@@ -300,7 +300,7 @@ describe('validateVoiceFacts', () => {
       .toEqual({ method: 'perimeter', quote: 'sprayed around the outside of the house' });
     expect(read({ method: 'spot', quote: "Didn't spray the garage door frames" })).toBeNull();
     expect(read({ method: 'perimeter', quote: 'sprayed the whole perimeter' })).toBeNull();
-    expect(read({ method: 'none', quote: '' })).toBeNull();
+    expect(read({ method: 'not_said', quote: '' })).toBeNull();
     expect(read(undefined)).toBeNull();
   });
 
