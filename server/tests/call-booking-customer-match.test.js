@@ -183,6 +183,18 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     expect(block).toContain("bridgeNeedsConfirmation.push('missing_first_name')");
   });
 
+  test('wiring: the fenced re-read re-applies the advisory address hold when the fresh row lost its first name', () => {
+    const start = source.indexOf('const freshHoldFields = advisoryBookingAddressHoldFields({');
+    const block = source.slice(start, start + 900);
+    expect(block).toContain('customerValidation: freshValidation');
+    expect(block).toContain("freshHoldFields.includes('first_name')");
+    expect(block).toContain('throw new Error(');
+    // the same decision the pre-fence hold makes: a fresh first_name advisory without an exact address holds; with one it does not
+    const fresh = { ok: true, missing: [], advisory: ['first_name'] };
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: fresh, avPositiveForBooking: true, exactAddressForBooking: false })).toEqual(['first_name']);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: fresh, avPositiveForBooking: true, exactAddressForBooking: true })).toEqual([]);
+  });
+
   test('the card text states the durable fact, not a booking', () => {
     expect(source).toContain('missing_first_name: "customer created without a first name — get it"');
     expect(source).not.toContain('booked on the last name alone');

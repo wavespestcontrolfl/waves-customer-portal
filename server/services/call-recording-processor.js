@@ -17308,6 +17308,16 @@ const CallRecordingProcessor = {
                   if (freshValidation.advisory?.includes('last_name')) {
                     await fileLastNameAdvisoryCard(trx);
                   }
+                  // The fresh row may have LOST its first name (merge-undo) since the pre-fence
+                  // validation passed: re-apply the same advisory address hold, so a
+                  // last-name-only booking never proceeds without the exact validated address.
+                  const freshHoldFields = advisoryBookingAddressHoldFields({
+                    enforceModeActive, customerValidation: freshValidation, avPositiveForBooking, exactAddressForBooking,
+                  });
+                  if (freshHoldFields.includes('first_name')) {
+                    await fileFirstNameAdvisoryCard(trx);
+                    throw new Error('customer lost its first name while waiting on the comms fence (merge-undo) — the booking needs the exact validated address; held for office review');
+                  }
                   if (freshValidation.advisory?.includes('first_name')) {
                     await fileFirstNameAdvisoryCard(trx);
                     // A card this fenced path left open must count toward review (the
