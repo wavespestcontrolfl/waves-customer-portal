@@ -21,6 +21,7 @@ export default function NoteBoxPhotos({
   onRemove,
   onCaption,
   onEditingChange,
+  micBusy = false,
   onDescribeWithAi,
   describing,
   describeError,
@@ -32,19 +33,28 @@ export default function NoteBoxPhotos({
   // The open description: which photo, and a session count that remounts
   // its editor (and the editor's own mic) for every photo opened.
   const [editing, setEditing] = useState(null);
+  const [editingData, setEditingData] = useState(null);
   const [session, setSession] = useState(0);
   const open = (index) => {
     if (disabled) return;
     setEditing(index);
+    setEditingData(photos[index]?.data ?? null);
     setSession((n) => n + 1);
   };
   const close = () => setEditing(null);
-  const editingPhoto = editing != null ? photos[editing] : null;
+  // A restored or discarded draft can replace the photos under an open
+  // description: it closes rather than save onto, or wait on, a photo it was
+  // not opened for (codex local r3 on #5589).
+  const isOpen = editing != null && photos[editing] != null && photos[editing].data === editingData;
+  useEffect(() => {
+    if (editing != null && !isOpen) setEditing(null);
+  }, [editing, isOpen]);
+  const editingPhoto = isOpen ? photos[editing] : null;
   // The form holds Generate and Complete while a description is open: it may
   // carry typed or dictated words not yet on the photo.
   useEffect(() => {
-    onEditingChange?.(editing != null);
-  }, [editing, onEditingChange]);
+    onEditingChange?.(isOpen);
+  }, [isOpen, onEditingChange]);
   useEffect(() => () => onEditingChange?.(false), [onEditingChange]);
   const button = {
     background: 'transparent',
@@ -89,6 +99,7 @@ export default function NoteBoxPhotos({
           index={editing}
           initial={editingPhoto.caption || ''}
           disabled={disabled}
+          micBusy={micBusy}
           palette={palette}
           button={button}
           dictationServiceId={dictationServiceId}
@@ -135,7 +146,9 @@ export default function NoteBoxPhotos({
 // transcript in flight never reaches another photo.
 // While the form is busy (a report being written from these captions) the
 // editor locks: nothing changes a caption the report request already read.
-function CaptionEditor({ index, initial, disabled, palette, button, dictationServiceId, onSave, onCancel }) {
+// `micBusy`: the notes mic is recording or transcribing, and one microphone
+// records at a time (an upload recording would hear both).
+function CaptionEditor({ index, initial, disabled, micBusy, palette, button, dictationServiceId, onSave, onCancel }) {
   const [draft, setDraft] = useState(initial);
   const dictation = useSpeechDictation(
     (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text).slice(0, PHOTO_CAPTION_MAX_CHARS)),
@@ -187,7 +200,7 @@ function CaptionEditor({ index, initial, disabled, palette, button, dictationSer
             <button
               type="button"
               onClick={dictation.toggle}
-              disabled={disabled || dictation.uploading}
+              disabled={disabled || dictation.uploading || (micBusy && !dictation.listening)}
               aria-label={dictation.listening ? 'Stop describing by voice' : 'Describe by voice'}
               style={{
                 position: 'absolute',

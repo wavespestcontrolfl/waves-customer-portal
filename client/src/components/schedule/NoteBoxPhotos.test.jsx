@@ -112,4 +112,26 @@ describe('NoteBoxPhotos', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onEditingChange).toHaveBeenLastCalledWith(false);
   });
+
+  it('a draft that replaces the photos under an open description closes it, and the form is released (codex local r3 on #5589)', () => {
+    const onEditingChange = vi.fn();
+    const props = { max: 5, disabled: false, palette, dictationServiceId: 'svc-1', onAdd: () => {}, onRemove: () => {}, onCaption: vi.fn(), onEditingChange, summary: '' };
+    const view = render(<NoteBoxPhotos photos={start} {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    expect(onEditingChange).toHaveBeenLastCalledWith(true);
+    // A restored draft puts a different photo at index 1.
+    view.rerender(<NoteBoxPhotos photos={[start[0], { name: 'z.jpg', data: 'data:z', caption: '' }]} {...props} />);
+    expect(screen.queryByLabelText('Description for photo 2')).toBeNull();
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+    // A discarded draft clears them: nothing stays open.
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    view.rerender(<NoteBoxPhotos photos={[]} {...props} />);
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('the description mic waits while the notes mic is recording or transcribing', () => {
+    render(<NoteBoxPhotos photos={start} max={5} disabled={false} micBusy palette={palette} dictationServiceId="svc-1" onAdd={() => {}} onRemove={() => {}} onCaption={() => {}} summary="" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    expect(screen.getByRole('button', { name: 'Describe by voice' }).disabled).toBe(true);
+  });
 });

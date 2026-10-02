@@ -19984,7 +19984,9 @@ export function CompletionPanel({
                   <button
                     type="button"
                     onClick={dictation.toggle}
-                    disabled={generating || dictation.uploading}
+                    // One microphone at a time: an open photo description holds the notes
+                    // mic (it can still stop a recording already going).
+                    disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                     aria-busy={dictation.uploading || undefined}
                     aria-label={
                       dictation.uploading
@@ -20033,6 +20035,7 @@ export function CompletionPanel({
                     onRemove={removePhoto}
                     onCaption={setPhotoCaption}
                     onEditingChange={setPhotoDescriptionOpen}
+                    micBusy={dictation.listening || dictation.starting || dictation.uploading}
                     onDescribeWithAi={handlePhotoAnalyze}
                     describing={photoAnalyzing}
                     describeError={photoAiError}
@@ -22472,7 +22475,9 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={dictation.toggle}
-                disabled={generating || dictation.uploading}
+                // One microphone at a time: an open photo description holds the notes
+                // mic (it can still stop a recording already going).
+                disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                 aria-busy={dictation.uploading || undefined}
                 aria-label={
                   dictation.uploading
@@ -22520,6 +22525,7 @@ export function CompletionPanel({
                 onRemove={removePhoto}
                 onCaption={setPhotoCaption}
                 onEditingChange={setPhotoDescriptionOpen}
+                micBusy={dictation.listening || dictation.starting || dictation.uploading}
                 onDescribeWithAi={handlePhotoAnalyze}
                 describing={photoAnalyzing}
                 describeError={photoAiError}
