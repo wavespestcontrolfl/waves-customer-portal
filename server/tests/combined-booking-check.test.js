@@ -204,8 +204,8 @@ describe('visit prices', () => {
 
   test('first visits, prepaid visits and unpriced visits are never price-checked', () => {
     const lawn = lawnRows({ parentOverrides: { estimated_price: 999 } }).map((row, i) => {
-      if (i === 1) return { ...row, estimated_price: 90, prepaid_amount: 90 };
-      if (i === 2) return { ...row, estimated_price: 90, prepaid_amount: 100, annual_prepay_term_id: 'term-1' };
+      if (i === 1) return { ...row, estimated_price: 90, prepay_covered: true };
+      if (i === 2) return { ...row, estimated_price: 90, prepay_covered: true };
       if (i === 3) return { ...row, estimated_price: null };
       return row.recurring_parent_id ? { ...row, estimated_price: 100 } : row;
     });
@@ -241,6 +241,14 @@ describe('visit prices', () => {
     expect(texts(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['5 lawn visits priced $90.00 x4, $80.00 x1, accepted $100.00']);
   });
 
+  test('a termite bait + bond plan (a rider beside the bait) has no per-line price to check', () => {
+    const BAIT = { service: 'termite_bait', name: 'Termite Bait Stations', visitsPerYear: 4, frequency: 'quarterly', annual: 480, mo: 40 };
+    const BOND = { service: 'termite_bond_1yr', name: 'Termite Bond 1yr', visitsPerYear: 1, frequency: 'annual', annual: 120, mo: 10 };
+    const plan = check.acceptedPlan(estimate([PEST, BAIT, BOND]));
+    expect(plan.prices.get('termite_bait')).toBeNull();
+    expect(plan.prices.get('pest_control')).toBe(150);
+  });
+
   test('a prepay term link with no live prepaid amount (a voided term keeps the link) is still price-checked', () => {
     const lawn = priced(lawnRows(), 90).map((row) => (row.recurring_parent_id ? { ...row, annual_prepay_term_id: 'term-voided' } : row));
     expect(codes(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['price_mismatch']);
@@ -255,6 +263,26 @@ describe('visit prices', () => {
       .toBe('5 lawn visits priced $90.00, accepted $100.00 (not re-checked).');
     // A missing time/tech finding is not held for an unknown price.
     expect(outcomeOf(verdict, [{ code: 'missing_time_tech', families: ['lawn_care'], text: 'x' }]).outcome).toBe('ok');
+  });
+});
+
+describe('markPrepayCovered', () => {
+  const renewals = require('../services/annual-prepay-renewals');
+  afterEach(() => jest.restoreAllMocks());
+  test('a cash payment covers a visit only in full; an annual stamp only when the validator confirms a live term', async () => {
+    const validator = jest.spyOn(renewals, 'annualPrepayCoversVisit').mockImplementation(async (row) => row.id === 'live');
+    const rows = [
+      { id: 'partial', prepaid_amount: 10, prepaid_method: 'cash', estimated_price: 120 },
+      { id: 'full', prepaid_amount: 120, prepaid_method: 'check', estimated_price: 120 },
+      { id: 'live', prepaid_amount: 120, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1', estimated_price: 120 },
+      { id: 'stale', prepaid_amount: 120, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't2', estimated_price: 120 },
+      { id: 'linkonly', annual_prepay_term_id: 't3', estimated_price: 120 },
+    ];
+    await check.markPrepayCovered({}, rows);
+    expect(Object.fromEntries(rows.map((row) => [row.id, row.prepay_covered]))).toEqual({
+      partial: false, full: true, live: true, stale: false, linkonly: false,
+    });
+    expect(validator).toHaveBeenCalledTimes(2);
   });
 });
 

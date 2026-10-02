@@ -499,6 +499,33 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a booking that kept an existing series for one service is still price-checked on the new one', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      // The duplicate-series guard kept the customer's older lawn series: this estimate seeded pest only.
+      const lawnRows = rows.filter((row) => /lawn/i.test(row.service_type));
+      const lawnParent = lawnRows.find((row) => !row.recurring_parent_id);
+      await trx('scheduled_services').whereIn('id', lawnRows.map((row) => row.id)).update({ source_estimate_id: null });
+      await trx('scheduled_services').whereIn('id', lawnRows.filter((row) => row.recurring_parent_id).map((row) => row.id)).del();
+      await trx('activity_log').insert({ customer_id: est.customerId, action: 'recurring_series_skipped',
+        description: 'kept existing lawn series', metadata: JSON.stringify({ estimateId: est.estimateId, existingParentId: lawnParent.id }) });
+      const pestChild = rows.find((row) => row.recurring_parent_id && /pest/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: pestChild.id }).update({ estimated_price: 140 });
+      await runCombinedBookingCheck({ conn: trx });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.metadata.problemCodes).toEqual(['price_mismatch']);
+      expect(alert.metadata.itemKeys).toEqual(['pest_control']);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('an OK result writes no row (an fyi fact)', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

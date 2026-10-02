@@ -175,9 +175,13 @@ function acceptedPrices(converter, lines, families, { estimate, acceptedFrequenc
   const reconciles = Number(estimate.annual_total) > 0 && annualCents === Math.round(Number(estimate.annual_total) * 100);
   const prices = new Map();
   for (const key of families) {
+    // One line per family: a family billed through two lines (a termite bond
+    // rider beside the bait) is priced by the converter as one whole-plan
+    // amount per application that the per-line rule cannot reproduce, so its
+    // price is unknown rather than guessed.
     const perVisits = lines.filter((line) => family(line) === key)
       .map((line) => converter.lineAnnualPerVisitAmount(line, acceptedFrequency));
-    const known = reconciles && perVisits.length > 0 && perVisits.every((amount) => amount > 0);
+    const known = reconciles && perVisits.length === 1 && perVisits[0] > 0;
     prices.set(key, known ? Math.round(perVisits.reduce((a, b) => a + b, 0) * 100) / 100 : null);
   }
   return prices;
@@ -250,9 +254,8 @@ function checkPrices(dated, families, prices) {
   for (const row of dated) {
     const price = Number(row.estimated_price);
     if (!row.recurring_parent_id || row.is_recurring === false || !(price > 0)) continue;
-    // A live prepay stamp, not the term link alone: a voided / refunded term
-    // clears prepaid_amount but keeps the link for audit, and that visit bills.
-    if (Number(row.prepaid_amount) > 0) continue;
+    // Fully covered by a prepayment (markPrepayCovered): its price never bills.
+    if (row.prepay_covered) continue;
     // Every service the row performs must have a known accepted price (one
     // the customer did not accept, or whose price is unknown, means the row's
     // price cannot be judged); it is reported under the services being judged.
@@ -384,6 +387,28 @@ function composeAlert(verdict, { customerName, customerId, estimateId }) {
 
 // --- database side ---------------------------------------------------------
 
+// row.prepay_covered: the visit is fully paid ahead, so its own price never
+// bills and is not price-checked. An out-of-band payment (cash, check, Zelle)
+// covers it only when it is at least the visit's price (completion bills the
+// rest of a partial one); an annual-prepay stamp only when annualPrepayCoversVisit
+// confirms it against a live, paid term, the same authority completion
+// trusts (fail-closed: unverifiable reads as not covered).
+async function markPrepayCovered(conn, rows) {
+  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
+  const { hasOutOfBandPrepaidStamp } = require('./schedule-integrity-watchdog');
+  for (const row of rows) {
+    row.prepay_covered = false;
+    const paid = Number(row.prepaid_amount);
+    if (!(paid > 0) || !(Number(row.estimated_price) > 0)) continue;
+    if (hasOutOfBandPrepaidStamp(row)) { row.prepay_covered = paid + 0.005 >= Number(row.estimated_price); continue; }
+    try {
+      row.prepay_covered = await annualPrepayCoversVisit(row, conn) === true;
+    } catch (err) {
+      logger.warn(`[combined-booking-check] prepay coverage unverifiable for a visit: ${err.message}`);
+    }
+  }
+}
+
 async function loadContext(conn, estimate) {
   const estimateId = estimate.id;
   const customerId = estimate.customer_id;
@@ -409,11 +434,10 @@ async function loadContext(conn, estimate) {
         this.select('id').from('scheduled_services').where({ source_estimate_id: estimateId, customer_id: customerId });
       });
     })
-    .select('s.id', 's.status', 's.recurring_parent_id', 's.is_recurring', 's.is_callback', 's.followup_included',
-      's.service_type', 's.service_key_snapshot', 's.window_start', 's.technician_id',
-      's.estimated_price', 's.prepaid_amount', 's.annual_prepay_term_id',
-      'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
+    // Whole row: annualPrepayCoversVisit validates prepay coverage from the row itself.
+    .select('s.*', 'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
+  await markPrepayCovered(conn, rows);
   const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name');
   return {
     estimate,
@@ -602,7 +626,8 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
             // The daily run also judges every upcoming PRICED series child
             // (checkPrices), but only on a booking whose series come from two or
             // more services, or one combined route that performs two (pest +
-            // termite bait, lawn + T&S), decided in SQL so the large
+            // termite bait, lawn + T&S), or that kept another service's existing
+            // series (the duplicate-series guard), decided in SQL so the large
             // single-service population is never loaded; the urgent pass is
             // about time and technician only.
             if (!lastDay) {
@@ -611,7 +636,9 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
                   WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL) >= 2
                   OR EXISTS (SELECT 1 FROM scheduled_services r LEFT JOIN services cat ON cat.id = r.service_id
                     WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL
-                      AND COALESCE(cat.service_key, r.service_key_snapshot) = ANY(?)))`, [multiServiceRouteKeys()]));
+                      AND COALESCE(cat.service_key, r.service_key_snapshot) = ANY(?))
+                  OR EXISTS (SELECT 1 FROM activity_log a WHERE a.customer_id = e.customer_id
+                    AND a.action = 'recurring_series_skipped' AND a.metadata->>'estimateId' = e.id::text))`, [multiServiceRouteKeys()]));
             }
           });
       });
@@ -762,6 +789,8 @@ module.exports = {
   outcomeOf,
   heldProblems,
   acceptedFamilies,
+  acceptedPlan,
+  markPrepayCovered,
   shortName,
   OPS_KEY,
   DONE_WHEN,
