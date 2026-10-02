@@ -1286,8 +1286,8 @@ describe('retired topics', () => {
     }
   });
 
-  test('registry size is deliberate (46: 51 proposed minus 5 kept live)', () => {
-    expect(gate._internals.RETIRED_POSTS).toHaveLength(46);
+  test('registry size is deliberate (45: 51 proposed minus 6 kept live)', () => {
+    expect(gate._internals.RETIRED_POSTS).toHaveLength(45);
   });
 
   test('a different topic in the same family still passes', () => {
