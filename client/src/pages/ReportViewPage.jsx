@@ -2651,6 +2651,116 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   );
 }
 
+// Re-service report card (GATE_RESERVICE_REPORT_CARD, owner-approved card
+// 2026-09-26): "You told us" from the customer's own booking words (FROZEN on
+// the record at completion), a "What we did" summary, and the "Still seeing X?
+// Tell us" button. Every phrase and the quote rule are decided on the SERVER
+// (reservice-report-card.js) — this only renders what the payload carries: a
+// verbatim picker/text request arrives `quoted: true` and gets quote marks; a
+// call paraphrase or an office entry arrives `quoted: false` with its own
+// lead-in and never gets any. Absent payload key (gate dark, not a callback,
+// older cache) renders nothing, so the page is byte-identical to before.
+// Live view only — the PDF prints the same card from ServiceReportDocument.
+// The button reuses the footer's existing path (the AUTHENTICATED portal
+// Schedule tab, behind the server's reserviceEligible boolean): no token or
+// public route is added to this forwardable report.
+function reserviceCardJoin(items) {
+  const list = (Array.isArray(items) ? items : []).filter((item) => typeof item === 'string' && item);
+  if (list.length <= 1) return list[0] || '';
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+const reserviceCardCapitalize = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : '');
+
+// What the card prints, from the server payload alone (shared with the PDF
+// document): the "You told us" line (quote marks only when the server says
+// the words are verbatim), the customer's pest chips, the "What we did" rows
+// and safety line, and the still-seeing topic. null = no card payload.
+export function reserviceCardView(card) {
+  if (!card || typeof card !== 'object') return null;
+  const told = card.youToldUs && typeof card.youToldUs === 'object' ? card.youToldUs : null;
+  const did = card.whatWeDid && typeof card.whatWeDid === 'object' ? card.whatWeDid : null;
+  const toldPests = Array.isArray(told?.pests) ? told.pests.filter(Boolean) : [];
+  const toldLine = told && told.text
+    ? `${told.lead ? `${told.lead} ` : ''}${told.quoted ? `\u201C${told.text}\u201D` : told.text}`
+    : '';
+  const rows = did ? [
+    Array.isArray(did.pests) && did.pests.length ? ['Treated for', reserviceCardCapitalize(reserviceCardJoin(did.pests))] : null,
+    did.where ? ['Where', reserviceCardCapitalize(did.where)] : null,
+    did.found?.label ? ['Activity seen', did.found.label] : null,
+  ].filter(Boolean) : [];
+  return {
+    toldLine,
+    toldQuoted: Boolean(told?.quoted),
+    toldPests,
+    showTold: Boolean(told && (toldLine || toldPests.length)),
+    rows,
+    safetyLine: did?.safetyLine || '',
+    showDid: Boolean(did && (rows.length || did.safetyLine)),
+    topic: typeof card.stillSeeing === 'string' ? card.stillSeeing.trim() : '',
+  };
+}
+
+export function ReserviceReportCard({ data, mode }) {
+  const view = mode === 'live' ? reserviceCardView(data?.reserviceReportCard) : null;
+  if (!view) return null;
+  const {
+    toldLine, toldQuoted, toldPests, showTold, rows: didRows, safetyLine, showDid, topic,
+  } = view;
+  const canRebook = data.reserviceEligible === true && Boolean(topic);
+  if (!showTold && !showDid && !canRebook) return null;
+  const cta = canRebook ? (
+    <div className="reservice-card-cta">
+      <a data-glass-accent="" href="/?tab=schedule" style={actionButtonStyle('primary')}>
+        {`Still seeing ${topic}? Tell us`}
+      </a>
+    </div>
+  ) : null;
+  return (
+    <>
+      {showTold && (
+        <section data-glass="card" className="sr-section reservice-card" id="reservice-you-told-us" data-section="reservice-you-told-us">
+          <h2 data-gt="h3x">You told us</h2>
+          {toldLine && (
+            <p className="reservice-card-body" data-quoted={toldQuoted ? 'true' : 'false'}>{toldLine}</p>
+          )}
+          {toldPests.length > 0 && (
+            <div className="reservice-chips" role="list" aria-label="What you reported">
+              {toldPests.map((pest) => (
+                <span key={pest} role="listitem" data-glass="chip" className="reservice-chip">{pest}</span>
+              ))}
+            </div>
+          )}
+          {!showDid && cta}
+        </section>
+      )}
+      {showDid && (
+        <section data-glass="card" className="sr-section reservice-card" id="reservice-what-we-did" data-section="reservice-what-we-did">
+          <h2 data-gt="h3x">What we did</h2>
+          {didRows.length > 0 && (
+            <div className="reservice-rows">
+              {didRows.map(([label, value]) => (
+                <div key={label} data-glass="soft" className="reservice-row">
+                  <div data-gt="eyebrow" className="reservice-row-label">{label}</div>
+                  <div className="reservice-row-value">{value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {safetyLine && <p className="reservice-card-body">{safetyLine}</p>}
+          {cta}
+        </section>
+      )}
+      {!showTold && !showDid && cta && (
+        <section data-glass="card" className="sr-section reservice-card" id="reservice-still-seeing" data-section="reservice-still-seeing">
+          {cta}
+        </section>
+      )}
+    </>
+  );
+}
+
 // "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
 // re-service COUNTS for this year — never a price, owner rule that prices
 // only ever appear on estimate pages. The server sends it for members only.
@@ -6737,6 +6847,68 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .map-footnote {
           margin-top: 12px;
         }
+        /* Re-service report card (GATE_RESERVICE_REPORT_CARD): glass type sheet —
+           16px body, 14/600 uppercase row labels (own class: the glass layout
+           hides .section-eyebrow), card titles via data-gt="h3x" (20/600). */
+        .reservice-card-body {
+          margin: 0 0 12px;
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.5;
+          overflow-wrap: anywhere;
+        }
+        .reservice-chips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin: 0 0 12px;
+        }
+        .reservice-chip {
+          display: inline-flex;
+          align-items: center;
+          min-height: 36px;
+          padding: 6px 14px;
+          border-radius: 999px;
+          border: 1px solid var(--line);
+          color: var(--text);
+          font-size: 14px;
+          font-weight: 600;
+          line-height: 1.2;
+        }
+        .reservice-rows {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+          gap: 10px;
+          margin: 0 0 14px;
+        }
+        .reservice-row {
+          padding: 12px 14px;
+          border-radius: 12px;
+          border: 1px solid var(--line);
+        }
+        .reservice-row-label {
+          margin: 0 0 4px;
+          color: var(--muted);
+          font-size: 14px;
+          font-weight: 600;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+        }
+        .reservice-row-value {
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.4;
+        }
+        .reservice-card-cta {
+          margin-top: 4px;
+        }
+        .reservice-card-cta a {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 44px;
+          text-decoration: none;
+        }
         .coverage-section-header {
           display: flex;
           align-items: flex-start;
@@ -9068,6 +9240,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             <LawnLeadCard lead={data.reportV2.lead} snapshot={data.reportV2.snapshot || {}} style={{ marginTop: 16 }} />
           </LawnPrintContext.Provider>
         )}
+
+        <ReserviceReportCard data={data} mode={mode} />
 
         <PlanSummaryCard data={data} mode={mode} />
 

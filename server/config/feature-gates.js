@@ -85,6 +85,7 @@
  *   GATE_STAMPED_ZERO_FREE=true (a scheduled_services.estimated_price stamped exactly 0 — not NULL, not '' — bills nothing in EVERY billing lane: per-application, per-visit, monthly_membership, legacy-null, annual prepay; owner ruling 2026-09-28, waves-billing skill invariant #8, "$0 means charge nothing", superseding invariant #6's monthly-fallback note while the gate is on. NULL/blank is unchanged — still falls through to per_application_fee / monthly_rate as today. Off = byte-identical to today on every path; canonical CALL-TIME reader stampedZeroFreeLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
+ *   GATE_RESERVICE_REPORT_CARD=true (re-service report card: on a pest/lawn callback report whose reserviceReport block composed, the payload carries `reserviceReportCard` — a "You told us" section from the customer's booking words FROZEN onto service_data.reserviceRequest at completion (scrubbed with the report writer's customer-words scrub; picker/text = quoted, call/office = never quoted), a "What we did" summary (pests from product targets, where from areas_serviced, activity from the technician's tapped rating, the safety line only with a recorded wet application; performed visits only) and the "Still seeing X? Tell us" topic for the existing portal Schedule link, on the web report and the PDF (-rcd1 cache key). Read at call time by services/service-report/reservice-report-card.js, exact 'true', and only ever alongside GATE_RESERVICE_REPORT_COPY; off = payload, page and PDF key byte-identical to before. Kill switch: unset.)
  *   GATE_RESERVICE_OFFICE_REQUEST=true (New Appointment modal "Customer's words" box on a pest/lawn re-service: suggests the customer's latest inbound text or call note from the last 72 hours with a "Use this" button, saved to scheduled_services.customer_request/_source; the server decides the source — unchanged text/call = quotable text/call, edited or typed = office. Off unless exactly 'true' (isEnabled('reserviceOfficeRequest')); off = the modal shows nothing new, GET /api/admin/schedule/reservice-request-suggestion answers {enabled:false, suggestion:null}, and POST ignores customerRequest. Sends nothing to a customer.)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ZONE_ROUTE_DAYS=true (customer-facing booking + estimate picker lift the self-serve detour cap on a far zone's route day — default Friday for Venice / North Port — so an EMPTY route day can be offered and seeded; config in system_settings key schedule_zone_route_days; phone/office/IB/auto-dispatch untouched; read at call time via zoneRouteDaysLive(); unset = today's cap everywhere)
@@ -3158,6 +3159,18 @@ const gates = {
   // re-render via the -rs1 key component. This entry is the status/log
   // listing. Kill switch: unset the var (payload keeps `isCallback` as data).
   reserviceReportCopy: process.env.GATE_RESERVICE_REPORT_COPY === 'true',
+
+  // Re-service report card (2026-10-01, PR D of the Fast Complete scope,
+  // owner-approved card 2026-09-26): "You told us" (the customer's booking
+  // words, frozen on the record at completion), a "What we did" summary and
+  // the "Still seeing X? Tell us" button on a pest/lawn callback report.
+  // Dark in every environment until Adam flips it (exact 'true'); it only does
+  // anything while GATE_RESERVICE_REPORT_COPY is on (the card hangs off the
+  // reserviceReport block). reservice-report-card.js reads the env at call
+  // time so a flip needs no redeploy — cached PDFs re-render via the -rcd1
+  // key component. This entry is the status/log listing. Kill switch: unset
+  // the var — payload, page and PDF key return to today's bytes.
+  reserviceReportCard: process.env.GATE_RESERVICE_REPORT_CARD === 'true',
 
   // Server-persisted Intelligence Bar threads (owner-ratified 2026-08-31):
   // admin conversations survive refresh/route changes; the palette resumes

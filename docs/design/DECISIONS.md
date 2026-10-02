@@ -2955,3 +2955,48 @@ another customer's id, or a failed lookup is `office`, which is never quoted.
 The suggestion skips empty bodies, STOP / HELP / opt-in keywords and
 natural-language opt-outs (the inbound opt-out detector's own rules), and
 spam or voicemail calls. Nothing is sent to a customer.
+
+## 2026-10-01 — Re-service report card: "You told us" + "What we did" (dark)
+
+On a pest or lawn re-service report whose `reserviceReport` block composed
+(`GATE_RESERVICE_REPORT_COPY`), the live report and the PDF gain the owner-approved
+card of 2026-09-26: "You told us" (the customer's booking words), "What we did"
+(treated for, where, activity seen, the safety line) and a "Still seeing X? Tell
+us" button. `GATE_RESERVICE_REPORT_CARD` (registry key `reserviceReportCard`, off
+unless exactly `true`, read at call time, dark in every environment). Gate off: the
+payload has no `reserviceReportCard` key, the page renders as before and the PDF
+cache key is unchanged. On: the key `reserviceReportCard` joins the payload, the web
+report renders two glass sections (card, soft rows, chip pills, glass type sheet)
+right under the status hero, the PDF prints the same two sections, and callback PDFs
+re-render once under `-rcd1`. Kill switch: unset the gate.
+
+The report is a permanent record, so the words are FROZEN: complete-scheduled-service
+copies `scheduled_services.customer_request` / `_source` / `_pests` from the LOCKED
+visit row onto `service_records.service_data.reserviceRequest` inside the completion
+transaction (callbacks with something on file only; no migration), whether or not the
+card gate is on yet, so a later edit of the booking cannot rewrite what the report
+says. The card never reads the live booking: a callback completed before this shipped
+has no frozen request and shows no "You told us" (it still shows "What we did").
+
+Card rule (owner 2026-09-26), decided on the SERVER from the frozen source: `picker`
+and `text` are the customer's verbatim words and are quoted; `call` is a paraphrase
+and reads "On your call, you mentioned ..." with no quote marks; `office` is staff
+typing and reads "As reported to our office: ..." with no quote marks. A missing or
+unknown source shows no words (the picked pest chips still show). Nothing on file
+hides the section. The words pass the report writer's customer-words scrub
+(`scrubCustomerText`: pest talk only, access details dropped, credential-shaped
+tokens masked) and the banned customer-copy screen, are capped at 280 characters, and
+are left out entirely when the scrub is unavailable; never rendered raw.
+
+"What we did" prints only for a performed callback (outcome `treated`): pests from the
+product rows' targets, where from `areas_serviced`, activity from the technician's own
+tapped rating (never an untouched first-visit default or a customer rating; pest line
+only), and the safety line only with a recorded wet application, reusing
+`reservice-fixed-recap.js` (`pestsOf`, `whereOf`, `hasLiquidApplication`,
+`SAFETY_LINE`). Inspection-only, declined and incomplete visits show "You told us"
+only. Products stay in the report's product section.
+
+The button reuses the report footer's existing path (`/?tab=schedule`, the
+authenticated portal Schedule tab, behind the server's `reserviceEligible` boolean).
+No `/reservice/:token` link is put on the public, forwardable report and no new route
+or token is minted.

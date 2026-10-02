@@ -91,6 +91,43 @@ five-component blend. Customer-visible pressure numbers no longer floor at
 0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
 unchanged.
 
+Re-service report card (owner-approved design 2026-09-26, Fast Complete PR D;
+`GATE_RESERVICE_REPORT_CARD` — dark, off unless exactly `'true'`, read at call
+time): on the service-report payload (`/api/reports/:token/data` and the PDF,
+which share `buildReportV1Data`), when the card gate is on AND the existing
+`reserviceReport` callback block is composed (`GATE_RESERVICE_REPORT_COPY` on,
+a pest/lawn callback record), gate on adds an optional `data.reserviceReportCard`
+object `{ version: 1, youToldUs, whatWeDid, stillSeeing }`; gate off, or no
+callback block, omits the key entirely (never `null`), so the payload is
+byte-identical to before. `server/services/service-report/reservice-report-card.js`
+is the pure builder.
+- `youToldUs` (`null` or `{ source, quoted, lead, text, pests }`): the
+  customer's booking words, read ONLY from the copy frozen onto
+  `service_records.service_data.reserviceRequest` at completion (from the
+  locked `scheduled_services.customer_request` / `_source` / `_pests` row;
+  never read live, so a later booking edit cannot rewrite a permanent report;
+  records completed before the freeze carry none). `source` is
+  `picker` | `text` | `call` | `office`. Picker and text words are the
+  customer's verbatim words (`quoted: true`); a call paraphrase
+  (`lead: 'On your call, you mentioned'`) and office words
+  (`lead: 'As reported to our office:'`) are never quoted. `text` always passes
+  the report writer's customer-words scrub (`scrubCustomerText`: pest talk
+  only, access details such as gate codes removed) and the banned
+  customer-copy screen, and is capped at 280 characters; a scrub that is
+  unavailable or throws drops the words (never shown raw). A call / office
+  paraphrase written about the customer in the third person is dropped.
+  `pests` are display labels of the picker's chip keys. Nothing left → `null`.
+- `whatWeDid` (`null` or `{ pests, where, found, safetyLine }`): only for a
+  performed (`treated`) outcome; pests from the product rows' targets, where
+  from `areas_serviced`, `found` from the technician's own activity tap, and
+  the safety line only with a recorded wet application.
+- `stillSeeing`: the topic word for the "Still seeing …? Tell us" button. The
+  button links only the existing authenticated `/?tab=schedule` portal route,
+  rendered only when the payload's existing `reserviceEligible === true` and in
+  the live view (never the PDF); no re-service token or new route is exposed.
+The PDF prints `youToldUs` and `whatWeDid`; its cache key gains `-rcd1` only
+when the card is present.
+
 Pest Report V2 "expectations" blocks (owner-approved 2026-09-27/28,
 `GATE_PEST_REPORT_EXPECTATIONS` — dark, off unless exactly `'true'`, read at
 call time, no redeploy to flip): on the pest-line service-report payload

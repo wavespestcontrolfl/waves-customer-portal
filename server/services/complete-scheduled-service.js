@@ -6326,6 +6326,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               }
               : {}),
           };
+          // Re-service report card (services/service-report/reservice-report-card.js,
+          // GATE_RESERVICE_REPORT_CARD): the customer's booking words
+          // (scheduled_services.customer_request / _source / _pests) freeze
+          // onto the record HERE, from the LOCKED row, so a later edit of the
+          // booking can never rewrite what the permanent report says the
+          // customer told us. Frozen whether or not the card gate is on yet
+          // (a gate flip must not strand visits completed while it was dark);
+          // inert data until the card renders. Callbacks with something on
+          // file only; the helper is pure and returns null otherwise.
+          const frozenReserviceRequest = require('../services/service-report/reservice-report-card')
+            .freezeReserviceRequest(lockedSvcRow || svc);
+          if (frozenReserviceRequest) serviceData.reserviceRequest = frozenReserviceRequest;
           // Freeze the appointment's add-on line identities with the
           // completion (codex P2 on #3189): schedule add-on rows are
           // MUTABLE after completion (the update-details route replaces
