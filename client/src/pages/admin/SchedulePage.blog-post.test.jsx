@@ -117,6 +117,28 @@ describe('the blog post on the completion form', () => {
     expect(onSubmit.mock.calls[0][1].blogPostId).toBe(POST.id);
   });
 
+  it.each([
+    ['Mosquito Control'],
+    ['Termite Bait Station Monitoring'],
+    ['Rodent Trap Check'],
+  ])('a %s visit asks the server and offers the search when it answers available (pre-push P1)', async (serviceType) => {
+    const onSubmit = vi.fn().mockResolvedValue({});
+    await act(async () => {
+      render(<CompletionPanel service={{ ...service, serviceType }} products={[]} onClose={vi.fn()} onSubmit={onSubmit} />);
+    });
+    expect(await screen.findByLabelText('Search the Waves blog')).toBeTruthy();
+    expect(fetch.mock.calls.some(([url]) => String(url).includes(`/admin/dispatch/${service.id}/blog-posts`))).toBe(true);
+  });
+
+  it.each([['Lawn Care'], ['Tree & Shrub Care'], ['Palm Injection']])('the %s form never asks (another lane owns it)', async (serviceType) => {
+    await act(async () => {
+      render(<CompletionPanel service={{ ...service, serviceType }} products={[]} onClose={vi.fn()} onSubmit={vi.fn().mockResolvedValue({})} />);
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/blog-posts'))).toBe(false);
+    expect(screen.queryByLabelText('Search the Waves blog')).toBeNull();
+  });
+
   it('no picker and no pick sent while the server answers unavailable (WDO, pre-treat, lawn, tree & shrub)', async () => {
     blogResponse = () => ({ available: false, posts: [] });
     localStorage.setItem(DRAFT_KEY, JSON.stringify({

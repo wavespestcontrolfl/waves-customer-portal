@@ -14883,15 +14883,15 @@ export function CompletionPanel({
     });
   }, [techTips, selectedTipIds]);
 
-  // The blog search is offered on pest visits while it answers available
-  // (an empty query reads nothing but the visit). The server answers
-  // available only where /complete keeps the pick (the visit's own service
-  // line is pest, so never a rodent visit). Never lawn or tree, shrub & palm:
-  // another lane owns those completions.
+  // The blog search is offered wherever the server answers available (an
+  // empty query reads nothing but the visit): only where /complete keeps the
+  // pick, every service but WDO, termite pre-treat, lawn and tree, shrub &
+  // palm (blogPostAllowedFor). The lawn and tree, shrub & palm forms never
+  // ask: another lane owns those completions.
   useEffect(() => {
     let cancelled = false;
     setBlogPost(null);
-    if (!service.id || serviceCategory !== "pest") {
+    if (!service.id || ["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout)) {
       setBlogPostOffer("no");
       return () => { cancelled = true; };
     }
@@ -14900,7 +14900,7 @@ export function CompletionPanel({
       .then((data) => { if (!cancelled) setBlogPostOffer(data?.available === true ? "yes" : "no"); })
       .catch(() => { if (!cancelled) setBlogPostOffer("unknown"); });
     return () => { cancelled = true; };
-  }, [service.id, serviceCategory]);
+  }, [service.id, serviceLineForCloseout]);
   const blogPostKept = !!blogPost && blogPostOffer !== "no";
   // A kept pick shows while the answer is pending or failed, so it can be
   // removed (a post /complete finds gone answers BLOG_POST_UNAVAILABLE).
