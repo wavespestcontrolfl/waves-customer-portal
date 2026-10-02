@@ -62,7 +62,7 @@ describe('tokenParity', () => {
 
   test('a changed, dropped or added figure fails', () => {
     expect(tokenParity(REPLY, REPLY_ES.replace('30', '20'))).toMatchObject({ ok: false, missing: ['30'], added: ['20'] });
-    expect(tokenParity('Your balance is $45.50.', 'Su saldo es de 45 dólares.')).toMatchObject({ ok: false, missing: ['50'] });
+    expect(tokenParity('Your balance is $45.50.', 'Su saldo es de 45 dólares.')).toMatchObject({ ok: false, missing: ['45.50'], added: ['45'] });
     expect(tokenParity('We will call you back.', 'Le llamaremos en 2 horas.')).toMatchObject({ ok: false, added: ['2'] });
   });
 
@@ -71,6 +71,16 @@ describe('tokenParity', () => {
     expect(tokenParity('We need 3 more days.', 'Necesitamos 15 días más, a las 15 h.')).toMatchObject({ ok: false });
     expect(tokenParity('See you at 2:30 PM.', 'Nos vemos a las 14:30.')).toEqual({ ok: true, missing: [], added: [] });
     expect(tokenParity('See you at 2 AM.', 'Nos vemos a las 14 h.')).toMatchObject({ ok: false });
+  });
+
+  test('numbers compare whole: reordered parts fail, faithful spellings pass', () => {
+    expect(tokenParity('Your balance is $45.50.', 'Su saldo es de $50.45.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your balance is $45.50.', 'Su saldo es de 45,50 $.')).toMatchObject({ ok: true });
+    expect(tokenParity('The plan is $2,500 a year.', 'El plan cuesta 2.500 $ al año.')).toMatchObject({ ok: true });
+    expect(tokenParity('See you at 10:30 AM.', 'Nos vemos a las 30:10.')).toMatchObject({ ok: false });
+    expect(tokenParity('See you at 2:00 PM.', 'On se voit à 14h.')).toMatchObject({ ok: true });
+    expect(tokenParity('See you at 2:30 PM.', 'On se voit à 14h30.')).toMatchObject({ ok: true });
+    expect(tokenParity('See you at 2:30 PM.', 'Nos vemos a las 14:45.')).toMatchObject({ ok: false });
   });
 
   test('links and emails must come through exactly', () => {

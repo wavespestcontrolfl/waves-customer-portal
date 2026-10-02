@@ -149,16 +149,43 @@ async function meaningCheck({ englishReply, backTranslation }) {
 // "10h30" or "45,00 $" still carries the same groups).
 const LINK_RE = /https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+/gi;
 const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.[a-z]{2,}/gi;
-const DIGITS_RE = /\d+/g;
+// A number is compared WHOLE ("45.50" is one value, never "45" + "50", so
+// "$50.45" cannot stand in for "$45.50"). Spelling is normalised so a faithful
+// translation still matches: thousands separators dropped ("2,500" = "2.500"),
+// a decimal comma read as a point ("45,50" = "45.50"), French "14h30" read as
+// "14:30", and zero cents or minutes dropped ("$2.00" = "2", "2:00 PM" = "2 PM").
+// Other separated runs (dates like "10/14", "14/10") compare part by part.
+const NUMBER_RE = /\d+(?:[.,:]\d+)*/g;
+const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b)/i;
+const PM_RE = /^\s*(?:pm\b|p\.m\.)/i;
+
+function trimZeros(n) {
+  return n.replace(/^0+(?=\d)/, '');
+}
+
+function numberValues(text) {
+  const str = String(text || '').replace(/\b(\d{1,2})h(\d{2})\b/gi, '$1:$2');
+  const out = [];
+  for (const m of str.matchAll(NUMBER_RE)) {
+    const raw = m[0];
+    const after = str.slice(m.index + raw.length);
+    const flags = { pm: PM_RE.test(after), time: raw.includes(':') || HOUR_WORD_RE.test(after) };
+    let values;
+    if (/^\d{1,3}(?:[.,]\d{3})+$/.test(raw)) values = [raw.replace(/[.,]/g, '')];
+    else if (/^\d+[.,]\d{1,2}$/.test(raw)) values = [raw.replace(',', '.').replace(/\.0+$/, '')];
+    else if (/^\d{1,2}:\d{2}$/.test(raw)) values = [raw.replace(/:00$/, '')];
+    else values = raw.split(/[.,:]/);
+    for (const v of values) out.push({ value: v.split(/[.:]/).map(trimZeros).join(raw.includes(':') ? ':' : '.'), ...flags });
+  }
+  return out;
+}
 
 function protectedTokens(text) {
   const str = String(text || '');
   const links = (str.match(LINK_RE) || []).map((l) => l.replace(/[.,;:!?]+$/, ''));
   const emails = (str.replace(LINK_RE, ' ').match(EMAIL_RE) || []).map((e) => e.replace(/[.,;:!?]+$/, '').toLowerCase());
-  const rest = str.replace(LINK_RE, ' ').replace(EMAIL_RE, ' ');
-  // "00" minutes and cents carry no figure on their own ("2:00 PM" may read "14 h" or "2 PM" in translation)
-  const digits = (rest.match(DIGITS_RE) || []).filter((d) => !/^0+$/.test(d)).map((d) => d.replace(/^0+(?=\d)/, ''));
-  return { links, emails, digits };
+  const numbers = numberValues(str.replace(LINK_RE, ' ').replace(EMAIL_RE, ' '));
+  return { links, emails, numbers, digits: numbers.map((n) => n.value) };
 }
 
 function multiset(list) {
@@ -176,30 +203,24 @@ function diffCounts(from, to) {
 }
 
 // A 12-hour PM time may legitimately be written as a 24-hour one ("2 PM" ->
-// "14 h", "2:30 PM" -> "14:30"). Only then: an hour h (1-11) the English states
-// as a PM time may come back as h+12 where the translation writes a time. Any
-// other number (a price, a count, a date) must match exactly.
-const EN_PM_HOUR_RE = /\b(\d{1,2})(?::\d{2})?\s*(?:pm|p\.m\.)/gi;
-const TR_24H_HOUR_RE = /\b(\d{1,2})(?:\s*[:h]\s*\d{2}|\s*h\b|\s*horas?\b|\s*heures?\b|(?:[.:]\d{2})?\s*uhr\b)/gi;
-
-function hoursMatching(text, re) {
-  return [...String(text || '').replace(LINK_RE, ' ').matchAll(re)].map((m) => String(Number(m[1])));
-}
-
-function pairTwentyFourHour(missing, added, englishReply, translated) {
-  const pmHours = hoursMatching(englishReply, EN_PM_HOUR_RE);
-  const timeHours = hoursMatching(translated, TR_24H_HOUR_RE);
+// "14 h", "2:30 PM" -> "14:30"). Only then: a time the English states as PM
+// (hour 1-11) may come back as hour+12, minutes unchanged, where the
+// translation writes a time. Any other number must match exactly.
+function pairTwentyFourHour(missing, added, en, tr) {
+  const pmTimes = en.numbers.filter((n) => n.pm).map((n) => n.value);
+  const trTimes = tr.numbers.filter((n) => n.time).map((n) => n.value);
   const m = [...missing];
   const a = [...added];
   for (let i = m.length - 1; i >= 0; i -= 1) {
-    const n = Number(m[i]);
-    if (!Number.isInteger(n) || n < 1 || n > 11) continue;
-    const h24 = String(n + 12);
-    const p = pmHours.indexOf(m[i]);
-    const t = timeHours.indexOf(h24);
+    const [hour, minutes] = m[i].split(':');
+    const n = Number(hour);
+    if (!/^\d+$/.test(hour) || n < 1 || n > 11) continue;
+    const h24 = minutes ? `${n + 12}:${minutes}` : String(n + 12);
+    const p = pmTimes.indexOf(m[i]);
+    const t = trTimes.indexOf(h24);
     const j = a.indexOf(h24);
     if (p === -1 || t === -1 || j === -1) continue;
-    pmHours.splice(p, 1); timeHours.splice(t, 1);
+    pmTimes.splice(p, 1); trTimes.splice(t, 1);
     m.splice(i, 1); a.splice(j, 1);
   }
   return { missing: m, added: a };
@@ -208,7 +229,7 @@ function pairTwentyFourHour(missing, added, englishReply, translated) {
 function tokenParity(englishReply, translated) {
   const en = protectedTokens(englishReply);
   const tr = protectedTokens(translated);
-  const digits = pairTwentyFourHour(diffCounts(en.digits, tr.digits), diffCounts(tr.digits, en.digits), englishReply, translated);
+  const digits = pairTwentyFourHour(diffCounts(en.digits, tr.digits), diffCounts(tr.digits, en.digits), en, tr);
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];
   const added = [...diffCounts(tr.links, en.links), ...diffCounts(tr.emails, en.emails), ...digits.added];
   return { ok: missing.length === 0 && added.length === 0, missing, added };
