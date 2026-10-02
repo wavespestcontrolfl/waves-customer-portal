@@ -33,7 +33,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
 
 // Bump on any prompt or schema change.
-const VOICE_FACTS_VERSION = 'visit-voice-facts-v2';
+const VOICE_FACTS_VERSION = 'visit-voice-facts-v3';
 // A dictated visit note runs a few hundred characters. A longer one is never
 // cut short (a fact said past the cut would go unread while the report
 // writer read the note whole): it is refused as too long, and the sheet asks
@@ -94,20 +94,21 @@ const VOICE_FACTS_SCHEMA = {
   additionalProperties: false,
 };
 
-// A denial ("no roaches", "did not treat inside", "didn't spray") before
-// what a quote asserts, in its clause, denies it: a fact the note denies
-// never stands, whatever was quoted. Checked in code; the prompt asks for it,
-// the code makes sure. What a quote asserts is its first treatment word for a
-// place or a spray (the prompt's own: sprayed, treated, baited, dusted,
+// The extraction leaves out what the note denies (the prompt says so), and
+// the tech reads what was heard before sending; the code only makes sure a
+// quote never contradicts itself. A fact is denied where a denial word stands
+// right before what the quote asserts ("did not spray", "no roaches", "never
+// baited"), or a short denial follows it ("checked for spiders, none found",
+// "inside: not treated"). What a quote asserts is its first treatment word for
+// a place or a spray (the prompt's own: sprayed, treated, baited, dusted,
 // spread, granules, placed, applied, stations, glue boards) and the pest's
-// own name for a pest; a quote without one is read whole. A clause ends at
-// punctuation or a turn of the sentence ("no activity inside but sprayed the
-// kitchen baseboards", "no roaches seen so treated the kitchen" are two
-// clauses each). A negative after the assertion is about something else
-// ("sprayed around the outside of the house with no issues") unless it is a
-// short denial of that same fact right after it (TRAILING_DENIAL).
-const NEGATION_RE = /\b(no|not|none|never|nothing|zero|without|nowhere|didn'?t|doesn'?t|don'?t|wasn'?t|weren'?t|isn'?t|aren'?t|hadn'?t|haven'?t|couldn'?t|cannot|can'?t)\b/;
-const CLAUSE_BREAK_RE = /[.,;!?]|\b(?:but|however|although|though|except|so|then)\b/g;
+// own name for a pest; a quote without one is read whole. A negative anywhere
+// else is about something else ("customer was not home and I sprayed around
+// the house", "sprayed around the house with no issues"), so it never holds
+// the visit.
+const DENIAL_WORDS = String.raw`no|not|none|never|nothing|zero|without|nowhere|didn'?t|doesn'?t|don'?t|wasn'?t|weren'?t|isn'?t|aren'?t|hadn'?t|haven'?t|couldn'?t|cannot|can'?t`;
+const DENIAL_RIGHT_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS})\s+$`);
+const DENIAL_IN_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS})\b`);
 const TREATMENT_WORD_RE = /\b(?:spray|treat|bait|dust|spread|granul|plac|appli|apply|station|glue board)[a-z]*/;
 // A short denial right after the assertion, comma or not, in the words of the
 // fact it denies: a pest looked for and not there ("checked for spiders,
@@ -136,31 +137,18 @@ function nameAssertion(name) {
   };
 }
 
-// Where the clause holding `from` starts: right after the last break before it.
-function clauseStart(note, from) {
-  let start = 0;
-  CLAUSE_BREAK_RE.lastIndex = 0;
-  for (let match = CLAUSE_BREAK_RE.exec(note); match && match.index + match[0].length <= from; match = CLAUSE_BREAK_RE.exec(note)) {
-    start = match.index + match[0].length;
-  }
-  return start;
-}
-
-// Whether the note denies what a quote asserts: every place the quote appears
-// has a denial before the assertion in its clause, or a short denial of the
-// same kind of fact right after it. A quote with no assertion is read whole.
+// Whether the note denies what a quote asserts at every place the quote
+// appears. A quote with no assertion is read whole: a denial in it, right
+// before it or right after it.
 function deniedInNote(quote, note, { assertion, denialAfter }) {
   const span = assertion(quote);
-  const from = span ? span.offset : quote.length;
+  const from = span ? span.offset : 0;
   const to = span ? span.offset + span.length : quote.length;
+  if (!span && DENIAL_IN_RE.test(quote)) return true;
   let at = note.indexOf(quote);
   if (at < 0) return true;
   while (at >= 0) {
-    // The clause the assertion sits in, even when the quote starts in an
-    // earlier one; a quote read whole from its own clause.
-    const clause = clauseStart(note, span ? at + from : at);
-    const denied = NEGATION_RE.test(note.slice(clause, at + from))
-      || denialAfter.test(note.slice(at + to));
+    const denied = DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at + from)) || denialAfter.test(note.slice(at + to));
     if (!denied) return false;
     at = note.indexOf(quote, at + 1);
   }
@@ -176,7 +164,7 @@ areas: where the technician put product down (sprayed, baited, dusted, spread gr
 - "inside": anywhere inside the home (kitchen, bathrooms, baseboards, cabinets, under sinks, inside door tracks, attic, any room).
 - "outside": anywhere outside the home (around the house, perimeter, foundation, eaves, lanai, patio, yard, mulch beds, outside door frames).
 - "garage": the garage.
-List an area only when the note says product went down there. A place the technician only looked at or inspected, or where pests were seen but nothing was applied, is NOT an area. For each area give a quote: the exact words from the note that say product went down there, copied character for character.
+List an area only when the note says product went down there. A place the technician only looked at or inspected, where pests were seen but nothing was applied, or that the note says was not treated ("did not treat inside", "skipped the garage"), is NOT an area. For each area give a quote: the exact words from the note that say product went down there, copied character for character.
 
 pests: the pests the treatment was for, in the technician's OWN words (for example "ghost ants", "roaches", "palmetto bugs"). Keep the technician's word exactly: never change it to another name or to a species they did not say ("roaches" stays "roaches", never "German roaches"). A pest the note says was not found ("no roaches") is not listed. For each pest give name (the technician's own words, at most ${MAX_PEST_WORDS} words) and a quote: the exact words from the note that contain that name.
 

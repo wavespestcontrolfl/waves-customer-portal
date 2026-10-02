@@ -181,7 +181,7 @@ describe('validateVoiceFacts', () => {
     expect(facts.unclearAreas).toEqual(['Inside']);
   });
 
-  test('a turn of the sentence starts a new clause', () => {
+  test('a denial of something said before the treatment never denies it', () => {
     const note = 'No activity inside but sprayed the kitchen baseboards. Sprayed around the outside of the house.';
     const facts = validateVoiceFacts({
       areas: [{ area: 'inside', quote: 'sprayed the kitchen baseboards' }, { area: 'outside', quote: 'Sprayed around the outside of the house' }],
@@ -230,7 +230,7 @@ describe('validateVoiceFacts', () => {
     expect(facts.spray).toMatchObject({ method: 'perimeter' });
   });
 
-  test('a quote that starts in an earlier clause is judged in the clause of what it asserts (pre-push P1)', () => {
+  test('a quote that starts with an earlier statement is judged at what it asserts (pre-push P1)', () => {
     const note = 'No activity inside but sprayed the kitchen baseboards. No ants out front but treated for roaches by the pool.';
     const facts = validateVoiceFacts({
       areas: [{ area: 'inside', quote: 'No activity inside but sprayed the kitchen baseboards' }],
@@ -243,14 +243,27 @@ describe('validateVoiceFacts', () => {
     expect(facts.spray).toMatchObject({ method: 'spot' });
   });
 
-  test('a short denial right after a fact denies it, comma or not', () => {
-    const note = 'Checked for spiders none found. Inside not treated. The garage was not needed.';
+  test('a short denial right after a fact denies it, comma or not, and a quote with no treatment word is read whole', () => {
+    const note = 'Checked for spiders none found. Inside not treated. The garage was not needed. Nothing outside.';
     const facts = validateVoiceFacts({
-      areas: [{ area: 'inside', quote: 'Inside' }, { area: 'garage', quote: 'The garage' }],
+      areas: [{ area: 'inside', quote: 'Inside' }, { area: 'garage', quote: 'The garage' }, { area: 'outside', quote: 'Nothing outside' }],
       pests: [{ name: 'spiders', quote: 'Checked for spiders' }],
       spray: { method: 'none', quote: '' },
     }, note);
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Garage'], pests: [], spray: null });
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside', 'Garage'], pests: [], spray: null });
+  });
+
+  test('a negative earlier in the sentence is about something else (codex r5 on #5538)', () => {
+    const note = 'Customer was not home and I sprayed around the outside of the house. There were no issues so we also treated for ants.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Customer was not home and I sprayed around the outside of the house' }],
+      pests: [{ name: 'ants', quote: 'There were no issues so we also treated for ants' }],
+      spray: { method: 'perimeter', quote: 'sprayed around the outside of the house' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside']);
+    expect(facts.unclearAreas).toEqual([]);
+    expect(facts.pests.map((pest) => pest.name)).toEqual(['ants']);
+    expect(facts.spray).toMatchObject({ method: 'perimeter' });
   });
 
   test('a fact said twice stands when one saying is not denied', () => {
