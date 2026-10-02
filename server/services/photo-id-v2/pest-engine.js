@@ -1600,11 +1600,12 @@ async function identifyPestV2(photos = [], { ladder = 'full' } = {}) {
   const verifiedTop = dedupeCandidates(triggerCandidates.filter((c) => candidateNodeId(c)))[0] || null;
   const topConfidenceForTrigger = verifiedTop ? verifiedTop.confidence : 0;
 
-  // Gemini-only: a reply whose candidate items were all malformed is a miss
-  // too, not an unknown; a valid empty list is still a genuine unknown
-  // (Codex #5560 r3 P2).
+  // Gemini-only: a reply that names candidates but none that resolves to a
+  // catalog node of the kind the photo shows (malformed items, unknown
+  // slugs, a kind the read itself rules out) is a miss, not an unknown; a
+  // valid empty list is still a genuine unknown (Codex #5560 r3, r5 P2).
   const rawCandidateCount = hasCandidatesArray(candidatesResult?.json) ? candidatesResult.json.candidates.length : 0;
-  const noUsableRead = !candidatesJson || (rawCandidateCount > 0 && candidatesFromCall1.length === 0);
+  const noUsableRead = !candidatesJson || (rawCandidateCount > 0 && !verifiedTop);
   const escalationReasons = (singleRead ? [[noUsableRead, 'gemini_missed']] : [
     [geminiMissed, 'gemini_missed'],
     [contradicted, 'self_contradiction'],

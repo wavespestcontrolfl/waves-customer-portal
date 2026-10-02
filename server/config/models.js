@@ -417,6 +417,7 @@ const MODEL_CATALOG = {
   'gpt-5.5': { label: 'GPT-5.5', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5-mini': { label: 'GPT-5 mini', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gemini-3.8-flash': { label: 'Gemini 3.8 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
+  'gemini-3.6-flash': { label: 'Gemini 3.6 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
   'gemini-3.5-flash': { label: 'Gemini 3.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
   'gemini-2.5-pro': { label: 'Gemini 2.5 Pro', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
   'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },

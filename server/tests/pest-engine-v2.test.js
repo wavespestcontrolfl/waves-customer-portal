@@ -1603,6 +1603,22 @@ describe('Gemini-only ladder (app route)', () => {
     expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
   });
 
+  test('a read naming only unresolvable candidates hands off to OpenAI', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: '', off_catalog_name: 'mystery bug', group_id: 'not-a-group', confidence: 0.9 }]))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.85, traits_visible: [1], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+  });
+
   test('a valid empty Gemini read stays a genuine unknown without OpenAI', async () => {
     dispatch.mockResolvedValueOnce(candidatesReply([]));
 
