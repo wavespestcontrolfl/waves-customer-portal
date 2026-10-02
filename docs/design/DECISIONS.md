@@ -3002,3 +3002,20 @@ The button reuses the report footer's existing path (`/?tab=schedule`, the
 authenticated portal Schedule tab, behind the server's `reserviceEligible` boolean).
 No `/reservice/:token` link is put on the public, forwardable report and no new route
 or token is minted.
+
+## 2026-10-02 — Photos in the notes box, office Complete Service (dark)
+
+Owner "ok go" on the Fast Complete mockup v8 (call 10: photos go in the text
+box, each with a short description typed or said; the separate photo section
+goes away). Behind `GATE_NOTE_BOX_PHOTOS` (dark), the office Complete Service
+form, on a computer and on a phone, puts the visit's photos inside the notes
+box (`components/schedule/NoteBoxPhotos.jsx`). Tapping a photo opens its
+description, typed or dictated. "Describe with AI" and its summary move in
+with them. A description is the photo's caption, the same field the AI photo
+read fills: it goes to Generate (`photoCaptions`) and is frozen with the
+photo on the customer's report. A typed one carries no AI tag. The schedule
+payload's per-visit `noteBoxPhotosEnabled` is never on for lawn or tree,
+shrub & palm (another lane owns those completions and their photo steps),
+and the form checks the same lines again. Off, the photo section is exactly
+as before. The tech Fast Complete sheet's notes box follows in its own
+change.

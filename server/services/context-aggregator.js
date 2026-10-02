@@ -1530,7 +1530,7 @@ class ContextAggregator {
   // sentinelOnError: return null instead of [] on a lookup failure so the
   // caller can tell an outage from a quiet phone (the pre-visit brief
   // must not hash "no calls" over a cached brief during an outage).
-  async getRecentCalls(customerId, { sentinelOnError = false } = {}) {
+  async getRecentCalls(customerId, { sentinelOnError = false, before = null, phone = null } = {}) {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
@@ -1540,6 +1540,20 @@ class ContextAggregator {
         // v10: 60-day window, 4 calls — customers reference calls older than
         // a month ("when we talked last month about the ants…").
         .where('created_at', '>', new Date(Date.now() - 60 * 86400000))
+        // Optional upper bound (the review-ask writer scopes calls to a visit)
+        // applied before the limit below, so later calls can't crowd it out.
+        .modify((qb) => { if (before) qb.where('created_at', '<', before); })
+        // Optional caller identity (the review-ask writer: the recipient's own
+        // number only), applied before the limit and the transcript pick, so
+        // another household contact's calls can't crowd theirs out.
+        .modify((qb) => {
+          const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+          if (!phone) return;
+          if (digits.length !== 10) { qb.whereRaw('1 = 0'); return; }
+          qb.where((w) => w
+            .where((x) => x.whereRaw("direction ILIKE 'inbound%'").whereRaw("right(regexp_replace(coalesce(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]))
+            .orWhere((x) => x.whereRaw("coalesce(direction, '') NOT ILIKE 'inbound%'").whereRaw("right(regexp_replace(coalesce(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])));
+        })
         .whereNotNull('call_summary')
         .whereRaw("length(trim(call_summary)) > 0")
         // The voice webhook links customer_id by caller ID BEFORE the call is
@@ -1555,7 +1569,7 @@ class ContextAggregator {
         // SQL throws on any malformed row), and a filtered row must not
         // silently shrink the pick below 4 real calls.
         .limit(10)
-        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status');
+        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status', 'from_phone', 'to_phone');
       const eligible = rows.filter((r) => !this.isExcludedCall(r)).slice(0, 4);
       // v10: the NEWEST call also carries its transcript (owner directive:
       // the drafter should see what was actually said, not only the

@@ -3173,6 +3173,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:30AM ET — Incident adjudicator (correction loop, owner 10-02).
+  // The judge's human_better verdict is a lead, not a failure: this turns
+  // each one into a confirmed mistake ONLY when two models on different
+  // providers both name the same failure and each quotes text the draft
+  // really contains; everything else is stored as a lead. Writes
+  // ai_incidents only — shadow data, nothing reads it at runtime. Same
+  // gate as the ledger it widens; PATHOLOGY_ADJUDICATE_BATCH=0 stops it.
+  // =========================================================================
+  cron.schedule('30 4 * * *', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS incident adjudicator');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { adjudicateHumanBetter } = require('./sms-pathology-ledger');
+      await runExclusive('sms-incident-adjudicate', () => adjudicateHumanBetter());
+    } catch (err) {
+      logger.error(`SMS incident adjudicator failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY SUN 4:40AM ET — Pathology patch proposer. Cells with enough fresh
   // evidence get ONE parked harness-patch proposal card + bell (Agents →
   // Shadow Drafts). Recommendation only — a human ships any actual prompt
