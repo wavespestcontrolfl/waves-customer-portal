@@ -241,6 +241,11 @@ async function resolveBillingCustomer(input, actionContext) {
 // transaction in read-only mode (the read-only charge fence releases and promotes nothing).
 const inSnapshot = (work) => db.transaction(work, { isolationLevel: 'repeatable read', readOnly: true });
 
+// A best-effort read inside the snapshot runs in its own SAVEPOINT (a nested transaction): when its SQL fails, only
+// the savepoint rolls back and the shared REPEATABLE READ transaction stays usable. Catching the error alone would
+// leave PostgreSQL's transaction aborted and fail every later read. The work must THROW to roll back.
+const optionalRead = (database, work) => database.transaction(work);
+
 // ─── the payment fences ─────────────────────────────────────────────
 
 const RECONCILE_POINTER = 'needs reconciliation — check the Invoices page';
@@ -385,43 +390,44 @@ async function processingStatusOutcome(invoice, database, terminalError) {
 async function decideCollectibility(invoice, listed, database) {
   const status = invoiceStatusKey(invoice.status);
   try {
-    try {
-      assertInvoiceCollectible(invoice);
-    } catch (err) {
-      // A saved-card ambiguity parks the invoice as `processing` (parkInvoiceForSavedCardReconciliation) and
-      // leaves the attempt: ask the charge fence before accepting the terminal explanation.
-      if (status === 'processing') return await processingStatusOutcome(invoice, database, err);
-      return held('not_collectible', fenceReason(err.message) || MEMBER_REASONS.not_collectible);
-    }
-    const member = await require('../pay-combined').memberCollectionPending(invoice, { database, customerId: listed.customer_id });
-    if (member.reason === 'deposit_settlement') return needsReconciliation('an estimate deposit has been received and is not yet applied to this invoice');
-    if (member.reason === 'charge_reconciliation') return await heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[member.code] || CHARGE_FENCE_REASONS.STRIPE_CHARGE_IN_PROGRESS, { allowBank: member.code !== 'STRIPE_CHARGED_DB_FAILED' });
-    if (member.reason === 'customer_changed') return held('unavailable', RECORD_CHANGED_REASON);
-    if (member.reason) return held('not_collectible', MEMBER_REASONS[member.reason] || MEMBER_REASONS.not_collectible);
-    // The collection fence re-read the invoice: the attached-intent hold and the amount use THAT row, never the
-    // older one the caller passed (an intent attached or credit applied between the two reads).
-    const fresh = member.row;
-    if (fresh.stripe_payment_intent_id) return { ...(await heldAttemptOutcome(fresh, database, ATTACHED_INTENT_REASON, { complete: true })), row: fresh };
-    return { collectible: true, needs_reconciliation: false, state: 'collectible', reason: null, balance_due: invoiceAmountDue(fresh), row: fresh };
+    assertInvoiceCollectible(invoice);
   } catch (err) {
-    logger.warn(`[intelligence-bar:billing-reader] collectibility check could not run (${err.code || err.name || 'error'})`);
-    return needsReconciliation('the payment-state check could not be completed');
+    // A saved-card ambiguity parks the invoice as `processing` (parkInvoiceForSavedCardReconciliation) and
+    // leaves the attempt: ask the charge fence before accepting the terminal explanation.
+    if (status === 'processing') return processingStatusOutcome(invoice, database, err);
+    return held('not_collectible', fenceReason(err.message) || MEMBER_REASONS.not_collectible);
   }
+  const member = await require('../pay-combined').memberCollectionPending(invoice, { database, customerId: listed.customer_id });
+  if (member.reason === 'deposit_settlement') return needsReconciliation('an estimate deposit has been received and is not yet applied to this invoice');
+  if (member.reason === 'charge_reconciliation') return heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[member.code] || CHARGE_FENCE_REASONS.STRIPE_CHARGE_IN_PROGRESS, { allowBank: member.code !== 'STRIPE_CHARGED_DB_FAILED' });
+  if (member.reason === 'customer_changed') return held('unavailable', RECORD_CHANGED_REASON);
+  // The live fence's payer verdict (including a payer resolved just now from the customer or the visit) is carried out
+  // so payer_billed and the reason can never disagree.
+  if (member.reason) return { ...held('not_collectible', MEMBER_REASONS[member.reason] || MEMBER_REASONS.not_collectible), payer_billed: ['payer_billed', 'withdrawn'].includes(member.reason) };
+  // The collection fence re-read the invoice: the attached-intent hold and the amount use THAT row, never the
+  // older one the caller passed (an intent attached or credit applied between the two reads).
+  const fresh = member.row;
+  if (fresh.stripe_payment_intent_id) return { ...(await heldAttemptOutcome(fresh, database, ATTACHED_INTENT_REASON, { complete: true })), row: fresh };
+  return { collectible: true, needs_reconciliation: false, state: 'collectible', reason: null, balance_due: invoiceAmountDue(fresh), row: fresh };
 }
 
 // The caller's row may be older than the checks: the invoice is re-read once here, every check runs on that row,
 // and EVERY verdict (held ones included) carries it back so the projected facts and the reason come from one state.
 async function invoiceCollectibility(listed, database) {
-  let current = listed;
+  // The whole verdict runs in ONE savepoint: any SQL failure rolls back only that, leaves the shared snapshot usable,
+  // and holds the balance. Nothing inside swallows a database error.
   try {
-    current = (await database('invoices').where({ id: listed.id }).first()) || listed;
+    return await optionalRead(database, async (savepoint) => {
+      const current = (await savepoint('invoices').where({ id: listed.id }).first()) || listed;
+      // Ownership changed during the read: the invoice is refused for this customer, never projected under their header.
+      if (String(current.customer_id) !== String(listed.customer_id)) return held('unavailable', RECORD_CHANGED_REASON);
+      const verdict = await decideCollectibility(current, listed, savepoint);
+      return { ...verdict, row: verdict.row || current };
+    });
   } catch (err) {
-    logger.warn(`[intelligence-bar:billing-reader] invoice re-read failed (${err.code || err.name || 'error'})`);
+    logger.warn(`[intelligence-bar:billing-reader] collectibility check could not run (${err.code || err.name || 'error'})`);
+    return needsReconciliation('the payment-state check could not be completed');
   }
-  // Ownership changed during the read: the invoice is refused for this customer, never projected under their header.
-  if (String(current.customer_id) !== String(listed.customer_id)) return held('unavailable', RECORD_CHANGED_REASON);
-  const verdict = await decideCollectibility(current, listed, database);
-  return { ...verdict, row: verdict.row || current };
 }
 
 // Sequential: every read shares the call's one snapshot connection.
@@ -448,6 +454,8 @@ function projectDue(row, fence, today) {
     ...(fence.reason ? { reason: fence.reason } : {}),
     needs_reconciliation: fence.needs_reconciliation,
     bank_payment_processing: fence.state === 'bank_payment_processing',
+    // The row's own payer fields, or the fence's live payer verdict: the flag and the reason never disagree.
+    payer_billed: isPayerBilled(row) || fence.payer_billed === true,
     overdue: fence.collectible ? isOverdue(row, today) : null,
   };
 }
@@ -461,7 +469,7 @@ function projectPlan(plan, fence) {
 async function readDisputeHold(customerId, database) {
   try {
     const { activeDisputeHolds } = require('../collections/collection-hold');
-    const hold = await activeDisputeHolds(database('collections_flags').where({ customer_id: customerId })).first('created_at');
+    const hold = await optionalRead(database, (savepoint) => activeDisputeHolds(savepoint('collections_flags').where({ customer_id: customerId })).first('created_at'));
     return { active: Boolean(hold), since: hold ? iso(hold.created_at) : null };
   } catch (err) {
     logger.warn(`[intelligence-bar:billing-reader] dispute hold lookup failed (${err.code || err.name || 'error'})`);
@@ -474,8 +482,10 @@ async function readCredit(customerId, database) {
     const CustomerCredit = require('../customer-credit');
     // Read inside the call's one snapshot: a grant, application or reversal commits the balance and the ledger
     // together, so both reads see the same state.
-    const balance = await CustomerCredit.getBalance(customerId, database);
-    const sum = await database('customer_credit_ledger').where({ customer_id: customerId }).sum({ total: 'delta' }).first();
+    const { balance, sum } = await optionalRead(database, async (savepoint) => ({
+      balance: await CustomerCredit.getBalance(customerId, savepoint),
+      sum: await savepoint('customer_credit_ledger').where({ customer_id: customerId }).sum({ total: 'delta' }).first(),
+    }));
     const ledgerSum = money(sum && sum.total) || 0;
     return {
       credit_balance: balance,
@@ -606,7 +616,6 @@ function invoiceItem(listedRow, today, fence, heldIds) {
     payment_plan: projectPlan(paymentPlanFromList(row), fence),
     dispute_hold: heldIds ? heldIds.has(String(row.id)) : null,
     annual_prepay: annualPrepayLinkage(row),
-    payer_billed: isPayerBilled(row),
     archived: Boolean(row.archived_at),
     archived_at: iso(row.archived_at),
   };
@@ -654,7 +663,7 @@ async function listForCustomer(customer, input, database) {
   const unknowns = [];
   let heldIds = new Set();
   try {
-    heldIds = await collectionHoldInvoiceIds(page.invoices.map((invoice) => invoice.id), { database });
+    heldIds = await optionalRead(database, (savepoint) => collectionHoldInvoiceIds(page.invoices.map((invoice) => invoice.id), { database: savepoint }));
   } catch (err) {
     logger.warn(`[intelligence-bar:billing-reader] per-invoice hold lookup failed (${err.code || err.name || 'error'})`);
     heldIds = null;
@@ -765,15 +774,18 @@ async function loadRecordedPayments(customerId, invoice, database) {
   const payerRef = (row) => (row.payer_id != null ? row.payer_id : (parseJson(row.metadata) || {}).payer_id);
   const payerIds = [...new Set(kept.map(payerRef).filter((id) => Number.isInteger(Number(id)) && Number(id) > 0).map(Number))];
   let names = new Map();
+  let namesUnavailable = false;
   if (payerIds.length) {
     try {
-      names = new Map((await database('payers').whereIn('id', payerIds).select('id', 'display_name')).map((payer) => [Number(payer.id), scrub(payer.display_name, 120)]));
+      names = new Map((await optionalRead(database, (savepoint) => savepoint('payers').whereIn('id', payerIds).select('id', 'display_name'))).map((payer) => [Number(payer.id), scrub(payer.display_name, 120)]));
     } catch (err) {
+      namesUnavailable = true;
       logger.warn(`[intelligence-bar:billing-reader] payer name lookup failed (${err.code || err.name || 'error'})`);
     }
   }
   return {
     truncated: rows.length > PAYMENT_ROW_CAP || statementRows.length > PAYMENT_ROW_CAP,
+    namesUnavailable,
     payments: kept.sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map((row) => {
       const payer = payerRef(row);
       const metadataTender = (parseJson(row.metadata) || {}).payment_method;
@@ -850,6 +862,7 @@ async function detailInSnapshot(input, actionContext, database) {
   const unknowns = [];
   if (hold.unknown) unknowns.push(hold.unknown);
   if (plans.length > PLAN_HISTORY_CAP) unknowns.push(`This invoice has more than ${PLAN_HISTORY_CAP} payment plans: only the newest ${PLAN_HISTORY_CAP} are shown, older plans are not (history_truncated).`);
+  if (recorded.namesUnavailable) unknowns.push('The payer name could not be read: a third-party payer is shown without its name.');
   if (recorded.truncated) unknowns.push('More payment rows are tied to this invoice than were read: the newest are shown.');
 
   return {
@@ -873,7 +886,6 @@ async function detailInSnapshot(input, actionContext, database) {
       total: money(facts.total),
       credit_applied: money(facts.credit_applied) || 0,
       ...projectDue(facts, fence, today),
-      payer_billed: isPayerBilled(facts),
       payment_method: facts.payment_method || null,
       payment_reference: scrub(facts.payment_reference, 120),
       payment_recorded_by: scrub(facts.payment_recorded_by, 80),

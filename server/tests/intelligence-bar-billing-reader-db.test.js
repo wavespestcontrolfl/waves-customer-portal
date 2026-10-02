@@ -590,6 +590,47 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.unknowns.join(' ')).not.toMatch(/More payment rows/);
   });
 
+  test('payer_billed comes from the fence\'s live payer verdict, so the flag and the reason never disagree (list and detail)', async () => {
+    const payCombined = require('../services/pay-combined');
+    const original = payCombined.memberCollectionPending;
+    const spy = jest.spyOn(payCombined, 'memberCollectionPending').mockImplementation(async (invoice, options) => (
+      String(invoice.id) === String(inv.credited.id) ? { reason: 'payer_billed' } : original(invoice, options)));
+    try {
+      const item = by(await read('get_customer_invoices', { customer_id: A, limit: 50 }), 'credited');
+      expect(item).toMatchObject({ payer_billed: true, collectible: false, balance_due: null });
+      expect(item.reason).toMatch(/billed to a third-party payer/);
+      expect((await read('get_invoice_detail', { invoice_id: inv.credited.id })).invoice).toMatchObject({ payer_billed: true, collectible: false });
+    } finally { spy.mockRestore(); }
+    expect(by(await read('get_customer_invoices', { customer_id: A, limit: 50 }), 'credited').payer_billed).toBe(false);
+  });
+
+  // A best-effort read that fails at the SQL level must not abort the shared snapshot: each runs in its own savepoint.
+  // The failure is forced by renaming a column the read selects, for the duration of one call.
+  async function withBrokenColumn(table, column, work) {
+    await db.raw('ALTER TABLE ?? RENAME COLUMN ?? TO ??', [table, column, `${column}_broken`]);
+    try { return await work(); } finally { await db.raw('ALTER TABLE ?? RENAME COLUMN ?? TO ??', [table, `${column}_broken`, column]); }
+  }
+
+  test('a failing payer-name lookup does not abort the snapshot: payments, plans and facts still return, the payer name is null, with an unknown warning', async () => {
+    const detail = await withBrokenColumn('payers', 'display_name', () => read('get_invoice_detail', { invoice_id: inv.g_payer.id }));
+    expect(detail.error).toBeUndefined();
+    expect(detail.recorded_payments).toEqual([expect.objectContaining({ amount: 300, funded_by_payer: { id: expect.any(Number), name: null } })]);
+    expect(detail.unknowns.join(' ')).toMatch(/payer name could not be read/);
+    expect(detail.invoice).toMatchObject({ id: inv.g_payer.id });
+    expect(detail).toHaveProperty('payment_plan');
+  });
+
+  test('a failing dispute-hold read does not abort the snapshot: everything else in the call still returns', async () => {
+    const detail = await withBrokenColumn('collections_flags', 'released_at', () => read('get_invoice_detail', { invoice_id: inv.credited.id }));
+    expect(detail.error).toBeUndefined();
+    expect(detail.dispute_hold).toMatchObject({ active: null, unknown: expect.stringMatching(/could not be read/) });
+    expect(detail.invoice).toMatchObject({ collectible: true, balance_due: 100 });
+    expect(detail.payment_plan.active).toMatchObject({ payment_amount: 25 });
+    const list = await withBrokenColumn('collections_flags', 'released_at', () => read('get_customer_invoices', { customer_id: A, limit: 50 }));
+    expect(list.error).toBeUndefined();
+    expect(by(list, 'credited')).toMatchObject({ collectible: true, balance_due: 100, dispute_hold: null });
+  });
+
   test('annual prepay linkage resolves through the term\'s prepay_invoice_id when the invoice has no term id of its own', async () => {
     const list = await read('get_customer_invoices', { customer_id: T });
     expect(by(list, 't_prepay').annual_prepay).toMatchObject({ role: 'prepay_invoice', term_id: inv.prepayTermId, term_status: 'active' });
