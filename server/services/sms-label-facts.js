@@ -1055,7 +1055,8 @@ function hasUnknownShortWord(text, { namesExempt = false } = {}) {
 // works" from "... kesho ..."): a word left untranslated, at any length. A
 // capitalized word (a name or product) is exempt.
 function untranslatedWords(text, source) {
-  const letters = (t) => [...stripMarks(canonText(t)).matchAll(/\p{L}+/gu)].map((m) => m[0]);
+  // a link, domain or email is copied on purpose (portal.wavespestcontrol.com, a customer's address): not a word
+  const letters = (t) => [...stripMarks(canonText(String(t || '').replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' '))).matchAll(/\p{L}+/gu)].map((m) => m[0]);
   const src = new Set(letters(source).map((w) => w.toLowerCase()));
   return letters(text).filter((raw) => !/^\p{Lu}/u.test(raw) && raw.length > 2 && src.has(raw.toLowerCase()) && !englishKnown(raw.toLowerCase()));
 }

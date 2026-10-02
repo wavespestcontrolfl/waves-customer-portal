@@ -48,10 +48,12 @@ function needsTranslation(inbound) {
 // treats an inbound over its 1,000-character cap as unverified, so a longer
 // text is read in sentence-aligned chunks under the cap.
 function isEnglishText(text, source = null) {
+  // a link, domain or email the output keeps on purpose is not language: read the words around it
+  const plain = String(text || '').replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' ').replace(/\s+/g, ' ').trim();
   const chunks = [];
   let current = '';
   // a sentence over the chunk size is itself split at word boundaries
-  const pieces = String(text || '').split(/(?<=[.!?])\s+/).flatMap((sentence) => {
+  const pieces = plain.split(/(?<=[.!?])\s+/).flatMap((sentence) => {
     if (sentence.length <= 900) return [sentence];
     const parts = [];
     let part = '';
@@ -73,7 +75,7 @@ function isEnglishText(text, source = null) {
   // nor, at any length, a word copied untranslated from the text it came from ("... if kesho works")
   const labelFacts = require('./sms-label-facts');
   return chunks.length > 0 && chunks.every((c) => c.length <= 1000 && isEnglishInbound(c))
-    && !labelFacts.hasUnknownShortWord(text, { namesExempt: true })
+    && !labelFacts.hasUnknownShortWord(plain, { namesExempt: true })
     && !(source && labelFacts.untranslatedWords(text, source).length);
 }
 
@@ -658,12 +660,20 @@ function calendarTokens(text) {
   return out;
 }
 
+// comms-lint findings counted sentence by sentence: an approved LABEL FACTS
+// sentence the English carried trips the re-entry rule once, so a second
+// sentence tripping it in the read-back ("... poses no risk to pets") is an
+// added finding even though the rule name is the same.
+function lintCounts(text, context) {
+  return String(text || '').split(/(?<=[.!?])\s+/).filter((s) => s.trim())
+    .flatMap((sentence) => lintFailures(sentence, context)).filter((r) => r !== 'sms-segment-limit');
+}
+
 function translationAddedFault(englishReply, backTranslation, context) {
   const before = bannedCopyCounts(englishReply);
   if (bannedCopyCounts(backTranslation).some((n, i) => n > before[i])) return 'banned_copy';
   // the customer's billing lane arms the plan-total rule (a translation adding "per month" to a balance)
-  const rulesBefore = new Set(lintFailures(englishReply, context));
-  const added = lintFailures(backTranslation, context).filter((r) => r !== 'sms-segment-limit' && !rulesBefore.has(r));
+  const added = diffCounts(lintCounts(backTranslation, context), lintCounts(englishReply, context));
   return added.length ? 'failed_comms_lint' : null;
 }
 
@@ -687,18 +697,18 @@ async function threadAsOfTrigger(context, smsLogId) {
 
 async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId }) {
   if (inboundMessage.length > MAX_TEXT) return { stop: 'inbound_too_long' };
-  // the customer's thread and account, snapshotted the moment the trial starts (after any consuming
-  // branch committed): a staff reply or newer text landing during the model calls below never reaches
-  // the draft. Same live-ETA opt-in as the live drafter (draftShadowReply): the real-answers gate.
+  // the language first: an English text (today's English path answers it) never costs a context load
+  const inbound = await translateInbound(inboundMessage);
+  if (!inbound.ok) return { stop: `inbound_translation_failed:${inbound.reason}` };
+  if (inbound.isEnglish) return { english: true };
+  // the customer's thread and account, read before any other model call; the thread is cut at the triggering
+  // text (threadAsOfTrigger), so a staff reply or newer text landing meanwhile never reaches the draft. Same
+  // live-ETA opt-in as the live drafter (draftShadowReply): the real-answers gate.
   const ContextAggregator = require('./context-aggregator');
   const liveEtaFetchedAt = new Date();
   // visit loops too, as the live drafter loads them: a "thanks" with something still open is not a pure thank-you
   const liveContext = await threadAsOfTrigger(await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS'), includeVisitLoops: true }), smsLogId);
   if (!liveContext) return { stop: 'trigger_row_unread' };
-  const inbound = await translateInbound(inboundMessage);
-  if (!inbound.ok) return { stop: `inbound_translation_failed:${inbound.reason}` };
-  // the model reads it as English: today's English path already answers it
-  if (inbound.isEnglish) return { english: true };
   const fields = { language: inbound.language, language_code: inbound.languageCode, inbound_english: inbound.english };
   // the customer's own figures (a time, an address number, an amount) must survive into the English the draft reads
   const inboundParity = tokenParity(inbound.english, inboundMessage, { strictTimes: false });

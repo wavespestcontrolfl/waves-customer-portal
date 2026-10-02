@@ -318,7 +318,7 @@ describe('runTranslationTrial', () => {
     expect(mockDraft).not.toHaveBeenCalled();
   });
 
-  test('the customer\'s context is snapshotted before any model call', async () => {
+  test('the language is read first; the context is read once, before every other model call', async () => {
     const ctx = require('../services/context-aggregator');
     const order = [];
     ctx.getContextForCustomer.mockClear();
@@ -327,8 +327,33 @@ describe('runTranslationTrial', () => {
     const base = mockDispatch.getMockImplementation();
     mockDispatch.mockImplementation(async (policy, payload) => { order.push('model'); return base(policy, payload); });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
-    expect(order[0]).toBe('context');
+    expect(order.slice(0, 2)).toEqual(['model', 'context']);
     expect(ctx.getContextForCustomer).toHaveBeenCalledTimes(1);
+  });
+
+  test('a text the model reads as English never loads the customer context', async () => {
+    const ctx = require('../services/context-aggregator');
+    ctx.getContextForCustomer.mockClear();
+    scriptModels({ inbound: { is_english: true, language: 'English', language_code: 'en', english: 'Use Termidor.' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Use Termidor.', customer, smsLogId: 's1' })).toBeNull();
+    expect(ctx.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('a read-back that adds a second re-entry claim beside the approved label sentence is held', async () => {
+    const sentence = 'For the products applied at your Sep 30 visit, the label says to keep people and pets off treated areas until dry.';
+    const labelFacts = require('../services/sms-label-facts');
+    const section = jest.spyOn(labelFacts, 'labelFactsSectionFrom').mockReturnValue(`LABEL FACTS (from the labels of products applied at the last visit on Tuesday, Sep 30):\n- ${sentence}`);
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Para los productos aplicados en su visita del 30 de septiembre, la etiqueta dice mantener a personas y mascotas fuera de las áreas tratadas hasta que se seque. El tratamiento no representa ningún riesgo para las mascotas.', back: `Thanks! ${sentence} The treatment poses no risk to pets.` });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: `Thanks! ${sentence}` }, converged: true, passes: 1, factsBlock: 'facts' });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    section.mockRestore();
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'back_translation_failed_comms_lint' });
+  });
+
+  test('a link or email kept in a translation is not an untranslated word', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Can you email the receipt to ana.lopez@example.com or check portal.wavespestcontrol.com today?' } });
+    const row = await runTranslationTrial({ inboundMessage: '¿Pueden enviar el recibo a ana.lopez@example.com o revisar portal.wavespestcontrol.com hoy?', customer, smsLogId: 's1' });
+    expect(row.hold_reason).not.toBe('inbound_translation_failed:translation_not_english');
   });
 
   test('a thank-you with a visit loop open goes to a person, as the live drafter routes it', async () => {
