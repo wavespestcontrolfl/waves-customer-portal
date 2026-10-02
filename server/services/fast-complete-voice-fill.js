@@ -723,6 +723,8 @@ function negatedPositions(tokens, breaks) {
   return out;
 }
 
+const AUXILIARY_WORDS = new Set(['was', 'were', 'is', 'are', 'got', 'get', 'did', 'does', 'do', 'has', 'have', 'had', 'been', 'be', 'being', 'will', 'would', 'could', 'should', 'actually', 'really', 't']);
+const POST_NEGATION_WINDOW = 4;
 function isNegatedMention(mention, world) {
   let from = mention.start;
   while (from > 0 && !world.breaks[from] && mention.start - from < NEGATION_WINDOW) from -= 1;
@@ -731,7 +733,14 @@ function isNegatedMention(mention, world) {
   let clause = from;
   while (clause > 0 && !world.breaks[clause]) clause -= 1;
   for (let j = clause; j < from; j += 1) if (isOtherVisitAt(world.tokens, j)) return true;
-  return world.tokens[mention.end] === 'not' && !world.breaks[mention.end];
+  // "Taurus not", "Taurus was not used", "four ounces of Taurus weren't used":
+  // a negation after the name, past auxiliary words, in the same clause.
+  for (let j = mention.end; j < world.tokens.length && j - mention.end < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
+    const token = world.tokens[j];
+    if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) return token !== 'no' || world.tokens[j + 1] !== 'wait';
+    if (!AUXILIARY_WORDS.has(token)) return false;
+  }
+  return false;
 }
 
 // The places in the transcript this product is named, as the heard words point

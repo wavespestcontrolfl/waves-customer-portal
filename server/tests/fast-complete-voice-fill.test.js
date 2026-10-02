@@ -1093,3 +1093,21 @@ test('"same as last time" does not cross a "but" to another product', () => {
   const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Talstar was a new product today' }] }), ctx, t);
   expect(out.products[0].sameAsLast).toBe(false);
 });
+
+describe('a negation after the product name', () => {
+  test.each([
+    'Four ounces of Taurus were not used; today I used Talstar.',
+    "Taurus wasn't used today, just Talstar.",
+    'Taurus was never applied, just Talstar.',
+  ])('"%s" does not apply Taurus', (t) => {
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus' }] }), ctx, t);
+    expect(out.products).toEqual([]);
+    expect(out.unclear.map((u) => u.reason)).toContain('negated_product');
+  });
+
+  test('"Taurus was used, not Talstar" still applies Taurus', () => {
+    const t = 'Taurus was used, not Talstar.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Taurus was used' }] }), ctx, t);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-taurus']);
+  });
+});
