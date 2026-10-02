@@ -639,6 +639,13 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     }
   });
 
+  test('#5524 r18: a list of treated areas is refused even when the recap holds it', () => {
+    const { listsTreatedAreas } = Drafter.__private;
+    expect(listsTreatedAreas('I treated the front entry and garage. Google review: {review_url}')).toBe(true);
+    expect(listsTreatedAreas('Did the kitchen, under the sinks, appliance areas and wall voids.')).toBe(true);
+    expect(listsTreatedAreas('I flagged moisture under the kitchen sink for your property group.')).toBe(false);
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);

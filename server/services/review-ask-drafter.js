@@ -815,6 +815,7 @@ const CONTENT_CHECKS = [
   ["satisfaction_condition", (b) => satisfactionConditioned(b)],
   ["termite_off_service", (b, c) => !c.termite && TERMITE_RE.test(b)],
   ["not_tech_voice", (b, c) => notTechVoice(b, c.techName)],
+  ["area_list", (b) => listsTreatedAreas(b)],
   ["coached_review", (b) => COACHED_REVIEW_RE.test(b)],
 ];
 const withoutLink = (b) => b.replace(/\{review_url\}/g, "");
@@ -868,6 +869,20 @@ function notTechVoice(body, techName) {
     const uses = String(body).match(new RegExp(`\\b${esc}\\b`, "gi")) || [];
     const intros = String(body).match(new RegExp(`\\b(?:it'?s|this is|i'?m|i am)\\s+${esc}\\b|\\b${esc}\\s+here\\b`, "gi")) || [];
     return uses.length > intros.length;
+  });
+}
+// Review texts never list treated areas (owner ruling 2026-10-01). The areas
+// field is not given to the writer, but a recap can carry a list ("Treated
+// the front entry and garage"), so code refuses a sentence that names three
+// or more places, or two alongside a treatment verb.
+const AREA_WORDS = new Set(`kitchen bathroom bedroom closet pantry cabinet garage laundry basement crawlspace attic lanai
+  pool cage deck patio porch driveway fence shed eave soffit baseboard foundation slab gutter yard lawn bed beds
+  perimeter entry entryway door window wall ornamental shrub hedge mulch garden sink plumbing appliance`.split(/\s+/).map(termStem).filter(Boolean));
+const TREATMENT_VERB_RE = /\b(?:treat(?:ed|ing)?|spray(?:ed|ing)?|did|covered|went\s+(?:through|after|over)|hit|got\s+(?:the|your))\b/i;
+function listsTreatedAreas(body) {
+  return String(body).split(/(?<=[.!?])\s+/).some((sentence) => {
+    const areas = new Set([...stemSet(sentence)].filter((w) => AREA_WORDS.has(w)));
+    return areas.size >= 3 || (areas.size >= 2 && TREATMENT_VERB_RE.test(sentence));
   });
 }
 const firstFailure = (checks, body, ctx) => (checks.find(([, fails]) => fails(body, ctx)) || [null])[0];
@@ -1375,7 +1390,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, listsTreatedAreas, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;
