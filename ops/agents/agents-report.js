@@ -59,6 +59,15 @@ process.env.GATE_LLM_DISPATCH_METRICS = 'true';
 // gate was passed through and is on.
 const typedDecisionsGate = process.env.GATE_TYPED_DECISIONS == null ? null : ['1', 'true', 'on'].includes(String(process.env.GATE_TYPED_DECISIONS).toLowerCase());
 
+// stdout is the report only (with --json, one document a consumer parses).
+// App modules print at load and inside reads with console.log as well as the
+// winston logger (e.g. call-recording-processor's flag line), so console
+// output is sent to stderr for the whole process and the report writes to
+// stdout directly.
+const out = (line = '') => process.stdout.write(`${line}\n`);
+console.log = (...args) => console.error(...args);
+console.info = (...args) => console.error(...args);
+
 const path = require('path');
 const SERVER = path.join(__dirname, '..', '..', 'server');
 const db = require(path.join(SERVER, 'models', 'db'));
@@ -103,6 +112,10 @@ async function waitingOnYou(now) {
 
 // Integrations the reads load lazily announce themselves as warnings too
 // (push providers, GBP); those are not about a source this report reads.
+// Every log record goes to stderr: stdout is the report (and, with --json,
+// one JSON document a consumer parses), so a recoverable source warning
+// must never land in it.
+for (const t of logger.transports) if (t.name === 'console') t.stderrLevels = Object.fromEntries(Object.keys(logger.levels).map((l) => [l, true]));
 const STARTUP_NOISE = /^\[(apns|fcm|push|gbp)\]/;
 const rawWarn = logger.warn.bind(logger);
 logger.warn = (msg, ...rest) => (typeof msg === 'string' && STARTUP_NOISE.test(msg) ? logger : rawWarn(msg, ...rest));
@@ -120,17 +133,17 @@ async function main() {
   }
   const basis = lanes.basis || {};
   const costNote = basis.cost == null ? 'cost: unavailable' : basis.cost.priced === false ? 'cost: waiting for the first price pull' : null;
-  console.log(`Agents report — ${WINDOW} — ${now.toISOString()}${costNote ? `  (${costNote})` : ''}`);
+  out(`Agents report — ${WINDOW} — ${now.toISOString()}${costNote ? `  (${costNote})` : ''}`);
   const gateWord = (v) => (v == null ? 'unknown' : v ? 'on' : 'OFF');
-  console.log(`lanes: ${lanes.counts.active} active, ${lanes.counts.attention} need attention, ${lanes.counts.idle} idle`);
-  console.log(`recording (portal gates): ledger ${gateWord(recorderState.GATE_LLM_CALL_LEDGER)}, chains ${gateWord(recorderState.GATE_LLM_DISPATCH_METRICS)}${recorderState.GATE_LLM_DISPATCH_METRICS === false ? ' — fallback rates cover only what was recorded' : ''}\n`);
+  out(`lanes: ${lanes.counts.active} active, ${lanes.counts.attention} need attention, ${lanes.counts.idle} idle`);
+  out(`recording (portal gates): ledger ${gateWord(recorderState.GATE_LLM_CALL_LEDGER)}, chains ${gateWord(recorderState.GATE_LLM_DISPATCH_METRICS)}${recorderState.GATE_LLM_DISPATCH_METRICS === false ? ' — fallback rates cover only what was recorded' : ''}\n`);
 
   const hasAttention = (att) => Object.values(att || {}).some((n) => n > 0);
   const areaRows = areas.areas.filter((a) => a.calls > 0 || hasAttention(a.attention) || SHOW_ALL).map((a) => [
     a.label, a.calls, pct(a.okRate), pct(a.fallbackRate), ms(a.p95LatencyMs), usd(a.estCostUsd),
     Object.entries(a.attention).filter(([, n]) => n > 0).map(([p, n]) => `${p}:${n}`).join(' ') || '',
   ]);
-  console.log(table(['area', 'calls', 'ok', 'fallback', 'p95', 'est $', 'attention'], areaRows, new Set([1, 2, 3, 4, 5])));
+  out(table(['area', 'calls', 'ok', 'fallback', 'p95', 'est $', 'attention'], areaRows, new Set([1, 2, 3, 4, 5])));
 
   const laneRows = lanes.lanes.filter((l) => l.status !== 'idle' || SHOW_ALL).map((l) => [
     l.status === 'attention' ? '!' : l.status === 'active' ? '' : '·',
@@ -143,12 +156,12 @@ async function main() {
     usd(l.estCostUsd), l.unpricedCalls == null ? '—' : l.unpricedCalls,
     l.attentionReasons.map((r) => r.detail || r.kind).join('; '),
   ]);
-  console.log(`\n${table(['', 'lane', 'area', 'calls', 'ok', 'fb', 'p50', 'p95', 'tok in/cached/cw/out/think', 'est $', 'unpriced', 'why'], laneRows, new Set([3, 4, 5, 6, 7, 8, 9, 10]))}`);
+  out(`\n${table(['', 'lane', 'area', 'calls', 'ok', 'fb', 'p50', 'p95', 'tok in/cached/cw/out/think', 'est $', 'unpriced', 'why'], laneRows, new Set([3, 4, 5, 6, 7, 8, 9, 10]))}`);
 
   const noUsage = lanes.lanes.filter((l) => l.tokens.unknownRows > 0);
-  if (noUsage.length) console.log(`\ntoken sums are partial (+N? = calls whose usage could not be read): ${noUsage.map((l) => `${l.id} ${l.tokens.unknownRows}`).join(', ')}`);
+  if (noUsage.length) out(`\ntoken sums are partial (+N? = calls whose usage could not be read): ${noUsage.map((l) => `${l.id} ${l.tokens.unknownRows}`).join(', ')}`);
   const unpriced = lanes.lanes.filter((l) => (l.unpricedCalls || 0) > 0);
-  if (unpriced.length) console.log(`\nunpriced calls (model-name matching to check): ${unpriced.map((l) => `${l.id} ${l.unpricedCalls}`).join(', ')}`);
+  if (unpriced.length) out(`\nunpriced calls (model-name matching to check): ${unpriced.map((l) => `${l.id} ${l.unpricedCalls}`).join(', ')}`);
 
   const w = waiting;
   const items = [];
@@ -157,7 +170,7 @@ async function main() {
   else if (w.typedDecisionLabels > 0) items.push(`${w.typedDecisionLabels} typed-decision review${w.typedDecisionLabels === 1 ? '' : 's'} unlabeled (last ${REVIEW_WINDOW_DAYS} days)`);
   if (w.contentEmailApprovals == null) items.push('content email approvals: unreadable');
   else if (w.contentEmailApprovals > 0) items.push(`${w.contentEmailApprovals} content email approval${w.contentEmailApprovals === 1 ? '' : 's'} awaiting your reply`);
-  console.log(`\nwaiting on you: ${items.length ? items.join('; ') : 'nothing'}`);
+  out(`\nwaiting on you: ${items.length ? items.join('; ') : 'nothing'}`);
 }
 
 main()
