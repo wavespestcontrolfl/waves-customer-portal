@@ -15,6 +15,7 @@ jest.mock('../config', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
+  homeLineLive: jest.fn(() => false),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -54,6 +55,7 @@ const express = require('express');
 const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+const { homeLineLive } = require('../config/feature-gates');
 
 function query({ result = [], returning } = {}) {
   const q = {};
@@ -100,6 +102,7 @@ describe('admin communications voice route', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    homeLineLive.mockReturnValue(false);
     process.env.ADAM_PHONE = '+19415993489';
     mockCallCreate.mockRejectedValue(new Error('Twilio voice unavailable'));
     db.mockImplementation((table) => {
@@ -159,6 +162,48 @@ describe('admin communications voice route', () => {
       expect(body.error).toBe('to must be a customer phone, not the admin bridge phone');
       expect(mockCallCreate).not.toHaveBeenCalled();
       expect(alertTwilioFailure).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('caller ID (GATE_HOME_LINE, home-line PR 2)', () => {
+    const MAIN = '+19412975749';
+    const PARRISH = '+19412972817';
+    const parrishCustomer = { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: '+15551234567', address_line1: '1 A St', city: '', zip: '34219' };
+
+    async function callFor(customerRow) {
+      db.mockImplementation((table) => {
+        if (table === 'customers') return query({ result: customerRow ? [customerRow] : [] });
+        if (table === 'call_log') return query({ returning: [{ id: 'call-log-1' }] });
+        throw new Error(`Unexpected table ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        await fetch(`${baseUrl}/admin/communications/call`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', fromNumber: MAIN }),
+        });
+      });
+      expect(mockCallCreate).toHaveBeenCalledTimes(1);
+      return mockCallCreate.mock.calls[0][0];
+    }
+
+    test('gate on: a linked customer is called from their home line', async () => {
+      homeLineLive.mockReturnValue(true);
+      const call = await callFor(parrishCustomer);
+      expect(call.from).toBe(PARRISH);
+      expect(call.url).toContain(`callerIdNumber=${encodeURIComponent(PARRISH)}`);
+      expect(alertTwilioFailure).toHaveBeenCalledWith(expect.objectContaining({ from: PARRISH }));
+    });
+
+    test('gate on: a customer whose address names no office keeps the main line', async () => {
+      homeLineLive.mockReturnValue(true);
+      const call = await callFor({ ...parrishCustomer, zip: '', city: '' });
+      expect(call.from).toBe(MAIN);
+    });
+
+    test('gate off: the main line, as before', async () => {
+      const call = await callFor(parrishCustomer);
+      expect(call.from).toBe(MAIN);
     });
   });
 });

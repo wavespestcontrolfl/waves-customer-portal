@@ -355,7 +355,9 @@ function resolveReviewLocationId(customer = {}, opts = {}) {
 // ~35mi of an office; beyond this the geocode is treated as unusable.
 const SERVICE_GEOCODE_MAX_MILES = 50;
 
-function resolveServiceLocation(customer = {}) {
+// resolveServiceLocation without the default-office fallback: null when no
+// city, ZIP or nearby geocode identifies an office (a lead with no address).
+function matchServiceLocation(customer = {}) {
   const byId = (id) => WAVES_LOCATIONS.find((l) => l.id === id) || null;
 
   // The customer's own city first, then the ZIP's city. Full value to
@@ -379,7 +381,11 @@ function resolveServiceLocation(customer = {}) {
     if (hit && haversineMiles({ latitude: lat, longitude: lng }, hit) <= SERVICE_GEOCODE_MAX_MILES) return hit;
   }
 
-  return WAVES_LOCATIONS[0];
+  return null;
+}
+
+function resolveServiceLocation(customer = {}) {
+  return matchServiceLocation(customer) || WAVES_LOCATIONS[0];
 }
 
 /**
@@ -394,12 +400,22 @@ function resolveServiceLocation(customer = {}) {
  * @returns {string} a WAVES_LOCATIONS id (never null)
  */
 function homeLineLocationId(customer = {}) {
+  return homeLineOfficeId(customer) || WAVES_LOCATIONS[0].id;
+}
+
+/**
+ * homeLineLocationId without the default-office fallback: null when the
+ * customer has no valid stored line and no address that identifies an office
+ * (owner ruling 2026-10-02: a lead with no office is called from the main
+ * line, not assigned Bradenton).
+ */
+function homeLineOfficeId(customer = {}) {
   const stored = customer.home_line_location_id;
   if (stored && customer.home_line_address_key != null && WAVES_LOCATIONS.some((l) => l.id === stored)) {
     const { addressKey } = require('../services/customer-property-address-keys');
     if (customer.home_line_address_key === addressKey(customer)) return stored;
   }
-  return resolveServiceLocation(customer).id;
+  return matchServiceLocation(customer)?.id || null;
 }
 
 // True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
@@ -439,6 +455,8 @@ module.exports = {
   resolveLocation,
   resolveServiceLocation,
   homeLineLocationId,
+  homeLineOfficeId,
+  matchServiceLocation,
   resolveLocationFromCandidates,
   isOfficeCity,
   nearestLocation,

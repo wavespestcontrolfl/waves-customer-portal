@@ -60,4 +60,23 @@ async function stampHomeLines({ now = new Date(), database = db } = {}) {
   return { stamped, unchanged, lostRace };
 }
 
-module.exports = { stampHomeLines };
+/**
+ * The caller ID a staff-placed outbound call to this customer presents
+ * (home-line PR 2, owner ruling 2026-10-02): their home line while
+ * GATE_HOME_LINE is on and their address identifies an office, else the main
+ * line — a lead with no office, an unlinked number, or the gate off (the
+ * pre-home-line behavior: every call from the main line).
+ *
+ * @param {object|null} customer  a customers row (address + home_line_* columns)
+ * @returns {string} an E.164 Waves number
+ */
+function homeLineCallerId(customer) {
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const main = TWILIO_NUMBERS.mainLine.number;
+  if (!customer || !homeLineLive()) return main;
+  const { homeLineOfficeId } = require('../config/locations');
+  const officeId = homeLineOfficeId(customer);
+  return (officeId && TWILIO_NUMBERS.locations[officeId]?.number) || main;
+}
+
+module.exports = { stampHomeLines, homeLineCallerId };

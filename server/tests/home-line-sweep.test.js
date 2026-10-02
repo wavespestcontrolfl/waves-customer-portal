@@ -7,7 +7,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const { stampHomeLines } = require('../services/home-line');
+const { stampHomeLines, homeLineCallerId } = require('../services/home-line');
 const { addressKey } = require('../services/customer-property-address-keys');
 
 function fakeDb(rows, { updateResult = 1 } = {}) {
@@ -67,5 +67,40 @@ describe('stampHomeLines', () => {
     const { database, predicates } = fakeDb([parrish]);
     await stampHomeLines({ now, database });
     expect(predicates).toEqual(expect.arrayContaining(['address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude', 'home_line_location_id', 'home_line_address_key'].map((c) => [`${c} IS NOT DISTINCT FROM ?`, [parrish[c] ?? null]])));
+  });
+});
+
+describe('homeLineCallerId (calls, PR 2)', () => {
+  const ORIGINAL = process.env.GATE_HOME_LINE;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.GATE_HOME_LINE;
+    else process.env.GATE_HOME_LINE = ORIGINAL;
+  });
+  const MAIN = '+19412975749';
+  const PARRISH = '+19412972817';
+  const parrish = { id: 'a', address_line1: '1 A St', city: '', zip: '34219' };
+
+  test('gate off: every call presents the main line', () => {
+    delete process.env.GATE_HOME_LINE;
+    expect(homeLineCallerId(parrish)).toBe(MAIN);
+  });
+
+  test('gate on: a customer whose address names an office gets that line', () => {
+    process.env.GATE_HOME_LINE = 'true';
+    expect(homeLineCallerId(parrish)).toBe(PARRISH);
+  });
+
+  test('gate on: a current stored stamp wins over the derived office', () => {
+    process.env.GATE_HOME_LINE = 'true';
+    const stamped = { ...parrish, home_line_location_id: 'venice' };
+    stamped.home_line_address_key = addressKey(stamped);
+    expect(homeLineCallerId(stamped)).toBe('+19412973337');
+  });
+
+  test('gate on: no customer, or a lead with no office, keeps the main line', () => {
+    process.env.GATE_HOME_LINE = 'true';
+    expect(homeLineCallerId(null)).toBe(MAIN);
+    expect(homeLineCallerId({ id: 'lead', city: '', zip: '' })).toBe(MAIN);
+    expect(homeLineCallerId({ id: 'far', city: 'Orlando', zip: '32801' })).toBe(MAIN);
   });
 });

@@ -1796,11 +1796,10 @@ router.post('/call', async (req, res, next) => {
     // below); it also owns the call_log row, the Twilio call, and the
     // touchpoint. This handler keeps the admin-only validations.
 
-    // All outbound calls present the main company line, regardless of which
-    // endpoint the UI picker selected (fromNumber is still validated above so
-    // garbage input fails loudly rather than silently dialing as main).
-    const from = TWILIO_NUMBERS.mainLine.number;
-    attemptedFrom = from;
+    // The caller ID is server-chosen, regardless of which endpoint the UI
+    // picker selected (fromNumber is still validated above so garbage input
+    // fails loudly): the linked customer's home line under GATE_HOME_LINE,
+    // else the main company line — set below once the customer is resolved.
     const source = relatedCommitmentId || rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
     // A callback attempt placed while the card policy is on is stamped so
     // rollback keeps its strict customer-leg proof and completion action,
@@ -1866,6 +1865,8 @@ router.post('/call', async (req, res, next) => {
     const leadName = customer
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
+    const from = require('../services/home-line').homeLineCallerId(customer);
+    attemptedFrom = from;
 
     let bridgeClaimIds = [];
     // Every callback attempt under the card policy takes the customer claim
@@ -1874,8 +1875,8 @@ router.post('/call', async (req, res, next) => {
     if (relatedCommitmentId || cardPolicy) bridgeClaimIds = await db.transaction(async (trx) => {
       if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
-      // before call_log is inserted, keyed to the NUMBER being called: every
-      // card dials from the shared main line, so a line-wide key would let
+      // before call_log is inserted, keyed to the NUMBER being called: cards
+      // share caller-ID lines (main or a home line), so a line-wide key would let
       // one ringing callback block every other customer's card; a
       // per-commitment or per-customer key would let a linked and an
       // unlinked attempt ring the same phone twice at once.

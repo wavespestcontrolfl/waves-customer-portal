@@ -152,3 +152,27 @@ describe('home line (GATE_HOME_LINE)', () => {
       .toBe(TWILIO_NUMBERS.getOutboundNumber('parrish'));
   });
 });
+
+describe('homeLineOfficeId / matchServiceLocation (no default office)', () => {
+  const { homeLineOfficeId, homeLineLocationId, matchServiceLocation } = require('../config/locations');
+  const { addressKey } = require('../services/customer-property-address-keys');
+
+  test('null when no city, ZIP or nearby geocode names an office', () => {
+    expect(matchServiceLocation({})).toBeNull();
+    expect(matchServiceLocation({ city: 'Orlando', zip: '32801' })).toBeNull();
+    expect(matchServiceLocation({ latitude: 0, longitude: 0 })).toBeNull();
+    expect(homeLineOfficeId({ city: '' })).toBeNull();
+  });
+
+  test('resolveServiceLocation and homeLineLocationId keep the default-office fallback', () => {
+    expect(resolveServiceLocation({}).id).toBe('bradenton');
+    expect(homeLineLocationId({})).toBe('bradenton');
+  });
+
+  test('a matched office or a current stamp is returned as-is', () => {
+    expect(matchServiceLocation({ zip: '34219' }).id).toBe('parrish');
+    expect(matchServiceLocation(NEAR_VENICE).id).toBe('venice');
+    const address = { address_line1: '1 A St', city: '' };
+    expect(homeLineOfficeId({ ...address, home_line_location_id: 'sarasota', home_line_address_key: addressKey(address) })).toBe('sarasota');
+  });
+});
