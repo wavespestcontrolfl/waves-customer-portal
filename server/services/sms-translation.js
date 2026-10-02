@@ -253,6 +253,8 @@ async function translateThread(context, inboundMessage, inboundEnglish) {
     if (!cache.has(key)) {
       const t = await translateInbound(m.body);
       if (!t.ok) return { ok: false, reason: t.reason };
+      // same figure check as the current text: a row the draft reads must keep the customer's numbers
+      if (!t.isEnglish && !tokenParity(t.english, m.body).ok) return { ok: false, reason: 'figures_changed' };
       cache.set(key, t.isEnglish ? null : t.english);
     }
     const english = cache.get(key);

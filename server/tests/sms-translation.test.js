@@ -202,6 +202,19 @@ describe('runTranslationTrial', () => {
     expect(logger.warn.mock.calls.flat().join(' ')).not.toContain('Hola');
   });
 
+  test('a thread row whose translation changes a figure holds the trial', async () => {
+    const ctx = require('../services/context-aggregator');
+    const OLDER = 'Mi código de la puerta es 4821, ¿pueden pasar el jueves?';
+    ctx.getContextForCustomer.mockResolvedValueOnce({ customer: { id: 'c1' }, smsHistory: [{ direction: 'inbound', body: OLDER, fromPhone: '+19415550100' }] });
+    scriptModels({ inbound: SPANISH_INBOUND });
+    const base = mockDispatch.getMockImplementation();
+    mockDispatch.mockImplementation(async (policy, payload) => (payload.text.includes(OLDER)
+      ? { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'My gate code is 4812, can you come Thursday?' } }
+      : base(policy, payload)));
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'thread_translation_failed:figures_changed' });
+    expect(mockDraft).not.toHaveBeenCalled();
+  });
+
   test('a draft that did not pass the English checks is held before any translation', async () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     mockDraft.mockResolvedValue({ parsed: { reply: REPLY }, converged: false, passes: 3 });
