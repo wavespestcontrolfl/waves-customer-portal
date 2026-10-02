@@ -48,25 +48,58 @@ function parseRouter(fileSpec) {
   const p = path.join(ROUTES, `${file}.js`);
   if (!fs.existsSync(p)) return { routes: [], adminWide: false, missing: true };
   const src = fs.readFileSync(p, 'utf8');
-  // Router-wide guards: router.use(adminAuthenticate, requireAdmin) etc. A
-  // file exporting several routers (serviceRouter/propertyRouter) is read as
-  // one; its own guards are per-route in practice.
-  const adminWide = /\brouter\.use\([^)]*\brequireAdmin\b[^)]*\)/.test(src);
+  // Router-wide guards: router.use(adminAuthenticate, requireAdmin) with NO
+  // path argument. A path-scoped use — router.use('/x', requireAdmin) or
+  // router.use(['/x', '/y'], requireAdmin) — guards only those prefixes
+  // (admin-equipment, admin-equipment-maintenance), so it is recorded per
+  // prefix instead of marking the whole router admin-only.
+  // Three shapes carry requireAdmin at router level:
+  //   router.use(adminAuthenticate, requireAdmin)         → every route admin-only
+  //   router.use('/x', requireAdmin) / (['/x','/y'], …)   → those prefixes only
+  //   router.use((req, res, next) => cond ? next() : requireAdmin(…))
+  //     → an exemption gate: admin-only EXCEPT the router's own named staff
+  //       exemptions (admin-inventory, admin-estimates, admin-invoices, …).
+  //       Static reading cannot evaluate the condition, so these routes are
+  //       kept in the census flagged "exemption gate" instead of being
+  //       wrongly listed as either fully open or fully admin-only.
+  let adminWide = false;
+  let exemptionGate = false;
+  const adminPrefixes = [];
+  for (const m of src.matchAll(/\brouter\.use\(([^]*?)\);/g)) {
+    const args = m[1];
+    if (!/\brequireAdmin\b/.test(args)) continue;
+    const trimmed = args.trim();
+    const firstArg = trimmed[0];
+    if (firstArg === "'" || firstArg === '"' || firstArg === '`' || firstArg === '[') {
+      adminPrefixes.push(...[...args.matchAll(/(['"`])(\/[^'"`]*)\1/g)].map((x) => x[2]));
+    } else if (firstArg === '(' || /^(async\s+)?function\b/.test(trimmed) || /=>/.test(trimmed)) {
+      exemptionGate = true;
+    } else {
+      adminWide = true;
+    }
+  }
   const routerStaffAuth = /\brouter\.use\([^)]*\badminAuthenticate\b[^)]*\)/.test(src);
   const routes = [];
-  const re = /\b(router|serviceRouter|propertyRouter)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\3\s*,([^]*?)(?=\n(?:[a-zA-Z/]|\s*\}\);|\s*$))/g;
+  // First argument: one quoted path or an array of quoted paths.
+  const re = /\b(router|serviceRouter|propertyRouter)\.(get|post|put|patch|delete|all)\(\s*(\[[^\]]*\]|(['"`])[^'"`]+\4)\s*,([^]*?)(?=\n(?:[a-zA-Z/]|\s*\}\);|\s*$))/g;
   for (const m of src.matchAll(re)) {
     const routerVar = m[1];
     if (exportName && routerVar !== exportName && routerVar !== 'router') continue;
     const method = m[2].toUpperCase();
-    const routePath = m[4];
+    const pathArg = m[3];
+    const routePaths = pathArg.startsWith('[')
+      ? [...pathArg.matchAll(/(['"`])([^'"`]+)\1/g)].map((x) => x[2])
+      : [pathArg.slice(1, -1)];
     const head = m[5].split('\n').slice(0, 6).join('\n');
     const guards = head.split('async')[0];
     const perRouteAdmin = /\brequireAdmin\b/.test(guards);
     const staffAuth = routerStaffAuth || /\b(adminAuthenticate|authStack)\b/.test(guards);
-    routes.push({ method: method === 'ALL' ? 'GET' : method, routePath, perRouteAdmin, staffAuth });
+    for (const routePath of routePaths) {
+      const prefixAdmin = adminPrefixes.some((pre) => routePath === pre || routePath.startsWith(`${pre}/`));
+      routes.push({ method: method === 'ALL' ? 'GET' : method, routePath, perRouteAdmin: perRouteAdmin || prefixAdmin, staffAuth });
+    }
   }
-  return { routes, adminWide, missing: false };
+  return { routes, adminWide, exemptionGate, missing: false };
 }
 
 function joinPath(mount, routePath) {
@@ -91,7 +124,7 @@ function census() {
       const full = joinPath(mount, route.routePath);
       const today = !(r.adminWide || route.perRouteAdmin);
       const after = today && technicianMayReach(route.method, samplePath(full));
-      rows.push({ method: route.method, path: full, file, today, after });
+      rows.push({ method: route.method, path: full, file, today, after, exemptionGate: r.exemptionGate });
     }
   }
   const seen = new Set();
@@ -107,7 +140,7 @@ function render(rows) {
   const allowed = rows.filter((r) => r.after);
   const newlyDenied = rows.filter((r) => r.today && !r.after);
   const alreadyAdmin = rows.filter((r) => !r.today);
-  const line = (r) => `| ${r.method} | \`${r.path}\` | ${r.file} |`;
+  const line = (r) => `| ${r.method} | \`${r.path}\` | ${r.file}${r.exemptionGate ? ' (router exemption gate: admin-only unless its named staff exemption applies)' : ''} |`;
   const table = (list) => ['| Method | Path | Router |', '|---|---|---|', ...list.map(line)].join('\n');
   return [
     '# Technician-reachable staff routes',
@@ -119,6 +152,8 @@ function render(rows) {
     `With GATE_STAFF_DEFAULT_DENY on, a technician reaches the ${allowed.length} routes in the first table. The ${newlyDenied.length} routes in the second table are open to a technician today and close at the flip. The ${alreadyAdmin.length} routes in the third table are admin-only already.`,
     '',
     'A route being listed as reachable means a technician may call it; routers still scope records to the assigned technician where they did before (schedule, customers, visits, timetracking).',
+    '',
+    'Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, admin-revenue, …) run a router-level function that admits a technician only on the router\'s own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.',
     '',
     `Allow-list buckets: ${[...new Set(TECHNICIAN_ALLOW_LIST.map((e) => e.bucket))].join(', ')}.`,
     '',

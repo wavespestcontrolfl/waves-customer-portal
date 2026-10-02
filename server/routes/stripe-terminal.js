@@ -9,6 +9,7 @@ const stripeConfig = require('../config/stripe-config');
 const config = require('../config');
 const {
   adminAuthenticate,
+  requireAdmin,
   isStaffAccessToken,
   staffTokenVersionMatches,
 } = require('../middleware/admin-auth');
@@ -152,6 +153,16 @@ function getHandoffSecret() {
 // pass the count check (READ COMMITTED isolation otherwise allows it).
 // adminAuthenticate guarantees req.technicianId is set — if that ever
 // changes the transaction aborts (advisory lock call throws on NULL).
+// Technician scope for in-person collection: the invoice's customer must be
+// on the technician's current/recent assigned route (technicianServicesCustomer
+// — the same predicate the schedule and customer routers use). Admins pass.
+async function technicianMayCollectInvoice(req, invoice) {
+  if (req.techRole !== 'technician') return true;
+  if (!invoice?.customer_id) return false;
+  const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+  return technicianServicesCustomer(req, invoice.customer_id);
+}
+
 router.post('/handoff', adminAuthenticate, async (req, res) => {
   // Hoisted so the generic catch below can reverse seam-applied credit when no
   // handoff token ends up minted (any abort after the credit-apply).
@@ -169,6 +180,11 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
 
     let invoice = await db('invoices').where({ id: invoice_id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Technician scope (codex #5568 r1 P1): a technician mints a Tap to Pay
+    // handoff only for a customer on their current/recent route; an admin is
+    // unscoped. 404 so an invoice id observed elsewhere does not confirm
+    // existence. Runs before any credit-apply side effect.
+    if (!(await technicianMayCollectInvoice(req, invoice))) return res.status(404).json({ error: 'Invoice not found' });
 
     // Status + Bill-To guards run FIRST — before any Stripe cancellation or
     // credit-apply side effect — so we never cancel a payer's PaymentIntent (or
@@ -1135,7 +1151,9 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
 // POST /api/stripe/terminal/capture
 // Manual capture path (if we ever switch capture_method to 'manual').
 // Body: { paymentIntentId }
-router.post('/capture', adminAuthenticate, async (req, res) => {
+// Admin-only (codex #5568 r1 P1): captures an arbitrary PaymentIntent id with
+// no handoff binding, and no field flow calls it (capture_method is automatic).
+router.post('/capture', adminAuthenticate, requireAdmin, async (req, res) => {
   try {
     const { paymentIntentId } = req.body;
     if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
@@ -1151,6 +1169,7 @@ router.post('/capture', adminAuthenticate, async (req, res) => {
 module.exports = router;
 module.exports._test = {
   handoffStaffSessionMatches,
+  technicianMayCollectInvoice,
   terminalChargeFenceResponse,
   terminalHandoffNeedsReissue,
 };

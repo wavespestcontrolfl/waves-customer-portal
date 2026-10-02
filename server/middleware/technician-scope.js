@@ -49,7 +49,11 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/social(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/projects(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/treatment-plans(\/.*)?$/ },
-  { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/lawn-assessment(\/.*)?$/ },
+  // Lawn assessment: the field flow only (the router scopes each of these to
+  // the technician's own route/customers; reset-baseline is requireAdmin).
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/lawn-assessment\/customers$/ },
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/lawn-assessment\/(assess|confirm)$/ },
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/lawn-assessment\/(service|history|baseline|latest)\/[^/]+$/ },
   // Consultation outcome on a visit (the router pins it to the assigned tech).
   { bucket: 'own-visits', methods: ['GET', 'HEAD', 'POST'], pattern: /^\/api\/admin\/consultations\/[^/]+\/outcome$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/customers(\/.*)?$/ },
@@ -64,9 +68,10 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/invoices\/[^/]+\/(charge-card|charge-card-quote|void)$/ },
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/pricing-config\/(estimate|quick-quote)$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/job-costs(\/.*)?$/ },
-  // Tap to Pay at the visit: the technician mints the handoff and captures;
-  // the terminal-scoped token (not a staff session) does the rest.
-  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/stripe\/terminal\/(handoff|capture)$/ },
+  // Tap to Pay at the visit: the technician mints the handoff (the route
+  // checks the invoice's customer is on their route); the terminal-scoped
+  // token does the rest. /capture is admin-only.
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/stripe\/terminal\/handoff$/ },
   // Visual service notes on a job (visibility and customer caption stay admin).
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/jobs\/[^/]+\/visual-moments$/ },
   { bucket: 'own-visits', methods: ['PATCH', 'DELETE'], pattern: /^\/api\/visual-moments\/[^/]+$/ },
@@ -131,14 +136,34 @@ function staffDefaultDenyEnabled() {
   }
 }
 
-// Once per (method, path-shape) per process: the shadow log must not grow
-// with traffic, and it must never carry a record identifier. Every path
-// segment that is not a plain lowercase route word (ids, SIDs, phone numbers,
-// tokens, emails) collapses to :x before the key is built or logged.
+// Once per (method, path-shape) per process, and bounded: every path segment
+// that is not a plain lowercase route word (ids, SIDs, phone numbers, tokens,
+// emails) collapses to :x before the key is built or logged, and the set stops
+// growing at SHADOW_LOG_CAP distinct shapes (one final line says so). A
+// technician varying a lowercase parameter cannot flood the log (codex #5568
+// r1 P2).
+const SHADOW_LOG_CAP = 200;
 const shadowLogged = new Set();
 function shadowKey(method, fullPath) {
   const shape = fullPath.split('/').map((seg) => (seg === '' || /^[a-z][a-z-]*$/.test(seg) ? seg : ':x')).join('/');
   return `${method} ${shape}`;
+}
+
+function shadowLogOnce(key) {
+  if (shadowLogged.has(key)) return;
+  if (shadowLogged.size >= SHADOW_LOG_CAP) {
+    if (!shadowLogged.has('__cap__')) {
+      shadowLogged.add('__cap__');
+      try {
+        require('../services/logger').warn(`[staff-scope] would-deny log reached ${SHADOW_LOG_CAP} distinct route shapes; further shapes are not logged`);
+      } catch { /* logging never blocks a request */ }
+    }
+    return;
+  }
+  shadowLogged.add(key);
+  try {
+    require('../services/logger').info(`[staff-scope] would-deny technician ${key} (GATE_STAFF_DEFAULT_DENY off)`);
+  } catch { /* logging never blocks a request */ }
 }
 
 // Middleware step. Call AFTER req.techRole is set. Admins pass untouched.
@@ -149,13 +174,7 @@ function enforceTechnicianScope(req, res) {
   const fullPath = normalizePath(req);
   if (technicianMayReach(method, fullPath)) return false;
   if (!staffDefaultDenyEnabled()) {
-    const key = shadowKey(method, fullPath);
-    if (!shadowLogged.has(key)) {
-      shadowLogged.add(key);
-      try {
-        require('../services/logger').info(`[staff-scope] would-deny technician ${key} (GATE_STAFF_DEFAULT_DENY off)`);
-      } catch { /* logging never blocks a request */ }
-    }
+    shadowLogOnce(shadowKey(method, fullPath));
     return false;
   }
   res.status(403).json({ error: 'Admin access required', code: 'TECHNICIAN_SCOPE' });
@@ -168,5 +187,6 @@ module.exports = {
   enforceTechnicianScope,
   normalizePath,
   shadowKey,
+  SHADOW_LOG_CAP,
   _shadowLoggedForTests: shadowLogged,
 };

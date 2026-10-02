@@ -8,7 +8,8 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { isTechnicianRequest, technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
 const visitAssessment = require('../services/lawn-visit-assessment');
@@ -377,15 +378,24 @@ router.get('/customers', async (req, res, next) => {
     const today = etDateString();
 
     let query;
-    const hasScheduled = await applyLawnServiceFilter(
+    // A technician sees only the lawn stops on their OWN route today (codex
+    // #5568 r1 P1): the unscoped list handed every technician the name,
+    // phone, email and address of every lawn customer scheduled that day,
+    // and the no-schedule fallback was the whole lawn customer directory.
+    const ownRoute = (q) => (isTechnicianRequest(req) ? q.where('ss.technician_id', req.technicianId) : q);
+    const hasScheduled = await ownRoute(applyLawnServiceFilter(
       db('scheduled_services as ss')
         .where('ss.scheduled_date', today)
         .whereNotIn('ss.status', ['cancelled', 'completed']),
       'ss'
-    ).first();
+    )).first();
+
+    if (!hasScheduled && isTechnicianRequest(req)) {
+      return res.json({ customers: [] });
+    }
 
     if (hasScheduled) {
-      query = applyLawnServiceFilter(
+      query = ownRoute(applyLawnServiceFilter(
         db('scheduled_services as ss')
           .join('customers as c', 'ss.customer_id', 'c.id')
           .where('ss.scheduled_date', today)
@@ -397,7 +407,7 @@ router.get('/customers', async (req, res, next) => {
             'ss.service_type as serviceType', 'ss.window_start as windowStart'
           ),
         'ss'
-      ).orderBy('ss.window_start', 'asc');
+      )).orderBy('ss.window_start', 'asc');
     } else {
       query = db('customers as c')
         .leftJoin('customer_turf_profiles as ctp', function () {
@@ -452,6 +462,10 @@ router.post('/assess', async (req, res, next) => {
 
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
+    // Technician scope: only a customer on the technician's current/recent
+    // route. 404, not 403 — existence must not leak (same contract as the
+    // schedule and customer routers).
+    if (!(await technicianServicesCustomer(req, customerId))) return res.status(404).json({ error: 'Customer not found' });
     // Gate on: up to six photos, each optionally labeled with the zone the
     // technician shot (front / close_up / trouble) — the only source of a zone claim.
     const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos) : null;
@@ -1215,6 +1229,7 @@ router.post('/confirm', async (req, res, next) => {
 
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
+    if (!(await technicianServicesCustomer(req, assessment.customer_id))) return res.status(404).json({ error: 'Assessment not found' });
 
     // Persisted provenance selects the workflow, even after the visit gate is
     // turned off. Legacy rows retain their existing confirmation behavior.
@@ -1365,6 +1380,13 @@ router.post('/confirm', async (req, res, next) => {
 // =========================================================================
 router.get('/service/:serviceId', async (req, res, next) => {
   try {
+    if (isTechnicianRequest(req)) {
+      const owned = await technicianCurrentVisitFilter(
+        req,
+        db('scheduled_services').where('scheduled_services.id', req.params.serviceId),
+      ).first('scheduled_services.id');
+      if (!owned) return res.status(404).json({ error: 'Service not found' });
+    }
     const assessment = await applyServiceAssessmentOrder(
       db('lawn_assessments').where({ service_id: req.params.serviceId }),
     ).first();
@@ -1397,6 +1419,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
 // =========================================================================
 router.get('/history/:customerId', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.customerId))) return res.status(404).json({ error: 'Customer not found' });
     const history = await lawnAssessment.getCustomerHistory(req.params.customerId);
     res.json({ history });
   } catch (err) {
@@ -1409,6 +1432,7 @@ router.get('/history/:customerId', async (req, res, next) => {
 // =========================================================================
 router.get('/baseline/:customerId', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.customerId))) return res.status(404).json({ error: 'Customer not found' });
     const baseline = await lawnAssessment.getBaseline(req.params.customerId);
     res.json({ baseline: baseline || null });
   } catch (err) {
@@ -1420,7 +1444,7 @@ router.get('/baseline/:customerId', async (req, res, next) => {
 // POST /reset-baseline/:customerId — reset baseline (admin only)
 // Body: { reason }
 // =========================================================================
-router.post('/reset-baseline/:customerId', async (req, res, next) => {
+router.post('/reset-baseline/:customerId', requireAdmin, async (req, res, next) => {
   try {
     const { reason, propertyId } = req.body;
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
@@ -1450,6 +1474,7 @@ router.post('/reset-baseline/:customerId', async (req, res, next) => {
 // =========================================================================
 router.get('/latest/:customerId', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.customerId))) return res.status(404).json({ error: 'Customer not found' });
     const latest = await db('lawn_assessments')
       .where({ customer_id: req.params.customerId })
       .orderBy('service_date', 'desc')

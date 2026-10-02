@@ -86,7 +86,11 @@ describe('matcher', () => {
     ['POST', '/api/stripe/terminal/handoff', true],
     ['POST', '/api/admin/consultations/11111111-2222-4333-8444-555555555555/outcome', true],
     ['GET', '/api/admin/consultations/stats', false],
-    ['POST', '/api/stripe/terminal/capture', true],
+    ['POST', '/api/stripe/terminal/capture', false],
+    ['GET', '/api/admin/lawn-assessment/customers', true],
+    ['POST', '/api/admin/lawn-assessment/assess', true],
+    ['GET', '/api/admin/lawn-assessment/history/11111111-2222-4333-8444-555555555555', true],
+    ['POST', '/api/admin/lawn-assessment/reset-baseline/11111111-2222-4333-8444-555555555555', false],
     ['GET', '/api/admin/wiki', true],
     ['GET', '/api/admin/wiki/termite/baiting', true],
     ['POST', '/api/admin/wiki/update/termite/baiting', false],
@@ -111,6 +115,21 @@ describe('matcher', () => {
   test('a trailing slash does not widen or narrow the match', () => {
     const req = { baseUrl: '/api/admin/kb', path: '/' };
     expect(scope.normalizePath(req)).toBe('/api/admin/kb');
+  });
+});
+
+describe('shadow log cap', () => {
+  test('the set stops growing at the cap and says so once', () => {
+    scope._shadowLoggedForTests.clear();
+    const { info, warn } = logger;
+    // Distinct lowercase route words (digits would collapse to :x).
+    const word = (n) => n.toString(26).split('').map((c) => String.fromCharCode(97 + parseInt(c, 26))).join('');
+    for (let i = 0; i < scope.SHADOW_LOG_CAP + 25; i += 1) {
+      scope.enforceTechnicianScope({ techRole: 'technician', method: 'GET', baseUrl: `/api/admin/zz-${word(i)}`, path: '/' }, {});
+    }
+    expect(info.mock.calls.filter(([m]) => m.includes('would-deny technician')).length).toBe(scope.SHADOW_LOG_CAP);
+    expect(warn.mock.calls.filter(([m]) => m.includes('reached')).length).toBe(1);
+    scope._shadowLoggedForTests.clear();
   });
 });
 
