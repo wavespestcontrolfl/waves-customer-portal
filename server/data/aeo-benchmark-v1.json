@@ -313,7 +313,7 @@
       "city": "North Port",
       "service": "pest control",
       "intent": "cost",
-      "target_path": "/pest-control/is-it-worth-getting-an-exterminator/"
+      "target_path": "/pest-control/how-much-should-you-spend-on-pest-control/"
     },
     {
       "id": "Q40",

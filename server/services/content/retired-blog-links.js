@@ -12,7 +12,8 @@
  * 2026-10-01; the topic-targeting gate reads the same file).
  */
 
-const RETIRED = new Map(require('../../data/retired-blog-topics-v1.json').posts.map((p) => [p.url, p]));
+// `live` rows are kept posts (topic protection only): their links stay as-is.
+const RETIRED = new Map(require('../../data/retired-blog-topics-v1.json').posts.filter((p) => !p.live).map((p) => [p.url, p]));
 
 function routeOf(link) {
   const raw = String(link || '').replace(/^https?:\/\/(?:www\.)?wavespestcontrol\.com/i, '').split(/[?#]/)[0].trim();
