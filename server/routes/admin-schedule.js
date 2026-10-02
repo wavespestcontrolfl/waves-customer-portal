@@ -5138,6 +5138,12 @@ async function loadProjectCompletionContextByServiceId(services) {
       // palm: another lane owns those completions and their photo steps.
       noteBoxPhotosEnabled: require('../config/feature-gates').noteBoxPhotosLive()
         && !['lawn', 'tree_shrub', 'palm'].includes(detectServiceLine(service.service_type)),
+      // GATE_LANE_VOICE_FILL: Generate on the completion form fills a
+      // specialty visit's own record from the notes; only a visit whose lane
+      // the reader reads, resolved as the completion resolves it
+      // (services/visit-lane-facts.js voiceLaneFor).
+      laneVoiceFillEnabled: require('../config/feature-gates').laneVoiceFillLive()
+        && require('../services/visit-lane-facts').voiceLaneFor({ profile: completionProfile, serviceType: service.service_type }) != null,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -6284,6 +6290,7 @@ router.get('/', async (req, res, next) => {
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
         fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
         noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
+        laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6878,6 +6885,7 @@ router.get('/week', async (req, res, next) => {
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
+          laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,

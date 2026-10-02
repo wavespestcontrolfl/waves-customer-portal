@@ -803,11 +803,10 @@ router.post('/:serviceId/lane-facts', async (req, res, next) => {
     if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
     }
-    const { specialtyServiceKey } = require('../../shared/specialty-service-closeouts');
-    const { readLaneFacts, VOICE_LANES } = require('../services/visit-lane-facts');
+    const { readLaneFacts, voiceLaneFor } = require('../services/visit-lane-facts');
     const profile = await resolveCompletionProfileForScheduledService(svc);
-    const laneKey = profile?.findingsType ? null : specialtyServiceKey({ serviceKey: profile?.serviceKey, serviceType: svc.service_type });
-    if (!laneKey || !Object.prototype.hasOwnProperty.call(VOICE_LANES, laneKey)) return res.json({ available: false });
+    const laneKey = voiceLaneFor({ profile, serviceType: svc.service_type });
+    if (!laneKey) return res.json({ available: false });
     const facts = await readLaneFacts({ note, laneKey });
     res.json({ available: true, ...facts });
   } catch (err) { next(err); }

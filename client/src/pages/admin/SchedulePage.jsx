@@ -378,6 +378,17 @@ function markerTexts(notes, tags) {
   const wanted = new Set(tags);
   return markerLines(notes).filter((entry) => wanted.has(entry.tag)).map((entry) => entry.text);
 }
+// Lane voice fill (GATE_LANE_VOICE_FILL): the words a lane field was filled
+// from on Generate, shown under the field while it still holds the filled
+// value; or, for a group the notes left unclear and nobody picked, an ask
+// to pick one.
+function LaneHeardLine({ quotes, unclear, color }) {
+  if (quotes?.length) {
+    return <div style={{ fontSize: 14, color, marginTop: 4 }}>Heard: {quotes.map((quote) => `“${quote}”`).join(" · ")}</div>;
+  }
+  if (unclear) return <div style={{ fontSize: 14, color, marginTop: 4 }}>The notes didn’t make this clear. Pick one.</div>;
+  return null;
+}
 export function labelsPresentInMarkerNotes(notes, labels) {
   const markerValues = new Set(markerLines(notes).map((entry) => entry.text.toLowerCase()));
   return (Array.isArray(labels) ? labels : []).filter((label) => (
@@ -13637,6 +13648,15 @@ export function CompletionPanel({
   // arrays are authoritative and selections render as removable pills instead
   // of tagged lines inside the report text. Persisted with the draft.
   const [chipLinesDetached, setChipLinesDetached] = useState(false);
+  // Lane voice fill (GATE_LANE_VOICE_FILL): what the last Generate filled
+  // from the notes (each field's words) and the groups it left for a person.
+  const [laneHeard, setLaneHeard] = useState(null);
+  // The fill's picks land on the next render; Generate then writes the
+  // report from them.
+  const [generateQueued, setGenerateQueued] = useState(0);
+  useEffect(() => {
+    if (generateQueued) runGenerate();
+  }, [generateQueued]);
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
   const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
@@ -14353,6 +14373,10 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const specialtyCompletion = specialtyCompletionFor(service);
+  // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): the
+  // schedule payload says when Generate first fills this visit's own record
+  // (its places and findings) from the notes.
+  const laneVoiceFill = service.laneVoiceFillEnabled === true && !!specialtyCompletion && !isTypedFindings;
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -16709,6 +16733,113 @@ export function CompletionPanel({
   // prompt won't turn a customer concern or a recommendation into a confirmed
   // finding (see the server prompt). photoCount is reported but never enough on
   // its own — the model can't see the photos.
+  // Lane voice fill: reads the tech's own words (the notes without the
+  // marker lines a tap writes, as the report writer gets them) and fills
+  // only what nobody picked, the way a tap does (the
+  // [Found] marker and the label; the areas while none are picked), never a
+  // value that clashes with a pick (the lane's exclusions, the selected
+  // actions): a clash is left for a person to pick. Best effort: a failed
+  // read fills nothing and Generate carries on.
+  async function fillLaneFromNotes() {
+    const words = stripChipTagLines(notes);
+    if (!words) return;
+    let heard;
+    try {
+      heard = await adminFetch(`/admin/dispatch/${service.id}/lane-facts`, {
+        method: "POST",
+        body: JSON.stringify({ note: words }),
+      });
+    } catch {
+      return;
+    }
+    if (!heard?.available || heard.status !== "read") return;
+    const groups = specialtyCompletion.findingGroups || [];
+    const picked = activeSelectedLabels(selectedObservationLabels);
+    const actions = activeSelectedLabels(selectedProtocolActionLabels);
+    const exclusions = specialtyCompletion.observationExclusions || [];
+    const clashes = (value, chosen) => exclusions.some(({ value: one, excludes }) => (
+      (one === value && excludes.some((other) => chosen.includes(other)))
+      || (excludes.includes(value) && chosen.includes(one))
+    ));
+    const findings = [];
+    const unclear = new Set(Array.isArray(heard.unclearGroups) ? heard.unclearGroups : []);
+    for (const finding of Array.isArray(heard.findings) ? heard.findings : []) {
+      const group = groups.find((item) => item.key === finding?.group);
+      if (!group || !group.options.some((option) => option.value === finding.value)) continue;
+      if (group.options.some((option) => picked.includes(option.value))) continue;
+      const chosen = [...picked, ...findings.map((entry) => entry.value)];
+      if (clashes(finding.value, chosen) || specialtyFindingActionConflict(specialtyCompletion, [...chosen, finding.value], actions)) {
+        unclear.add(group.key);
+        continue;
+      }
+      findings.push({ group: group.key, value: finding.value, quote: finding.quote });
+    }
+    const areas = areasServiced.length
+      ? []
+      : (Array.isArray(heard.areas) ? heard.areas : []).filter((entry) => areaOptions.includes(entry?.area));
+    if (areas.length) {
+      lawnAreasInitializedRef.current = true;
+      setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
+    }
+    for (const { value } of findings) {
+      addChipNote("Found", value);
+      appendUniqueLabel(setSelectedObservationLabels, value);
+    }
+    setLaneHeard({ areas, findings, unclear: [...unclear] });
+  }
+  // The report itself, from the form as it stands.
+  async function runGenerate() {
+    const { payload, hasReportInput } = buildAiReportPayload();
+    if (!hasReportInput) {
+      setGenerating(false);
+      alert("Add service notes, products, or visit details first.");
+      return;
+    }
+    setGenerating(true);
+    try {
+      const r = await generateAiReport(payload);
+      if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
+    } catch (e) {
+      alert("AI report failed: " + e.message);
+    }
+    setGenerating(false);
+  }
+  // Generate AI report (computer and phone layouts). With the lane fill on,
+  // the record is filled from the notes first and the report is written on
+  // the next render, from the picks as they landed; the form stays locked
+  // (generating) all the way through.
+  async function handleGenerateClick() {
+    // Stop dictation BEFORE snapshotting notes for the payload, so a final
+    // spoken chunk lands in serviceNotes rather than after the snapshot.
+    // Once generating flips true the dictation callback ignores any late
+    // chunk (and the mic is disabled). Upload-mode dictation transcribes
+    // AFTER the mic stops (an async server round-trip), so a snapshot taken
+    // now would miss it. Hold the action until the transcript has landed.
+    if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+      alert("Stop dictation and wait for the transcript to appear in your notes first.");
+      return;
+    }
+    if (photoDescriptionOpen) {
+      alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+      return;
+    }
+    if (promiseMarksPending) {
+      alert(PROMISE_MARKS_LOADING_ALERT);
+      return;
+    }
+    if (dictation.listening) dictation.toggle();
+    if (!laneVoiceFill) {
+      await runGenerate();
+      return;
+    }
+    setGenerating(true);
+    try {
+      await fillLaneFromNotes();
+    } catch {
+      // The fill is best effort: the report is written either way.
+    }
+    setGenerateQueued((n) => n + 1);
+  }
   function buildAiReportPayload() {
     const productsApplied = selectedProducts
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
@@ -20210,6 +20341,11 @@ export function CompletionPanel({
                     onChange={(value) => handleSpecialtyFindingChange(group, value)}
                     inputStyle={{ width: "100%", boxSizing: "border-box" }}
                   />
+                  <LaneHeardLine
+                    quotes={laneHeard?.findings.filter((entry) => entry.group === group.key && entry.value === selected).map((entry) => entry.quote)}
+                    unclear={!selected && laneHeard?.unclear.includes(group.key)}
+                    color={M.ink3}
+                  />
                 </Field>
               );
             })}
@@ -20400,41 +20536,7 @@ export function CompletionPanel({
             {!quickComplete && (
               <button
                 type="button"
-                onClick={async () => {
-                  // Stop dictation BEFORE snapshotting notes for the payload, so
-                  // a final spoken chunk lands in serviceNotes rather than after
-                  // the snapshot. Once generating flips true the dictation
-                  // callback ignores any late chunk (and the mic is disabled).
-                  // Upload-mode dictation transcribes AFTER the mic stops (an
-                  // async server round-trip), so a snapshot taken now would miss
-                  // it. Hold the action until the transcript has landed.
-                  if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
-                    alert("Stop dictation and wait for the transcript to appear in your notes first.");
-                    return;
-                  }
-                  if (photoDescriptionOpen) {
-                    alert(PHOTO_DESCRIPTION_OPEN_ALERT);
-                    return;
-                  }
-                  if (promiseMarksPending) {
-                    alert(PROMISE_MARKS_LOADING_ALERT);
-                    return;
-                  }
-                  if (dictation.listening) dictation.toggle();
-                  const { payload, hasReportInput } = buildAiReportPayload();
-                  if (!hasReportInput) {
-                    alert("Add service notes, products, or visit details first.");
-                    return;
-                  }
-                  setGenerating(true);
-                  try {
-                    const r = await generateAiReport(payload);
-                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
-                  } catch (e) {
-                    alert("AI report failed: " + e.message);
-                  }
-                  setGenerating(false);
-                }}
+                onClick={handleGenerateClick}
                 disabled={generating
                   || (isLawn && lawnAssessmentReady === false)
                   // A mid-load station registry would land counts AFTER the
@@ -21212,6 +21314,10 @@ export function CompletionPanel({
                     [...added, ...removed].forEach((area) => toggleArea(area));
                   }}
                   inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                />
+                <LaneHeardLine
+                  quotes={[...new Set((laneHeard?.areas || []).filter((entry) => areasServiced.includes(entry.area)).map((entry) => entry.quote))]}
+                  color={M.ink3}
                 />
               </Field>
             )}
@@ -22720,6 +22826,11 @@ export function CompletionPanel({
                     onChange={(value) => handleSpecialtyFindingChange(group, value)}
                     inputStyle={inputStyle}
                   />
+                  <LaneHeardLine
+                    quotes={laneHeard?.findings.filter((entry) => entry.group === group.key && entry.value === selected).map((entry) => entry.quote)}
+                    unclear={!selected && laneHeard?.unclear.includes(group.key)}
+                    color={D.muted}
+                  />
                 </div>
               );
             })}
@@ -22909,41 +23020,7 @@ export function CompletionPanel({
           {!quickComplete && (
             <button
               type="button"
-              onClick={async () => {
-                // Stop dictation BEFORE snapshotting notes for the payload, so
-                // a final spoken chunk lands in serviceNotes rather than after
-                // the snapshot. Once generating flips true the dictation
-                // callback ignores any late chunk (and the mic is disabled).
-                // Upload-mode dictation transcribes AFTER the mic stops (an
-                // async server round-trip), so a snapshot taken now would miss
-                // it. Hold the action until the transcript has landed.
-                if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
-                  alert("Stop dictation and wait for the transcript to appear in your notes first.");
-                  return;
-                }
-                if (photoDescriptionOpen) {
-                  alert(PHOTO_DESCRIPTION_OPEN_ALERT);
-                  return;
-                }
-                if (promiseMarksPending) {
-                  alert(PROMISE_MARKS_LOADING_ALERT);
-                  return;
-                }
-                if (dictation.listening) dictation.toggle();
-                const { payload, hasReportInput } = buildAiReportPayload();
-                if (!hasReportInput) {
-                  alert("Add service notes, products, or visit details first.");
-                  return;
-                }
-                setGenerating(true);
-                try {
-                  const r = await generateAiReport(payload);
-                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
-                } catch (e) {
-                  alert("AI report failed: " + e.message);
-                }
-                setGenerating(false);
-              }}
+              onClick={handleGenerateClick}
               disabled={generating
                 || (isLawn && lawnAssessmentReady === false)
                 // Same station-registry hold as the mobile Generate button.
@@ -23668,6 +23745,10 @@ export function CompletionPanel({
                   [...added, ...removed].forEach((area) => toggleArea(area));
                 }}
                 inputStyle={{ width: "100%", boxSizing: "border-box" }}
+              />
+              <LaneHeardLine
+                quotes={[...new Set((laneHeard?.areas || []).filter((entry) => areasServiced.includes(entry.area)).map((entry) => entry.quote))]}
+                color={D.muted}
               />
             </div>
           )}

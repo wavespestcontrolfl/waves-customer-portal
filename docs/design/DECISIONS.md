@@ -3113,3 +3113,23 @@ office form (slice 2) fills only fields nobody picked and the tech's sheet
 (slice 3) shows each field with its words and a Change, so a person confirms
 every value before anything is sent. The gate stays off until both land.
 Bora-Care has no lane yet; its places and findings wait for an owner ruling.
+
+## 2026-10-02 — Lane voice fill, the office form (dark)
+
+Slice 2 of the Fast Complete step 2 lane voice fill (the server reader
+landed in #5625). With the schedule payload's per-visit
+`laneVoiceFillEnabled` (`GATE_LANE_VOICE_FILL` and a lane the reader reads,
+resolved as the completion resolves it through `voiceLaneFor`), Generate AI
+report on the office Complete Service form (computer and phone) first reads
+the notes for the visit's own record, the notes as the report writer gets
+them (without the marker lines a tap writes), and fills only what nobody
+picked, the way a tap does: an empty group gets the `[Found]` marker and the
+label; the areas fill only while none are picked. A value that clashes with
+a pick (the lane's exclusions, or the selected protocol actions) is left for
+a person, with "The notes didn't make this clear. Pick one." under the
+group. Each filled field shows the words it came from ("Heard: ...") while
+it still holds the filled value. The report is written on the next render,
+from the record as the fill left it, so the report and the record agree; the
+form stays locked through both steps. A failed read fills nothing and the
+report is written anyway. The two Generate buttons (computer and phone) now
+share one handler. Off, Generate is exactly as before.
