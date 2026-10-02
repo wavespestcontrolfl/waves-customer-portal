@@ -1035,7 +1035,10 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
         .whereIn('scheduled_service_id', database('scheduled_services').where({ payer_id: payerId }).select('id'))
         .select('packet_id')));
   }
-  return Boolean(await query.first('id'));
+  if (await query.first('id')) return true;
+  // Invoices with no packet that ride a visit (a service-record or direct visit link) are the
+  // same window: the shared Bill-To transition would hand a debt to AP under a send or charge.
+  return require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(database, { customerId, scheduledServiceId, payerId });
 }
 
 /**
@@ -1080,15 +1083,11 @@ async function resolvePacketOwnershipLocked(packetId, trx) {
   return { visit, billed, payerId: await liveThirdPartyPayerForPacket(packetId, trx) };
 }
 
-// The one withdrawal for a self-pay combined-visit invoice whose live owner
-// is a payer: the invoice leaves the send queue as a draft stamped with the
-// payer it was withdrawn for, the visit goes on billing hold, and a packet
-// that already closed records the office-review state (error + one open
-// visit_closeout_review alert). A packet still processing gets that state
-// from its own close. The stamp is what the reconciliation below keys on.
-// Returns whether the invoice was withdrawn (false = it was already terminal
-// or payer-owned when held, and nothing was recorded).
-async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId }) {
+// The invoice-level half of a Bill-To withdrawal, shared by the combined-visit (packet)
+// path below and the visit-linked path (visit-linked-invoice-withdrawal.js): credit
+// returned, the invoice off the send queue and stamped `payer_billed:<payer>`, armed
+// dunning paused. Returns { stamp, prior } or null when nothing was withdrawn.
+async function withdrawInvoiceFromCustomer(trx, { invoiceId, payerId, markQueued = false }) {
   // A repeated withdrawal (a second claim on the same draft) keeps the hold
   // flag the first one recorded: the invoice row is held before the marker
   // is read, so two withdrawals cannot both read the pre-flag value.
@@ -1123,7 +1122,10 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   }
   const parked = prior?.status === 'scheduled' && !prior.scheduled_send_at
     && (String(prior.scheduled_send_error || '') === STALE_SEND_PARK_ERROR || /:park(:|$)/.test(String(prior.scheduled_send_error || '')));
-  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}`;
+  // `queued` (non-packet callers only): the invoice was waiting in the send queue, so a
+  // release puts it back there instead of leaving it a draft.
+  const queued = markQueued && !parked && prior?.status === 'scheduled';
+  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}${queued ? ':queued' : ''}`;
   const withdrawn = parked
     ? await trx('invoices').where({ id: invoiceId, status: 'scheduled' }).whereNull('payer_id').whereNull('scheduled_send_at')
       .update({ scheduled_send_error: stamp, updated_at: trx.fn.now() })
@@ -1143,7 +1145,7 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   // caller's read and these held updates. There is nothing to withdraw and
   // no stamp for the reconciliation to clear, so no hold or office review
   // is recorded either; the caller decides on the invoice as it is now.
-  if (!stamped) return false;
+  if (!stamped) return null;
   // An ARMED dunning sequence chases the homeowner with the pay link, and
   // its guards read payer_id — which a withdrawal deliberately leaves NULL
   // (Codex #4311 r31 P1). Pause it here, inside the withdrawal, so the next
@@ -1152,6 +1154,21 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   // ordinary lifecycle arms the sequence again.
   await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).whereIn('status', ['active', 'autopay_hold'])
     .update({ status: 'paused', next_touch_at: null, paused_reason: 'payer_billed', updated_at: trx.fn.now() });
+  return { stamp, prior };
+}
+
+// The one withdrawal for a self-pay combined-visit invoice whose live owner
+// is a payer: the invoice leaves the send queue as a draft stamped with the
+// payer it was withdrawn for, the visit goes on billing hold, and a packet
+// that already closed records the office-review state (error + one open
+// visit_closeout_review alert). A packet still processing gets that state
+// from its own close. The stamp is what the reconciliation below keys on.
+// Returns whether the invoice was withdrawn (false = it was already terminal
+// or payer-owned when held, and nothing was recorded).
+async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId }) {
+  const core = await withdrawInvoiceFromCustomer(trx, { invoiceId, payerId });
+  if (!core) return false;
+  const { stamp, prior } = core;
   // The hold is the withdrawal's own only when the visit was not already
   // held for another office-owned reason; the stamp records that
   // (`:hold`), and the reconciliation lifts only a hold it created.
@@ -1254,6 +1271,8 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
   for (const invoice of withdrawn) {
     if (await releaseWithdrawnPacketInvoice(trx, invoice)) released += 1;
   }
+  released += await require('./visit-linked-invoice-withdrawal')
+    .reconcileLinkedInvoices(trx, { customerId, payerId, scheduledServiceId });
   return released;
 }
 
@@ -1274,6 +1293,40 @@ async function summaryStillToCarryLink(trx, packet, invoiceId) {
   if (effect?.status !== 'pending') return true;
   return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })
     .whereRaw("metadata->>'visit_id' = ?", [String(packet.visit_id)]).whereRaw("metadata->'billing_link' IS NOT NULL").first('id'));
+}
+
+// The dunning a withdrawal paused resumes with its release.
+async function resumeDunningPausedByWithdrawal(trx, invoiceId) {
+  // The dunning the withdrawal paused resumes with it (local audit): a
+  // sent/viewed/overdue invoice triggers no new send lifecycle on release, and
+  // a paused row keeps the legacy reminder sweep away too, so the debt would
+  // simply stop being collected. ONLY this system pause is lifted — an admin
+  // pause or an autopay hold carries its own reason and is left alone.
+  const pausedByWithdrawal = await trx('invoice_followup_sequences')
+    .where({ invoice_id: invoiceId, status: 'paused', paused_reason: 'payer_billed' }).first('id', 'customer_id');
+  if (pausedByWithdrawal) {
+    // An AUTOPAY customer goes back to the hold, never to active dunning
+    // (local audit): the withdrawal paused both states under one reason, so
+    // resuming everything to active would start payment reminders for a
+    // customer whose card runs automatically. Re-checked live, under this
+    // transaction, the same way the follow-up re-arm does it.
+    // The helper takes the customer ROW, not an id (local audit): an id makes
+    // its payment-method lookup read `customer.id` as undefined and answer
+    // "not on autopay", so every release would have activated dunning. A read
+    // failure keeps the hold — the quiet direction for a customer whose card
+    // may run automatically.
+    let onAutopay = false;
+    try {
+      const customer = await trx('customers').where({ id: pausedByWithdrawal.customer_id }).first();
+      onAutopay = customer
+        ? await require('./autopay-eligibility').customerOnAutopay(customer, { db: trx, failClosed: true })
+        : true;
+    } catch { onAutopay = true; }
+    await trx('invoice_followup_sequences').where({ id: pausedByWithdrawal.id })
+      .update(onAutopay
+        ? { status: 'autopay_hold', paused_reason: null, next_touch_at: null, updated_at: trx.fn.now() }
+        : { status: 'active', paused_reason: null, next_touch_at: trx.fn.now(), updated_at: trx.fn.now() });
+  }
 }
 
 async function releaseWithdrawnPacketInvoice(trx, invoice) {
@@ -1319,36 +1372,7 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   // Only a hold the withdrawal created is lifted: a visit held before it
   // for another office-owned reason keeps that hold.
   if (holdFlag === 'hold') await trx('service_visits').where({ id: packet.visit_id }).update({ billing_hold: false, updated_at: trx.fn.now() });
-  // The dunning the withdrawal paused resumes with it (local audit): a
-  // sent/viewed/overdue invoice triggers no new send lifecycle on release, and
-  // a paused row keeps the legacy reminder sweep away too, so the debt would
-  // simply stop being collected. ONLY this system pause is lifted — an admin
-  // pause or an autopay hold carries its own reason and is left alone.
-  const pausedByWithdrawal = await trx('invoice_followup_sequences')
-    .where({ invoice_id: invoice.id, status: 'paused', paused_reason: 'payer_billed' }).first('id', 'customer_id');
-  if (pausedByWithdrawal) {
-    // An AUTOPAY customer goes back to the hold, never to active dunning
-    // (local audit): the withdrawal paused both states under one reason, so
-    // resuming everything to active would start payment reminders for a
-    // customer whose card runs automatically. Re-checked live, under this
-    // transaction, the same way the follow-up re-arm does it.
-    // The helper takes the customer ROW, not an id (local audit): an id makes
-    // its payment-method lookup read `customer.id` as undefined and answer
-    // "not on autopay", so every release would have activated dunning. A read
-    // failure keeps the hold — the quiet direction for a customer whose card
-    // may run automatically.
-    let onAutopay = false;
-    try {
-      const customer = await trx('customers').where({ id: pausedByWithdrawal.customer_id }).first();
-      onAutopay = customer
-        ? await require('./autopay-eligibility').customerOnAutopay(customer, { db: trx, failClosed: true })
-        : true;
-    } catch { onAutopay = true; }
-    await trx('invoice_followup_sequences').where({ id: pausedByWithdrawal.id })
-      .update(onAutopay
-        ? { status: 'autopay_hold', paused_reason: null, next_touch_at: null, updated_at: trx.fn.now() }
-        : { status: 'active', paused_reason: null, next_touch_at: trx.fn.now(), updated_at: trx.fn.now() });
-  }
+  await resumeDunningPausedByWithdrawal(trx, invoice.id);
   await liftPayerOfficeReview(trx, packet);
   return true;
 }
@@ -1442,6 +1466,10 @@ async function withdrawPacketInvoicesForOwner(trx, { customerId = null, schedule
       withdrawn.push(invoice.id);
     }
   }
+  // Invoices that ride the visit without a packet (minted from the service record, or linked to
+  // the visit directly) change hands in the same transaction, by the same withdrawal.
+  withdrawn.push(...await require('./visit-linked-invoice-withdrawal')
+    .withdrawLinkedInvoicesForOwner(trx, { customerId, scheduledServiceId, payerId }));
   return withdrawn;
 }
 
@@ -1647,4 +1675,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { invoicePayerOwnedNow, memberInTechnicianScope, visitCloseoutMemberQuery, retainedCloseoutMembers, packetPayload, parseOfficeReviewState, buildVisitDurationAllocation, memberDurationAllocation, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions, _test: { packetSnapshot } };
+module.exports = { invoicePayerOwnedNow, memberInTechnicianScope, visitCloseoutMemberQuery, retainedCloseoutMembers, packetPayload, parseOfficeReviewState, buildVisitDurationAllocation, memberDurationAllocation, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, withdrawInvoiceFromCustomer, resumeDunningPausedByWithdrawal, INVOICE_TERMINAL_STATUSES, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions, _test: { packetSnapshot } };

@@ -10137,6 +10137,15 @@ const InvoiceService = {
           await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
         }
       }
+      // A restored invoice that rides a visit WITHOUT a packet (a service-record or direct
+      // visit link) takes the same rows in the same order: the withdrawal below resolves its
+      // live owner under them.
+      if (!current.visit_completion_packet_id && current.customer_id
+        && (current.scheduled_service_id || current.service_record_id)) {
+        await trx("customers").where({ id: current.customer_id }).forShare().first("id");
+        const linkedVisitId = await linkedScheduledServiceId(current, trx);
+        if (linkedVisitId) await trx("scheduled_services").where({ id: linkedVisitId }).forShare().first("id");
+      }
       // Statement re-check under lock (a concurrent close could finalize it
       // between the fast pre-check above and this write).
       if (current.payer_statement_id) {
@@ -10194,6 +10203,12 @@ const InvoiceService = {
         // …and a restored row whose live owner is a payer is withdrawn before
         // it can ever be collected.
         await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id });
+      } else if (updated.customer_id && (updated.scheduled_service_id || updated.service_record_id)) {
+        // The same re-judgement for a restored invoice with no packet: a payer assigned to its
+        // visit while it sat void must not hand the homeowner a collectible link on restore.
+        const Linked = require("./visit-linked-invoice-withdrawal");
+        await Linked.reconcileLinkedInvoices(trx, { invoiceId: id });
+        await Linked.withdrawLinkedInvoicesForOwner(trx, { invoiceId: id });
       }
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
       // #3493 r2): a concurrent /annual-prepay can create the term and
@@ -12605,6 +12620,7 @@ InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderHandoff;
 InvoiceService.checkDeferredInvoiceEmailDelivery = checkDeferredInvoiceEmailDelivery;
 module.exports = InvoiceService;
+module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepayReplacedCharges = prepayReplacedCharges;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;

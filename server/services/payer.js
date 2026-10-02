@@ -210,6 +210,8 @@ async function updatePayer(id, body) {
       if (referencingCustomerIds.length) {
         await require('./pay-combined').lockCombinedCustomers(trx, referencingCustomerIds);
         await trx('customers').whereIn('id', referencingCustomerIds).orderBy('id').forShare().select('id');
+        // Visits that invoices with no packet ride: the withdrawal below locks them too.
+        const linkedVisitIds = await require('./visit-linked-invoice-withdrawal').linkedVisitIdsForCustomers(trx, referencingCustomerIds);
         // EVERY member of a packet this payer reaches, not only the members
         // that name it (Codex #4311 r29 P2): the withdrawal resolves
         // ownership per packet and takes ALL its billed members, so a member
@@ -228,7 +230,8 @@ async function updatePayer(id, body) {
                 .join('invoices', 'invoices.visit_completion_packet_id', 'owned.packet_id')
                 .whereIn('invoices.customer_id', referencingCustomerIds)
                 .select('owned.packet_id'))
-              .select('scheduled_service_id')))
+              .select('scheduled_service_id'))
+            .orWhereIn('id', linkedVisitIds))
           .orderBy('id').forShare().select('id');
       }
       const current = await trx('payers').where({ id: pid }).forUpdate().first();

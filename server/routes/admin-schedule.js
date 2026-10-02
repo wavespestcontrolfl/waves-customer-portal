@@ -14410,6 +14410,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
             fencedVisitIds.push(...childIds);
           } catch { /* no children / column absent */ }
+          // The children's visit-linked invoices change hands with the payer propagation below,
+          // so a send or charge in flight on one is refused here, before the first Stripe cancel.
+          if (fencedVisitIds.length > 1
+            && await require('../services/visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { scheduledServiceIds: fencedVisitIds.slice(1) })) {
+            throw Object.assign(new Error('An invoice for a later visit in this series is being delivered or charged. Retry the Bill-To change in a moment.'), {
+              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+            });
+          }
           const visitRelease = await require('../services/pay-combined')
             .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);
           // In-flight combined money DEFERS the payer edit (codex r30 P1,
@@ -14635,10 +14643,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               childPayerUpdates.self_pay_override = updates.self_pay_override === true;
             }
             if (Object.keys(childPayerUpdates).length > 0) {
-              await trx('scheduled_services')
+              const movedChildIds = await trx('scheduled_services')
                 .where({ recurring_parent_id: req.params.id })
                 .whereIn('status', ['pending', 'confirmed'])
-                .update(childPayerUpdates);
+                .update(childPayerUpdates)
+                .returning('id');
+              // The children took the Bill-To in the same write: their visit-linked invoices follow
+              // it (withdrawn when a payer now owns them, released when it cleared).
+              const childVisitIds = movedChildIds.map((row) => (row && typeof row === 'object' ? row.id : row));
+              if (childVisitIds.length) {
+                const Linked = require('../services/visit-linked-invoice-withdrawal');
+                await Linked.reconcileLinkedInvoices(trx, { scheduledServiceIds: childVisitIds });
+                if (activatesPayer) await Linked.withdrawLinkedInvoicesForOwner(trx, { scheduledServiceIds: childVisitIds });
+              }
             }
           }
         }
