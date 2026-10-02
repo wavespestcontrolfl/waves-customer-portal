@@ -313,6 +313,24 @@ describe('generate and read', () => {
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
+  test('"didn\'t spray" also holds a product whose own method is another spray, such as a foliar spray (codex local r17)', async () => {
+    const products = [...CATALOG, { id: 'tritek', name: 'TriTek', category: 'Insecticide', application_method: 'foliar_spray' }];
+    const cleanout = { ...REGULAR, serviceType: 'Pest Initial Cleanout', serviceKey: 'pest_initial_cleanout' };
+    const request = makeRequest({
+      service: cleanout,
+      products,
+      facts: { available: true, status: 'read', areas: ['Inside'], unclearAreas: [], pests: ['ants'], spray: null, noSpray: true },
+    });
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Pest Initial Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /^TriTek\b/ }));
+    fireEvent.change(within(screen.getByRole('group', { name: 'TriTek' })).getByLabelText('How much?'), { target: { value: '1' } });
+    await generate({ note: "Didn't spray today; placed bait inside along the counter for ants." });
+    expect(screen.getByText('Your note says you didn’t spray, but TriTek is a spray. Remove it or change how it went down, then write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
   test('the report waits for the promise list to answer, so a mark is never left out (Codex #5538)', async () => {
     const request = makeRequest({ promises: () => new Promise(() => {}) });
     await openSheet(request);

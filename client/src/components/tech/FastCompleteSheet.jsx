@@ -102,6 +102,10 @@ const METHOD_CHOICES = [
   { value: 'perimeter_spray', label: 'Perimeter spray' },
 ];
 const SPRAY_METHODS = new Set(METHOD_CHOICES.map((choice) => choice.value));
+// Every way a product goes down as a spray, a catalog's own method included
+// (product-rate-prefill.js): a note that says "didn't spray" contradicts any
+// of them, not only the How row's two (codex local r17).
+const SPRAYED_METHODS = new Set(['perimeter_spray', 'spot_treatment', 'broadcast_spray', 'foliar_spray', 'fog_ulv', 'pin_stream']);
 // The How row's starting pick.
 const DEFAULT_METHOD = 'spot_treatment';
 // The ways an added product can go down, beside its own catalog method.
@@ -841,7 +845,7 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
   // The note says no spraying, so a product still going down as a spray (the
   // house mix starts on) would be recorded as applied when it wasn't.
   const sprayedAnyway = draft?.facts?.noSpray
-    && active.find((row) => ['spot_treatment', 'perimeter_spray'].includes(rowMethod(row, reportSprayMethod(draft.facts))));
+    && active.find((row) => SPRAYED_METHODS.has(rowMethod(row, reportSprayMethod(draft.facts))));
   // A saved trace shows on the customer's report whatever its length or
   // kind (a perimeter, an outline), so one the record has no spray around
   // the house for would claim a spray it never records (Codex #5538).
