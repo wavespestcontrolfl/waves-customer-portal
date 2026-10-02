@@ -256,8 +256,8 @@ describe('conflict vs ambiguity wording (Codex round-27 P2)', () => {
   };
   test('conflict: the named invoice is not open — target-specific, not "SEVERAL", and no Zelle is mentioned', () => {
     const l = line({ zelleTargetConflict: true });
-    expect(l).toContain('does NOT match an open invoice');
-    expect(l).toContain('tell them that invoice is not open and that the office can confirm which invoice they mean; do not mention Zelle');
+    expect(l).toContain('does not match one we can confirm here');
+    expect(l).toContain('do not say whether it is paid, open or owed; say a teammate will confirm which invoice they mean; do not mention Zelle');
     expect(l).not.toContain('SEVERAL');
     expect(l).not.toContain('ask which invoice');
     expect(l).not.toContain('pay@example.com');
@@ -303,15 +303,15 @@ describe('conflict vs ambiguity wording (Codex round-27 P2)', () => {
     const one = [{ id: 'inv-1', invoiceNumber: 'WPC-2026-0101', status: 'sent', amountDue: 120 }];
     const two = [...one, { id: 'inv-2', invoiceNumber: 'WPC-2026-0202', status: 'sent', amountDue: 95 }];
     const f1 = await draftFacts('Can I Zelle invoice WPC-2026-0999?', one);
-    expect(f1).toContain('does NOT match an open invoice');
+    expect(f1).toContain('does not match one we can confirm here');
     expect(f1).not.toContain('SEVERAL');
     const f2 = await draftFacts('Can I Zelle the $95 invoice?', one);
-    expect(f2).toContain('does NOT match an open invoice');
+    expect(f2).toContain('does not match one we can confirm here');
     const f3 = await draftFacts('Can I pay by Zelle?', two);
     expect(f3).toContain('SEVERAL open invoices');
     expect(f3).not.toContain('does NOT match');
     const f4 = await draftFacts('Can I Zelle invoice WPC-2026-0999?', two);
-    expect(f4).toContain('does NOT match an open invoice'); // an explicit conflict even with several open
+    expect(f4).toContain('does not match one we can confirm here'); // an explicit conflict even with several open
   });
 });
 

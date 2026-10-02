@@ -932,3 +932,16 @@ test.each([
   expect(c.copiesOffTarget(copied, inbound, { today: '2026-09-13' })).toBe(off);
 });
 
+// Codex round-67 P2s: an absence summary is no candidate; a named card brand / funding type is never proven by a generic card receipt
+test('an absence summary does not count as a second payment candidate', () => {
+  const R = 'We received your $100.00 card payment on Sep 12, 2026.';
+  const snap = c.paymentStatusSnapshotFor({ customerId: 'c', sentences: [R, "We don't see a payment on your account since Sep 12, 2026."], reply: R, inboundText: 'Did you get my payment?' });
+  expect(snap.family_counts).toEqual({ payment: 1 });
+  expect(c.autoSendScopeBlock({ reply: R, inboundText: 'Did you get my payment?', snapshot: snap })).toBeNull();
+});
+test.each([
+  ['Did my Visa payment arrive?', true], ['Did my debit go through?', true], ['Did my Mastercard payment post?', true], ['Did my card payment arrive?', false],
+])('card subtype %s => off target: %s', (inbound, off) => {
+  expect(c.copiesOffTarget(['We received your $100.00 card payment on Sep 12, 2026.'], inbound, { today: '2026-09-13' })).toBe(off);
+});
+

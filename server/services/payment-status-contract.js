@@ -527,6 +527,7 @@ const INBOUND_AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?/g;
 const amountCentsOf = (raw) => Math.round(Number(String(raw).replace(/[^\d.]/g, '')) * 100);
 // Codex round-66 P2: the customer's own figure also comes as "100 dollars" / "50 bucks" / "75 USD" (the money detector's forms)
 const INBOUND_NAMED_AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?(?=\s*(?:dollars?|bucks|usd)\b)/gi;
+const CARD_SUBTYPE_RE = /\b(?:visa|master\s?card|amex|american\s+express|discover|debit|credit\s+card|prepaid\s+card)\b/i;
 const INBOUND_TENDER_RES = [
   ['card', /\b(?:card|credit|debit|visa|mastercard|amex|discover|apple\s*pay|google\s*pay)\b/i],
   ['ach', /\b(?:ach|bank(?:\s+(?:account|transfer|draft))?|e-?check|checking)\b/i],
@@ -599,6 +600,9 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   // / ACH from Stripe columns; a manual tender - Zelle, cash, check - is never named), so a copied payment sentence answers a tender
   // question only when it names THAT tender: a Zelle / cash / check question is never answered by a copied receipt.
   const namedTenders = INBOUND_TENDER_RES.filter(([, re]) => re.test(inbound)).map(([tender]) => tender);
+  // Codex round-67 P2: a card BRAND or funding type the customer named (Visa, debit ...) is narrower than any rendered sentence (which
+  // says "card" at most) - so no copied receipt is proven to be that payment
+  if (CARD_SUBTYPE_RE.test(inbound)) namedTenders.push('card_subtype');
   // Codex round-62 P2: a payment DATE the customer named ("the payment I sent on Sep 1", "9/1") - a copied payment sentence must be
   // dated that day (month + day; the year too when the customer gave one)
   const todayParts = (typeof today === 'string' ? dateParts(today) : today) || dateParts(require('../utils/datetime-et').etDateString());
@@ -621,6 +625,7 @@ function attributesOffTarget(t, { namedDates, namedTenders, amounts }) {
     const d = sentenceDate(t);
     if (!d || !namedDates.some((n) => n.month === d.month && n.day === d.day && (n.year == null || n.year === d.year))) return true;
   }
+  if (namedTenders.includes('card_subtype')) return true;
   if (namedTenders.length && !namedTenders.some((tender) => sentenceTender(t) === tender)) return true;
   return amounts.size > 0 && !(t.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf).some((c) => amounts.has(c));
 }
@@ -686,7 +691,9 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
 // HOLD WHEN AMBIGUOUS (owner 2026-10-02, after round 66): code does not guess which record the customer means. A copied receipt or invoice
 // status line auto-sends only when the draft rendered exactly ONE line of that family; with 2+ candidates (or a snapshot that never
 // counted them) the draft goes to Agent Review and a person picks. copiesOffTarget stays a filter, not the gate.
-const sentenceFamily = (t) => (/^Invoice\s/.test(t) ? 'invoice' : /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t) ? 'payment' : null);
+// (Codex round-67 P2: an absence summary - "We don't see a payment ..." - is no record, so it is no candidate)
+const sentenceFamily = (t) => (/^Invoice\s/.test(t) ? 'invoice'
+  : /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t) && !/^We don't see\b/.test(t) ? 'payment' : null);
 function familyCounts(texts) {
   const counts = {};
   for (const t of texts) { const f = sentenceFamily(String(t)); if (f) counts[f] = (counts[f] || 0) + 1; }

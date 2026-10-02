@@ -532,7 +532,10 @@ describe('payPageZelleVisibility + GET: an erroring credit lookup fails closed',
       }
       return chain({ first: null });
     });
-    await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), creditWillCoverAnchor: false })).resolves.toEqual({ visible: false, reason: 'credit_unverifiable' });
+    // (owner ruling 2026-10-02: the final full pass reads customers too, so the failing read may land there - closed either way)
+    const verdict = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), creditWillCoverAnchor: false });
+    expect(verdict.visible).toBe(false);
+    expect(['credit_unverifiable', 'eligibility_unverifiable']).toContain(verdict.reason);
   });
 
   test('GET /:token withholds manualPayOptions (key absent, page still served) when the credit lookup errors', async () => {
@@ -744,5 +747,35 @@ test('a saved-method requirement that appears during the probes withholds Zelle 
   const verdict = await visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false });
   expect(verdict).toEqual({ visible: false, reason: 'invoice_changed' });
   delete process.env.ZELLE_RECIPIENT;
+});
+
+// Codex round-67 P1: the projected (partial) credit is read LAST, from the fresh row - a credit that appears during the probes withholds
+test('a partial account credit that appears during the probes => credit_pending (never a stale projectedCredit of 0)', async () => {
+  process.env.ZELLE_RECIPIENT = 'pay@example.com';
+  require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null });
+  const gates = require('../config/feature-gates').gates;
+  gates.autoApplyAccountCredit = true;
+  const inv = invoiceData({ status: 'overdue' });
+  let creditReads = 0;
+  try {
+    setDbImpl((table) => {
+      if (table === 'invoices') return chain({ first: inv });
+      const q = chain({ first: { billing_mode: null, monthly_rate: null } });
+      if (table === 'customers') {
+        q.first = jest.fn(async (...cols) => {
+          if (!cols.includes('account_credits')) return { billing_mode: null, monthly_rate: null };
+          creditReads += 1;
+          return { account_credits: creditReads >= 2 ? 20 : 0, auto_apply_account_credit: true };
+        });
+      }
+      return q;
+    });
+    const verdict = await visibilityOf({ invoice: inv, saveRequired: false });
+    expect(verdict).toMatchObject({ visible: false, reason: 'credit_pending' });
+    expect(verdict.projectedCredit).toBeGreaterThan(0);
+  } finally {
+    gates.autoApplyAccountCredit = false;
+    delete process.env.ZELLE_RECIPIENT;
+  }
 });
 

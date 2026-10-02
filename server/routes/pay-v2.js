@@ -399,19 +399,21 @@ async function zellePayerOwnership(inv, dbh) {
 }
 
 // null when the freshly read invoice still passes every DB-side Zelle condition with no caller overrides; otherwise the withholding reason.
+// { reason } when Zelle must be withheld; else { reason: null, invoice: <the fresh row> }.
 async function zelleFinalPass(inv, { dbh, readOnly }) {
   let fresh;
-  try { fresh = await dbh('invoices').where({ id: inv.id }).first(); } catch { return 'eligibility_unverifiable'; }
-  if (!fresh) return 'invoice_not_found';
+  try { fresh = await dbh('invoices').where({ id: inv.id }).first(); } catch { return { reason: 'eligibility_unverifiable' }; }
+  if (!fresh) return { reason: 'invoice_not_found' };
   const changed = String(fresh.status || '') !== String(inv.status || '')
     || (fresh.stripe_payment_intent_id || null) !== (inv.stripe_payment_intent_id || null)
     || invoiceAmountDue(fresh) !== invoiceAmountDue(inv);
-  if (changed) return 'invoice_changed';
+  if (changed) return { reason: 'invoice_changed' };
   try {
-    if (await zelleDeniedByInvoiceState(fresh, { database: dbh })) return 'invoice_changed';
-    if (await zelleDeniedByPayerOrSiblings(fresh, { readOnly, database: dbh })) return 'invoice_changed';
-  } catch { return 'eligibility_unverifiable'; }
-  return zellePayerOwnership(fresh, dbh);
+    if (await zelleDeniedByInvoiceState(fresh, { database: dbh })) return { reason: 'invoice_changed' };
+    if (await zelleDeniedByPayerOrSiblings(fresh, { readOnly, database: dbh })) return { reason: 'invoice_changed' };
+  } catch { return { reason: 'eligibility_unverifiable' }; }
+  const owned = await zellePayerOwnership(fresh, dbh);
+  return owned ? { reason: owned } : { reason: null, invoice: fresh };
 }
 
 const ZELLE_ELIGIBILITY_TIMEOUT_MS = 8000;
@@ -487,16 +489,16 @@ async function payPageZelleVisibility({
   // `creditPending && !stripeSetup` rule at the one instant this function can
   // answer for (before any /setup call exists to resolve the post-credit
   // amount).
-  let projectedCredit;
-  try { projectedCredit = await invoiceProjectedCreditApplied(inv, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
-  // projectedCredit rides the verdict so GET /:token reuses it instead of a
-  // third credit read (Codex round-13 P1).
   // ONE FINAL FULL PASS (owner ruling 2026-10-02, after Codex rounds 63-66 named one field at a time): after the credit / reconciliation /
   // Stripe awaits, the invoice row is read again and the whole DB part of the predicate reruns on it with NO caller overrides - status /
   // PaymentIntent / amount unchanged, collectible, not withdrawn, saved-method requirement, credit coverage, payer + siblings, live payer.
   // A change after this final read is the accepted residual window. A failed read fails closed.
-  const settled = await zelleFinalPass(inv, { dbh, readOnly });
-  if (settled) return { visible: false, reason: settled };
+  const final = await zelleFinalPass(inv, { dbh, readOnly });
+  if (final.reason) return { visible: false, reason: final.reason };
+  // The projected (partial) credit is read LAST, from the fresh row (Codex round-67 P1: never a value read before the final pass).
+  // projectedCredit rides the verdict so GET /:token reuses it instead of another credit read (Codex round-13 P1).
+  let projectedCredit;
+  try { projectedCredit = await invoiceProjectedCreditApplied(final.invoice, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
   if (projectedCredit > 0) return { visible: false, reason: 'credit_pending', projectedCredit };
   return { visible: true, reason: null, projectedCredit };
 }

@@ -4733,7 +4733,8 @@ function buildFactsBlock(context, extras = {}) {
     const zelleGuidance = (zf && ['offer', 'invoice_unavailable', 'not_offered'].includes(zf.state))
       ? 'for anything about Zelle, copy the Zelle sentence in Payment status sentences word for word; never write about Zelle any other way'
       : extras.zelleTargetConflict
-        ? 'the invoice (number or amount) this customer named does NOT match an open invoice on their account — tell them that invoice is not open and that the office can confirm which invoice they mean; do not mention Zelle'
+        // Codex round-67 P2: no status may be asserted here (the contract would refuse it) - only a hand-off
+        ? 'the invoice (number or amount) this customer named does not match one we can confirm here — do not say whether it is paid, open or owed; say a teammate will confirm which invoice they mean; do not mention Zelle'
         : extras.zelleTargetAmbiguous
           ? 'this customer has SEVERAL open invoices — ask which invoice they want to pay (its number or amount); do not mention Zelle'
           : 'do not mention Zelle; if they ask about it, say a teammate will confirm';
