@@ -987,7 +987,8 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   const statementReconciliation = entries.filter((entry) => entry.type === 'payer_statement_reconciliation');
   const reversalReconciliation = entries.filter((entry) => entry.type === 'payment_reversal_reconciliation');
   const refundPendingEntries = entries.filter((entry) => entry.refund_pending === true);
-  const netUnknown = reversalReconciliation.length > 0 || refundPendingEntries.length > 0;
+  // A net over rows that were not all read is not a net: omitted payments or refunds would change it.
+  const netUnknown = reversalReconciliation.length > 0 || refundPendingEntries.length > 0 || !evidenceComplete;
   const payerFunded = entries.filter((entry) => entry.type === 'payer_payment');
   const payerNames = [...new Set(payerFunded.map((entry) => entry.funded_by.name).filter(Boolean))];
   // Pending (a bank payment in flight) is not received YET. An unknown outcome (a charge handed to Stripe
@@ -1021,7 +1022,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
 
   const parts = [];
   const refundedTotal = fromCents(recorded.reduce((total, entry) => total + cents(entry.refunded_amount), 0));
-  if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, ${netUnknown ? `net amount UNKNOWN (${refundPendingEntries.length ? 'a refund is still pending' : 'an unallocated refund or dispute exists'})` : `net $${netRecorded.toFixed(2)}`}${!netUnknown && refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
+  if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, ${netUnknown ? `net amount UNKNOWN (${!evidenceComplete ? 'more records exist than were read' : refundPendingEntries.length ? 'a refund is still pending' : 'an unallocated refund or dispute exists'})` : `net $${netRecorded.toFixed(2)}`}${!netUnknown && refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
   if (reversalReconciliation.length) parts.push(`${reversalReconciliation.length} refund or dispute record(s) on the covering payment not yet allocated to an invoice (reconciliation required)`);
   if (stripeConfirmed.length) parts.push(`${stripeConfirmed.length} Stripe charge(s) that succeeded and are not confirmed in the payments table (needs reconciling)`);
   if (pending.length) parts.push(`${pending.length} payment(s) still processing (not received yet)`);

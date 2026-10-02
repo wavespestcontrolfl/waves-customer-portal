@@ -273,6 +273,8 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     P2 = await customer(`Proof${run}`, `Payments${run}`);
     const proof = await invoice('p_proof', P2, { total: 95, status: 'paid', paid_at: new Date() });
     await db.batchInsert('payments', bulkRows(P2, proof.id), 100);
+    // A retained successful payment next to older omitted rows: receipt is proven, the net total is not.
+    await db('payments').insert({ customer_id: P2, payment_date: day(0), amount: 95, status: 'paid', description: 'Synthetic proof payment', metadata: json({ invoice_id: proof.id }) });
     await db('stripe_invoice_charge_attempts').insert({ invoice_id: proof.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-proof-${run}`, status: 'succeeded', amount: 95,
       stripe_payment_intent_id: `pi_proof_${run}`, resolved_at: new Date(), submitted_at: new Date() });
     await invoice('h_open', H, { total: 80 });
@@ -646,7 +648,10 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.payment_summary).toMatchObject({ evidence_complete: false, received: null, attached_intent_outcome_unknown: null });
     expect(detail.payment_summary.counts_note).toMatch(/zero is not proof/);
     const proof = await read('get_invoice_detail', { invoice_id: inv.p_proof.id });
-    expect(proof.payment_summary).toMatchObject({ evidence_complete: false, received: true });
+    expect(proof.payment_summary).toMatchObject({ evidence_complete: false, received: true, recorded_payments_net: null });
+    expect(proof.payments_timeline.some((e) => e.type === 'recorded_payment' && e.received === true)).toBe(true);
+    expect(proof.payment_summary.statement).toMatch(/net amount UNKNOWN \(more records exist than were read\)/);
+    expect(proof.payment_summary.statement).not.toMatch(/net \$/);
     expect(proof.payments_timeline.find((e) => e.type === 'stripe_charge_attempt')).toMatchObject({ received: true, ledger_recorded: null });
     const complete = await read('get_invoice_detail', { invoice_id: inv.e_self.id });
     expect(complete.payment_summary).toMatchObject({ evidence_complete: true, received: false, attached_intent_outcome_unknown: false });
