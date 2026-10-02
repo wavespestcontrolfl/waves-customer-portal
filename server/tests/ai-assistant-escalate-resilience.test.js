@@ -54,7 +54,7 @@ describe('escalate resilience', () => {
 
     expect(result.escalated).toBe(true);
     expect(result.escalationId).toBe('esc-1');
-    expect(result.reply).toMatch(/connecting you with our team/i);
+    expect(result.reply).toMatch(/saved your request for our team/i);
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('Failed to mark session escalated'),
       expect.objectContaining({ conversationId: 'conv-1' }),
@@ -67,7 +67,7 @@ describe('escalate resilience', () => {
     const result = await assistant.escalate(conversation, 'hello', 'reason');
 
     expect(result.escalated).toBe(true);
-    expect(result.reply).toMatch(/connecting you with our team/i);
+    expect(result.reply).toMatch(/saved your request for our team/i);
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('Failed to save escalation reply'),
       expect.objectContaining({ conversationId: 'conv-1' }),

@@ -833,6 +833,17 @@ function initScheduledJobs() {
     return;
   }
 
+  // Public forecast history: first successful snapshot per city / ET day.
+  // Afternoon retry fills weather gaps, never rewrites morning predictions.
+  cron.schedule('15 8,14 * * *', async () => {
+    if (!gateEnvValue('GATE_PEST_FORECAST_HISTORY')) return;
+    try {
+      await runExclusive('pest-forecast-history', () => require('./pest-forecast/history').collectDailyForecasts());
+    } catch (err) {
+      logger.error(`[pest-forecast-history] ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
@@ -848,6 +859,22 @@ function initScheduledJobs() {
   };
   cron.scheduleTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN — SMS offer ledger backfill (GATE_SMS_OFFER_LEDGER, dark):
+  // re-records an offer whose post-send write failed after the carrier took
+  // the text. Gate off, the sweep returns before touching the database.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    try {
+      await runExclusive('sms-offer-ledger-backfill', async () => {
+        const result = await require('./sms-offers').backfillMissedOffers();
+        if (result.recorded > 0) logger.info(`[sms-offer-ledger-backfill] recorded=${result.recorded} scanned=${result.scanned}`);
+        // A failed scan or write must fail job health, not read as a green tick.
+        if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
+      });
+    } catch (err) {
+      logger.error(`[sms-offer-ledger-backfill] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
 
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
@@ -1088,6 +1115,17 @@ function initScheduledJobs() {
         require('./link-library').syncSitemapLinks());
     } catch (err) {
       logger.error(`[link-library] nightly sitemap sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3:05AM — Customer home line stamp (GATE_HOME_LINE, read inside)
+  // =========================================================================
+  cron.schedule('5 3 * * *', async () => {
+    try {
+      await runExclusive('home-line-sweep', () => require('./home-line').stampHomeLines());
+    } catch (err) {
+      logger.error(`[home-line] daily sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1931,6 +1969,34 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Neighborhood gate-code directory (PR 2): file every saved neighborhood
+  // gate code under its property's neighborhood; dark behind
+  // GATE_NEIGHBORHOOD_ACCESS, read at each tick. Logs counts and error codes
+  // only — never a code.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
+    const tickStartedAt = Date.now();
+    try {
+      // A pass in which any customer's filing or any conflict bell failed is
+      // reported to job health as failed (both retry next pass).
+      const lockRes = await runExclusive('neighborhood-gate-codes', async () => {
+        const result = await require('./neighborhood-access').sweepSavedGateCodes();
+        if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, bellsFailed: result.bellsFailed, conflicts: result.conflicts })}`);
+        if (result?.failed > 0) throw Object.assign(new Error(`${result.failed} gate-code filing(s) failed`), { code: 'GATE_CODE_FILINGS_FAILED' });
+        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict bell step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
+        return result;
+      });
+      // No connection / lost lock session = no filing ran: a missed tick in
+      // job health. 'lease_held' means a concurrent run is doing the work.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('neighborhood-gate-codes', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw Object.assign(new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`), { code: 'TICK_SKIPPED' });
+      }
+    } catch (err) {
+      logger.error(`[neighborhood-access] sweep tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 */5 * * * *', async () => {
     if (require('./reschedule-link-promises').mode() === 'off') return;
@@ -2244,6 +2310,61 @@ function initScheduledJobs() {
       const prober = require('./seo/llm-mention-prober');
       await prober.runDaily();
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // MONTHLY, 1ST–7TH 6:20 AM ET — Annual rate review ranking batch (plan
+  // annual-rate-review-2026-09-30 step 2). On the 1st it ranks every active
+  // plan line whose anniversary falls 35–65 days out into
+  // rate_review_snapshots and emails ONE ACT:/OK: summary to contact@
+  // (services/rate-review.js); days 2–7 are the idempotent RETRY of that
+  // digest — an emailed batch is skipped before any query, an unsent one is
+  // rebuilt inside its stored window and sent (a delivery failure is thrown
+  // so job_health records it). Dark behind GATE_RATE_REVIEW — rateReviewLive()
+  // is read BEFORE the cron lock, so off = no query, no write, no email.
+  // Writes rankings only: never a rate, never a customer message. After the
+  // 6:05 MRR snapshot and before the 8 AM dues run. runExclusive: a deploy-
+  // overlap tick must not build and email the same batch twice (the batch
+  // row's email_sent_at is the second guard).
+  // =========================================================================
+  cron.schedule('20 6 1-7 * *', async () => {
+    const { rateReviewLive } = require('../config/feature-gates');
+    if (!rateReviewLive()) return;
+    logger.info('Running: rate review monthly batch');
+    try {
+      await runExclusive('rate-review-monthly', async () => {
+        const { runMonthlyRateReview } = require('./rate-review');
+        const result = await runMonthlyRateReview();
+        logger.info(`[rate-review] monthly tick: ${result.skipped ? `skipped (${result.skipped})` : `${result.rows} rows, emailed=${result.emailed}`}`);
+      });
+    } catch (err) { logger.error(`Rate review monthly batch failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3:10 AM ET — Annual rate review APPLY (plan annual-rate-review-
+  // 2026-09-30 step 3, services/rate-review-apply.js). Writes the noticed
+  // rate on its effective date for every rate-review notice the comms lane
+  // has SENT: per-application visits + fee + ledger slice, monthly dues +
+  // slice, or the prepaid term's successor amount — one transaction per
+  // notice, holds recorded and belled, never a customer message. Dark behind
+  // GATE_RATE_REVIEW — rateReviewLive() is read BEFORE the cron lock, so off
+  // = no query, no write (customers keep the lower rate: the safe direction
+  // of the kill switch). Before the 6:05 MRR snapshot and the 8 AM dues run,
+  // so a dues day on the effective date bills the new rate. runExclusive: a
+  // deploy-overlap tick must not apply the same night twice (applied_at
+  // under the notice row lock is the second guard).
+  // =========================================================================
+  cron.schedule('10 3 * * *', async () => {
+    const { rateReviewLive } = require('../config/feature-gates');
+    if (!rateReviewLive()) return;
+    logger.info('Running: rate review nightly apply');
+    try {
+      await runExclusive('rate-review-apply', async () => {
+        const { applyDueRateChanges } = require('./rate-review-apply');
+        const result = await applyDueRateChanges();
+        logger.info(`[rate-review-apply] nightly tick: ${result.reason ? `skipped (${result.reason})` : `${result.due} due, ${result.applied} applied, ${result.held} held`}`);
+      });
+    } catch (err) { logger.error(`Rate review nightly apply failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // MONTHLY (1st, 4AM) — Competitor keyword gap mining. Pulls tracked
@@ -3118,6 +3239,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:30AM ET — Incident adjudicator (correction loop, owner 10-02).
+  // The judge's human_better verdict is a lead, not a failure: this turns
+  // each one into a confirmed mistake ONLY when two models on different
+  // providers both name the same failure and each quotes text the draft
+  // really contains; everything else is stored as a lead. Writes
+  // ai_incidents only — shadow data, nothing reads it at runtime. Same
+  // gate as the ledger it widens; PATHOLOGY_ADJUDICATE_BATCH=0 stops it.
+  // =========================================================================
+  cron.schedule('30 4 * * *', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS incident adjudicator');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { adjudicateHumanBetter } = require('./sms-pathology-ledger');
+      await runExclusive('sms-incident-adjudicate', () => adjudicateHumanBetter());
+    } catch (err) {
+      logger.error(`SMS incident adjudicator failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY SUN 4:40AM ET — Pathology patch proposer. Cells with enough fresh
   // evidence get ONE parked harness-patch proposal card + bell (Agents →
   // Shadow Drafts). Recommendation only — a human ships any actual prompt
@@ -3133,6 +3275,25 @@ function initScheduledJobs() {
       await runExclusive('sms-pathology-propose', () => proposePatches());
     } catch (err) {
       logger.error(`SMS pathology proposer failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:45AM ET — Correction-loop fix proposals (owner 10-02). A
+  // cell with enough DISTINCT confirmed ai_incidents on the live prompt
+  // version gets one pending ai_fix_proposals row with its dev/holdout
+  // split. No model call, no bell: the Monday correction-loop lane reads the
+  // rows. Same gate as the ledger; PATHOLOGY_FIX_PROPOSAL_MAX_CELLS=0 stops it.
+  // =========================================================================
+  cron.schedule('45 4 * * 0', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS correction-loop fix proposals');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeSmsFixes } = require('./sms-pathology-ledger');
+      await runExclusive('sms-fix-proposals', () => proposeSmsFixes());
+    } catch (err) {
+      logger.error(`SMS correction-loop fix proposals failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4448,6 +4609,11 @@ function initScheduledJobs() {
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
+            // GATE_SMS_SCHEDULING_SUGGEST rollback (Codex #5617 r2): a scheduling
+            // card queued while the gate was on must not fire after it is unset.
+            // Gate on, this reads nothing. Same block+retire path as the checks below.
+            const schedulingGated = !anchorStale
+              && await suggest.decisionIsGatedSchedulingSuggestion({ decisionId: claimMeta.agent_decision_id });
             // Amount revalidation (Codex r9): the account can change between
             // review and fire (a portal payment sends no inbound SMS, so the
             // anchor check can't see it). Non-human-authored agent text
@@ -4615,8 +4781,25 @@ function initScheduledJobs() {
             // window on its own facts. Same shared check the immediate
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
+            // Open-loop revalidation (PR #5499 r1): a promise the reply was grounded on
+            // can be fulfilled or dismissed before this fires. Fail-closed.
+            let openLoopsStale = false;
+            let openLoopsReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale && !labelStale && !reserviceStale) {
+              const { scheduledOpenLoopsBlockReason } = require('./agent-decision-send-checks');
+              const rawOpenLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, dbh: db });
+              // An unreadable recheck says nothing about the message (same as the LIVE ETA
+              // leg below): never retire on it — the provider-boundary open-loop check re-reads
+              // and, if still unreadable, refuses retryably onto the bounded retry rail.
+              if (rawOpenLoopsReason === 'open_loops_recheck_failed') {
+                logger.warn(`[scheduled-sms] ${msg.id} open-loop recheck unreadable; deferring to the provider-boundary check`);
+              } else if (rawOpenLoopsReason != null) {
+                openLoopsReason = rawOpenLoopsReason;
+                openLoopsStale = true;
+              }
+            }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale;
+            const priorStale = anchorStale || schedulingGated || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4629,7 +4812,9 @@ function initScheduledJobs() {
             if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
-                : amountsStale
+                : schedulingGated
+                  ? 'scheduling_suggest_gate_off'
+                  : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
@@ -4639,7 +4824,9 @@ function initScheduledJobs() {
                         ? 'stale_label_facts_agent_decision'
                         : reserviceStale
                           ? 'stale_reservice_agent_decision'
-                          : 'stale_eta_agent_decision';
+                          : openLoopsStale
+                            ? 'stale_open_loops_agent_decision'
+                            : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4665,7 +4852,9 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : amountsStale
+                    : schedulingGated
+                      ? 'AI scheduling suggestions were switched off before this scheduled reply fired — review the thread.'
+                      : amountsStale
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
@@ -4675,7 +4864,9 @@ function initScheduledJobs() {
                             ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
                             : reserviceStale
                               ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
-                              : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                              : openLoopsStale
+                                ? `A promise this scheduled reply was written around is no longer open (${openLoopsReason}) — review the thread.`
+                                : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4944,12 +5135,14 @@ function initScheduledJobs() {
           // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
           // its request), composed AFTER any predicate the entry point registered.
           if (claimMeta.agent_decision_id) {
-            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
               // LABEL FACTS (Codex #5416 P1): same window, same boundary re-read of the latest visit.
               labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // open-loop facts (PR #5499) at the same boundary
+              openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),
             );
           }
           return require('./messaging/deferred-replay-registry')

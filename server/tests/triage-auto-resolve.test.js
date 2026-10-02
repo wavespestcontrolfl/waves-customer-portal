@@ -226,6 +226,29 @@ describe('moot-condition resolves', () => {
     expect(classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', payload: { heard_name: { first_name: 'Pat', last_name: null } } }), noBookings, { now: NOW })).toBeNull();
   });
 
+  test('missing_first_name resolves when EVERY listed customer is live with a nonblank first name, whatever its spelling', () => {
+    const card = (over = {}) => item({
+      reason_code: 'missing_first_name',
+      // the call's CURRENT link (customer_*) is deliberately a different, named person: only the listed customers count
+      customer_first_name: 'Relinked', customer_last_name: 'Other',
+      owed_total: 2, owed_named: 2,
+      customer_created_at: CUSTOMER_AFTER, ...heardV1(null, 'Murphy'), ...over,
+    });
+    expect(classifyTriageItem(card(), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
+    expect(classifyTriageItem(card({ owed_total: 1, owed_named: 1 }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
+    // a name the call itself heard is fulfilment too — the heard-name snapshot is no longer compared
+    expect(classifyTriageItem(card({ ...heardV1('Sam', 'Murphy'), owed_total: 1, owed_named: 1 }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
+    expect(classifyTriageItem(card({ payload: { flag: 'missing_first_name' }, owed_total: 1, owed_named: 1 }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
+    // one listed customer still blank / deleted / gone (the SQL counts it owed, not named) keeps the card open
+    expect(classifyTriageItem(card({ owed_named: 1 }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ owed_named: 0 }), noBookings, { now: NOW })).toBeNull();
+    // RELINK: the call points at a named customer but the listed one is still blank -> open
+    expect(classifyTriageItem(card({ owed_total: 1, owed_named: 0, customer_first_name: 'Relinked' }), noBookings, { now: NOW })).toBeNull();
+    // an empty list (nothing to prove) never auto-resolves
+    expect(classifyTriageItem(card({ owed_total: 0, owed_named: 0 }), noBookings, { now: NOW })).toBeNull();
+    expect(RULE_NOTES.first_name_moot).toBeTruthy();
+  });
+
   test('a customer born from the call never moots its own surname card (V1-merged surname is not independent evidence)', () => {
     expect(classifyTriageItem(item({
       reason_code: 'missing_last_name', customer_last_name: 'Sample',

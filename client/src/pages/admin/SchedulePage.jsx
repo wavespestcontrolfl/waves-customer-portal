@@ -43,6 +43,8 @@ import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../.
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
+import BlogPostPicker from "../../components/schedule/BlogPostPicker";
+import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -125,6 +127,7 @@ import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
 
 import BestTimeHint from "../../components/schedule/BestTimeHint";
+import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning } from "../../components/schedule/AvailabilityStrip";
 import IntelligenceBarShell from "../../components/admin/IntelligenceBarShell";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
 import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
@@ -145,6 +148,7 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -373,6 +377,17 @@ function markerLines(notes) {
 function markerTexts(notes, tags) {
   const wanted = new Set(tags);
   return markerLines(notes).filter((entry) => wanted.has(entry.tag)).map((entry) => entry.text);
+}
+// Lane voice fill (GATE_LANE_VOICE_FILL): the words a lane field was filled
+// from on Generate, shown under the field while it still holds the filled
+// value; or, for a group the notes left unclear and nobody picked, an ask
+// to pick one.
+function LaneHeardLine({ quotes, unclear, color }) {
+  if (quotes?.length) {
+    return <div style={{ fontSize: 14, color, marginTop: 4 }}>Heard: {quotes.map((quote) => `“${quote}”`).join(" · ")}</div>;
+  }
+  if (unclear) return <div style={{ fontSize: 14, color, marginTop: 4 }}>The notes didn’t make this clear. Pick one.</div>;
+  return null;
 }
 export function labelsPresentInMarkerNotes(notes, labels) {
   const markerValues = new Set(markerLines(notes).map((entry) => entry.text.toLowerCase()));
@@ -1061,6 +1076,9 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
 export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+// An open photo description (GATE_NOTE_BOX_PHOTOS) may hold typed or
+// dictated words not yet on the photo: Generate and Complete wait for it.
+export const PHOTO_DESCRIPTION_OPEN_ALERT = "Save or cancel the photo description first.";
 // The promise list is an optional read: a stalled one gives up rather than
 // hold the form (Codex #5516).
 const PROMISE_CHECK_TIMEOUT_MS = 15000;
@@ -2118,8 +2136,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // and the range chip would move the finished (or cancelled / skipped /
   // no-show) visit onto a live day (update-details allows the edit) — no
   // hint at all (Codex #4120 r4 P2, r5 P2).
-  const { bestTimes, picked, bestInRange } = useBestTimes({
+  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
+    // Availability strip (GATE_RESCHEDULE_AVAILABILITY): one search over the
+    // days around the picked date. Gate off = no `availability`, and the
+    // three-line hint below renders exactly as before.
+    summary: true,
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
@@ -2141,6 +2163,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
   });
+  const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
+  // A VERIFIED miss only (never "could not check"): Save stays enabled —
+  // the strip is advisory — but says what it is about to do.
+  const routeMissVerdict = availabilityVerdict(availability, stripCurrent)?.tone === "miss";
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
   // modal and the appointment detail sheet show. The endpoint resolves the
@@ -4817,7 +4843,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save & take payment"}
+              {saving ? "Saving..." : (routeMissVerdict ? "Save & take payment anyway" : "Save & take payment")}
             </button>{" "}
             <button
               onClick={() => handleSave()}
@@ -4835,7 +4861,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save"}
+              {saving ? "Saving..." : (routeMissVerdict ? "Save anyway" : "Save")}
             </button>{" "}
             <button
               onClick={closeEditor}
@@ -5829,7 +5855,32 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <SlotConflictNotice
-                conflicts={slotConflicts}
+                // The strip states the route problem itself; the
+                // double-booking notice (no `warning`) always stays.
+                conflicts={stripCoversRouteWarning(availability, stripCurrent)
+                  ? slotConflicts.filter((conflict) => !conflict.warning)
+                  : slotConflicts}
+                style={{ marginTop: -2, marginBottom: 14 }}
+              />{" "}
+              <AvailabilityStrip
+                availability={availability}
+                currentDate={form.scheduledDate}
+                currentStart={form.windowStart}
+                currentTechnicianId={form.technicianId}
+                onPick={(slot) =>
+                  // Same adoption rule as the hint chips below: an
+                  // unassigned visit takes the technician the hour was
+                  // scored for; an assigned visit's technician never changes.
+                  setForm((f) => ({
+                    ...f,
+                    scheduledDate: slot.date,
+                    windowStart: slot.start,
+                    windowEnd: slot.end,
+                    technicianId: !f.technicianId && slot.technicianId
+                      ? slot.technicianId
+                      : f.technicianId,
+                  }))
+                }
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <BestTimeHint
@@ -8990,7 +9041,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   });
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start select, never submits the reschedule.
-  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange } = useBestTimes({
+  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange, availability: manualAvailability } = useBestTimes({
+    summary: true,
     // Same route check as the manual save and the edit form: under
     // GATE_ADMIN_ARRIVAL_WINDOWS the verdict and the chips must not endorse
     // an hour the save would refuse for another customer's window
@@ -9181,6 +9233,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       manualBestTimes={manualBestTimes}
       manualPicked={manualPicked}
       manualBestInRange={manualBestInRange}
+      manualAvailability={manualAvailability}
       onClose={onClose}
     />
   );
@@ -10615,24 +10668,7 @@ export function defaultApplicationMethod(product = {}, serviceType = "", { inter
 // products DO (owner request 2026-07-23): their targets are the nutrition
 // goals of the application (green-up, iron chlorosis, potassium deficiency),
 // prefilled from the catalog like pest targets. Unknown catalog rows keep it.
-export function productControlsTargets(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  if (!category) return true;
-  return !/(adjuvant|surfactant|soil|moisture|growth regulator|pgr)/.test(
-    category,
-  );
-}
-
-// Fertilizer-family products (incl. micros/biostimulants) target nutrition
-// goals rather than pests — their picker swaps to the nutrition suggestions.
-export function productTargetsNutrition(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  return /(fert|micronutrient|biostimulant)/.test(category);
-}
+export { productTargetsNutrition, productControlsTargets };
 
 function requiresLinearFt(method) {
   return normalizeApplicationMethod(method) === "perimeter_spray";
@@ -12837,6 +12873,7 @@ export function CompletionPanel({
   // Completion photos are intentionally kept out of localStorage (a handful
   // of base64 images can exceed its quota).
   const [servicePhotos, setServicePhotos] = useState([]);
+  const [photoDescriptionOpen, setPhotoDescriptionOpen] = useState(false);
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -13587,6 +13624,15 @@ export function CompletionPanel({
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
   const [customTip, setCustomTip] = useState("");
+  // A Waves blog post for the customer (GATE_REPORT_BLOG_POST): every service
+  // but WDO, termite pre-treat, lawn and tree, shrub & palm; the search
+  // answers available:false elsewhere and while the switch is off.
+  // Whether the server offers the blog search for this visit: "checking"
+  // until it answers, then "yes" or "no"; "unknown" when it could not be
+  // asked. A pick (a restored draft's) stays and is sent unless the answer
+  // is a firm "no": /complete checks it either way.
+  const [blogPostOffer, setBlogPostOffer] = useState("no");
+  const [blogPost, setBlogPost] = useState(null);
   // Free-typed [Found]/[Next] note lines parked when an AI draft replaces
   // the notes (parkTaggedNoteLines). Their own state, NOT the textarea
   // state: they ground the AI draft, the recap and the photo context, but
@@ -13603,6 +13649,15 @@ export function CompletionPanel({
   // arrays are authoritative and selections render as removable pills instead
   // of tagged lines inside the report text. Persisted with the draft.
   const [chipLinesDetached, setChipLinesDetached] = useState(false);
+  // Lane voice fill (GATE_LANE_VOICE_FILL): what the last Generate filled
+  // from the notes (each field's words) and the groups it left for a person.
+  const [laneHeard, setLaneHeard] = useState(null);
+  // The fill's picks land on the next render; Generate then writes the
+  // report from them.
+  const [generateQueued, setGenerateQueued] = useState(0);
+  useEffect(() => {
+    if (generateQueued) runGenerate();
+  }, [generateQueued]);
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
   const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
@@ -13801,6 +13856,20 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
+  // flag): the visit's photos and their descriptions sit inside the notes
+  // box and the separate photo section goes away. Never on lawn or tree,
+  // shrub & palm: another lane owns those completions and their photo steps.
+  const noteBoxPhotos = service.noteBoxPhotosEnabled === true && !quickComplete && !hideServicePhotos
+    && !["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout);
+  // Locked while a report is being written, like removePhoto: the request
+  // already read these captions.
+  const setPhotoCaption = (index, caption) => {
+    if (generating) return;
+    setServicePhotos((prev) => prev.map((photo, i) => (i === index
+      ? { ...photo, caption, captionSource: caption ? "tech" : undefined }
+      : photo)));
+  };
   const propertyAreaLine = propertyAreaLineFor(service);
   const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
   const propertyAreasBlocked = propertyAreasRefreshing || (!!propertyAreaKey && propertyAreasSettledFor !== service.id);
@@ -14305,6 +14374,10 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const specialtyCompletion = specialtyCompletionFor(service);
+  // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): the
+  // schedule payload says when Generate first fills this visit's own record
+  // (its places and findings) from the notes.
+  const laneVoiceFill = service.laneVoiceFillEnabled === true && !!specialtyCompletion && !isTypedFindings;
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -14627,6 +14700,7 @@ export function CompletionPanel({
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
       !product.totalAmount ||
+      !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
       (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
@@ -14659,7 +14733,7 @@ export function CompletionPanel({
   // actual (pre-push audit P1). The empty-list and inventory gates stay
   // tier-scoped.
   const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
-    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
+    || selectedProducts.some((product) => product.lawnPlanDefaults || product.requiresDoseSelection)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
     (calibrationRequired &&
       !isIncompleteVisit &&
@@ -14952,6 +15026,33 @@ export function CompletionPanel({
       return kept.length === prev.length ? prev : kept;
     });
   }, [techTips, selectedTipIds]);
+
+  // The blog search is offered wherever the server answers available (an
+  // empty query reads nothing but the visit): only where /complete keeps the
+  // pick, every service but WDO, termite pre-treat, lawn and tree, shrub &
+  // palm (blogPostAllowedFor). The lawn and tree, shrub & palm forms never
+  // ask: another lane owns those completions.
+  useEffect(() => {
+    let cancelled = false;
+    setBlogPost(null);
+    if (!service.id || ["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout)) {
+      setBlogPostOffer("no");
+      return () => { cancelled = true; };
+    }
+    setBlogPostOffer("checking");
+    adminFetch(`/admin/dispatch/${service.id}/blog-posts`)
+      .then((data) => { if (!cancelled) setBlogPostOffer(data?.available === true ? "yes" : "no"); })
+      .catch(() => { if (!cancelled) setBlogPostOffer("unknown"); });
+    return () => { cancelled = true; };
+  }, [service.id, serviceLineForCloseout]);
+  const blogPostKept = !!blogPost && blogPostOffer !== "no";
+  // A kept pick shows while the answer is pending or failed, so it can be
+  // removed (a post /complete finds gone answers BLOG_POST_UNAVAILABLE).
+  const blogPostShown = blogPostOffer === "yes" || blogPostKept;
+  const searchBlogPosts = useCallback(
+    (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
+    [service.id],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -15426,6 +15527,8 @@ export function CompletionPanel({
       recommendationsText.trim() ||
       selectedTipIds.length ||
       customTip.trim() ||
+      // A picked blog post is tech input on its own.
+      blogPost ||
       // A promise mark is tech input on its own (a mark-only draft saves).
       promiseMarksSignature(promiseMarks).length ||
       parkedFound.trim() ||
@@ -15572,6 +15675,9 @@ export function CompletionPanel({
         recommendationsText,
         selectedTipIds,
         customTip,
+        // The picked blog post comes back with the draft, or the completion
+        // after a reload or billing detour would silently leave it off.
+        blogPost,
         parkedFound,
         parkedNext,
         // Which deselect model the label arrays were saved under — a restored
@@ -15719,6 +15825,8 @@ export function CompletionPanel({
     service.propertyAddress,
     // A mark is operator input: a mark-only change must save the draft.
     promiseMarks,
+    // So is a picked blog post.
+    blogPost,
   ]);
 
   function restoreDraft() {
@@ -15990,6 +16098,13 @@ export function CompletionPanel({
         : [],
     );
     setCustomTip(restoredCustom);
+    // The pick as the search answered it; /complete re-checks it is still a
+    // live post. Older drafts have none.
+    const draftBlogPost = savedDraft.blogPost;
+    setBlogPost(draftBlogPost && typeof draftBlogPost === "object"
+      && ["id", "title", "url"].every((key) => typeof draftBlogPost[key] === "string" && draftBlogPost[key])
+      ? { id: draftBlogPost.id, title: draftBlogPost.title, url: draftBlogPost.url }
+      : null);
     setParkedFound(typeof savedDraft.parkedFound === "string" ? savedDraft.parkedFound : "");
     setParkedNext(typeof savedDraft.parkedNext === "string" ? savedDraft.parkedNext : "");
     // Drafts saved before the detached-selection model lack the field → false,
@@ -16619,6 +16734,138 @@ export function CompletionPanel({
   // prompt won't turn a customer concern or a recommendation into a confirmed
   // finding (see the server prompt). photoCount is reported but never enough on
   // its own — the model can't see the photos.
+  // The tech's OWN notes, as the report writer and the lane fill read them:
+  // regeneration grounds in them, so when the notes box still holds the
+  // installed draft the pre-generation notes are the grounding (codex r43;
+  // pre-push P1 on the lane fill: a second Generate never reads the AI's
+  // own report as the tech's words); a hand-edited draft is the tech's copy
+  // and grounds itself. Never the marker lines a tap writes.
+  function groundingNotes() {
+    return stripChipTagLines(
+      generatedReportTextRef.current
+        && notes.trim() === String(generatedReportTextRef.current).trim()
+        ? (preGenerationNotesRef.current || "")
+        : notes,
+    );
+  }
+  // Lane voice fill: reads the tech's own words (groundingNotes, as the
+  // report writer gets them) and fills only what nobody picked, the way a tap does (the
+  // [Found] marker and the label; the areas while none are picked), never a
+  // value that clashes with a pick (the lane's exclusions, the selected
+  // actions): a clash is left for a person to pick. Best effort: a failed
+  // read fills nothing and Generate carries on.
+  async function fillLaneFromNotes() {
+    const note = groundingNotes();
+    const heard = note
+      ? await adminFetch(`/admin/dispatch/${service.id}/lane-facts`, {
+        method: "POST",
+        body: JSON.stringify({ note }),
+      }).catch(() => null)
+      : null;
+    if (heard?.status !== "read") return;
+    // A value fills only an unpicked group and only beside what is chosen:
+    // the tap's own rules decide a clash (reconcile drops a value the new
+    // one excludes; the selected actions refuse a value), and a clash is
+    // left for a person.
+    const actions = activeSelectedLabels(selectedProtocolActionLabels);
+    const chosen = activeSelectedLabels(selectedObservationLabels);
+    const unclear = new Set(heard.unclearGroups);
+    const findings = [];
+    for (const finding of heard.findings) {
+      const group = specialtyCompletion.findingGroups.find((item) => (
+        item.key === finding.group && item.options.some((option) => option.value === finding.value)
+      ));
+      if (!group || group.options.some((option) => chosen.includes(option.value))) continue;
+      const kept = reconcileDependentFindingSelections(specialtyCompletion, chosen, group, finding.value);
+      if (chosen.some((value) => !kept.includes(value)) || specialtyFindingActionConflict(specialtyCompletion, kept, actions)) {
+        unclear.add(group.key);
+      } else {
+        chosen.push(finding.value);
+        findings.push(finding);
+      }
+    }
+    const areas = areasServiced.length ? [] : heard.areas.filter((entry) => areaOptions.includes(entry.area));
+    if (findings.length || areas.length) applyLaneFill(findings, areas);
+    // Words heard earlier stay beside values still standing; a group or
+    // area filled again takes its new words.
+    setLaneHeard((prev) => ({
+      areas: [...(prev?.areas || []).filter((entry) => !areas.some((next) => next.area === entry.area)), ...areas],
+      findings: [...(prev?.findings || []).filter((entry) => !findings.some((next) => next.group === entry.group)), ...findings],
+      unclear: [...unclear],
+    }));
+  }
+  // A fill changes the record an installed report was written from, as a
+  // tap does: the report goes and the tech's own notes, with their marker
+  // lines, come back before the fill's markers are written (pre-push P1;
+  // mirrors handleSpecialtyFindingChange). While the picks stay detached
+  // from the notes (an edited report), the notes an edit would bring back
+  // get the markers instead, so a later restore keeps the fill (codex local
+  // r1 on #5628).
+  function applyLaneFill(findings, areas) {
+    const detached = invalidateGeneratedReportOnTypedEdit();
+    const withMarkers = (text) => [String(text || "").trimEnd(), ...findings.map(({ value }) => `[Found] ${value}`)]
+      .filter(Boolean).join("\n");
+    if (!detached) setNotes(withMarkers);
+    else if (preGenerationNotesRef.current != null) preGenerationNotesRef.current = withMarkers(preGenerationNotesRef.current);
+    for (const { value } of findings) appendUniqueLabel(setSelectedObservationLabels, value);
+    if (areas.length) {
+      lawnAreasInitializedRef.current = true;
+      setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
+    }
+  }
+  // The report itself, from the form as it stands.
+  async function runGenerate() {
+    const { payload, hasReportInput } = buildAiReportPayload();
+    if (!hasReportInput) {
+      setGenerating(false);
+      alert("Add service notes, products, or visit details first.");
+      return;
+    }
+    setGenerating(true);
+    try {
+      const r = await generateAiReport(payload);
+      if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
+    } catch (e) {
+      alert("AI report failed: " + e.message);
+    }
+    setGenerating(false);
+  }
+  // Generate AI report (computer and phone layouts). With the lane fill on,
+  // the record is filled from the notes first and the report is written on
+  // the next render, from the picks as they landed; the form stays locked
+  // (generating) all the way through.
+  async function handleGenerateClick() {
+    // Stop dictation BEFORE snapshotting notes for the payload, so a final
+    // spoken chunk lands in serviceNotes rather than after the snapshot.
+    // Once generating flips true the dictation callback ignores any late
+    // chunk (and the mic is disabled). Upload-mode dictation transcribes
+    // AFTER the mic stops (an async server round-trip), so a snapshot taken
+    // now would miss it. Hold the action until the transcript has landed.
+    if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+      alert("Stop dictation and wait for the transcript to appear in your notes first.");
+      return;
+    }
+    if (photoDescriptionOpen) {
+      alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+      return;
+    }
+    if (promiseMarksPending) {
+      alert(PROMISE_MARKS_LOADING_ALERT);
+      return;
+    }
+    if (dictation.listening) dictation.toggle();
+    if (!laneVoiceFill) {
+      await runGenerate();
+      return;
+    }
+    setGenerating(true);
+    try {
+      await fillLaneFromNotes();
+    } catch {
+      // The fill is best effort: the report is written either way.
+    }
+    setGenerateQueued((n) => n + 1);
+  }
   function buildAiReportPayload() {
     const productsApplied = selectedProducts
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
@@ -16801,16 +17048,7 @@ export function CompletionPanel({
             timeZone: "America/New_York",
           })
         : "",
-      // Regeneration grounds in the tech's OWN notes: when the notes box
-      // still holds the installed draft, the pre-generation notes are the
-      // grounding (codex r43) — a hand-edited draft is the tech's copy and
-      // grounds itself.
-      serviceNotes: stripChipTagLines(
-        generatedReportTextRef.current
-          && notes.trim() === String(generatedReportTextRef.current).trim()
-          ? (preGenerationNotesRef.current || "")
-          : notes,
-      ),
+      serviceNotes: groundingNotes(),
       productsApplied,
       areasServiced: completionAreasServiced,
       actionsCompleted,
@@ -17683,6 +17921,10 @@ export function CompletionPanel({
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
       return;
     }
+    if (photoDescriptionOpen) {
+      alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+      return;
+    }
     // Marks restored with a draft are checked against the promise list once
     // it loads; completing before then would drop them (Codex #5516).
     if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll && promiseMarksPending) {
@@ -18225,6 +18467,9 @@ export function CompletionPanel({
         techTips: techTips?.available === true
           ? { ids: selectedTipIds, custom: customTip.trim() || null }
           : null,
+        // The Waves blog post picked for the customer: the id only; the server
+        // checks it is live on the site and freezes its title and URL.
+        ...(blogPostKept ? { blogPostId: blogPost.id } : {}),
         internalRecommendations,
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
@@ -19944,8 +20189,9 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>{" "}
-            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label="Technician notes">
+            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label={noteBoxPhotos ? "Notes and photos" : "Technician notes"}>
               {" "}
+              <div style={noteBoxPhotos ? { border: `1px solid ${M.hairline}`, borderRadius: 12, background: M.card, overflow: "hidden" } : undefined}>
               <div style={{ position: "relative" }}>
                 <textarea
                   value={notes}
@@ -19969,13 +20215,16 @@ export function CompletionPanel({
                     // typed text never runs under it.
                     paddingRight: dictation.supported ? 52 : mTextarea.padding,
                     opacity: generating ? 0.6 : 1,
+                    ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
                   }}
                 />{" "}
                 {dictation.supported && (
                   <button
                     type="button"
                     onClick={dictation.toggle}
-                    disabled={generating || dictation.uploading}
+                    // One microphone at a time: an open photo description holds the notes
+                    // mic (it can still stop a recording already going).
+                    disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                     aria-busy={dictation.uploading || undefined}
                     aria-label={
                       dictation.uploading
@@ -20010,6 +20259,35 @@ export function CompletionPanel({
                     {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
                   </button>
                 )}
+              </div>
+              {noteBoxPhotos && (
+                <>
+                  <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+                  <NoteBoxPhotos
+                    photos={servicePhotos}
+                    max={5}
+                    disabled={generating}
+                    palette={{ text: M.ink, muted: M.ink3, border: M.hairline, card: M.card, danger: M.err, onDanger: M.actionFg }}
+                    dictationServiceId={service.id}
+                    onAdd={() => photoInputRef.current?.click()}
+                    onRemove={removePhoto}
+                    onCaption={setPhotoCaption}
+                    onEditingChange={setPhotoDescriptionOpen}
+                    micBusy={dictation.listening || dictation.starting || dictation.uploading}
+                    onDescribeWithAi={handlePhotoAnalyze}
+                    describing={photoAnalyzing}
+                    describeError={photoAiError}
+                    summary={typedPhotoSummary}
+                    summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                    onSummary={setTypedPhotoSummary}
+                    onAddSummaryToNotes={isTypedFindings ? null : () => {
+                      const summary = typedPhotoSummary.trim();
+                      if (!summary) return;
+                      setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                    }}
+                  />
+                </>
+              )}
               </div>
             </Field></details>
             {/* Post-AI-draft structured selections — the tagged lines no
@@ -20079,6 +20357,11 @@ export function CompletionPanel({
                     value={selected}
                     onChange={(value) => handleSpecialtyFindingChange(group, value)}
                     inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                  />
+                  <LaneHeardLine
+                    quotes={laneHeard?.findings.filter((entry) => entry.group === group.key && entry.value === selected).map((entry) => entry.quote)}
+                    unclear={!selected && laneHeard?.unclear.includes(group.key)}
+                    color={M.ink3}
                   />
                 </Field>
               );
@@ -20179,6 +20462,17 @@ export function CompletionPanel({
                 />
               </Field>
             )}
+            {blogPostShown && (
+              <Field label="Blog post for the customer">
+                <BlogPostPicker
+                  search={searchBlogPosts}
+                  value={blogPost}
+                  onChange={setBlogPost}
+                  disabled={generating || submitting}
+                  tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, font, inputStyle: mInput }}
+                />
+              </Field>
+            )}
             {/* Lines parked from the notes when an AI draft replaced them
                 stay visible and editable here — they still submit as
                 findings / internal next steps, so the tech can correct or
@@ -20259,37 +20553,7 @@ export function CompletionPanel({
             {!quickComplete && (
               <button
                 type="button"
-                onClick={async () => {
-                  // Stop dictation BEFORE snapshotting notes for the payload, so
-                  // a final spoken chunk lands in serviceNotes rather than after
-                  // the snapshot. Once generating flips true the dictation
-                  // callback ignores any late chunk (and the mic is disabled).
-                  // Upload-mode dictation transcribes AFTER the mic stops (an
-                  // async server round-trip), so a snapshot taken now would miss
-                  // it. Hold the action until the transcript has landed.
-                  if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
-                    alert("Stop dictation and wait for the transcript to appear in your notes first.");
-                    return;
-                  }
-                  if (promiseMarksPending) {
-                    alert(PROMISE_MARKS_LOADING_ALERT);
-                    return;
-                  }
-                  if (dictation.listening) dictation.toggle();
-                  const { payload, hasReportInput } = buildAiReportPayload();
-                  if (!hasReportInput) {
-                    alert("Add service notes, products, or visit details first.");
-                    return;
-                  }
-                  setGenerating(true);
-                  try {
-                    const r = await generateAiReport(payload);
-                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
-                  } catch (e) {
-                    alert("AI report failed: " + e.message);
-                  }
-                  setGenerating(false);
-                }}
+                onClick={handleGenerateClick}
                 disabled={generating
                   || (isLawn && lawnAssessmentReady === false)
                   // A mid-load station registry would land counts AFTER the
@@ -20382,6 +20646,9 @@ export function CompletionPanel({
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
                     serviceId={service.id}
+                    // The property this form loaded the visit at: a save that lands after
+                    // the office moved the visit is refused (Codex #5538).
+                    expectedPropertyId={'propertyId' in service ? (service.propertyId ?? null) : undefined}
                     customerName={service.customerName || "Customer"}
                     address={service.address || ""}
                     lat={service.lat ?? service.customer_latitude}
@@ -20402,7 +20669,7 @@ export function CompletionPanel({
                 </span>
               </Field>
             )}
-            {!quickComplete && !hideServicePhotos && (
+            {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
               <Field label={`Service photos (${servicePhotos.length}/5)`}>
                 {" "}
                 <input
@@ -20655,6 +20922,7 @@ export function CompletionPanel({
             })}
             {/* Products applied */}
             <Field label="Products applied">
+              {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
               {quickComplete ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
@@ -21063,6 +21331,10 @@ export function CompletionPanel({
                     [...added, ...removed].forEach((area) => toggleArea(area));
                   }}
                   inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                />
+                <LaneHeardLine
+                  quotes={[...new Set((laneHeard?.areas || []).filter((entry) => areasServiced.includes(entry.area)).map((entry) => entry.quote))]}
+                  color={M.ink3}
                 />
               </Field>
             )}
@@ -22262,6 +22534,9 @@ export function CompletionPanel({
               {zoneMapOpen && (
                 <TechTreatmentZoneModal
                   serviceId={service.id}
+                  // The property this form loaded the visit at: a save that lands after
+                  // the office moved the visit is refused (Codex #5538).
+                  expectedPropertyId={'propertyId' in service ? (service.propertyId ?? null) : undefined}
                   customerName={service.customerName || "Customer"}
                   address={service.address || ""}
                   lat={service.lat ?? service.customer_latitude}
@@ -22391,7 +22666,8 @@ export function CompletionPanel({
           </select>
           {/* Technician Notes */}
           <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}
-          <label style={labelStyle}>Technician Notes</label>{" "}
+          <label style={labelStyle}>{noteBoxPhotos ? "Notes and photos" : "Technician Notes"}</label>{" "}
+          <div style={noteBoxPhotos ? { border: `1px solid ${D.border}`, borderRadius: 10, background: D.input, overflow: "hidden" } : undefined}>
           <div style={{ position: "relative" }}>
             <textarea
               value={notes}
@@ -22415,6 +22691,7 @@ export function CompletionPanel({
                 fontFamily: "'Nunito Sans', sans-serif",
                 boxSizing: "border-box",
                 opacity: generating ? 0.6 : 1,
+                ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
               }}
               placeholder={
                 dictation.listening
@@ -22428,7 +22705,9 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={dictation.toggle}
-                disabled={generating || dictation.uploading}
+                // One microphone at a time: an open photo description holds the notes
+                // mic (it can still stop a recording already going).
+                disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                 aria-busy={dictation.uploading || undefined}
                 aria-label={
                   dictation.uploading
@@ -22462,6 +22741,35 @@ export function CompletionPanel({
                 {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
               </button>
             )}
+          </div>
+          {noteBoxPhotos && (
+            <>
+              <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+              <NoteBoxPhotos
+                photos={servicePhotos}
+                max={5}
+                disabled={generating}
+                palette={{ text: D.text, muted: D.muted, border: D.border, card: D.input, danger: D.red, onDanger: D.white }}
+                dictationServiceId={service.id}
+                onAdd={() => photoInputRef.current?.click()}
+                onRemove={removePhoto}
+                onCaption={setPhotoCaption}
+                onEditingChange={setPhotoDescriptionOpen}
+                micBusy={dictation.listening || dictation.starting || dictation.uploading}
+                onDescribeWithAi={handlePhotoAnalyze}
+                describing={photoAnalyzing}
+                describeError={photoAiError}
+                summary={typedPhotoSummary}
+                summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                onSummary={setTypedPhotoSummary}
+                onAddSummaryToNotes={isTypedFindings ? null : () => {
+                  const summary = typedPhotoSummary.trim();
+                  if (!summary) return;
+                  setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                }}
+              />
+            </>
+          )}
           </div>
           </details>
           {/* Post-AI-draft structured selections — the tagged lines no longer
@@ -22534,6 +22842,11 @@ export function CompletionPanel({
                     value={selected}
                     onChange={(value) => handleSpecialtyFindingChange(group, value)}
                     inputStyle={inputStyle}
+                  />
+                  <LaneHeardLine
+                    quotes={laneHeard?.findings.filter((entry) => entry.group === group.key && entry.value === selected).map((entry) => entry.quote)}
+                    unclear={!selected && laneHeard?.unclear.includes(group.key)}
+                    color={D.muted}
                   />
                 </div>
               );
@@ -22628,6 +22941,18 @@ export function CompletionPanel({
                 />
               </div>
             )}
+            {blogPostShown && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>Blog post for the customer</label>{" "}
+                <BlogPostPicker
+                  search={searchBlogPosts}
+                  value={blogPost}
+                  onChange={setBlogPost}
+                  disabled={generating || submitting}
+                  tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, inputStyle }}
+                />
+              </div>
+            )}
             {/* Parked note lines stay visible and editable after an AI draft
                 replaced the notes (see the mobile branch). */}
             {parkedFound.trim() && (
@@ -22712,37 +23037,7 @@ export function CompletionPanel({
           {!quickComplete && (
             <button
               type="button"
-              onClick={async () => {
-                // Stop dictation BEFORE snapshotting notes for the payload, so
-                // a final spoken chunk lands in serviceNotes rather than after
-                // the snapshot. Once generating flips true the dictation
-                // callback ignores any late chunk (and the mic is disabled).
-                // Upload-mode dictation transcribes AFTER the mic stops (an
-                // async server round-trip), so a snapshot taken now would miss
-                // it. Hold the action until the transcript has landed.
-                if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
-                  alert("Stop dictation and wait for the transcript to appear in your notes first.");
-                  return;
-                }
-                if (promiseMarksPending) {
-                  alert(PROMISE_MARKS_LOADING_ALERT);
-                  return;
-                }
-                if (dictation.listening) dictation.toggle();
-                const { payload, hasReportInput } = buildAiReportPayload();
-                if (!hasReportInput) {
-                  alert("Add service notes, products, or visit details first.");
-                  return;
-                }
-                setGenerating(true);
-                try {
-                  const r = await generateAiReport(payload);
-                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
-                } catch (e) {
-                  alert("AI report failed: " + e.message);
-                }
-                setGenerating(false);
-              }}
+              onClick={handleGenerateClick}
               disabled={generating
                 || (isLawn && lawnAssessmentReady === false)
                 // Same station-registry hold as the mobile Generate button.
@@ -22808,7 +23103,7 @@ export function CompletionPanel({
               turf photos in the Lawn Assessment block above (which flow into the
               report gallery), so this redundant second upload is hidden.
               Combined visits keep it (companions have their own photo gates). */}
-          {!quickComplete && !hideServicePhotos && (
+          {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Service Photos</label>{" "}
@@ -23077,6 +23372,7 @@ export function CompletionPanel({
           })}
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
+          {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
           {quickComplete ? (
             <div
               style={{
@@ -23466,6 +23762,10 @@ export function CompletionPanel({
                   [...added, ...removed].forEach((area) => toggleArea(area));
                 }}
                 inputStyle={{ width: "100%", boxSizing: "border-box" }}
+              />
+              <LaneHeardLine
+                quotes={[...new Set((laneHeard?.areas || []).filter((entry) => areasServiced.includes(entry.area)).map((entry) => entry.quote))]}
+                color={D.muted}
               />
             </div>
           )}
@@ -24323,36 +24623,6 @@ const PEST_TARGET_SUGGESTIONS = [
   "Scorpions",
 ];
 
-// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
-// what a lawn tech actually enters as a product's target, not structural pests.
-const LAWN_TARGET_SUGGESTIONS = [
-  "Broadleaf weeds",
-  "Crabgrass",
-  "Nutsedge / sedge",
-  "Green kyllinga",
-  "Dollarweed",
-  "Doveweed",
-  "Chamberbitter",
-  "Spurge",
-  "Clover",
-  "Goosegrass",
-  "Torpedograss",
-  "Annual bluegrass (Poa annua)",
-  "Southern chinch bugs",
-  "Fall armyworms",
-  "Tropical sod webworms",
-  "White grubs",
-  "Tawny mole crickets",
-  "Fire ants",
-  "Nematodes",
-  "Large patch",
-  "Dollar spot",
-  "Gray leaf spot",
-  "Take-all root rot",
-  "Fairy ring",
-  "Pythium root rot",
-];
-
 // Tree & shrub / palm targets: the SWFL ornamental pests a T&S tech actually
 // treats — whitefly species, scale, thrips, mites — plus the foliar diseases.
 const ORNAMENTAL_TARGET_SUGGESTIONS = [
@@ -24370,24 +24640,6 @@ const ORNAMENTAL_TARGET_SUGGESTIONS = [
   "Sooty mold (sap-feeder cleanup)",
   "Fungal leaf spot",
   "Powdery mildew",
-];
-
-// Fertilizer-family targets are the nutrition goal of the application — what
-// the feeding is meant to correct or stimulate, in customer-report language.
-const NUTRITION_TARGET_SUGGESTIONS = [
-  "Nitrogen green-up",
-  "Deep green color",
-  "Color & density",
-  "Iron chlorosis (yellowing turf)",
-  "Potassium deficiency",
-  "Root strength & stress tolerance",
-  "Balanced feeding",
-  "Micronutrient deficiency",
-  "Slow-release feeding",
-  "Winter hardiness",
-  "Magnesium deficiency (palms)",
-  "Manganese deficiency (palms)",
-  "Potassium deficiency (palms)",
 ];
 
 // Which suggestion list / placeholder noun a product's Targets picker gets:
@@ -25050,6 +25302,8 @@ const PRODUCT_DESCRIPTIONS = {
   "snapshot 2.5tg": "granular bed pre-emergent for long residual weed prevention",
   snapshot: "granular bed pre-emergent for long residual weed prevention",
   "8-2-12": "palm fertilizer with potassium and magnesium for palm nutrition",
+  "8-0-12": "LESCO palm fertilizer #511542; dose in pounds from the canopy chart",
+  "0-0-16": "LESCO palm fertilizer #510513; potassium and magnesium without N or P",
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",

@@ -829,6 +829,8 @@ export default function App() {
             <Route path="auto-dispatch" element={<AdminTabRedirect to="/admin/agents" tab="dispatch" />} />
             <Route path="price-match" element={<Suspense fallback={<RouteFallback label="Loading price match..." />}><AdminPriceMatchPage /></Suspense>} />
             <Route path="price-change" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="notices" />} />
+            {/* The rate-review ops email links ?area=rate-review&batch=<key>; the alias keeps the batch param. */}
+            <Route path="rate-review" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="rate-review" />} />
             <Route path="more" element={<Suspense fallback={<RouteFallback label="Loading…" />}><AdminMorePage /></Suspense>} />
             <Route path="_design-system" element={<Suspense fallback={<RouteFallback label="Loading design system..." />}><DesignSystemPage /></Suspense>} />
             <Route path="_design-system/flags" element={<Suspense fallback={<RouteFallback label="Loading flags..." />}><DesignSystemFlagsPage /></Suspense>} />

@@ -28,6 +28,7 @@ module.exports = {
     // module is in the floor's coverage set and these are its direct tests.
     '<rootDir>/tests/notification-admin-dedupe-window.test.js',
     '<rootDir>/tests/notification-admin-dedupe-refresh.test.js',
+    '<rootDir>/tests/notification-inbound-sms-read-admin.test.js',
   ],
   collectCoverage: true,
   collectCoverageFrom: [

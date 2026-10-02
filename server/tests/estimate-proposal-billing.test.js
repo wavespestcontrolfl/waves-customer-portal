@@ -35,6 +35,13 @@ const {
   proposalCallbackTermsEligible,
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
+  proposalRateReviewTermsEligible,
+  proposalPrintsCannedTerms,
+  commercialTermLines,
+  documentCarriesRateReviewTerms,
+  rateReviewTermsServedIsCurrent,
+  recordRateReviewTermsServedOutcome,
+  ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
@@ -167,6 +174,101 @@ describe('proposalCallbackTermsEligible', () => {
   it('never allows it where the proposal makes no guarantee claim', () => {
     mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
     expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(false);
+  });
+});
+
+describe('proposalRateReviewTermsEligible (annual rate review disclosure, owner ruling 2026-09-30)', () => {
+  const building = (...lines) => ({ name: 'Home', lineItems: lines.map(([description, frequency]) => ({ description, amount: 55, frequency })) });
+
+  it('prints on every recurring residential plan-terms document — pest, lawn, and a pest + lawn mix — not only all-pest', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] }, 'e1')).toBe(true);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Lawn Care', 'monthly'])] }, 'e1')).toBe(true);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Mosquito Control', 'monthly'])] }, 'e1')).toBe(true);
+    const pestLawn = { enabled: false, buildings: [building(['Pest Control', 'quarterly'], ['Lawn Care', 'monthly'])] };
+    expect(proposalCallbackTermsEligible(pestLawn, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible(pestLawn, 'e1')).toBe(true);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  it('never prints on rodent, commercial (authored), empty or one-time-only documents', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Rodent Bait Stations', 'monthly'])] }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'], ['Rodent Bait Stations', 'monthly'])] }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ enabled: true, buildings: [building(['Quarterly Pest Control', 'quarterly'])] }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [] }, 'e1')).toBe(false);
+    // A one-time-only document has no rate to review.
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Pest Control', 'one_time'])] }, 'e1')).toBe(false);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  it('never prints where the proposal makes no guarantee claim (termite / unclassifiable work)', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] }, 'e1')).toBe(false);
+  });
+
+  // Pre-push Codex on #5434: the renderers suppress the canned line beside
+  // authored, structured or program terms, so the shared predicate must too —
+  // otherwise a download would record served evidence for a line never shown.
+  it('never prints beside authored free-text terms, structured commercial terms or programs (renderer exclusions)', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    const pest = () => ({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] });
+    expect(proposalRateReviewTermsEligible(pest(), 'e1')).toBe(true);
+    expect(proposalRateReviewTermsEligible({ ...pest(), terms: 'Operator terms govern this proposal.' }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ ...pest(), commercialTerms: { paymentTerms: 'net30' } }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ ...pest(), commercialTerms: { initialTermMonths: 0 } }, 'e1')).toBe(false);
+    // A programs-mode proposal whose program rows classify as plan work.
+    expect(proposalRateReviewTermsEligible({ ...pest(), programs: [{ name: 'Lawn Program', frequencyPerYear: 8, pricePerApplication: 60 }] }, 'e1')).toBe(false);
+    // An EMPTY structured block or blank terms are not authored terms.
+    expect(proposalRateReviewTermsEligible({ ...pest(), commercialTerms: {}, terms: '' }, 'e1')).toBe(true);
+    expect(proposalPrintsCannedTerms(pest())).toBe(true);
+    expect(proposalPrintsCannedTerms({ ...pest(), terms: 'x' })).toBe(false);
+    expect(proposalPrintsCannedTerms(null)).toBe(false);
+    expect(commercialTermLines({ paymentTerms: 'net15', renewal: 'Auto-renews yearly' })).toEqual(['Payment: Net-15', 'Renewal: Auto-renews yearly']);
+    expect(commercialTermLines(null)).toEqual([]);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  // codex #5434 r2 P1: frozen documents keep their original terms.
+  describe('frozen documents (accepted / declined) keep the terms the customer saw', () => {
+    const { RATE_REVIEW_SENTENCE } = require('../services/acceptance-terms-text');
+    const plan = { enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] };
+    const planAcceptance = { termsText: `Accepting authorizes these services at the price shown.\nServices — at the price and frequency shown, until you cancel. No contract. ${RATE_REVIEW_SENTENCE}` };
+    const baseAcceptance = { termsText: 'Accepting authorizes these services at the price shown.\nServices — at the price and frequency shown, until you cancel. No contract.' };
+    beforeEach(() => mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false));
+    afterEach(() => mockEstimateMakesNoGuaranteeClaim.mockReset());
+
+    it('an open estimate prints (it is being sold under the current terms)', () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'sent' } })).toBe(true);
+      expect(documentCarriesRateReviewTerms({ status: 'viewed', price_locked_at: null })).toBe(true);
+    });
+
+    it('an accepted estimate prints ONLY when its recorded acceptance carried the sentence', () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted' }, acceptance: planAcceptance })).toBe(true);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted' }, acceptance: baseAcceptance })).toBe(false);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted' }, acceptance: null })).toBe(false);
+      // price_locked_at alone freezes too (both accept flows stamp it).
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'sent', price_locked_at: '2026-09-01T00:00:00Z' } })).toBe(false);
+      // The raw ledger column shape is accepted as well.
+      expect(documentCarriesRateReviewTerms({ status: 'accepted' }, { terms_text: planAcceptance.termsText })).toBe(true);
+    });
+
+    it('a declined estimate never acquires it', () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'declined' } })).toBe(false);
+    });
+
+    // codex #5434 r3 P1: an accept that records no drawer snapshot (gate off,
+    // the annual prepay lane) stamps the document fact itself.
+    it("an accepted estimate stamped rateReviewDisclosedAtAccept prints even with no acceptance row", () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted', estimate_data: { rateReviewDisclosedAtAccept: true } }, acceptance: null })).toBe(true);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted', estimate_data: JSON.stringify({ rateReviewDisclosedAtAccept: true }) }, acceptance: null })).toBe(true);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted', estimate_data: { rateReviewDisclosedAtAccept: false } }, acceptance: null })).toBe(false);
+      expect(proposalRateReviewTermsEligible(plan, 'e1', { estimate: { status: 'accepted', estimate_data: '{not json' }, acceptance: null })).toBe(false);
+    });
+
+    it('without the estimate row the plan-terms decision stands alone (legacy callers)', () => {
+      expect(proposalRateReviewTermsEligible(plan, 'e1')).toBe(true);
+    });
   });
 });
 
@@ -375,5 +477,135 @@ describe('pricing authority', () => {
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
       .toEqual({ billsPerApplication: false, livePricing: null });
     expect(mockBuildPricingBundle).not.toHaveBeenCalled();
+  });
+});
+
+// Served-disclosure evidence (pre-push Codex on #5434's merge head): the
+// accept stamps the frozen document only on proof the customer was served
+// the line — this marker (written by the /pdf download and the legacy page
+// card) or the recorded 'plan' drawer snapshot.
+describe('served-disclosure evidence (estimate_data.rateReviewTermsServed)', () => {
+  const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+
+  test('rateReviewTermsServedIsCurrent: the current version only, string or object data', () => {
+    expect(rateReviewTermsServedIsCurrent({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION })).toBe(true);
+    expect(rateReviewTermsServedIsCurrent(JSON.stringify({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION }))).toBe(true);
+    expect(rateReviewTermsServedIsCurrent({ rateReviewTermsServed: 'v2025-01' })).toBe(false);
+    expect(rateReviewTermsServedIsCurrent({})).toBe(false);
+    expect(rateReviewTermsServedIsCurrent(null)).toBe(false);
+    expect(rateReviewTermsServedIsCurrent('not json')).toBe(false);
+  });
+
+  function stubEstimatesUpdate(update) {
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereNotIn: jest.fn(() => chain), update };
+    mockDb.mockImplementation((table) => {
+      if (table === 'estimates') return chain;
+      throw new Error(`unexpected table ${table}`);
+    });
+    mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    return chain;
+  }
+
+  test('an open estimate is stamped with the current version under the frozen-status guards', async () => {
+    const update = jest.fn(async () => 1);
+    const chain = stubEstimatesUpdate(update);
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e1', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe('persisted');
+    expect(chain.where).toHaveBeenCalledWith({ id: 'e1' });
+    expect(chain.whereNull).toHaveBeenCalledWith('price_locked_at');
+    expect(chain.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['accepted', 'declined']));
+    const [{ estimate_data }] = update.mock.calls[0];
+    expect(estimate_data.__raw).toContain("'{rateReviewTermsServed}', to_jsonb(?::text)");
+    expect(estimate_data.bindings).toEqual([RATE_REVIEW_TERMS_VERSION]);
+  });
+
+  test('a frozen estimate, or one already marked at the current version, is never written', async () => {
+    const update = jest.fn(async () => 1);
+    stubEstimatesUpdate(update);
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e2', status: 'accepted', price_locked_at: null, estimate_data: '{}' })).resolves.toBe('frozen');
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e3', status: 'sent', price_locked_at: '2026-09-01T00:00:00Z', estimate_data: '{}' })).resolves.toBe('frozen');
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e4', status: 'sent', price_locked_at: null, estimate_data: { rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION } })).resolves.toBe('current');
+    await expect(recordRateReviewTermsServedOutcome(null)).resolves.toBe('failed');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a database failure is swallowed — the page or download never fails on the marker', async () => {
+    stubEstimatesUpdate(jest.fn(async () => { throw new Error('db down'); }));
+    await expect(recordRateReviewTermsServedOutcome({ id: 'e5', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe('failed');
+  });
+});
+
+describe('ensureRateReviewTermsEvidenceBeforeRender (the /pdf pre-render step)', () => {
+  const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+  const openPlan = (extra = {}) => ({
+    id: 'e-open', status: 'sent', price_locked_at: null,
+    estimate_data: JSON.stringify({ lineItems: [{ displayName: 'Quarterly Pest Control', monthlyPrice: 55 }], ...extra }),
+  });
+  const billing = { billsPerApplication: false, livePricing: null };
+  function stubEstimates({ updateResult = 1, fresh = null, firstThrows = false } = {}) {
+    const update = jest.fn(async () => updateResult);
+    const first = jest.fn(async () => { if (firstThrows) throw new Error('db down'); return fresh; });
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereNotIn: jest.fn(() => chain), update, first };
+    mockDb.mockImplementation((table) => { if (table === 'estimates') return chain; throw new Error(`unexpected table ${table}`); });
+    mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    return { update, first };
+  }
+  beforeEach(() => mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false));
+  afterEach(() => mockEstimateMakesNoGuaranteeClaim.mockReset());
+
+  test('an eligible open row is marked and returned as-is, line allowed', async () => {
+    const { update, first } = stubEstimates({ updateResult: 1 });
+    const estimate = openPlan();
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: false });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
+  });
+
+  test('a zero-row write (the row froze) re-reads and returns the frozen row, line allowed (the stamp decides)', async () => {
+    const frozen = { id: 'e-open', status: 'accepted', price_locked_at: '2026-10-01T06:00:00.000Z', estimate_data: '{}' };
+    const { update, first } = stubEstimates({ updateResult: 0, fresh: frozen });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(openPlan(), { billing })).resolves.toEqual({ estimate: frozen, withholdRateReviewTerms: false });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(first).toHaveBeenCalledTimes(1);
+  });
+
+  test('a FAILED write withholds the line (GH Codex r8 P0); so does a zero-row write whose re-read fails or shows an open row', async () => {
+    const estimate = openPlan();
+    stubEstimates({ updateResult: 0, firstThrows: true });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: true });
+    const throwing = { where: jest.fn(() => throwing), whereNull: jest.fn(() => throwing), whereNotIn: jest.fn(() => throwing), update: jest.fn(async () => { throw new Error('db down'); }) };
+    mockDb.mockImplementation(() => throwing);
+    mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: true });
+    await expect(recordRateReviewTermsServedOutcome(estimate)).resolves.toBe('failed');
+    stubEstimates({ updateResult: 0, fresh: { ...estimate } });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: true });
+  });
+
+  test('an eligibility check that throws withholds the line without touching the database (fail closed)', async () => {
+    const { update, first } = stubEstimates({ updateResult: 1 });
+    mockEstimateMakesNoGuaranteeClaim.mockImplementation(() => { throw new Error('policy lookup exploded'); });
+    const estimate = openPlan();
+    // proposalMakesNoGuaranteeClaim swallows its own error as "no claim" → not
+    // eligible → passthrough; a throw from normalizeProposal's inputs is the
+    // real fail-closed path: feed it an estimate whose data cannot be read.
+    const unreadable = { ...estimate, estimate_data: 'not json' };
+    const result = await ensureRateReviewTermsEvidenceBeforeRender(unreadable, { billing });
+    expect(result.estimate).toBe(unreadable);
+    expect(update).not.toHaveBeenCalled();
+    expect(first).not.toHaveBeenCalled();
+  });
+
+  test('already current: no write, no re-read; ineligible (frozen, or no line): passthrough without touching the database', async () => {
+    const { update, first } = stubEstimates({ updateResult: 1 });
+    const current = openPlan({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(current, { billing })).resolves.toEqual({ estimate: current, withholdRateReviewTerms: false });
+    await expect(recordRateReviewTermsServedOutcome(current)).resolves.toBe('current');
+    const frozen = { ...openPlan(), status: 'accepted' };
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(frozen, { billing })).resolves.toEqual({ estimate: frozen, withholdRateReviewTerms: false });
+    await expect(recordRateReviewTermsServedOutcome(frozen)).resolves.toBe('frozen');
+    const authored = openPlan({ proposal: { enabled: false, terms: 'Operator terms.', buildings: [{ name: 'Home', lineItems: [{ description: 'Quarterly Pest Control', unitPrice: 55, frequency: 'quarterly' }] }] } });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(authored, { billing })).resolves.toEqual({ estimate: authored, withholdRateReviewTerms: false });
+    expect(update).not.toHaveBeenCalled();
+    expect(first).not.toHaveBeenCalled();
   });
 });

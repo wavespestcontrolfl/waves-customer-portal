@@ -3,7 +3,8 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString } = require('../../utils/datetime-et');
 const { dispatchWithFallback } = require('../llm/call');
-const { isEnabled, kbSpeciesQaLive } = require('../../config/feature-gates');
+const { isEnabled, kbSpeciesQaLive, kbCustomerAudienceLive } = require('../../config/feature-gates');
+const { KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES } = require('./customer-safe-categories');
 
 // Callers whose answer goes to staff, never to a customer. Every other
 // source (ai_assistant, lead_agent, content_agent, unknown) is treated as
@@ -51,21 +52,41 @@ const SPECIES_RULE = ' Articles titled "SPECIES CATALOG" are the owner-approved 
 // minutes-long DEEP turn is unacceptable. The DEEP tier writes/audits the
 // wiki content offline; this path just reads it back fast.
 
+// Every read here uses `active IS NOT FALSE`: an admin's active=false hides
+// the article, and a legacy row with no flag (NULL) counts as on.
 class WikiQA {
+
+  /**
+   * True when GATE_KB_CUSTOMER_AUDIENCE is on and the caller is customer-
+   * facing (any source outside STAFF_SOURCES; a missing source counts), so
+   * every knowledge_base read is limited to the customer-safe categories.
+   * Gate off, or a staff caller: false, reads are unchanged.
+   */
+  customerAudienceOnly(source) {
+    return kbCustomerAudienceLive() && !STAFF_SOURCES.has(source);
+  }
 
   /**
    * Answer a question using the knowledge base.
    * Two-step: route to relevant articles, then answer with full context.
    */
   async query(question, context = {}) {
+    // GATE_KB_CUSTOMER_AUDIENCE: a customer-facing caller reads only the
+    // customer-safe categories, on every knowledge_base read below.
+    const customerOnly = this.customerAudienceOnly(context.source);
+
     // Build live index directly from knowledge_base (not the compiled _summaries.md)
-    const indexRows = await db('knowledge_base')
-      .where('active', true)
-      .whereNot('path', 'like', 'wiki/_%')
+    const indexQuery = db('knowledge_base')
+      .whereRaw('active IS NOT FALSE') // NULL counts as on, the same rule as the article load below
+      .whereNot('path', 'like', 'wiki/_%');
+    if (customerOnly) indexQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
+    const indexRows = await indexQuery
       .select('path', 'title', 'summary', 'category')
       .orderBy('category');
 
-    if (indexRows.length === 0) {
+    // An empty index is "the wiki is empty" for staff. A customer caller with
+    // an empty allowlist falls through so the species catalog can still answer.
+    if (indexRows.length === 0 && !customerOnly) {
       const answer = 'The knowledge base is empty. Add articles via the compiler before asking questions.';
       await this.logQuery(question, answer, [], context.source, 'none');
       return { answer, articlesUsed: [] };
@@ -87,7 +108,10 @@ class WikiQA {
     // Step 1: Route to relevant articles (FLAGSHIP first, Sol on a miss)
     const knownPaths = new Set(indexRows.map((r) => r.path));
     let paths = [];
+    // Nothing to route over (customer caller, empty allowlist): skip the call.
+    const routable = indexRows.length > 0;
     try {
+      if (!routable) throw new Error('empty_index');
       const routing = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
         laneId: 'wiki_qa',
         text: `Given this question about Waves Pest Control, which wiki articles should I read? List the file paths (max 8).
@@ -113,18 +137,20 @@ ${liveIndex}`,
       if (!routing.ok || !Array.isArray(routing.json?.paths)) throw new Error(routing.reason || 'no_paths');
       paths = routing.json.paths.slice(0, 8);
     } catch {
-      // Fallback: search by keywords
+      // Fallback: search by keywords (nothing to search when the index was empty)
       const keywords = question.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-      const fallbackArticles = await db('knowledge_base')
-        .where('active', true)
+      const fallbackQuery = !routable ? null : db('knowledge_base')
+        .whereRaw('active IS NOT FALSE')
         .where(function () {
           for (const kw of keywords.slice(0, 5)) {
             this.orWhere('content', 'ilike', `%${kw}%`)
               .orWhere('title', 'ilike', `%${kw}%`);
           }
-        })
+        });
+      if (fallbackQuery && customerOnly) fallbackQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
+      const fallbackArticles = fallbackQuery ? await fallbackQuery
         .limit(5)
-        .select('path');
+        .select('path') : [];
       paths = fallbackArticles.map(a => a.path);
     }
 
@@ -136,9 +162,15 @@ ${liveIndex}`,
 
     // Step 2: Load articles. Knowledge-base paths stay first in the refs so
     // fileBack (which appends to refs[0]) never targets a species entry.
-    const kbArticles = paths.length
-      ? await db('knowledge_base').whereIn('path', paths).select('path', 'title', 'content')
-      : [];
+    let kbArticles = [];
+    if (paths.length) {
+      const articleQuery = db('knowledge_base')
+        .whereIn('path', paths)
+        .whereRaw('active IS NOT FALSE'); // an admin's active=false hides the row (NULL counts as on), as in every other reader
+      // A routed path outside the allowlist can never load for a customer caller.
+      if (customerOnly) articleQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
+      kbArticles = await articleQuery.select('path', 'title', 'content');
+    }
     const articles = [...kbArticles, ...species];
     const refs = [...paths, ...species.map((a) => a.path)];
 
@@ -214,7 +246,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
    */
   async lookup(topic) {
     const article = await db('knowledge_base')
-      .where('active', true)
+      .whereRaw('active IS NOT FALSE')
       .where(function () {
         this.where('title', 'ilike', `%${topic}%`)
           .orWhereRaw("tags::text ILIKE ?", [`%${topic.toLowerCase()}%`]);
@@ -227,12 +259,12 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
   /**
    * Search articles by text content, title, or tags.
    */
-  async search(query, limit = 20) {
+  async search(query, limit = 20, context = null) {
     const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
     if (keywords.length === 0) return [];
 
-    const results = await db('knowledge_base')
-      .where('active', true)
+    const searchQuery = db('knowledge_base')
+      .whereRaw('active IS NOT FALSE')
       .where(function () {
         for (const kw of keywords) {
           this.orWhere('title', 'ilike', `%${kw}%`)
@@ -240,7 +272,14 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
             .orWhere('content', 'ilike', `%${kw}%`)
             .orWhereRaw("tags::text ILIKE ?", [`%${kw}%`]);
         }
-      })
+      });
+    // Callers that pass no context object (admin lists, dispatch) are
+    // unchanged; a context object with a customer-facing or missing source
+    // is filtered when GATE_KB_CUSTOMER_AUDIENCE is on.
+    if (context && this.customerAudienceOnly(context.source)) {
+      searchQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
+    }
+    const results = await searchQuery
       .select('id', 'path', 'title', 'summary', 'category', 'tags', 'word_count', 'last_compiled')
       .limit(limit);
 
@@ -251,16 +290,19 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
    * Keyword-based fallback when AI is unavailable.
    */
   async keywordSearch(question, context) {
-    const results = await this.search(question, 5);
+    const results = await this.search(question, 5, { source: context?.source });
     if (results.length === 0) {
       const answer = 'No matching articles found. Try different keywords.';
       await this.logQuery(question, answer, [], context?.source || 'keyword_fallback', 'none');
       return { answer, articlesUsed: [] };
     }
 
-    const articles = await db('knowledge_base')
-      .whereIn('path', results.map(r => r.path))
-      .select('path', 'title', 'content');
+    const articleQuery = db('knowledge_base')
+      .whereIn('path', results.map(r => r.path));
+    if (this.customerAudienceOnly(context?.source)) {
+      articleQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
+    }
+    const articles = await articleQuery.select('path', 'title', 'content');
 
     const answer = `Found ${results.length} relevant article(s):\n\n` +
       articles.map(a => `**${a.title}**\n${(a.content || '').substring(0, 500)}...`).join('\n\n---\n\n');
@@ -325,14 +367,14 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
    * Get all articles in a specific category.
    */
   async getCategory(category) {
-    return db('knowledge_base').where({ category, active: true }).select('path', 'title', 'summary', 'content', 'tags');
+    return db('knowledge_base').where({ category }).whereRaw('active IS NOT FALSE').select('path', 'title', 'summary', 'content', 'tags');
   }
 
   /**
    * List all active articles (used by dispatch module).
    */
   async listAll() {
-    return db('knowledge_base').where('active', true)
+    return db('knowledge_base').whereRaw('active IS NOT FALSE')
       .select('path', 'title', 'category', 'summary', 'tags', 'word_count', 'last_compiled')
       .orderBy('category');
   }

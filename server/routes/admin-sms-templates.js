@@ -548,6 +548,11 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
       }
     }
     const renderVars = dedupeBrandInServiceVars(body, formatSmsTemplateVars(vars));
+    // A customer with no first name on file (call-created on a last name alone)
+    // reads "Hello there!" — never "Hello !".
+    if (Object.prototype.hasOwnProperty.call(renderVars, 'first_name') && !String(renderVars.first_name ?? '').trim()) {
+      renderVars.first_name = 'there';
+    }
     for (const [key, val] of Object.entries(renderVars)) {
       // Function-form replacement: a STRING replacement treats `$$`/`$&`
       // (and `$n` when the pattern captures) as substitution tokens, so a

@@ -1116,6 +1116,9 @@ module.exports = {
   normalizeCountyName,
   lookupSubdivisionMedianLivingSqft,
   SUBDIVISION_MEDIAN_MIN_SAMPLES,
+  // Also the first step of the neighborhood directory's community name
+  // (services/neighborhood-access.js), which then collapses further.
+  subdivisionBaseName,
   _private: {
     COUNTY_LAYERS,
     queryCountyLayer,

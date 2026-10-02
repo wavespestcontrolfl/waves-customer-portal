@@ -51,6 +51,17 @@ function response(status, body) {
   };
 }
 
+// A JWT-shaped staff token (only its shape, exp and signature segment are
+// read on the device) and the offline pass a verified check leaves behind.
+function staffJwt(exp = Math.floor(Date.now() / 1000) + 3600, sig = 'fixture-signature') {
+  const part = (value) => btoa(JSON.stringify(value)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return `${part({ alg: 'HS256' })}.${part({ exp })}.${sig}`;
+}
+const LIVE_TOKEN = staffJwt();
+function seedOfflinePass(token, profile = { id: 'tech-1', name: 'River Tech', role: 'technician' }) {
+  localStorage.setItem('waves_tech_offline_pass', JSON.stringify({ binding: token.split('.')[2], profile }));
+}
+
 describe('TechLayout staff-session verification', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -146,9 +157,9 @@ describe('TechLayout staff-session verification', () => {
 
     expect(screen.getByRole('status')).toHaveTextContent('Verifying staff access');
     expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith('/api/admin/auth/me', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/admin/auth/me', expect.objectContaining({
       headers: { Authorization: 'Bearer staff-access-token' },
-    });
+    }));
 
     await act(async () => {
       finishRequest(response(200, {
@@ -166,6 +177,129 @@ describe('TechLayout staff-session verification', () => {
       id: 'tech-1',
       role: 'technician',
     });
+  });
+
+  it('renders from this token\'s offline pass when /admin/auth/me gets no answer at all', async () => {
+    localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN);
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+
+    renderTech();
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(screen.getByText('River Tech')).toBeInTheDocument();
+    expect(localStorage.getItem('waves_admin_token')).toBe(LIVE_TOKEN);
+  });
+
+  it('falls back to the offline pass when the verification request hangs', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+      seedOfflinePass(LIVE_TOKEN);
+      vi.stubGlobal('fetch', vi.fn((_url, options = {}) => new Promise((_, reject) => {
+        options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      })));
+
+      renderTech();
+      expect(screen.getByRole('status')).toHaveTextContent('Verifying staff access');
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+
+      expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+      expect(screen.getByText('River Tech')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['the body read fails', () => Promise.reject(new TypeError('network error'))],
+    ['the body is not JSON', () => Promise.reject(new SyntaxError('Unexpected token <'))],
+  ])('treats a 2xx whose body never arrives as weak signal when %s', async (_label, body) => {
+    localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: body })));
+
+    renderTech();
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(localStorage.getItem('waves_admin_token')).toBe(LIVE_TOKEN);
+  });
+
+  it.each([
+    ['a pass written for another token', () => seedOfflinePass(staffJwt(undefined, 'previous-login'))],
+    ['an expired token', () => { localStorage.setItem('waves_admin_token', staffJwt(Math.floor(Date.now() / 1000) - 60)); seedOfflinePass(staffJwt(Math.floor(Date.now() / 1000) - 60)); }],
+    ['only a stored profile and no pass', () => localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', role: 'technician' }))],
+  ])('never opens offline with %s', async (_label, seed) => {
+    localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+    seed();
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+
+    renderTech();
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
+  });
+
+  it('writes the offline pass for the token it verified', async () => {
+    localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-1', name: 'River Tech', role: 'technician' })));
+
+    renderTech();
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    const pass = JSON.parse(localStorage.getItem('waves_tech_offline_pass'));
+    expect(pass).toMatchObject({ binding: 'fixture-signature', profile: { id: 'tech-1' } });
+  });
+
+  it('clears the saved route with the session on a 401', async () => {
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    localStorage.setItem('waves_tech_route_snapshot', JSON.stringify({ techId: 'tech-1' }));
+    vi.stubGlobal('fetch', vi.fn(async () => response(401, { error: 'Session expired' })));
+
+    renderTech();
+
+    expect(await screen.findByText(/Staff login \/admin\/login\?next=/)).toBeInTheDocument();
+    expect(localStorage.getItem('waves_tech_route_snapshot')).toBeNull();
+  });
+
+  it('still clears a rejected session when the 401 body times out', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      localStorage.setItem('waves_admin_token', 'staff-access-token');
+      localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', name: 'River Tech', role: 'technician' }));
+      vi.stubGlobal('fetch', vi.fn(async (_url, options = {}) => ({
+        ok: false, status: 401,
+        json: () => new Promise((_, reject) => {
+          options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        }),
+      })));
+
+      renderTech();
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+
+      expect(await screen.findByText(/Staff login \/admin\/login\?next=/)).toBeInTheDocument();
+      expect(localStorage.getItem('waves_admin_token')).toBeNull();
+      expect(localStorage.getItem('waves_admin_user')).toBeNull();
+      expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['a server error', () => response(503, { error: 'Unavailable' }), { id: 'tech-1', name: 'River Tech', role: 'technician' }],
+    ['no stored profile', () => { throw new TypeError('Failed to fetch'); }, null],
+    ['a stored profile with a non-staff role', () => { throw new TypeError('Failed to fetch'); }, { id: 'x', role: 'customer' }],
+    ['a stored profile that still owes a password change', () => { throw new TypeError('Failed to fetch'); }, { id: 'tech-1', role: 'technician', mustChangePassword: true }],
+  ])('keeps the verification error offline with %s', async (_label, respond, stored) => {
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    if (stored) localStorage.setItem('waves_admin_user', JSON.stringify(stored));
+    vi.stubGlobal('fetch', vi.fn(async () => respond()));
+
+    renderTech();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to verify staff access');
+    expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
   });
 
   it('clears invalid session state and sends a 401 to login with the field destination', async () => {
@@ -258,5 +392,122 @@ describe('TechLayout staff-session verification', () => {
     )).toBeInTheDocument();
     expect(localStorage.getItem('waves_admin_token')).toBe('rotation-token');
     expect(screen.queryByText('Protected field route')).not.toBeInTheDocument();
+  });
+
+  it('renders the verified profile, not the stored one, when caching it fails', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-new-login');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-old', name: 'Old Fixture', role: 'technician' }));
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-new', name: 'New Fixture', role: 'technician' })));
+    // A storage that is full: the profile cache write throws.
+    const map = new Map([
+      ['waves_admin_token', 'fixture-new-login'],
+      ['waves_admin_user', JSON.stringify({ id: 'tech-old', name: 'Old Fixture', role: 'technician' })],
+    ]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, value) => {
+        if (key === 'waves_admin_user') throw new DOMException('Quota exceeded', 'QuotaExceededError');
+        map.set(key, String(value));
+      },
+      removeItem: (key) => { map.delete(key); },
+      clear: () => map.clear(),
+    });
+
+    renderTech();
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(screen.getAllByText(/New Fixture/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Old Fixture/)).not.toBeInTheDocument();
+    // The stale profile cannot unlock a later offline reopen either.
+    expect(map.has('waves_admin_user')).toBe(false);
+  });
+
+  it('ends the session when any staff call on the tech screens gets a 401 for this token', async () => {
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', role: 'technician' }));
+    localStorage.setItem('waves_tech_route_snapshot', JSON.stringify({ techId: 'tech-1' }));
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/admin/auth/me')) return response(200, { id: 'tech-1', name: 'River Tech', role: 'technician' });
+      if (/en-route|public/.test(String(url))) return response(401, { error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+      return response(200, {});
+    }));
+
+    renderTech();
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+
+    // Another tab's login, then a host outside the API: neither ends it.
+    await act(async () => { await fetch('/api/tech/services/s1/en-route', { method: 'POST', headers: { Authorization: 'Bearer other-login' } }); });
+    await act(async () => { await fetch('https://elsewhere.example/public/thing', { headers: { Authorization: 'Bearer staff-access-token' } }); });
+    expect(localStorage.getItem('waves_admin_token')).toBe('staff-access-token');
+
+    // A staff route outside /admin and /tech (visual moments) counts too.
+    await act(async () => { await fetch('/api/jobs/job-1/visual-moments/en-route', { headers: { Authorization: 'Bearer staff-access-token' } }); });
+
+    expect(await screen.findByText(/Staff login \/admin\/login\?next=/)).toBeInTheDocument();
+    expect(localStorage.getItem('waves_admin_token')).toBeNull();
+    expect(localStorage.getItem('waves_admin_user')).toBeNull();
+    expect(localStorage.getItem('waves_tech_route_snapshot')).toBeNull();
+  });
+
+  it('removes its fetch guard on unmount', async () => {
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    const fetchMock = vi.fn(async () => response(200, { id: 'tech-1', role: 'technician' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const view = renderTech();
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(globalThis.fetch).not.toBe(fetchMock);
+    view.unmount();
+    expect(globalThis.fetch).toBe(fetchMock);
+  });
+
+  it('ignores a verification answer that lands after another tab signed in, and checks the new login', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-login-a');
+    let answerA;
+    const fetchMock = vi.fn((url, init) => {
+      if (init?.headers?.Authorization === 'Bearer fixture-login-a') return new Promise((resolve) => { answerA = resolve; });
+      if (String(url).includes('/admin/auth/me')) return Promise.resolve(response(200, { id: 'tech-b', name: 'Fixture B', role: 'technician' }));
+      return Promise.resolve(response(200, {}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderTech();
+    await vi.waitFor(() => expect(answerA).toBeTypeOf('function'));
+    localStorage.setItem('waves_admin_token', 'fixture-login-b');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-b', name: 'Fixture B', role: 'technician' }));
+    await act(async () => { answerA(response(200, { id: 'tech-a', name: 'Fixture A', role: 'technician' })); });
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves_admin_user')).id).toBe('tech-b');
+    expect(screen.queryByText(/Fixture A/)).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes('/admin/auth/me') && init?.headers?.Authorization === 'Bearer fixture-login-b')).toBe(true);
+  });
+
+  it('drops the verified identity and re-verifies when another tab switches accounts', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-login-a');
+    let answerB;
+    const fetchMock = vi.fn((url, init) => {
+      if (!String(url).includes('/admin/auth/me')) return Promise.resolve(response(200, {}));
+      if (init?.headers?.Authorization === 'Bearer fixture-login-a') return Promise.resolve(response(200, { id: 'tech-a', name: 'Fixture A', role: 'technician' }));
+      return new Promise((resolve) => { answerB = resolve; });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderTech();
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+
+    vi.mocked(refetchFlags).mockClear();
+    // Tab 2 signs in as B: the storage event reaches this tab.
+    localStorage.setItem('waves_admin_token', 'fixture-login-b');
+    await act(async () => { window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_token', newValue: 'fixture-login-b' })); });
+    // A's identity is gone and nothing protected renders until B verifies;
+    // A's per-user feature flags are dropped too.
+    expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(refetchFlags).toHaveBeenCalled());
+    await vi.waitFor(() => expect(answerB).toBeTypeOf('function'));
+    await act(async () => { answerB(response(200, { id: 'tech-b', name: 'Fixture B', role: 'technician' })); });
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves_admin_user')).id).toBe('tech-b');
+    expect(screen.queryByText(/Fixture A/)).not.toBeInTheDocument();
   });
 });

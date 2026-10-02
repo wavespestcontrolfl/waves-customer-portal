@@ -45,6 +45,7 @@ const AWAITING = 'awaiting_first_visit';
 const STALE_DAYS = 14;
 const NOT_PERFORMED_OUTCOMES = ['inspection_only', 'customer_declined', 'incomplete'];
 const DEAD_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refunded'];
+const UNFINISHED_COMPLETION_STATUSES = ['pending', 'side_effects_pending', 'side_effects_running'];
 const JOB = "estimate_data -> 'prepayAutoChargeJob'";
 
 const staleAlertKey = (estimateId) => `paf-prepay-no-first-visit:${estimateId}`;
@@ -74,19 +75,14 @@ async function patchJob(estimateId, patch, guard = (q) => q, conn = db) {
 const whileAwaiting = (q) => q.whereRaw(`${JOB} ->> 'status' = ?`, [AWAITING]);
 const whileUnset = (key) => (q) => q.whereRaw(`${JOB} ->> '${key}' IS NULL`);
 
-// The first performed visit of the accepted plan: a visit (or a child of a
-// series parent) carrying this estimate as its source.
-async function firstPerformedVisit(estimateId, customerId) {
+// The first performed visit the year HELD: completion stamped it with the
+// term at closeout (paf_held_term_id, owner ruling 2026-10-02). A visit
+// outside the year's coverage billed on its own, was never stamped, and never
+// stands in for the first visit of the year.
+async function firstPerformedVisit(estimateId, customerId, termId) {
+  if (!termId) return null;
   const candidates = await performedVisitCandidates(estimateId, customerId);
-  const { pafDeferredPrepayCoversVisit } = require('./annual-prepay-renewals');
-  // Only a visit the year HOLDS releases its charge — the same sold-coverage
-  // check (count, window, callbacks out, price drift) that kept that visit
-  // from billing. A visit outside it billed on its own and never stands in
-  // for the first visit of the year.
-  for (const visit of candidates) {
-    if (await pafDeferredPrepayCoversVisit(visit, db, { throwOnError: true })) return visit;
-  }
-  return null;
+  return candidates.find((v) => String(v.paf_held_term_id || '') === String(termId)) || null;
 }
 
 async function performedVisitCandidates(estimateId, customerId) {
@@ -108,10 +104,21 @@ async function performedVisitCandidates(estimateId, customerId) {
     .whereNotExists(function unfinishedCompletion() {
       this.select(db.raw('1')).from('service_completion_attempts as a')
         .whereRaw('a.service_id = s.id')
-        .whereIn('a.status', ['pending', 'side_effects_pending', 'side_effects_running']);
+        .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES);
     })
     .orderBy('s.scheduled_date', 'asc')
     .select('s.*');
+}
+
+async function planHasUnfinishedCompletion(estimateId, customerId) {
+  const row = await db('service_completion_attempts as a')
+    .join('scheduled_services as s', 's.id', 'a.service_id')
+    .leftJoin('scheduled_services as p', 'p.id', 's.recurring_parent_id')
+    .where('s.customer_id', customerId)
+    .where((q) => q.where('s.source_estimate_id', estimateId).orWhere('p.source_estimate_id', estimateId))
+    .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES)
+    .first('a.id');
+  return !!row;
 }
 
 async function releaseOne(row, now) {
@@ -120,7 +127,7 @@ async function releaseOne(row, now) {
   const invoice = await db('invoices').where({ id: job.invoice_id }).first('id', 'status', 'customer_id', 'payment_method');
   const invStatus = String(invoice?.status || '').toLowerCase();
   const term = invoice
-    ? await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('status')
+    ? await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status')
     : null;
   const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || String(term?.status || '') === 'cancelled';
   // Settled before any visit = paid, or a BANK debit already initiated. A card
@@ -133,26 +140,40 @@ async function releaseOne(row, now) {
     // year HELD is work done while it was pending, for the office to bill. A
     // callback, a visit past the sold count or a price-drifted visit was
     // never held — it billed on its own (Codex r8).
+    // A deleted invoice row also clears the term's prepay_invoice_id (FK), so
+    // the term is found by its estimate then (GitHub Codex #5567 r9).
+    // A closeout still finishing may already have held its visit: wait for it
+    // before the terminal classification (pre-push audit P1).
+    const deadCustomerForWait = invoice?.customer_id
+      || (await db('annual_prepay_terms').where({ source_estimate_id: row.id }).first('customer_id'))?.customer_id || null;
+    if (deadCustomerForWait && await planHasUnfinishedCompletion(row.id, deadCustomerForWait)) return null;
     let visit = null;
-    if (invoice) {
-      const deadTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('*');
-      if (deadTerm) {
-        const held = await require('./annual-prepay-renewals').pafDeferredHeldVisitIds(deadTerm, db);
-        visit = (await performedVisitCandidates(row.id, invoice.customer_id)).find((v) => held.has(String(v.id))) || null;
-      }
+    const deadTerm = await db('annual_prepay_terms')
+      .where(invoice ? { prepay_invoice_id: invoice.id } : { source_estimate_id: row.id }).first('*');
+    const deadCustomerId = invoice?.customer_id || deadTerm?.customer_id || null;
+    if (deadTerm && deadCustomerId) {
+      // Only work the year HELD (stamped at closeout): a visit billed on its
+      // own, or paid another way, was never stamped (GitHub Codex #5567 r10).
+      visit = await firstPerformedVisit(row.id, deadCustomerId, deadTerm.id);
     }
     const reason = !invoice ? 'invoice_missing' : (DEAD_INVOICE_STATUSES.includes(invStatus) ? `invoice_${invStatus}` : 'term_cancelled');
     const moved = await patchJob(row.id, {
       // Work already done was held, not billed: it must reach the office.
       status: visit ? 'cancelled_after_visit' : 'cancelled_before_visit',
       reason,
-      ...(visit ? { performed_visit_id: visit.id, customer_id: invoice.customer_id } : {}),
+      ...(visit ? { performed_visit_id: visit.id, customer_id: deadCustomerId } : {}),
       resolved_at: now.toISOString(),
       resolved_by: 'paf_release',
     }, whileAwaiting);
     return moved ? 'cancelled' : null;
   }
-  const visit = await firstPerformedVisit(row.id, invoice.customer_id);
+  const visit = await firstPerformedVisit(row.id, invoice.customer_id, term?.id);
+  // Never release while ANY visit of the plan is still finishing its
+  // completion (pre-push audit P0): that visit decided its bill from the hold,
+  // and the charge and activation this release leads to would end the hold
+  // under it, so a resumed completion could bill beside the paid year. The
+  // next pass releases once every completion has finished.
+  if (visit && !settled && await planHasUnfinishedCompletion(row.id, invoice.customer_id)) return null;
   if (settled || visit) {
     // Due date first, so the transition stays retryable until it lands: a
     // declined charge's pay link and follow-ups then age from after the
@@ -296,7 +317,11 @@ async function reconcileJobAlerts(estimateId) {
   // voided before it charged) still had its first visit held unbilled. If the
   // year then dies unpaid, that work goes to the unbilled-visits alert below;
   // once it is paid, the check is done.
-  if (job.status === 'skipped' && job.released_for_visit_id && !job.unbilled_check_done_at) {
+  // Same for a released year whose bank debit was initiated ('processing'):
+  // a debit that returns, then a voided year, must still hand the held visit
+  // to the office (pre-push audit P1).
+  const releasedHolders = ['skipped', 'processing'];
+  if (releasedHolders.includes(job.status) && job.released_for_visit_id && !job.unbilled_check_done_at) {
     const invoice = await db('invoices').where({ id: job.invoice_id }).first('status');
     const invStatus = String(invoice?.status || '').toLowerCase();
     if (!invoice || DEAD_INVOICE_STATUSES.includes(invStatus)) {
@@ -304,7 +329,7 @@ async function reconcileJobAlerts(estimateId) {
         status: 'cancelled_after_visit',
         reason: `invoice_${invStatus || 'missing'}_after_release`,
         performed_visit_id: job.released_for_visit_id,
-      }, (q) => q.whereRaw(`${JOB} ->> 'status' = 'skipped'`));
+      }, (q) => q.whereRaw(`${JOB} ->> 'status' = ?`, [job.status]));
       return;
     }
     if (['paid', 'prepaid'].includes(invStatus)) {
@@ -341,7 +366,7 @@ async function reconcileAlerts({ pageSize = 200 } = {}) {
           (${JOB} ->> 'stale_alert_reserved_at' IS NOT NULL AND ${JOB} ->> 'stale_alert_closed_at' IS NULL)
           OR (${JOB} ->> 'status' = 'delivered_fallback' AND ${JOB} ->> 'charge_alert_closed_at' IS NULL)
           OR (${JOB} ->> 'status' = 'cancelled_after_visit' AND ${JOB} ->> 'unbilled_alert_raised_at' IS NULL)
-          OR (${JOB} ->> 'status' = 'skipped' AND ${JOB} ->> 'released_for_visit_id' IS NOT NULL
+          OR (${JOB} ->> 'status' IN ('skipped', 'processing') AND ${JOB} ->> 'released_for_visit_id' IS NOT NULL
               AND ${JOB} ->> 'unbilled_check_done_at' IS NULL)
         )`)
         .modify((q) => { if (afterId) q.where('id', '>', afterId); })
@@ -465,14 +490,15 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     const job = parseData(row?.estimate_data)?.prepayAutoChargeJob;
     if (!job || job.deferred_to_first_visit !== true || job.status !== AWAITING) return null;
     if (!Number.isInteger(job.authorized_total_cents) || job.authorized_total_cents <= 0) return null;
-    const { pafDeferredPrepayCoversVisit } = require('./annual-prepay-renewals');
-    if (!(await pafDeferredPrepayCoversVisit(svc, conn, { throwOnError: true }))) return null;
+    // Held by THIS year: completion stamped the visit with the job's term just
+    // before the text (paf_held_term_id).
+    const term = await conn('annual_prepay_terms').where({ prepay_invoice_id: job.invoice_id || null }).first('id');
+    if (!term || String(svc.paf_held_term_id || '') !== String(term.id)) return null;
     // First visit only: another held visit already performed (two visits done
     // before a release pass) already carried the announcement.
-    for (const other of await performedVisitCandidates(estimateId, svc.customer_id)) {
-      if (String(other.id) === String(svc.id)) continue;
-      if (await pafDeferredPrepayCoversVisit(other, conn, { throwOnError: true })) return null;
-    }
+    const performedHeld = (await performedVisitCandidates(estimateId, svc.customer_id))
+      .filter((v) => String(v.paf_held_term_id || '') === String(term.id));
+    if (performedHeld.some((v) => String(v.id) !== String(svc.id))) return null;
     // "Being charged now" only when the sweep's automatic charge will really
     // run (Codex r8): charging is switched on, the bound method is still saved, nothing already parked
     // it on the pay link, Auto Pay was not turned off or paused since the
@@ -501,9 +527,13 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     // is charged, so the regular "nothing due today" text is the true one;
     // credit that only lowers it makes the amount "up to" the ceiling.
     const invoice = job.invoice_id
-      ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'total', 'credit_applied')
+      ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied')
       : null;
     if (!invoice) return null;
+    // Still owed and not already moving (GitHub Codex #5567 r9): a year paid,
+    // processing, or dead before the release pass gets no new charge.
+    const invStatus = String(invoice.status || '').toLowerCase();
+    if (['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
     const credit = require('./customer-credit');
     let creditLowers = false;
     if (await credit.autoApplyWouldApply(invoice, conn)) {
@@ -513,6 +543,13 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     } else if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied }).skipReason === 'already_covered') {
       return null;
     }
+    // One announcement per year (GitHub Codex #5567 r9): reserve it on the
+    // job for THIS visit while it still waits. Two completions racing before
+    // a release pass both pass the reads above; only one wins the reservation.
+    // A retry of the same visit's closeout re-wins its own.
+    const reserved = await patchJob(estimateId, { first_charge_text_visit_id: String(svc.id) }, (q) => whileAwaiting(q)
+      .whereRaw(`COALESCE(${JOB} ->> 'first_charge_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)]), conn);
+    if (!reserved) return null;
     const ceiling = `$${(job.authorized_total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     return { amount: creditLowers ? `up to ${ceiling}` : ceiling, methodLine: bank ? 'saved bank account' : 'card on file' };
   } catch (err) {

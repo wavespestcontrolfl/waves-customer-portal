@@ -20,9 +20,14 @@ jest.mock('../config/feature-gates', () => ({
 // null = template path, matching the gate-off production posture.
 const mockDraftAskBody = jest.fn(async () => null);
 const mockDraftEmailIntro = jest.fn(async () => null);
+const mockDraftTechVoice = jest.fn(async () => null);
 jest.mock('../services/review-ask-drafter', () => ({
+  // The real verifiers: the send path re-checks a reused older draft with them.
+  verifyDraftBody: jest.requireActual('../services/review-ask-drafter').verifyDraftBody,
+  verifyEmailIntro: jest.requireActual('../services/review-ask-drafter').verifyEmailIntro,
   draftAskBody: (...a) => mockDraftAskBody(...a),
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
+  draftTechVoice: (...a) => mockDraftTechVoice(...a),
 }));
 // Day-0 contextual topic (own suite: review-ask-topic.test.js). Default null
 // = no topic, matching the gate-off production posture; this file only
@@ -51,7 +56,7 @@ jest.mock('../utils/cron-lock', () => {
 });
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
-jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url), existingShortUrlFor: async () => null }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url), existingShortUrlFor: async () => null, allShortUrlsFor: async () => [] }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 jest.mock('../services/customer-contact', () => ({
   // Honor explicit null/'' so tests can model a customer missing a channel.
@@ -188,6 +193,8 @@ beforeEach(() => {
   mockGates.reviewDirectLink = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
+  mockDraftTechVoice.mockReset().mockResolvedValue(null);
+  delete mockGates.reviewAskTechVoice;
   mockResolveReviewTopic.mockReset().mockResolvedValue(null);
 });
 
@@ -490,6 +497,36 @@ describe('review sequences — cadence engine', () => {
     const row = mock.__state.rows.review_requests[0];
     expect(row.template_key).toBe('review_request_email_personalized');
     expect(row.custom_body).toBe(intro); // persisted for retry reuse
+  });
+
+  test('tech voice on: a cadence EMAIL touch keeps the fixed company-voice email (owner 2026-10-02: texts only for now)', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const intro = 'Deb, you asked whether the ants would come back along the lanai. A Google review would help us a lot.';
+    mockDraftTechVoice.mockResolvedValue(intro);
+    const mock = makeMock({
+      email_templates: [{ id: 'tpl-rre', template_key: 'review_request_email', active_version_id: 'ver-rre' }],
+      email_template_versions: [{ id: 'ver-rre', blocks: '[{"type":"paragraph","content":"{{intro_paragraph}}"}]' }],
+      customers: [{ id: 'pe-tv', first_name: 'Deb', last_name: 'D', phone: '+19410000015', email: 'x@y.com', nearest_location_id: 'sarasota' }],
+      // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
+      service_records: [{ id: 'sr-pe-tv', customer_id: 'pe-tv', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      notification_prefs: [{ customer_id: 'pe-tv', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      serviceRecordId: 'sr-pe-tv',
+      customer: mock.__state.rows.customers[0],
+      channel: 'email', templateId: 'final_nudge',
+      sequenceId: 'seq-pe-tv', sequenceStep: 2, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    // No drafted paragraph of either kind: the fixed generic intro sends.
+    expect(mockDraftEmailIntro).not.toHaveBeenCalled();
+    expect(mockDraftTechVoice).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate.mock.calls[0][0].payload.intro_paragraph).not.toBe(intro);
+    expect(mockEmailSendTemplate.mock.calls[0][0].payload.intro_paragraph).toMatch(/Google review/);
+    expect(mock.__state.rows.review_requests[0].template_key).toBe('review_request_email');
   });
 
   test('a cadence email touch falls back to the generic intro when the drafter declines', async () => {
@@ -4736,6 +4773,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
         { id: `${id}-day0`, sequence_id: id, sequence_step: 0, customer_id: customer.id, channel: 'sms', template_key: 'day0_ask', status: 'sent', sms_sent_at: new Date(Date.now() - 4 * 86400000), created_at: new Date(Date.now() - 4 * 86400000) },
         ...(extra.review_requests || []),
       ],
+      // Any other table the test needs (e.g. the visit tech voice drafts about).
+      ...Object.fromEntries(Object.entries(extra).filter(([k]) => k !== 'review_requests')),
     };
   }
 
@@ -4796,11 +4835,306 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(touch.template_key).toBe('day0_ask');
       expect(touch.custom_body == null).toBe(true);
       const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-      expect(sentBody).toBe(`Hi Christopher2! Christopher with Waves. If we earned it, a Google review means a lot: https://portal.test/rate/${touch.token} Reply if anything's off.`);
+      expect(sentBody).toBe(`Hi Christopher2! Christopher with Waves. A Google review means a lot: https://portal.test/rate/${touch.token}`);
       expect(sentBody).not.toMatch(/\btoday\b|\btonight\b|\bthis morning\b/i);
       // As sent: scheme stripped at the Twilio boundary, GSM-normalized.
       const seg = countSegments(normalizeGsmPunctuation(stripSmsUrlScheme(sentBody.replace(`https://portal.test/rate/${touch.token}`, 'https://portal.wavespestcontrol.com/l/abcde'))));
       expect(seg).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
+    });
+
+    test('tech voice on: the Day-0 SMS is drafted in the tech\'s voice, recorded _tech_voice, and the old drafter is not used', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const body = "It's Christopher, thanks for having me out. A Google review would really help: {review_url}";
+      mockDraftTechVoice.mockResolvedValue(body);
+      mockDraftAskBody.mockResolvedValue('OLD DRAFTER {review_url}');
+      const mock = makeMock({
+        customers: [{ id: 'tv-1', first_name: 'Lena', last_name: 'K', phone: '+19410000093', nearest_location_id: 'bradenton' }],
+        // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
+        service_records: [{ id: 'sr-tv-1', customer_id: 'tv-1', technician_id: 'tech-c', service_type: 'pest control', status: 'completed', service_date: new Date() }],
+        technicians: [{ id: 'tech-c', name: 'Christopher Adams' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'tv-1', serviceRecordId: 'sr-tv-1', serviceType: 'Quarterly Pest Control', techName: 'Christopher Adams', startedBy: 'admin-1' });
+
+      expect(result.started).toBe(true);
+      expect(mockDraftAskBody).not.toHaveBeenCalled();
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      // The writer speaks as the VISIT's technician (first name), resolved from the record.
+      expect(mockDraftTechVoice.mock.calls[0][0]).toMatchObject({ sequenceStep: 0, channel: 'sms', techName: 'Christopher', serviceRecordId: 'sr-tv-1' });
+      // The pre-push audit: the recovered visit's own service type rides along.
+      expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('pest control');
+      // #5524 r4: the recovered visit is anchored to the cadence for later touches.
+      expect(mock.__state.rows.review_sequences[0].service_record_id).toBe('sr-tv-1');
+      const touch = mock.__state.rows.review_requests[0];
+      // ...and this touch's own request row carries it, so its send guards see the visit.
+      expect(touch.service_record_id).toBe('sr-tv-1');
+      expect(touch.template_key).toBe('day0_ask_tech_voice');
+      expect(touch.custom_body).toBe(body);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toBe(body.replace('{review_url}', `https://portal.test/rate/${touch.token}`));
+    });
+
+    test('Codex r2: tech voice on, a pre-change plan still naming friendly_ask at step 0 falls back to day0_ask', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-3', first_name: 'Ravi', last_name: 'P', phone: '+19410000095', nearest_location_id: 'venice' }],
+        // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
+        service_records: [{ id: 'sr-tv-3', customer_id: 'tv-3', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      });
+      db.mockImplementation(mock);
+      const out = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv3', serviceRecordId: 'sr-tv-3', sequenceStep: 0,
+      });
+      expect(out.ok).toBe(true);
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+    });
+
+    test('Codex r3: a tech-voice draft that would run past two segments with the long (unshortened) link sends the fixed template', async () => {
+      mockGates.reviewAskTechVoice = true;
+      // ~250 chars of text: two segments around the 40-char short link, three around the long /rate URL this suite renders.
+      const body = `It's Christopher, thanks for waiting on me this morning when you had to get to work. ${'I checked the kitchen and the garage and the lanai and the beds. '.repeat(2)}A Google review would really help: {review_url}`;
+      mockDraftTechVoice.mockResolvedValue(body);
+      const mock = makeMock({
+        customers: [{ id: 'tv-4', first_name: 'Lena', last_name: 'K', phone: '+19410000096', nearest_location_id: 'bradenton' }],
+      });
+      db.mockImplementation(mock);
+      const result = await ReviewService.startReviewSequence({ customerId: 'tv-4', serviceType: 'Quarterly Pest Control', techName: 'Christopher Adams', startedBy: 'admin-1' });
+      expect(result.started).toBe(true);
+      const sent = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sent).not.toContain('waiting on me this morning');
+      expect(sent).toContain('A Google review means a lot');
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+      expect(touch.custom_body == null).toBe(true);
+    });
+
+    test('GitHub r4: an over-long tech-voice draft on a plan step with an unknown template key falls back to friendly_ask', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const body = `It's Christopher, thanks for waiting on me this morning when you had to get to work. ${'I checked the kitchen and the garage and the lanai and the beds. '.repeat(2)}A Google review would really help: {review_url}`;
+      mockDraftTechVoice.mockResolvedValue(body);
+      const mock = makeMock({
+        customers: [{ id: 'tv-5', first_name: 'Lena', last_name: 'K', phone: '+19410000097', nearest_location_id: 'bradenton' }],
+        // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
+        service_records: [{ id: 'sr-tv-5', customer_id: 'tv-5', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      });
+      db.mockImplementation(mock);
+      const out = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'admin_custom_key', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv5', serviceRecordId: 'sr-tv-5', sequenceStep: 1,
+      });
+      expect(out.ok).toBe(true);
+      const sent = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sent).not.toContain('waiting on me this morning');
+      expect(sent).toContain('A quick Google review would help us a lot');
+      expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
+    });
+
+    test('#5524 pre-push: on a later touch the anchored visit\'s own service type wins over the sequence\'s cached type', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock(reminderStepFixture('seq-st', { id: 'st-1', first_name: 'Stan', last_name: 'P', phone: '+19410000062', nearest_location_id: 'bradenton' }, {
+        service_records: [{ id: 'sr-st', customer_id: 'st-1', technician_id: null, service_type: 'Termite Inspection', service_date: new Date() }],
+      }));
+      mock.__state.rows.review_sequences[0].service_record_id = 'sr-st'; // anchored on Day 0; cached type is 'pest control'
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('Termite Inspection');
+    });
+
+    test('#5524 r8: a cadence anchored to a scheduled visit drafts with that visit\'s own service type', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-8', first_name: 'Ravi', last_name: 'P', phone: '+19410000089', nearest_location_id: 'venice' }],
+        scheduled_services: [{ id: 'ss-tv-8', customer_id: 'tv-8', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: null }],
+        // The service record the visit has by now (enrolled before it existed).
+        service_records: [{ id: 'sr-tv-8', customer_id: 'tv-8', scheduled_service_id: 'ss-tv-8', service_type: 'Quarterly Pest Control', status: 'completed', service_date: new Date(), created_at: new Date(), technician_id: 'tech-real' }],
+        technicians: [{ id: 'tech-real', name: 'Maria Lopez' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv8', sequenceStep: 1, scheduledServiceId: 'ss-tv-8', serviceType: 'Termite Inspection', // stale cache
+      });
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('Quarterly Pest Control');
+      // #5524 r12: the visit's report is read through its record, linked by scheduled_service_id.
+      expect(mockDraftTechVoice.mock.calls[0][0].serviceRecordId).toBe('sr-tv-8');
+      // #5524 r13: the completed record's technician speaks, not the scheduled row's.
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBe('Maria');
+      // #5524 r15: the request row describes the same visit (rate page, attribution).
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.service_record_id).toBe('sr-tv-8');
+      expect(row.technician_id).toBe('tech-real');
+      expect(row.tech_name).toBe('Maria'); // #5524 r17: the resolved name is saved too
+    });
+
+    test('#5524 pre-push: a cadence anchored to a record with no technician drafts with no name', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-11', first_name: 'Ravi', last_name: 'P', phone: '+19410000086', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-tv-11', customer_id: 'tv-11', scheduled_service_id: 'ss-tv-11', service_type: 'Quarterly Pest Control', status: 'completed', service_date: new Date(), technician_id: null }],
+        scheduled_services: [{ id: 'ss-tv-11', customer_id: 'tv-11', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: 'tech-sched' }],
+        technicians: [{ id: 'tech-sched', name: 'Sched Tech' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv11', sequenceStep: 1, serviceRecordId: 'sr-tv-11',
+      });
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBeNull();
+      // #5524 r19: the request row follows the record too (no technician, the record's type).
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.technician_id == null).toBe(true);
+      expect(row.tech_name == null).toBe(true);
+      expect(row.service_type).toBe('Quarterly Pest Control');
+    });
+
+    test('#5524 pre-push: a linked record with no technician drafts with no name, never the scheduled tech', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-10', first_name: 'Ravi', last_name: 'P', phone: '+19410000087', nearest_location_id: 'venice' }],
+        scheduled_services: [{ id: 'ss-tv-10', customer_id: 'tv-10', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: 'tech-sched' }],
+        service_records: [{ id: 'sr-tv-10', customer_id: 'tv-10', scheduled_service_id: 'ss-tv-10', service_type: 'Quarterly Pest Control', status: 'completed', service_date: new Date(), created_at: new Date(), technician_id: null }],
+        technicians: [{ id: 'tech-sched', name: 'Sched Tech' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv10', sequenceStep: 1, scheduledServiceId: 'ss-tv-10', technicianId: 'tech-sched', techName: 'Sched Tech',
+      });
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBeNull();
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.technician_id == null).toBe(true);
+      expect(row.tech_name == null).toBe(true);
+    });
+
+    test('#5524 r21: a record-anchored touch saves the resolved tech name, never the sequence cache', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-13', first_name: 'Ravi', last_name: 'P', phone: '+19410000084', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-tv-13', customer_id: 'tv-13', service_type: 'Quarterly Pest Control', technician_id: 'tech-real', status: 'completed', service_date: new Date() }],
+        technicians: [{ id: 'tech-real', name: 'Maria Lopez' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv13', sequenceStep: 1, serviceRecordId: 'sr-tv-13', technicianId: 'tech-real', techName: 'Cached Name',
+      });
+      expect(mock.__state.rows.review_requests[0].tech_name).toBe('Maria');
+    });
+
+    test('#5524 r20 P1: the canonical sibling (the record the completion attempt pinned) wins over a newer row', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-12', first_name: 'Ravi', last_name: 'P', phone: '+19410000085', nearest_location_id: 'venice' }],
+        scheduled_services: [{ id: 'ss-tv-12', customer_id: 'tv-12', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: null }],
+        service_records: [
+          { id: 'sr-done', customer_id: 'tv-12', scheduled_service_id: 'ss-tv-12', service_type: 'Quarterly Pest Control', technician_id: 'tech-real', status: 'completed', service_date: new Date(), created_at: new Date(Date.now() - 3600000) },
+          { id: 'sr-failed', customer_id: 'tv-12', scheduled_service_id: 'ss-tv-12', service_type: 'Termite Inspection', technician_id: 'tech-other', status: 'incomplete', service_date: new Date(), created_at: new Date() },
+        ],
+        service_completion_attempts: [{ id: 'att-1', service_id: 'ss-tv-12', status: 'succeeded', service_record_id: 'sr-done', updated_at: new Date() }],
+        technicians: [{ id: 'tech-real', name: 'Maria Lopez' }, { id: 'tech-other', name: 'Other Tech' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv12', sequenceStep: 1, scheduledServiceId: 'ss-tv-12',
+      });
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0]).toMatchObject({ serviceRecordId: 'sr-done', serviceType: 'Quarterly Pest Control', techName: 'Maria' });
+    });
+
+    test('#5524 r9: a visit whose service type cannot be read is not drafted (a stale cached type is never trusted)', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-9', first_name: 'Ravi', last_name: 'P', phone: '+19410000088', nearest_location_id: 'venice' }],
+        scheduled_services: [], // the anchored visit row is gone / unreadable
+      });
+      db.mockImplementation(mock);
+      const out = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv9', sequenceStep: 1, scheduledServiceId: 'ss-missing', serviceType: 'Termite Inspection',
+      });
+      expect(out.ok).toBe(true);
+      expect(mockDraftTechVoice).not.toHaveBeenCalled();
+      expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
+    });
+
+    test('#5524 r5: a cadence with no visit of its own never calls the writer (fixed copy), even when the customer has recent visits', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-6', first_name: 'Ravi', last_name: 'P', phone: '+19410000091', nearest_location_id: 'venice' }],
+        service_records: [
+          { id: 'sr-old', customer_id: 'tv-6', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date(Date.now() - 90 * 86400000) },
+          // Recent, but not a completed visit: never the subject.
+          { id: 'sr-incomplete', customer_id: 'tv-6', technician_id: null, service_type: 'pest control', status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }), service_date: new Date() },
+          { id: 'sr-sched', customer_id: 'tv-6', technician_id: null, service_type: 'pest control', status: 'scheduled', service_date: new Date() },
+        ],
+      });
+      db.mockImplementation(mock);
+      const out = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv6', sequenceStep: 1,
+      });
+      expect(out.ok).toBe(true);
+      expect(mockDraftTechVoice).not.toHaveBeenCalled();
+      expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
+    });
+
+    test('#5524 r7: if the long-link fallback cannot be stamped, nothing is sent and the step retries', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const body = `It's Christopher, thanks for waiting on me this morning when you had to get to work. ${'I checked the kitchen and the garage and the lanai and the beds. '.repeat(2)}A Google review would really help: {review_url}`;
+      mockDraftTechVoice.mockResolvedValue(body);
+      const mock = makeMock({
+        customers: [{ id: 'tv-7', first_name: 'Lena', last_name: 'K', phone: '+19410000090', nearest_location_id: 'bradenton' }],
+        service_records: [{ id: 'sr-tv-7', customer_id: 'tv-7', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      });
+      // Only the fallback stamp (template_key + custom_body cleared) fails.
+      db.mockImplementation((table) => {
+        const q = mock(table);
+        if (table === 'review_requests') {
+          const update = q.update.bind(q);
+          q.update = (patch) => (patch && 'custom_body' in patch && patch.custom_body === null && patch.template_key
+            ? Promise.reject(new Error('db blip')) : update(patch));
+        }
+        return q;
+      });
+      const out = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv7', sequenceStep: 1, serviceRecordId: 'sr-tv-7',
+        manageRetryVia: 'sequence', // as the sequence runner calls it
+      });
+      expect(out).toMatchObject({ ok: false, code: 'FALLBACK_STAMP_FAILED' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      // Pre-push audit: the sequence runner keeps the retry; the row never goes back
+      // to processScheduled (pending + scheduled_for), which would resend the stale draft.
+      const row = mock.__state.rows.review_requests[0];
+      expect(['failed', 'deferred']).toContain(row.status);
+      expect(row.status).not.toBe('pending');
+      expect(row.scheduled_for == null).toBe(true);
+    });
+
+    test('tech voice on but no verified draft: the fixed Day-0 template sends', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-2', first_name: 'Ravi', last_name: 'P', phone: '+19410000094', nearest_location_id: 'venice' }],
+        // A recent completed visit: tech voice drafts about a visit (visit-less cadences use fixed copy).
+        service_records: [{ id: 'sr-tv-2', customer_id: 'tv-2', technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'tv-2', serviceRecordId: 'sr-tv-2', serviceType: 'pest control', techName: 'Adam B', startedBy: 'admin-1' });
+
+      expect(result.started).toBe(true);
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('A Google review means a lot');
     });
 
     test('no technician on the record → the company signs, never "Your tech with Waves"', async () => {
@@ -4813,7 +5147,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       expect(result.started).toBe(true);
       const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-      expect(sentBody).toContain("Hi Mae! It's Waves. If we earned it");
+      expect(sentBody).toContain("Hi Mae! It's Waves. A Google review means a lot");
       expect(sentBody).not.toContain('Your tech');
     });
 
@@ -5089,6 +5423,65 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Uma! Older with Waves.');
     });
 
+    test('Codex r4: tech voice drafts AS the record\'s technician, never the name cached on the sequence', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'd0-11', first_name: 'Uma', last_name: 'P', phone: '+19410000098', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d11', customer_id: 'd0-11', technician_id: 'tech-a', service_type: 'pest control', service_date: '2026-09-01' }],
+        technicians: [{ id: 'tech-a', name: 'Older Tech' }, { id: 'tech-b', name: 'Newer Tech' }],
+        review_sequences: [{
+          id: 'seq-d11', customer_id: 'd0-11', status: 'active', current_step: 0, touches_sent: 0,
+          tech_name: 'Newer Tech', service_record_id: 'sr-d11',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.processReviewSequences();
+
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBe('Older');
+    });
+
+    test('GitHub r5: a record technician whose name will not resolve drafts with NO name, never the cached one', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'd0-12', first_name: 'Uma', last_name: 'P', phone: '+19410000097', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d12', customer_id: 'd0-12', technician_id: 'tech-gone', service_type: 'pest control', service_date: '2026-09-01' }],
+        technicians: [{ id: 'tech-b', name: 'Newer Tech' }],
+        review_sequences: [{
+          id: 'seq-d12', customer_id: 'd0-12', status: 'active', current_step: 0, touches_sent: 0,
+          tech_name: 'Newer Tech', service_record_id: 'sr-d12',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBeNull();
+    });
+
+    test('#5524 r1: a record-scoped cadence whose visit has no technician drafts with no name, never the cached one', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'd0-13', first_name: 'Uma', last_name: 'P', phone: '+19410000096', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d13', customer_id: 'd0-13', technician_id: null, service_type: 'pest control', service_date: '2026-09-01' }],
+        technicians: [{ id: 'tech-b', name: 'Newer Tech' }],
+        review_sequences: [{
+          id: 'seq-d13', customer_id: 'd0-13', status: 'active', current_step: 0, touches_sent: 0,
+          tech_name: 'Newer Tech', service_record_id: 'sr-d13',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBeNull();
+    });
+
     test('a drawer send with no techName resolves the technician from the latest completed visit (codex #4139 r1)', async () => {
       const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
       const mock = makeMock({
@@ -5128,8 +5521,19 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(touch.template_key).toBe('friendly_ask');
   });
 
+  test('#5524 r10: a draft saved before the neutral-copy rules is dropped on retry, never resent', async () => {
+    const staleDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
+    const mock = makeMock(reminderStepFixture('seq-st2', { id: 'st2-1', first_name: 'Stan', last_name: 'P', phone: '+19410000063', nearest_location_id: 'bradenton' }, {
+      review_requests: [{ id: 'rr-st2', sequence_id: 'seq-st2', sequence_step: 1, customer_id: 'st2-1', channel: 'sms', custom_body: staleDraft, template_key: 'soft_reminder_personalized', status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    }));
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).not.toMatch(/earned it|just reply/i);
+  });
+
   test('a retried reminder step reuses the previously persisted draft instead of re-drafting', async () => {
-    const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
+    const priorDraft = 'Hi Stan, hope the ants stayed gone. A quick Google review: {review_url}';
     const mock = makeMock(reminderStepFixture('seq-rt', { id: 'rt-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
       // A prior attempt already drafted + persisted for this step (send deferred).
       review_requests: [{ id: 'rr-rt', sequence_id: 'seq-rt', sequence_step: 1, customer_id: 'rt-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
@@ -5144,6 +5548,76 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(retry.custom_body).toBe(priorDraft);
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).toContain('hope the ants stayed gone');
+  });
+
+  test('tech voice on: a persisted draft is reused the same ET day, but a retry on a later day drafts afresh (it may say "today")', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const priorDraft = "It's Adam, thanks for waiting on me this morning. A Google review would really help: {review_url}";
+    const fresh = "It's Adam, thanks again for Tuesday. A Google review would really help: {review_url}";
+    mockDraftTechVoice.mockResolvedValue(fresh);
+    const fixture = (id, createdAt, templateKey = 'soft_reminder_tech_voice') => makeMock(reminderStepFixture(`seq-${id}`, { id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
+      // A real row records the visit it was drafted about.
+      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt, template_key: templateKey, service_type: 'pest control', technician_id: null, service_record_id: `sr-${id}`, service_date: new Date() }],
+      service_records: [{ id: `sr-${id}`, customer_id: id, technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      review_sequences: [{
+        id: `seq-${id}`, customer_id: id, status: 'active', current_step: 1, touches_sent: 1, service_type: 'pest control', tech_name: 'Adam', service_record_id: `sr-${id}`,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    }));
+
+    let mock = fixture('tvd-1', new Date(Date.now() - 2 * 86400000));
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('thanks again for Tuesday');
+
+    mockDraftTechVoice.mockClear();
+    mockSendCustomerMessage.mockClear();
+    mock = fixture('tvd-2', new Date());
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('waiting on me this morning');
+
+    // #5524 r22: same day, but the anchored visit date changed since: never reused.
+    mockSendCustomerMessage.mockClear();
+    mockDraftTechVoice.mockClear();
+    mock = fixture('tvd-5', new Date());
+    mock.__state.rows.review_requests.find((r) => r.id === 'rr-tvd-5').service_date = new Date(Date.now() - 3 * 86400000);
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+
+    // #5524 r20: same day, but the visit's technician changed since: never reused.
+    mockSendCustomerMessage.mockClear();
+    mockDraftTechVoice.mockClear();
+    mock = fixture('tvd-4', new Date());
+    mock.__state.rows.review_requests.find((r) => r.id === 'rr-tvd-4').technician_id = 'tech-someone-else';
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('thanks again for Tuesday');
+
+    // Same day, but persisted by the older drafter before the switch: never
+    // reused, since it skipped the fact check.
+    mockSendCustomerMessage.mockClear();
+    mockDraftTechVoice.mockClear();
+    mock = fixture('tvd-3', new Date(), 'soft_reminder_personalized');
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('thanks again for Tuesday');
+  });
+
+  test('Fable P2: with tech voice OFF, a deferred tech-voice draft is never reused (it may say "today")', async () => {
+    const priorDraft = "It's Adam, thanks for waiting on me this morning. A Google review would really help: {review_url}";
+    const mock = makeMock(reminderStepFixture('seq-tvo', { id: 'tvo-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
+      review_requests: [{ id: 'rr-tvo', sequence_id: 'seq-tvo', sequence_step: 1, customer_id: 'tvo-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(), template_key: 'soft_reminder_tech_voice' }],
+    }));
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).not.toContain('waiting on me this morning');
   });
 
   test('a retry does NOT reuse a persisted draft when the recipient is no longer the account holder', async () => {
@@ -6084,7 +6558,7 @@ describe('shared ask history foundation', () => {
     // is a structural template-design limit, not a classifier bug, so they
     // are pinned here as known link-dependent rather than silently ignored.
     const templates = require('../services/review-outreach-templates');
-    const LINK_DEPENDENT_ONLY = new Set(['service_specific_pest', 'recovery_review']);
+    const LINK_DEPENDENT_ONLY = new Set(['recovery_review']);
     for (const t of templates.OUTREACH_TEMPLATES) {
       if (!templates.isAskTemplate(t.id)) continue; // no-link check-ins are not asks
       const linkFreeBody = templates.renderOutreachBody(t.body, {

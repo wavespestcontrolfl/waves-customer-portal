@@ -5,7 +5,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
-import { AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { AFTER_VISIT_CONSENT_VERSION, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 vi.mock('react-router-dom', () => ({
   useParams: () => ({
     token: 'synthetic-prepay-token'
@@ -252,7 +252,8 @@ describe('annual prepay charged after the first visit (GATE_PAF_PREPAY)', () => 
     expect(acceptBodies(fetchMock)[1]).toMatchObject({
       prepayChargeAcknowledgedTotalCents: 60000,
       prepayChargeConsentAccepted: true,
-      prepayChargeConsentVariant: 'after_visit_prepay'
+      prepayChargeConsentVariant: 'after_visit_prepay',
+      prepayChargeConsentVersion: AFTER_VISIT_CONSENT_VERSION
     });
     // The first (pre-quote) accept never claims a variant.
     expect(acceptBodies(fetchMock)[0].prepayChargeConsentVariant).toBeUndefined();
@@ -282,6 +283,7 @@ describe('annual prepay charged after the first visit (GATE_PAF_PREPAY)', () => 
     fireEvent.click(screen.getByRole('button', { name: 'Confirm & pay $600.00' }));
     await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
     expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVariant');
+    expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVersion');
   });
 
   it('an after_first_visit success shows nothing-charged-today copy with the acknowledged total', async () => {
@@ -309,6 +311,7 @@ describe('a capture only consents to the charge timing it showed (GitHub Codex #
     fireEvent.click(confirm);
     await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
     expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVariant');
+    expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVersion');
   });
 
   it('captured under charge-now wording, quoted for after the first visit: the quote asks again', async () => {

@@ -14,15 +14,50 @@ const serverText = require('../services/acceptance-terms-text');
 
 // The EXACT text pinned together with its version (GH Codex r3 P1): a
 // copy-only edit that forgets the version bump would let an already-open tab
-// attest 'v2026-09' for text the customer never saw. Bump BOTH when editing.
-const PINNED_VERSION = 'v2026-09';
-const PINNED_SNAPSHOT_SHA256 = '517ff8fc3cad1153efc1e440ebed5ba1b5f83f9f96fb2946baf8a5b499e6f495';
+// attest 'v2026-10' for text the customer never saw. Bump BOTH when editing.
+// One version, two SCOPES (codex #5434 r1 P0): 'plan' carries the annual
+// rate review sentence on its Services line; 'base' is byte-identical to
+// the v2026-09 snapshot (its hash is v2026-09's pin) — rodent, one-time-only
+// and one-time-toggle accepts never read, or get recorded under, the rate
+// term.
+const PINNED_VERSION = 'v2026-10';
+const PINNED_SNAPSHOT_SHA256 = {
+  plan: 'ba94d31e56e3cc301f044462015812c88b15f96ee05de80742dceddee6de6e03',
+  base: '517ff8fc3cad1153efc1e440ebed5ba1b5f83f9f96fb2946baf8a5b499e6f495',
+};
+const RATE_REVIEW_SENTENCE = 'Rates are reviewed once a year after your first 12 months, with at least 30 days’ written notice before any change.';
 
 describe('acceptance terms text', () => {
-  test('version AND text are pinned together — edit the copy ⇒ bump the version and this hash', () => {
+  test('version AND text are pinned together, per scope — edit the copy ⇒ bump the version and these hashes', () => {
     expect(serverText.ACCEPTANCE_TERMS_VERSION).toBe(PINNED_VERSION);
-    const hash = crypto.createHash('sha256').update(serverText.acceptanceTermsSnapshot(), 'utf8').digest('hex');
-    expect(hash).toBe(PINNED_SNAPSHOT_SHA256);
+    expect(serverText.ACCEPTANCE_TERMS_SCOPES).toEqual(['plan', 'base']);
+    for (const scope of serverText.ACCEPTANCE_TERMS_SCOPES) {
+      const hash = crypto.createHash('sha256').update(serverText.acceptanceTermsSnapshot(scope), 'utf8').digest('hex');
+      expect(hash).toBe(PINNED_SNAPSHOT_SHA256[scope]);
+    }
+  });
+
+  test("the rate review sentence is the 'plan' Services line's and nothing else's", () => {
+    expect(serverText.RATE_REVIEW_SENTENCE).toBe(RATE_REVIEW_SENTENCE);
+    const plan = serverText.acceptanceTermsLines('plan');
+    const base = serverText.acceptanceTermsLines('base');
+    expect(plan[0].label).toBe('Services');
+    expect(plan[0].text).toBe(`${base[0].text} ${RATE_REVIEW_SENTENCE}`);
+    expect(plan.slice(1)).toEqual(base.slice(1));
+    expect(serverText.acceptanceTermsSnapshot('plan')).toContain(RATE_REVIEW_SENTENCE);
+    expect(serverText.acceptanceTermsSnapshot('base')).not.toContain(RATE_REVIEW_SENTENCE);
+    // The one-liner above Accept is scope-free (owner ruling 2026-08-28: same steps, least words).
+    expect(serverText.ACCEPTANCE_LINE).not.toContain('Rates are reviewed');
+  });
+
+  test('an unknown or absent scope is never served or snapshotted (fail closed)', () => {
+    expect(serverText.normalizeAcceptanceTermsScope('plan')).toBe('plan');
+    expect(serverText.normalizeAcceptanceTermsScope('base')).toBe('base');
+    for (const bad of [undefined, null, '', 'PLAN', 'all', 'recurring', 0, {}]) {
+      expect(serverText.normalizeAcceptanceTermsScope(bad)).toBeNull();
+    }
+    expect(() => serverText.acceptanceTermsSnapshot()).toThrow(/unknown scope/);
+    expect(() => serverText.acceptanceTermsPayload('all')).toThrow(/unknown scope/);
   });
 
   test('copy is short: one line above Accept, five drawer lines', () => {
@@ -32,31 +67,40 @@ describe('acceptance terms text', () => {
       expect(typeof t.label).toBe('string');
       expect(typeof t.text).toBe('string');
     }
+    for (const scope of serverText.ACCEPTANCE_TERMS_SCOPES) expect(serverText.acceptanceTermsLines(scope)).toHaveLength(5);
   });
 
-  test('never carries a fee, interest or collection-cost clause (prospective-only rule)', () => {
-    const all = serverText.acceptanceTermsSnapshot().toLowerCase();
+  test.each(['plan', 'base'])('%s never carries a fee, interest or collection-cost clause (prospective-only rule)', (scope) => {
+    const all = serverText.acceptanceTermsSnapshot(scope).toLowerCase();
     for (const banned of ['late fee', 'interest', 'collection cost', 'attorney', 'lien', 'credit bureau']) {
       expect(all).not.toContain(banned);
     }
   });
 
-  test('snapshot = line + every drawer line, in order', () => {
-    const snap = serverText.acceptanceTermsSnapshot();
+  test.each(['plan', 'base'])('%s snapshot = line + every drawer line, in order', (scope) => {
+    const snap = serverText.acceptanceTermsSnapshot(scope);
     const lines = snap.split('\n');
     expect(lines[0]).toBe(serverText.ACCEPTANCE_LINE);
-    expect(lines).toHaveLength(1 + serverText.ACCEPTANCE_TERMS.length);
-    serverText.ACCEPTANCE_TERMS.forEach((t, i) => {
+    const drawer = serverText.acceptanceTermsLines(scope);
+    expect(lines).toHaveLength(1 + drawer.length);
+    drawer.forEach((t, i) => {
       expect(lines[i + 1]).toBe(`${t.label} — ${t.text}`);
     });
   });
 
-  test('payload shape served to the estimate page', () => {
-    const p = serverText.acceptanceTermsPayload();
-    expect(p).toEqual({
+  test('payload shape served to the estimate page: the scope, its lines, and the one-time lines a plan can swap in', () => {
+    expect(serverText.acceptanceTermsPayload('base')).toEqual({
       version: serverText.ACCEPTANCE_TERMS_VERSION,
+      scope: 'base',
       line: serverText.ACCEPTANCE_LINE,
-      terms: serverText.ACCEPTANCE_TERMS.map((t) => ({ label: t.label, text: t.text })),
+      terms: serverText.acceptanceTermsLines('base'),
+    });
+    expect(serverText.acceptanceTermsPayload('plan')).toEqual({
+      version: serverText.ACCEPTANCE_TERMS_VERSION,
+      scope: 'plan',
+      line: serverText.ACCEPTANCE_LINE,
+      terms: serverText.acceptanceTermsLines('plan'),
+      oneTimeTerms: serverText.acceptanceTermsLines('base'),
     });
   });
 });

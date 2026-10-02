@@ -15,6 +15,10 @@
  *     slotStepMinutes?,       // snap starts to this granularity (1–120)
  *     arrivalWindows?,        // supported edit/drag picker opt-in
  *     hint?,                  // advisory best-times consumer — gated (GATE_BEST_TIME_HINTS)
+ *     summary?,               // hint mode only: also answer `summary.days`, one row per date in
+ *                             // the range with every hour that fits (GATE_RESCHEDULE_AVAILABILITY;
+ *                             // gate off = the flag is ignored and the answer is the plain hint)
+ *     pickedDate?,            // summary mode: the date `pickedStart` is on (default dateFrom)
  *   }
  */
 
@@ -24,7 +28,9 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour } = require('../services/scheduling/find-time-hints');
+const {
+  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, hintSearchPlan, buildHintSummary,
+} = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -202,6 +208,7 @@ router.post('/', async (req, res) => {
       topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
+      summary, pickedDate,
     } = req.body || {};
     let { technicianId } = req.body || {};
 
@@ -263,7 +270,7 @@ router.post('/', async (req, res) => {
     }
     // Picker-hint params (the hour in the picker, its window end, the
     // picker's same-day floor) — shapes and meaning in find-time-hints.js.
-    const hintParamError = validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin });
+    const hintParamError = validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin, summary, pickedDate });
     if (hintParamError) throw httpError(400, hintParamError);
     // A pending Service address only means something for an existing
     // visit (the edit form); the stamp helper 422s on an id that is not
@@ -280,7 +287,18 @@ router.post('/', async (req, res) => {
     const to = dateTo || etDateString(addETDays(parseETDateTime(`${from}T12:00`), 7));
     if (to < from) throw httpError(400, 'dateTo must be on or after dateFrom');
     const maxTo = etDateString(addETDays(parseETDateTime(`${from}T12:00`), MAX_FIND_TIME_DAYS));
-    const clampedTo = to > maxTo ? maxTo : to;
+    // What this request searches (find-time-hints.js hintSearchPlan). Every
+    // caller but one gets back exactly what it asked for; an availability-
+    // strip summary (hint + summary:true, behind its own call-time gate on
+    // top of the hint gate) is clamped to today, capped in length and forced
+    // hourly. Gate off = the flag is ignored and the plain hint answers. A
+    // summary it cannot answer (range in the past, picked date outside the
+    // range) throws a 400 the handler's catch reports like every other.
+    const startedAt = Date.now();
+    const plan = hintSearchPlan({
+      hint, summary, summaryEnabled: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
+      from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,
+    });
 
     const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
     // Arrival checks load the saved appointment too. Request coordinates or
@@ -314,8 +332,8 @@ router.post('/', async (req, res) => {
       lng: target.lng,
       durationMinutes: Math.max(15, parseInt(durationMinutes, 10) || 60),
       serviceType: typeof serviceType === 'string' ? serviceType : undefined,
-      dateFrom: from,
-      dateTo: clampedTo,
+      dateFrom: plan.from,
+      dateTo: plan.to,
       technicianId: technicianId || undefined,
       // Hint mode takes the engine's ENTIRE candidate list and slices to
       // the requested count below: the occupancy guard can veto whole gaps
@@ -330,7 +348,7 @@ router.post('/', async (req, res) => {
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
       ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges } } : {}),
-      slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
+      slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
       includeBlackoutDates: true,
@@ -343,24 +361,35 @@ router.post('/', async (req, res) => {
     // slice, the picked-hour verdict) lives in scheduling/find-time-hints.js;
     // the ungated Find-a-Time search only gets unknown detours marked.
     const excluded = (excludeServiceIds || []).map(String);
-    const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
+    const step = plan.step !== undefined ? plan.step : 1;
     const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
-    const slots = hint
-      ? await guardHintSlots(rawSlots, { today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN })
-      : rawSlots;
+    // One guard pass answers both lists: `ranked` is the plain hint's top-N
+    // (one start per gap); `every` is each start that fits, for the summary.
+    const { ranked: slots, every } = hint
+      ? await guardHintStarts(rawSlots, {
+        today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN, every: plan.summary,
+      })
+      : { ranked: rawSlots };
     const picked = hint && pickedStart
       ? await scorePickedHour({
-        rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
+        rawSlots, from: plan.verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
+        withReason: plan.summary,
       })
       : undefined;
 
+    // The engine's per-date refusal counts feed the summary's day status
+    // only; they are not part of any response contract.
+    const { rejections_by_date: rejectionsByDate, ...engineResult } = { ...result };
+
     res.json({
-      ...result,
+      ...engineResult,
       slots,
       ...(picked ? { picked } : {}),
+      // undefined (dropped from the JSON) for everything but a summary plan.
+      summary: buildHintSummary(plan, every, { rejectionsByDate, startedAt }),
       target,
-      range: { dateFrom: from, dateTo: clampedTo },
+      range: { dateFrom: plan.from, dateTo: plan.to },
     });
   } catch (err) {
     logger.error('[find-time] failed:', err);

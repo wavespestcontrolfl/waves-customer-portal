@@ -15,6 +15,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { typedDecisionsLive } = require('../../config/feature-gates');
 const { raiseAdminAlert } = require('../admin-alert-compose');
+const { providerLabel } = require('./packages');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const CATEGORY = 'typed_decisions';
@@ -49,7 +50,8 @@ function describeRow(row) {
   const jev = parse(row.jev_answer);
   const baselines = Object.entries(parse(row.baseline_answers) || {})
     .map(([name, value]) => `${BASELINE_LABELS[name] || name} ${describeBaseline(value)}`);
-  return `${row.capability} ${row.question_id}: Jev ${describeAnswer(jev)} vs ${baselines.join(', ') || 'no baseline'}`;
+  // The provider's own name (Jev, Clef): a row is never attributed to a model that did not answer it.
+  return `${row.capability} ${row.question_id}: ${providerLabel(row.provider)} ${describeAnswer(jev)} vs ${baselines.join(', ') || 'no baseline'}`;
 }
 
 // The item lists what is STILL waiting, not one calendar day: rows stay in
@@ -87,7 +89,7 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
     .where({ label_status: 'unreviewed', sampled_for: sampledFor })
     .where('created_at', '>=', start)
     .orderBy('created_at', 'desc').limit(limit)
-    .select('id', 'capability', 'question_id', 'jev_answer', 'baseline_answers', 'created_at');
+    .select('id', 'capability', 'provider', 'question_id', 'jev_answer', 'baseline_answers', 'created_at');
   const disagreements = await pick('disagreement', MAX_DISAGREEMENTS);
   const spotChecks = await pick('random_audit', MAX_SPOT_CHECKS);
   const total = disagreements.length + spotChecks.length;
@@ -98,7 +100,7 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
 
   const day = etDateString(now);
   const detail = [
-    `Unreviewed shadow decisions from the last ${REVIEW_WINDOW_DAYS} days, newest first (up to ${MAX_DISAGREEMENTS} disagreements and ${MAX_SPOT_CHECKS} spot checks). Nothing acts on these answers; label each as Jev right, Jev wrong or unclear.`,
+    `Unreviewed shadow decisions from the last ${REVIEW_WINDOW_DAYS} days, newest first (up to ${MAX_DISAGREEMENTS} disagreements and ${MAX_SPOT_CHECKS} spot checks). Nothing acts on these answers; label each as right, wrong or unclear.`,
     ...disagreements.map((row) => `Disagreement - ${describeRow(row)}`),
     ...spotChecks.map((row) => `Spot check - ${describeRow(row)}`),
     `Review: ${LINK}`,
@@ -107,7 +109,7 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
   const alert = await raiseAdminAlert(CATEGORY, {
     area: 'System',
     action: `review ${word(total, 'AI decision', 'AI decisions')}`,
-    why: `${word(disagreements.length, 'disagreement', 'disagreements')}, ${word(spotChecks.length, 'spot check', 'spot checks')} · Jev vs rules/judge`,
+    why: `${word(disagreements.length, 'disagreement', 'disagreements')}, ${word(spotChecks.length, 'spot check', 'spot checks')} · AI vs rules/judge`,
     severity: 'needs-you',
     link: LINK,
     subject: { type: 'check', id: 'typed-decisions-review' },

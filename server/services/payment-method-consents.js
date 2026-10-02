@@ -12,7 +12,10 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { getConsentText, consentVersionForVariant } = require('./payment-method-consent-text');
+const {
+  CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY, PREPAY_CONSENT_MARKER,
+  getConsentText, consentVersionForVariant, renderedConsentVersionIsCurrent,
+} = require('./payment-method-consent-text');
 const { isExpiredCardMethod } = require('./autopay-eligibility');
 
 const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request', 'autopay_setup_link', 'portal_autopay_enable', 'portal_set_default']);
@@ -33,10 +36,15 @@ async function recordConsent({
   // 'prepay_card' snapshots the annual-prepay authorization (immediate
   // charge + future invoices) instead of the base card text — the UI must
   // have rendered the SAME variant at the checkbox (GATE_PREPAY_CARD_AND_CHARGE).
+  // 'card_hold' snapshots the one-time hold disclosure the CardHoldModal
+  // rendered (fee + window in `holdTerms`) under CARD_HOLD_CONSENT_VERSION —
+  // never the card authorization that modal does not show (codex #5434 r3).
   // 'after_visit_prepay' / 'after_visit_card' (GATE_PAY_AFTER_FIRST_VISIT)
-  // snapshot the charge-after-the-first-visit authorization and are recorded
-  // under the v12_2026-09-30 label (consentVersionForVariant).
+  // snapshot the charge-after-the-first-visit authorization; they carry the
+  // rate sentence too and are recorded under the v12 label. The label for
+  // every variant comes from consentVersionForVariant.
   consentVariant = null,
+  holdTerms = null,
   // Authorization that came from a SIGNED AGREEMENT rather than a consent
   // checkbox (termite annual plan charged at signature, owner ruling
   // 2026-09-25): the snapshot is the agreement text the customer actually
@@ -67,22 +75,24 @@ async function recordConsent({
   if (rendered && !(typeof rendered.text === 'string' && rendered.text && /^v\d+(?:[_-]|$)/.test(String(rendered.version || '')))) {
     throw new Error('recordConsent: a rendered consent needs its text and a v<N> version');
   }
-  const consentText = consentTextSnapshot || rendered?.text || getConsentText(methodType, { variant: consentVariant });
-  const consentVersion = consentTextVersion || rendered?.version || consentVersionForVariant(consentVariant, methodType);
+  // Text: the agreement snapshot, else the copy the capture RENDERED (#5481),
+  // else this server's text for the variant (a card hold renders its own).
+  const consentText = consentTextSnapshot || rendered?.text || getConsentText(methodType, { variant: consentVariant, holdTerms });
+  const versionLabel = consentTextVersion || rendered?.version || consentVersionForVariant(consentVariant, methodType);
 
   const [row] = await database('payment_method_consents').insert({
     customer_id: customerId,
     payment_method_id: paymentMethodId,
     stripe_payment_method_id: stripePaymentMethodId,
     source,
-    consent_text_version: consentVersion,
+    consent_text_version: versionLabel,
     consent_text_snapshot: consentText,
     ip,
     user_agent: userAgent,
     ...(evidenceContractId ? { evidence_contract_id: evidenceContractId } : {}),
   }).returning('*');
 
-  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${consentVersion}, methodType=${methodType})`);
+  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${versionLabel}, methodType=${methodType})`);
   return row;
 }
 
@@ -147,11 +157,37 @@ async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { d
 // immediate-charge authorization in the ledger even when an older
 // future-invoice consent exists, while webhook-backstop retries must not
 // stack duplicate rows).
-async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, text: renderedText = null, since = null, source = null, dbh = db } = {}) {
+// `version` / `anyVersion` (codex #5434 r1 P1, deferred prepay recovery):
+// an authorization recorded under an OLDER consent text version cannot be
+// matched by the current text, and the older text is not re-derivable —
+// recovery therefore looks the row up by the version the capture attested
+// (`version`), or by any version at all (`anyVersion`, for jobs stamped
+// before versions were persisted), scoped by `source`/`since` as usual.
+async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, text: renderedText = null, since = null, source = null, version = null, anyVersion = false, dbh = db } = {}) {
   if (!customerId || !stripePaymentMethodId) return false;
+  // The copy the capture RENDERED (#5481) is the snapshot to match, else
+  // this server's text for the variant.
   const text = renderedText || getConsentText(methodType, { variant });
   const q = dbh('payment_method_consents')
-    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId, consent_text_snapshot: text });
+    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId });
+  if (version) q.where({ consent_text_version: String(version) });
+  else if (!anyVersion) q.where({ consent_text_snapshot: text });
+  // A version/any-version lookup for the PREPAY variant still has to be the
+  // prepay authorization (codex #5434 r3 P1): a base save-and-charge row the
+  // recurring-card backstop recorded for the same method, matching on
+  // version/source/time alone, must never stand in for the immediate-charge
+  // authorization. The marker rides every version of both prepay texts.
+  if ((version || anyVersion) && variant === 'prepay_card') {
+    q.where('consent_text_snapshot', 'like', `%${PREPAY_CONSENT_MARKER}%`);
+  }
+  // Same for the after-visit prepay authorization (GATE_PAF_PREPAY): only a
+  // row carrying both the annual-prepay and the after-the-first-visit wording
+  // (card and ACH texts, every version) — never a base after_visit_card row
+  // or a charge-now prepay row.
+  if ((version || anyVersion) && variant === 'after_visit_prepay') {
+    q.where('consent_text_snapshot', 'like', '%12-month annual prepay invoice%')
+      .where('consent_text_snapshot', 'like', '%after my first service visit is completed%');
+  }
   // `source` scopes the idempotency to ONE capture surface: an identical
   // consent the customer gave elsewhere (portal, another link) is its own
   // ledger row and must not stand in for this surface's record.
@@ -256,8 +292,64 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
   return { total: orphans.length, linked, stale };
 }
 
+/**
+ * The rendered-version rule for DEFERRED captures (codex #5434 r1 P1) —
+ * webhook mirrors and deferred completions that record a consent long
+ * after the browser left. The mint stamped the version the tab rendered
+ * into the Stripe intent's metadata (`consent_text_version`); recording
+ * may proceed only when that stamp is this server's current
+ * CONSENT_VERSION. A stale stamp — or none (an intent minted before stamps
+ * existed) — must never be recorded as agreement to the current text:
+ * the method may still be saved, but it stays unconsented and therefore
+ * unenrolled, and ONE deduped billing bell asks the office to re-collect
+ * the authorization. Returns true when recording may proceed. Never
+ * throws (the bell is best-effort).
+ */
+async function deferredCaptureConsentVersionCurrent(intent, { context = 'capture', customerId = null } = {}) {
+  const stamped = intent?.metadata?.[CONSENT_VERSION_METADATA_KEY];
+  if (renderedConsentVersionIsCurrent(stamped)) return true;
+  await refuseDeferredConsentRecording({ intentId: intent?.id, stampedVersion: stamped, context, customerId });
+  return false;
+}
+
+/**
+ * The refusal half of the rule above, for deferred recorders whose
+ * attested version lives somewhere other than the intent's metadata (the
+ * estimate accept stamps it on the estimate row): logs, and parks ONE
+ * deduped Billing bell per intent so the office re-collects the
+ * authorization. Never throws.
+ */
+async function refuseDeferredConsentRecording({ intentId = null, stampedVersion = null, context = 'capture', customerId = null } = {}) {
+  const stamped = stampedVersion;
+  intentId = intentId || 'unknown';
+  logger.warn(`[consent] ${context}: consent text version ${stamped ? `'${stamped}'` : 'absent'} on intent ${intentId} is not the current ${CONSENT_VERSION} — authorization NOT recorded (customer ${customerId || 'unknown'})`);
+  if (customerId) {
+    try {
+      // docs/admin-notifications.md: an event, needs a person, one row per
+      // intent (the dedupe key), cleared once the authorization is on file.
+      await require('./admin-alert-compose').raiseAdminAlert('billing', {
+        area: 'Billing',
+        action: 're-collect the saved-payment authorization',
+        why: 'A payment method finished saving after the authorization text changed, so nothing was recorded or enrolled.',
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${customerId}`,
+        subject: { type: 'customer', id: String(customerId) },
+        doneWhen: 'consent_recorded',
+        who: 'person',
+      }, {
+        metadata: { customerId, intentId, context, stampedVersion: stamped || null, currentVersion: CONSENT_VERSION },
+        dedupeKey: `consent_version_stale:${intentId}`,
+      });
+    } catch (bellErr) {
+      logger.warn(`[consent] stale-version bell failed for intent ${intentId}: ${bellErr.message}`);
+    }
+  }
+}
+
 module.exports = {
   recordConsent,
+  deferredCaptureConsentVersionCurrent,
+  refuseDeferredConsentRecording,
   hasConsentSnapshotForVariant,
   hasConsentFor,
   hasEnrollmentScopedConsent,

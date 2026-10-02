@@ -54,7 +54,9 @@ import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimat
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, CONSENT_VERSION, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import {
+  ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, CONSENT_VERSION, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, clearLatchedConsentVersion, consentAttestation, latchConsentVersion, latchedConsentVersionIsCurrent,
+} from '../lib/paymentMethodConsentText';
 import { FIRST_INVOICE_AT_CONFIRM_COPY, captureTimingProps, resolvePaymentTiming } from '../lib/paymentTiming';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
@@ -3182,6 +3184,9 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
         onSuccess(existing.setupIntent.id, bank ? 'us_bank_account' : 'card');
         return;
       }
+      // The consent text version this capture is authorized under, latched
+      // for a redirect return (codex #5434 r2 P1).
+      latchConsentVersion();
       const result = await stripeRef.current.confirmSetup({
         elements: elementsRef.current,
         confirmParams: { return_url: window.location.href },
@@ -3776,20 +3781,39 @@ function SoftExitLink({ onOpen }) {
 }
 
 /**
+ * The acceptance-terms SCOPE this tab renders — and attests on accept — for
+ * the served payload and the current service mode (owner ruling
+ * 2026-09-30, codex #5434 r1 P0): a 'plan' payload (the Services line
+ * carries the annual rate review sentence) swaps in its 'base' lines when
+ * the customer toggles the plan to a one-time visit, which has no rate to
+ * review; the server re-derives the same scope at accept and refuses a
+ * mismatch. Returns null when no terms are served.
+ */
+export function renderedAcceptanceTermsScope(terms, serviceMode) {
+  if (!terms || !terms.line) return null;
+  if (terms.scope === 'plan' && serviceMode === 'one_time' && Array.isArray(terms.oneTimeTerms)) return 'base';
+  return terms.scope === 'plan' ? 'plan' : 'base';
+}
+
+/**
  * Acceptance line + inline "View terms" drawer (GATE_ESTIMATE_ACCEPTANCE_TERMS,
  * owner ruling 2026-08-28: same steps, least words, no extra page). Renders
  * the copy the SERVER served (data.acceptanceTerms) — never a client constant —
  * so what the customer reads is what the accept route records. The Accept
  * tap itself is the acceptance; there is deliberately no checkbox. The
  * drawer is a toggle (same pattern as InlineAutoPayCapture's "View full
- * terms"), never a link off the estimate.
+ * terms"), never a link off the estimate. The drawer lines follow the
+ * rendered scope (renderedAcceptanceTermsScope): a one-time accept of a
+ * plan estimate shows the served `oneTimeTerms` instead of the plan lines.
  */
-function AcceptanceTermsLine({ terms }) {
+function AcceptanceTermsLine({ terms, serviceMode = 'recurring' }) {
   const [open, setOpen] = useState(false);
   if (!terms || !terms.line) return null;
+  const scope = renderedAcceptanceTermsScope(terms, serviceMode);
+  const lines = scope === 'base' && terms.scope === 'plan' ? terms.oneTimeTerms : (terms.terms || []);
   const toggleId = 'estimate-acceptance-terms';
   return (
-    <div data-testid="acceptance-terms" style={{ marginTop: 14, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
+    <div data-testid="acceptance-terms" data-terms-scope={scope} style={{ marginTop: 14, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
       <span>{terms.line} </span>
       <button
         type="button"
@@ -3806,7 +3830,7 @@ function AcceptanceTermsLine({ terms }) {
       {open ? (
         <div id={toggleId} style={{ ...estimateInnerBox({ padding: '12px 14px', marginTop: 10 }), display: 'grid', gap: 8, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
           <div style={{ fontSize: 14, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 600 }}>Terms · {terms.version}</div>
-          {(terms.terms || []).map((t) => (
+          {lines.map((t) => (
             <div key={t.label}><strong style={{ color: ESTIMATE_TEXT }}>{t.label}</strong> — {t.text}</div>
           ))}
         </div>
@@ -5858,10 +5882,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     recurringCardRenderedConsentRef.current = {
       tender: t,
       variant: afterVisit ? 'after_visit_card' : null,
-      prepayAfterVisit: prepayAfterVisitRenderedRef.current === true,
       // The base card / ACH text this bundle rendered carries its own version
       // (GitHub Codex #5481 r5 P1), attested like the after-visit one.
       version: afterVisit ? cur.version : CONSENT_VERSION,
+      prepayAfterVisit: prepayAfterVisitRenderedRef.current === true,
     };
   }, []);
   // Server said RECURRING_CARD_REQUIRED but our /data snapshot predates the
@@ -6041,7 +6065,22 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         // accept sends each in its own field and the server pins trust to the
         // intent's purpose metadata, so the wrong-lane echo is ignored.
         cardHoldSetupIntentIdRef.current = siFromRedirect;
-        recurringCardSetupIntentIdRef.current = siFromRedirect;
+        // The Auto Pay capture is restored ONLY when the consent text version
+        // it was authorized under (latched before confirmSetup) is this
+        // bundle's (codex #5434 r2 P1): a return into a newer bundle, or from
+        // a bundle that latched nothing, re-authorizes under the current text
+        // — this bundle never attests its version for a capture consented
+        // under older copy. The hold is not a consent-text capture.
+        if (latchedConsentVersionIsCurrent()) {
+          recurringCardSetupIntentIdRef.current = siFromRedirect;
+        } else {
+          recurringCardSetupIntentIdRef.current = null;
+          recurringCardForceRef.current = true;
+        }
+        clearLatchedConsentVersion();
+        // (The restore above is the latch's decision alone — never
+        // unconditional, or recurringCardForceRef could not force a fresh
+        // authorization after a copy change; pre-push Codex on the merge.)
         // The tender the customer rendered is unknown after a redirect; the
         // attestation falls back to the current render (card) and the server
         // verifies it against the intent's real tender.
@@ -7292,6 +7331,21 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // Never for annual prepay: the line is not shown for that lane (paid
           // up front), so nothing is attested and nothing is recorded.
           termsVersion: (paymentPreference !== 'prepay_annual' && data?.acceptanceTerms?.version) || undefined,
+          // …and which SCOPE of that version it rendered — 'plan' (the
+          // Services line carried the annual rate review sentence) or
+          // 'base' — under the same predicate. The server re-derives the
+          // scope from the estimate and this accept's service mode and
+          // 409s TERMS_VERSION_STALE on a mismatch (codex #5434 r1 P0).
+          termsScope: (paymentPreference !== 'prepay_annual' && renderedAcceptanceTermsScope(data?.acceptanceTerms, serviceMode)) || undefined,
+          // The saved-payment-method consent text version THIS BUNDLE
+          // renders beside every capture checkbox (inline Auto Pay capture,
+          // the capture modal, the prepay exact-total step — card, ACH and
+          // both prepay variants). The server refuses a consent-bearing
+          // accept whose version is not its current one with 409
+          // CONSENT_VERSION_STALE (codex #5434 r1 P1), so a tab left open
+          // across a copy change is never recorded under text it never
+          // showed; a plain accept with no capture ignores it.
+          ...consentAttestation(),
           // Attests which card-authorization copy THIS TAB RENDERED for the
           // captured intent (GATE_PAF_EXISTING_CUSTOMERS) — {variant, version,
           // tender}, taken from what the capture UI showed when the card was
@@ -7343,6 +7397,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // GATE_PAF_PREPAY: attests the after-first-visit authorization the
           // quote step displayed; sent only when the quote named it.
           prepayChargeConsentVariant: prepayChargeAckRef.current?.consentVariant ?? undefined,
+          prepayChargeConsentVersion: prepayChargeAckRef.current?.consentVersion ?? undefined,
           // Missing-contact capture: only sent when the field was actually
           // rendered (a real contactGaps gap) and the customer typed
           // something — email is optional/skippable, so a blank field sends
@@ -7471,6 +7526,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // one more tap.
             await loadEstimate({ preserveSelection: true });
             throw new Error(body.error || 'The terms were updated — please review the line above Accept and confirm again.');
+          }
+          if (body.code === CONSENT_VERSION_STALE_CODE) {
+            // The saved-payment-method authorization text changed since
+            // this tab loaded: nothing was accepted or recorded. A reload
+            // renders the current text; the reservation survives in the
+            // server-side hold.
+            throw new Error(body.error || CONSENT_VERSION_STALE_MESSAGE);
           }
           if (body.code === 'SETUP_FEE_TERMS_REFRESH') {
             if (typeof body.setupFeePromise === 'boolean') {
@@ -9395,6 +9457,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                     methodKey: prepayChargeQuote.methodKey || null,
                     consentAccepted: consentSatisfied,
                     consentVariant: afterVisitQuote ? 'after_visit_prepay' : null,
+                    // The after-visit text's own version label this bundle
+                    // rendered (GitHub Codex #5567 r11).
+                    consentVersion: afterVisitQuote ? AFTER_VISIT_CONSENT_VERSION : null,
                   };
                   setPrepayChargeQuote(null);
                   handleConfirm();
@@ -9514,7 +9579,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               />
             ) : null}
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
-              <AcceptanceTermsLine terms={data.acceptanceTerms} />
+              <AcceptanceTermsLine terms={data.acceptanceTerms} serviceMode={serviceMode} />
             ) : null}
             contactSlot={data?.contactGaps ? (
               <ContactGapFields

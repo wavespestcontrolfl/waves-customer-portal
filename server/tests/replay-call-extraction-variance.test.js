@@ -904,6 +904,28 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
+  describe('on-site consent input variance coverage (schema 1.22.0)', () => {
+    test('both flat mirrors are high-severity replay fields that collapse absent to false', () => {
+      for (const field of ['secondary_wants_appointment_texts', 'secondary_on_site']) {
+        expect(FIELD_GROUPS.high).toContain(field);
+        expect(normalizeField(field, null)).toBe(false);
+        expect(normalizeField(field, true)).toBe(true);
+        expect(compareFlatFields({ [field]: false }, { [field]: true }, true).find((v) => v.field === field).severity).toBe('high');
+      }
+    });
+    test('the per-contact consent signature covers every entry and collapses absent to empty', () => {
+      const field = 'secondary_contacts_consent_signature';
+      expect(FIELD_GROUPS.high).toContain(field);
+      expect(normalizeField(field, null)).toBe('');
+      expect(normalizeField(field, '')).toBe('');
+      // A flip on entry 2 (invisible to the singleton fields) is a high-severity variance.
+      const before = '5550100123:spouse_partner:1:1:1|other@example.com:tenant:1:0:0';
+      const after = '5550100123:spouse_partner:1:1:1|other@example.com:tenant:1:1:1';
+      expect(compareFlatFields({ [field]: before }, { [field]: after }, true).find((v) => v.field === field).severity).toBe('high');
+      expect(compareFlatFields({ [field]: before }, { [field]: before }, true).filter((v) => v.field === field)).toEqual([]);
+    });
+  });
+
   describe('consent.sms_declined variance coverage', () => {
     test('sms_declined is registered in FIELD_GROUPS', () => {
       const allFields = new Set(Object.values(FIELD_GROUPS).flat());

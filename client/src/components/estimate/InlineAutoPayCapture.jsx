@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
-import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, latchConsentVersion } from '../../lib/paymentMethodConsentText';
 import { FIRST_INVOICE_AT_CONFIRM_COPY } from '../../lib/paymentTiming';
 
 /**
@@ -264,6 +264,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           }
           return { ok: true, setupIntentId: existing.setupIntent.id, methodType: tenderNow() };
         }
+        // The consent text version this capture is authorized under, latched
+        // for a redirect return (codex #5434 r2 P1).
+        latchConsentVersion();
         const result = await stripeRef.current.confirmSetup({
           elements: elementsRef.current,
           confirmParams: { return_url: window.location.href },

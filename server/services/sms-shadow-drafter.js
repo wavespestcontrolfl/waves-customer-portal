@@ -125,7 +125,8 @@ const PROMPT_VERSION = 'house_voice_v11';
 // The two cohorts stay distinct: bare (pre both), '_cf' (company facts, no
 // re-service fact), '2' (re-service fact, no company facts), '2_cf' (both,
 // shipped), '3_cf' (both + LIVE ETA). 32 chars; with all four category tags ('+bclm') 37, under
-// PROMPT_VERSION_COLUMN_MAX (40). ('3_cfl' below adds LABEL FACTS: 33 chars, 38 with all four tags.)
+// PROMPT_VERSION_COLUMN_MAX (40). ('3_cfl' added LABEL FACTS: 33 chars, 38 with all four tags; '3_cflv'
+// below adds VISIT STATUS & OPEN LOOPS: 34 chars, 39 with all four tags.)
 // The identity FAMILY every real-answers cohort shares (bare, '_cf', '2', '2_cf', '3_cf', any later
 // suffix, any '+category' tags): readers that must recognize ALL of them —
 // sms-auto-send's gratitude discovery — match this prefix, never the current
@@ -145,10 +146,13 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // chars and 41 with all four category tags — one past the varchar(40) columns.
 // LABEL FACTS (owner ruling 2026-09-30): '_cfl' adds the per-draft LABEL FACTS
 // section (rainfast/re-entry from the label of the product applied at the
-// customer's last visit) and the matching timing-grounding rule. Still inside
-// REAL_ANSWERS_VERSION_FAMILY and cumulative: '3_cfl' = the re-service fact + LIVE ETA + COMPANY FACTS + LABEL FACTS.
-// 33 chars, 38 with all four category tags.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}3_cfl`;
+// customer's last visit) and the matching timing-grounding rule.
+// VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1, #5499): '_cflv' adds the live
+// tech position / delay / missed-visit / open-promise section and the gate-on
+// rules that act on it. Cumulative, inside REAL_ANSWERS_VERSION_FAMILY: '3_cflv' =
+// the re-service fact + LIVE ETA + COMPANY FACTS + LABEL FACTS + VISIT STATUS &
+// OPEN LOOPS. 34 chars, 39 with all four category tags.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}3_cflv`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -4271,7 +4275,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   // 8am/8pm ET boundary, since sms-gratitude-qualification.js hashes and
   // pins the full rendered system prompt.
   const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS, LABEL FACTS' : ''}, the thread`;
+  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS' : ''}, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
     ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
@@ -4296,6 +4300,20 @@ LABEL FACTS (product timing from the label):
 - When a LABEL FACTS section is in the context block, each line is ONE finished sentence about the visit named in its header (a re-entry sentence and/or a rainfast sentence). To give label timing at all, COPY the sentence word for word - the whole sentence, unchanged, including its visit date. Never paraphrase, shorten, split, combine, round, convert, spell out, or add to it, and never give a time, a number of hours or minutes, a clock time, "overnight", "a couple of hours", "until dry", "rainfast", or a "you can go back out now" / "safe for the pets now" / "fine to water or mow" line in your own words. A re-entry sentence answers only when people or pets can go back out; a rainfast sentence answers only whether rain washes it off. Never name a product or brand.
 - With no LABEL FACTS sentence of the kind asked about (or with LABEL FACTS saying none is on file), give no timing of that kind at all. For a rain question with no rainfast sentence, answer from the COMPANY FACTS rain line - a treatment needs to dry and bond to surfaces, and after that it holds up to weather - plainly, as your own knowledge of how we work; never say the label is silent, missing, or does not list a rainfast time.
 - Never call a treatment safe, pet-safe, kid-safe, or non-toxic, and never say EPA-approved or "safe for" anyone - LABEL FACTS gives timing, not safety claims. A question about symptoms, illness, or exposure is not a timing question: it stays with a person.
+`
+    : '';
+  // VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1), gate-on only: rules that act
+  // on the per-draft VISIT STATUS & OPEN LOOPS section (a flagged delay, a passed
+  // window, open promises). Static text — the section's content is
+  // per-draft data (buildFactsBlock), never interpolated here, so this stays
+  // time-invariant. The tightened voice bans live HERE, not in the shared
+  // CUSTOMER_SMS_HOUSE_VOICE constant other agents use. '' gate-off (byte-identical).
+  const visitLoopsRules = realAnswersOn
+    ? `
+VISIT STATUS & OPEN LOOPS:
+- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
+- Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on this visit.").
+- Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
   const handoffBullet = realAnswersOn
@@ -4347,7 +4365,7 @@ PROPERTY & ACCESS RULES:
 - PROPERTY & PREFERENCES facts (pets, irrigation, HOA, instructions) are there so you respect them in replies — reference them naturally when relevant.
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
 ${deferRule}
-${companyFactsRules}
+${companyFactsRules}${visitLoopsRules}
 USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and ${liveStatusMeaning}${liveEtaUseRule} If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
@@ -4469,6 +4487,146 @@ function monthlyChargeNote(dues) {
     || '. Whether these dues are currently collecting could not be confirmed, so state the dues and never a charge total';
 }
 
+// VISIT STATUS & OPEN LOOPS header — fixed, ALWAYS rendered gate-on (sealed-eval's
+// 'vl' marker, VERSION_SUFFIX_FACT_MARKERS, is this exact string).
+const VISIT_LOOPS_HEADER = 'VISIT STATUS & OPEN LOOPS:';
+// One internal field → a single capped, injection-screened line fragment ('' when
+// absent or when it reads as a prompt-control attempt). Descriptions of
+// commitments are model-extracted from call/SMS text — untrusted like exemplars.
+// Internal free text (commitment descriptions) can hold gate codes or
+// card/SSN digits: the aggregator's shared redactor runs first (lazy require, as
+// elsewhere in this file; fail closed to '' if it cannot load).
+function visitLoopRedact(value) {
+  try {
+    return require('./context-aggregator').redactAccessCodes(value == null ? '' : String(value));
+  } catch {
+    return '';
+  }
+}
+function visitLoopText(value, cap) {
+  const text = sanitizeSingleLine(visitLoopRedact(value), cap).replace(/"/g, "'");
+  if (!text || EXEMPLAR_INJECTION_RE.test(text)) return '';
+  return text;
+}
+// " (the Lawn Care visit, 9-11 AM)" — which visit a line is about. Never "today's":
+// a prior-day visit whose window runs past midnight is carried into these facts.
+function visitLoopWhich(item) {
+  const type = visitLoopText(item && item.visitType, 60);
+  const win = visitLoopText(item && item.windowDisplay, 40);
+  if (!type && !win) return '';
+  return ` (the ${type ? `${type} ` : ''}visit${win ? `, ${win}` : ''})`;
+}
+function visitLoopLateLine(late) {
+  if (!late || typeof late !== 'object') return null;
+  if (late.missingTracking === true) {
+    return `- Tracking gap${visitLoopWhich(late)}: no departure or arrival is recorded yet for this visit — this is not confirmed lateness; do not say the tech is late or on time, and do not promise an arrival time`;
+  }
+  return `- DELAY FLAGGED${visitLoopWhich(late)}: dispatch flagged this visit past its window — apologize once for the delay; never say "on time"`;
+}
+// Where the tech is comes only from the canonical LIVE STATUS / LIVE ETA facts on
+// the visit line; this line never restates position, so it is always a hand-off.
+function visitLoopPastWindowLine(past) {
+  if (!past || typeof past !== 'object') return null;
+  const type = visitLoopText(past.type, 60) || 'scheduled';
+  const win = visitLoopText(past.windowDisplay, 40);
+  return `- WINDOW PASSED: the ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete — apologize for the delay, say you're checking with ${past.assigned === false ? 'the office' : 'the tech'}, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
+}
+// WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
+// timingGuard: OUR promises (WE OWE THEM) also pass the rain / re-entry timing mode —
+// SMS timing comes only from LABEL FACTS, so a promise text stating one is withheld.
+// A customer's own request ("asked whether the sprinklers need to be off") is not a
+// timing claim of ours and keeps the standard banned-copy check, so the ask stays visible.
+function visitLoopItemLines(items, label, trailing, { timingGuard = false } = {}) {
+  const lines = [];
+  for (const item of (Array.isArray(items) ? items : []).slice(0, 5)) {
+    if (!item || typeof item !== 'object') continue;
+    const kind = visitLoopText(item.kind, 40);
+    // model-extracted free text: banned customer copy ("pet-safe", fixed re-entry
+    // times, ...) never enters the facts — the shared compliance guard decides, fail
+    // closed (in its timing mode for our own promises)
+    const raw = visitLoopText(item.description, 120);
+    const description = raw && hasBannedCustomerCopy(raw, timingGuard ? { rainTimeGuard: true } : {}) ? 'details withheld (restricted wording)' : raw;
+    if (!kind && !description) continue;
+    lines.push(`- ${label}: ${[kind, description].filter(Boolean).join(' — ')}${trailing(item)}`);
+  }
+  return lines;
+}
+// The call_commitments ids renderVisitLoopsSection can show (the same five-per-list
+// cap) — persisted on a suggestion so the send boundary rechecks they are still
+// open. [] gate-off: the section is not rendered then.
+// Keyed on the facts block the reply was generated from (did it carry the
+// section?), not the live gate: a gate flip between generation and persistence
+// must not drop the send-time rechecks for a reply grounded on the section.
+const factsCarryVisitLoops = (factsBlock) => String(factsBlock || '').includes(`\n${VISIT_LOOPS_HEADER}\n`);
+function visitLoopCommitmentIds(context, factsBlock) {
+  if (!factsCarryVisitLoops(factsBlock)) return [];
+  const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
+  const ids = [...(Array.isArray(v.weOwe) ? v.weOwe.slice(0, 5) : []), ...(Array.isArray(v.customerWaiting) ? v.customerWaiting.slice(0, 5) : [])]
+    // "id:rev" — the send boundary checks the row is still open AND unedited
+    .map((i) => (i && i.id != null ? (i.rev ? `${i.id}:${i.rev}` : String(i.id)) : '')).filter(Boolean);
+  return [...new Set(ids)];
+}
+// The lines a reply must address even when the customer only said thanks (the
+// VISIT STATUS & OPEN LOOPS rule); a tracking gap alone is not one. false gate-off.
+function visitLoopsNeedAnswer(context) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return false;
+  const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
+  const listed = (list) => Array.isArray(list) && list.some((i) => i && typeof i === 'object');
+  // a tracking gap is explicitly not confirmed lateness: not a loop
+  const delay = v.lateAlert && typeof v.lateAlert === 'object' && v.lateAlert.missingTracking !== true;
+  return Boolean(delay || v.pastWindow) || listed(v.weOwe) || listed(v.customerWaiting);
+}
+// Deterministic draft check (same loop as validateReserviceOffer): with an open loop
+// listed, an empty reply breaks the "never go silent" rule — it is revised, or stays
+// unconverged, instead of passing as "no reply warranted".
+// Read from the RENDERED facts block (live drafting and the sealed eval's frozen
+// facts alike): one of the lines the rule says must be answered is listed.
+const MUST_ANSWER_LINE_RE = /^- (?:DELAY FLAGGED|WINDOW PASSED|WE OWE THEM|THEY ARE WAITING ON US FOR)\b/;
+function factsListOpenLoop(factsBlock) {
+  const text = String(factsBlock || '');
+  const at = text.indexOf(`\n${VISIT_LOOPS_HEADER}\n`);
+  if (at < 0) return false;
+  const lines = text.slice(at + VISIT_LOOPS_HEADER.length + 2).split('\n');
+  const end = lines.findIndex((l) => !l.startsWith('- '));
+  return lines.slice(0, end < 0 ? lines.length : end).some((line) => MUST_ANSWER_LINE_RE.test(line));
+}
+function validateOpenLoopAnswer({ reply, factsBlock }) {
+  if (!factsListOpenLoop(factsBlock) || String(reply || '').trim()) return { ok: true, violations: [] };
+  return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
+}
+// Marks a draft whose section showed time-sensitive VISIT STATUS (a delay, a
+// passed window): { signature } from visit-loops-facts
+// visitStatusSignature. The send boundary rebuilds the facts and refuses if the
+// signature changed.
+// null when the section showed none of these, or gate-off.
+// The section was rendered, so the snapshot is persisted even when nothing
+// time-sensitive showed ({ signature: null }): a delay, passed window or missed
+// visit that appears while the card waits changes the live signature and refuses.
+function visitLoopStatus(context, factsBlock) {
+  if (!factsCarryVisitLoops(factsBlock)) return null;
+  return { signature: require('./visit-loops-facts').visitStatusSignature(context && context.visitLoops) };
+}
+// Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
+// undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
+// header, then one line per present field, or the single line "- none". Pure.
+function renderVisitLoopsSection(visitLoops) {
+  const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
+  const lines = [
+    visitLoopLateLine(v.lateAlert),
+    visitLoopPastWindowLine(v.pastWindow),
+    // the day it was asked, never a deadline (visit-loops-facts: no due time is restated)
+    ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
+      const since = visitLoopText(formatEtDate(i.since), 40);
+      return since ? ` (since ${since})` : '';
+    }, { timingGuard: true }),
+    ...visitLoopItemLines(v.customerWaiting, 'THEY ARE WAITING ON US FOR', (i) => {
+      const since = visitLoopText(formatEtDate(i.since), 40);
+      return since ? ` (since ${since})` : '';
+    }),
+  ].filter(Boolean);
+  return `${VISIT_LOOPS_HEADER}\n${lines.length ? lines.join('\n') : '- none'}\n`;
+}
+
 /**
  * The fact block the drafter may draw from — and the EXACT same block the
  * verifier checks the draft against, so the two agree on what counts as
@@ -4512,6 +4670,14 @@ function buildFactsBlock(context, extras = {}) {
   // against like any other section. '' gate-off (byte-identical).
   const companyFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? renderCompanyFactsSection()
+    : '';
+  // VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1): gate-on only, '' gate-off
+  // (byte-identical). Rendered right after UPCOMING SERVICES — NOT between COMPANY
+  // FACTS and BILLING: sms-sealed-eval's factPresent, sms-shadow-judge and
+  // sms-company-facts all trust the exact "...SLA\nFREE RE-SERVICE\n[COMPANY
+  // FACTS][LABEL FACTS]BILLING:" tail, so nothing may be inserted there.
+  const visitLoopsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? renderVisitLoopsSection(context.visitLoops)
     : '';
   // LABEL FACTS (owner ruling 2026-09-30), gate-on only, and only when the
   // fetch found verified label timing for the last visit's products.
@@ -4791,7 +4957,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}${labelFactsSection}BILLING:
+${visitLoopsSection}${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}${labelFactsSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
@@ -5359,6 +5525,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassLiveEta.violations);
     }
+    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, factsBlock });
+    if (!singlePassOpenLoop.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassOpenLoop.violations);
+    }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
@@ -5387,7 +5558,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // empty reply is checked like any other and revised.
     if (!parsed.reply) {
       const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
-      if (owed.ok) { converged = true; break; }
+      if (owed.ok && validateOpenLoopAnswer({ reply: '', factsBlock }).ok) { converged = true; break; }
     }
 
     // Owner-directed structural fix: check the model's own offered_times
@@ -5399,7 +5570,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
-    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck]) {
+    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock });
+    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, openLoopCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
         timesCheck.violations.push(...check.violations);
@@ -5582,7 +5754,8 @@ function parseShadowResponse(text) {
 async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false, source = null, hasMedia = false }) {
   const startedAt = Date.now();
   try {
-    const gratitudeCandidate = source === 'live_webhook' && !hasMedia && !schedulingIntent
+    const classifiedIntent = intent;
+    let gratitudeCandidate = source === 'live_webhook' && !hasMedia && !schedulingIntent
       && customer?.id && smsLogId && isGratitudeOnly(inboundMessage);
     if (gratitudeCandidate) {
       intent = { intent: GRATITUDE_INTENT, confidence: 1, approvedReply: buildGratitudeReply(customer.first_name) };
@@ -5603,9 +5776,26 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // Codex round-16 P2: gate-off must be byte-identical — the live-row query
     // changes the upcoming list, so the opt-in also requires the release gate.
     const includeLiveEta = gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
-    const context = customer
-      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta })
-      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta });
+    const loadContext = (liveEta) => (customer
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: liveEta, includeVisitLoops: true })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: liveEta, includeVisitLoops: true }));
+    let context = await loadContext(includeLiveEta);
+    // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
+    // window, a promise we owe, an ask they are waiting on) is not a
+    // pure thank-you — the gate-on rules require the reply to address it, which the
+    // gratitude lane's fixed reply cannot. It takes the ordinary operational path
+    // under its classified intent, with the context RELOADED with LIVE ETA: the
+    // upcoming list can still show a LIVE STATUS, and a status line drafted from it
+    // needs the live snapshot evidence the send-time guard checks.
+    let openLoopThanks = false;
+    if (gratitudeCandidate && visitLoopsNeedAnswer(context)) {
+      gratitudeCandidate = false;
+      intent = classifiedIntent;
+      context = await loadContext(gateEnvValue('GATE_SMS_REAL_ANSWERS'));
+      // A plain "Thanks!" classifies no_reply_needed (a shadow rung): route it to a
+      // person explicitly so the open loop is never answered with silence.
+      openLoopThanks = true;
+    }
     // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
     const liveEtaSnapshot = buildLiveEtaSnapshot(context);
     // The technician first name(s) this draft may have used as a status subject ("Sam is on
@@ -5640,8 +5830,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // Phase D/E: intents flipped to 'suggest' surface the draft as a composer
     // card; intents flipped to 'auto_send' (and that have earned the rung)
     // have it SENT to the customer automatically. Escalation intents,
-    // scheduling-intent messages, and anything without a customer + inbound
-    // link stay silent shadow.
+    // scheduling-intent messages (unless GATE_SMS_SCHEDULING_SUGGEST and the
+    // offer came from a booking picker: then a card, never a send), and
+    // anything without a customer + inbound link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
     const deliveryMode = await suggestMode.resolveDeliveryMode({
       reply: parsed.reply,
@@ -5649,6 +5840,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       smsLogId: smsLogId || null,
       intent: intentName,
       schedulingIntent,
+      // GATE_SMS_SCHEDULING_SUGGEST: a scheduling draft whose times came from a
+      // booking picker may reach the staff card (never auto-send).
+      openTimesSnapshot,
+      // Any draft whose facts list something owed goes to a person: no check can
+      // prove a non-empty reply actually addressed it (openLoopThanks is the
+      // demoted-gratitude case of the same rule).
+      requireReview: openLoopThanks || factsListOpenLoop(factsForDraft),
     });
 
     // Deterministic comms-lint verdict for this draft, computed once and
@@ -5827,6 +6025,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // rechecks them are still en_route immediately before sending.
           liveEtaSnapshot,
           techNames,
+          // PR #5499: open commitments the reply was grounded on — rechecked at the provider boundary.
+          visitLoopCommitmentIds: visitLoopCommitmentIds(context, factsForDraft),
+          visitLoopStatus: visitLoopStatus(context, factsForDraft),
           // Codex round-43 P2: the already-booked callback(s) a reply may refer to — persisted on the claim and rechecked live before provider entry.
           reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
         });
@@ -5850,6 +6051,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             smsLogId: smsLogId || null,
             intent: intentName,
             schedulingIntent,
+            openTimesSnapshot,
           });
           if (fallbackMode === 'suggest' || fallbackMode === suggestMode.AUTO_SEND_MODE) {
             const decisionId = await suggestMode.publishSuggestion({
@@ -5871,6 +6073,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
               liveEtaSnapshot,
               techNames,
+              visitLoopCommitmentIds: visitLoopCommitmentIds(context, factsForDraft),
+              visitLoopStatus: visitLoopStatus(context, factsForDraft),
               // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
               reserviceLanesSnapshot,
               reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -5901,6 +6105,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             smsLogId: smsLogId || null,
             intent: intentName,
             schedulingIntent,
+            openTimesSnapshot,
           });
           publishDemotedCard = freshMode === 'suggest' || freshMode === suggestMode.AUTO_SEND_MODE;
           if (publishDemotedCard) {
@@ -5929,6 +6134,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
             liveEtaSnapshot,
             techNames,
+            visitLoopCommitmentIds: visitLoopCommitmentIds(context, factsForDraft),
+            visitLoopStatus: visitLoopStatus(context, factsForDraft),
             // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
             reserviceLanesSnapshot,
             reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
@@ -5977,6 +6184,13 @@ module.exports = {
   buildUserPrompt,
   buildUserPromptFromFacts,
   buildFactsBlock,
+  renderVisitLoopsSection,
+  visitLoopCommitmentIds,
+  visitLoopStatus,
+  visitLoopsNeedAnswer,
+  validateOpenLoopAnswer,
+  factsListOpenLoop,
+  VISIT_LOOPS_HEADER,
   formatExemplarBlock,
   exemplarLooksClean,
   fetchVoiceExemplars,
@@ -6001,6 +6215,9 @@ module.exports = {
   parseOpenTimesDaysFromFactsBlock,
   stripOpenTimesSection,
   planOpenTimesRecheck,
+  // The day label every scheduler-backed offer is rendered with (sms-offers.js
+  // reads a sent offer's calendar date back through it).
+  schedulerDayLabel,
   looksLikeOfferText,
   computeOpenTimesSnapshot,
   openTimesStillOffered,

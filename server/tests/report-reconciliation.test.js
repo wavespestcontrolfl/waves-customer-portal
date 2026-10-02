@@ -234,6 +234,42 @@ describe('a confirmed prompt is honored downstream', () => {
   });
 });
 
+// Codex #5538: a same-key retry of a recorded attempt already got past the
+// pre-claim edit heads-up, so it never meets it again (asking would make the
+// retry carry reportRulesConfirmed, which the attempt's request hash refuses).
+describe('a same-key retry skips the edit heads-up', () => {
+  const { hasCompletionAttemptForKey } = require('../services/completion-attempts');
+  const stub = (row, seen) => (table) => {
+    const q = {
+      where: (criteria) => { seen.push({ table, criteria }); return q; },
+      first: () => Promise.resolve(row),
+    };
+    return q;
+  };
+
+  test('an attempt under this key is found by service and key; none, or no key, is not', async () => {
+    const seen = [];
+    await expect(hasCompletionAttemptForKey('svc-1', ' key-1 ', stub({ id: 'a1' }, seen))).resolves.toBe(true);
+    expect(seen).toEqual([{ table: 'service_completion_attempts', criteria: { service_id: 'svc-1', idempotency_key: 'key-1' } }]);
+    await expect(hasCompletionAttemptForKey('svc-1', 'key-2', stub(null, []))).resolves.toBe(false);
+    await expect(hasCompletionAttemptForKey('svc-1', '', stub({ id: 'a1' }, []))).resolves.toBe(false);
+  });
+
+  test('the completion asks only when neither a committed attempt nor an attempt under this key exists', () => {
+    const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    expect(source).toMatch(/if \(rulesBlock\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCommittedCompletionAttempt\(svc\.id, k\), true\)\)\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCompletionAttemptForKey\(/);
+  });
+
+  test('the promise check skips only a committed completion: an uncommitted same-key retry is asked again (codex local r15)', () => {
+    const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    expect(source).toMatch(/if \(stalePromiseIds\.length\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCommittedCompletionAttempt\(svc\.id, k\), true\)\)\) \{/);
+    // Its confirmation stays outside the request hash, so a confirmed retry
+    // still matches the attempt it retries.
+    const { hashCompletionRequest } = require('../services/completion-attempts');
+    expect(hashCompletionRequest({ a: 1, promiseMarksConfirmed: true })).toEqual(hashCompletionRequest({ a: 1 }));
+  });
+});
+
 // Round on 6c46f21bb (P2): a primary trapping report whose final activity
 // score is 0 never admits the reviewed body — the zero-state template
 // wins even when confirmed — so the prompt must not ask for an override

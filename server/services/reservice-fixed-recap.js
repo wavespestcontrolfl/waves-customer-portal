@@ -36,7 +36,11 @@ const SAFETY_LINE = 'Keep kids and pets off treated areas until dry; your techni
 // module's own classifier (everything but bait, station and trunk injection:
 // sprays, soil drench, fog, pin stream, and any method added later) and is not
 // a dry granular broadcast. An empty method says nothing, so it counts as dry.
-const DRY_APPLICATION_METHODS = new Set(['granular_broadcast']);
+const DRY_APPLICATION_METHODS = new Set(['granular_broadcast', 'dust', 'dusting', 'dust_application', 'dust_injection']);
+// A dry formulation recorded under a spray-class method (a dust catalog row
+// saved as spot_treatment, e.g. Delta Dust, "a waterproof dust") is not a wet
+// application either.
+const DRY_FORMULATION_RE = /\b(?:dusts?|granul\w*|powders?|baits?)\b/i;
 
 function isWetMethod(method) {
   const key = String(method == null ? '' : method).toLowerCase().replace(/[^a-z0-9]+/g, '_');
@@ -89,7 +93,8 @@ function pestsOf(products) {
 
 function hasLiquidApplication(products) {
   return (Array.isArray(products) ? products : [])
-    .some((product) => isWetMethod(product?.application_method ?? product?.applicationMethod));
+    .some((product) => isWetMethod(product?.application_method ?? product?.applicationMethod)
+      && !DRY_FORMULATION_RE.test(`${product?.product_name || ''} ${product?.product_category || ''}`));
 }
 
 /**
@@ -203,6 +208,8 @@ async function loadReserviceFixedRecapFacts(db, { svc, recordId, reportUrl }) {
     areas: asArray(record?.areas_serviced),
     products: (productRows || []).map((row) => ({
       application_method: row.application_method,
+      product_name: row.product_name,
+      product_category: row.product_category,
       targets: asArray(row.targets),
     })),
     reportUrl,
@@ -250,6 +257,9 @@ module.exports = {
   TEMPLATE_KEY,
   SAFETY_LINE,
   isWetMethod,
+  whereOf,
+  pestsOf,
+  hasLiquidApplication,
   providerBody,
   buildReserviceFixedRecap,
   reserviceFixedRecapHonored,

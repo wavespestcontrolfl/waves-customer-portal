@@ -2239,3 +2239,42 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     fin.mockRestore(); rec.mockRestore();
   });
 });
+
+// #5467: an on-site opt-in ask deferred to the send window carries the booked
+// visit (optin_visit_id); it goes out only while that visit is still confirmed
+// and its canonical arrival is ahead.
+describe('recipient_optin_deferred: on-site ask re-checked against its booked visit', () => {
+  const { scheduledServiceApptTime } = require('../services/appointment-reminders');
+  const meta = { optin_phone_key: '9415557777', optin_customer_id: 'c1', optin_visit_id: 'v1' };
+  const wireDb = (visit) => {
+    db.mockReset();
+    db.mockImplementation((table) => {
+      if (table === 'recipient_optin') return firstChain({ status: 'pending' });
+      if (table === 'customers') return firstChain({ id: 'c1' });
+      if (table === 'scheduled_services') return firstChain(visit);
+      return firstChain(null);
+    });
+  };
+
+  test('still confirmed and ahead: eligible', async () => {
+    wireDb({ id: 'v1' });
+    expect(await recheckDeferredReplay('recipient_optin_deferred', meta)).toMatchObject({ eligible: true });
+  });
+
+  test('cancelled / no longer confirmed (no confirmed row): not sent', async () => {
+    wireDb(undefined);
+    expect(await recheckDeferredReplay('recipient_optin_deferred', meta)).toMatchObject({ eligible: false, reason: 'optin-visit-not-live' });
+  });
+
+  test('arrival already passed: not sent', async () => {
+    wireDb({ id: 'v1' });
+    scheduledServiceApptTime.mockResolvedValueOnce(new Date(Date.now() - 60 * 1000));
+    expect(await recheckDeferredReplay('recipient_optin_deferred', meta)).toMatchObject({ eligible: false, reason: 'optin-visit-not-live' });
+  });
+
+  test('a portal ask with no visit is unchanged', async () => {
+    wireDb(undefined);
+    const { optin_visit_id: _omit, ...portal } = meta;
+    expect(await recheckDeferredReplay('recipient_optin_deferred', portal)).toMatchObject({ eligible: true });
+  });
+});

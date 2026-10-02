@@ -29,6 +29,11 @@ jest.mock('../config/models', () => {
         primary: { provider: 'gemini', model: 'gemini-3.8-flash-test' },
         fallback: { provider: 'openai', model: 'gpt-6-astra-test' },
       },
+      photoIdPestV2: {
+        name: 'photoIdPestV2',
+        primary: { provider: 'gemini', model: 'gemini-3.6-flash-test' },
+        fallback: { provider: 'openai', model: 'gpt-6-astra-test' },
+      },
     },
   };
 });
@@ -73,6 +78,9 @@ function baseCtx(overrides = {}) {
 
 const CURRENT_MONTH = 6; // June — inside every fixture entry's active_months
 
+// The default (no ladder option) is the full Gemini → verify → OpenAI
+// ladder (the 2026-09-26 contract); the app route's Gemini-only read
+// (owner 2026-10-01) has its own block below.
 beforeEach(() => {
   dispatch.mockReset();
 });
@@ -787,6 +795,29 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.internal.escalation_reasons).toContain('low_confidence');
     expect(result.internal.disagreed).toBe(false);
     expect(result.v2.answer.wording).toBe('pretty_sure'); // bumped to the higher (0.85) of the two
+  });
+
+  // 2026-10-01: Gemini's default MEDIUM thinking took ~30 s on one leg; the
+  // two Gemini legs run at LOW, the OpenAI escalation sets no Gemini level.
+  test('Gemini legs think at LOW; the escalation leg carries no Gemini level', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [1], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.85, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      });
+
+    await identifyPestV2([PHOTO]);
+    const payloads = dispatch.mock.calls.map(([, payload]) => [payload.laneId, payload.thinkingLevel]);
+    expect(payloads).toEqual([
+      ['photo_id_v2_candidates', 'LOW'],
+      ['photo_id_v2_verify', 'LOW'],
+      ['photo_id_v2_escalation', undefined],
+    ]);
   });
 
   test('provider agreement is recomputed after an organism-only read removes sign candidates', async () => {
@@ -1509,5 +1540,101 @@ describe('L1: pest engine reads only the pest section', () => {
       const offCatalogPest = freshEngine.resolveCandidate({ slug: '', off_catalog_name: 'Some Ant', group_id: 'ants', confidence: 0.6 });
       expect(freshEngine.candidateNodeId(offCatalogPest)).toBe('ants');
     });
+  });
+});
+
+// Owner 2026-10-01: "lets just use Gemini for this". The app route asks
+// for a Gemini-only read: OpenAI only stands in when Gemini returns nothing.
+describe('Gemini-only ladder (app route)', () => {
+  const GEMINI_ONLY = { ladder: 'gemini_only' };
+
+  test('a confident Gemini read is the answer: one call, no verify, no escalation', async () => {
+    dispatch.mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.92 }]));
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch.mock.calls[0][0]).toMatchObject({ provider: 'gemini', model: 'gemini-3.6-flash-test' });
+    expect(dispatch.mock.calls[0][1]).toMatchObject({ laneId: 'pest_id_app', thinkingLevel: 'LOW' });
+    expect(result.internal).toMatchObject({ ladder: 'gemini_only', escalation_triggered: false, escalation_reasons: [] });
+    // No trait check ran, so the answer names the species at "Likely".
+    expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fire-ant', wording: 'likely' });
+  });
+
+  test('a low-confidence Gemini read does not escalate; it climbs on its own', async () => {
+    dispatch.mockResolvedValueOnce(candidatesReply([{ slug: 'ghost-ant', confidence: 0.35 }, { slug: 'white-footed-ant', confidence: 0.3 }]));
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.internal.escalation_triggered).toBe(false);
+    expect(result.v2.answer.level).not.toBe('entry');
+  });
+
+  test('a Gemini miss still hands the photo to OpenAI so the customer gets an answer', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'gemini_incomplete' })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.85, traits_visible: [1], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(dispatch.mock.calls[1][1].laneId).toBe('pest_id_app');
+    expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+    expect(result.ok).toBe(true);
+  });
+
+  test('a reply whose candidate items are all malformed hands off to OpenAI', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [{ slug: 'fire-ant' }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.85, traits_visible: [1], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+  });
+
+  test('a read naming only unresolvable candidates hands off to OpenAI', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: '', off_catalog_name: 'mystery bug', group_id: 'not-a-group', confidence: 0.9 }]))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.85, traits_visible: [1], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+  });
+
+  test('a valid empty Gemini read stays a genuine unknown without OpenAI', async () => {
+    dispatch.mockResolvedValueOnce(candidatesReply([]));
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.v2.answer.wording).toBe('unknown');
+  });
+
+  test('callers that do not ask (visit prep) keep the full ladder', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.92 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.92, traits_visible: [1, 2], traits_not_visible: [] }] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch.mock.calls[0][0].model).toBe('gemini-3.8-flash-test');
+    expect(dispatch.mock.calls[1][1].laneId).toBe('photo_id_v2_verify');
+    expect(result.internal.ladder).toBe('full');
   });
 });

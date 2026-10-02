@@ -5,7 +5,7 @@
 // sheet's body (the sheet's header stays in view); at desktop width, a
 // popover under the button. The products this service line used most in the
 // last 90 days come first with their usual amount, then every pest product
-// A–Z; the rest of the catalog waits behind "Show other products", and
+// A–Z (the lawn line, `line="lawn"`, lists the lawn categories instead); the rest of the catalog waits behind "Show other products", and
 // search covers all of it. Items never applied to a property (supplies,
 // cleaner, traps, termite monitors) are not listed. A product already on the
 // sheet can't be added twice: /complete keeps only the first row per product.
@@ -13,7 +13,7 @@ import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import useModalFocus from '../../hooks/useModalFocus';
 import { Button, Input, cn } from '../ui';
 import {
-  byName, categoryLabel, isOutOfStock, productGroup, rankProducts, usualAmountText,
+  byName, categoryLabel, isOutOfStock, lawnProductGroup, productGroup, rankProducts, usualAmountText,
 } from '../../lib/fast-complete-products';
 
 const iconProps = {
@@ -35,8 +35,8 @@ function SearchIcon() {
 
 // The lists the picker browses: "Used most" in the server's order (most
 // visits first), then pest and other products A–Z without repeating them.
-function pickerLists(products, commonProducts) {
-  const listed = products.filter((product) => product && productGroup(product) !== 'hidden');
+function pickerLists(products, commonProducts, groupOf) {
+  const listed = products.filter((product) => product && groupOf(product) !== 'hidden');
   const byId = new Map(listed.map((product) => [String(product.id), product]));
   const commonById = new Map();
   for (const common of commonProducts) {
@@ -48,8 +48,8 @@ function pickerLists(products, commonProducts) {
     listed,
     commonById,
     mostUsed: [...commonById.keys()].map((id) => byId.get(id)),
-    pest: rest.filter((product) => productGroup(product) === 'pest'),
-    other: rest.filter((product) => productGroup(product) === 'other'),
+    pest: rest.filter((product) => groupOf(product) === 'pest'),
+    other: rest.filter((product) => groupOf(product) === 'other'),
   };
 }
 
@@ -103,17 +103,23 @@ function OptionGroup({ title, products, lists, onSheetIds, onPick, revealed = fa
   );
 }
 
-function BrowseLists({ lists, showOther, groupProps }) {
+// Section titles: the pest line's (the default) or the lawn line's.
+const LIST_TITLES = {
+  pest: { mostUsed: 'Used most on pest visits', primary: 'All pest products' },
+  lawn: { mostUsed: 'Used on the last lawn visit', primary: 'Lawn products' },
+};
+
+function BrowseLists({ lists, showOther, groupProps, titles }) {
   return (
     <>
-      {lists.mostUsed.length > 0 && <OptionGroup title="Used most on pest visits" products={lists.mostUsed} {...groupProps} />}
-      {lists.pest.length > 0 && <OptionGroup title="All pest products" products={lists.pest} {...groupProps} />}
+      {lists.mostUsed.length > 0 && <OptionGroup title={titles.mostUsed} products={lists.mostUsed} {...groupProps} />}
+      {lists.pest.length > 0 && <OptionGroup title={titles.primary} products={lists.pest} {...groupProps} />}
       {showOther && lists.other.length > 0 && <OptionGroup title="Other products" products={lists.other} revealed {...groupProps} />}
     </>
   );
 }
 
-export default function FastCompleteProductPicker({ variant, products, commonProducts, onSheetIds, anchorRef, onPick, onClose }) {
+export default function FastCompleteProductPicker({ variant, line = 'pest', products, commonProducts, onSheetIds, anchorRef, onPick, onClose }) {
   const titleId = useId();
   const searchId = useId();
   // Escape and Tab stay in the picker; the sheet's own Escape waits under it,
@@ -124,7 +130,8 @@ export default function FastCompleteProductPicker({ variant, products, commonPro
   onCloseRef.current = onClose;
   const [query, setQuery] = useState('');
   const [showOther, setShowOther] = useState(false);
-  const lists = useMemo(() => pickerLists(products, commonProducts), [products, commonProducts]);
+  const lawn = line === 'lawn';
+  const lists = useMemo(() => pickerLists(products, commonProducts, lawn ? lawnProductGroup : productGroup), [products, commonProducts, lawn]);
   const popover = variant === 'popover';
 
   // A popover takes the search box and closes on a press anywhere else. The
@@ -178,7 +185,7 @@ export default function FastCompleteProductPicker({ variant, products, commonPro
             {!results.length && <p className="tech-visit-muted">No products match.</p>}
           </>
         ) : (
-          <BrowseLists lists={lists} showOther={showOther} groupProps={groupProps} />
+          <BrowseLists lists={lists} showOther={showOther} groupProps={groupProps} titles={LIST_TITLES[lawn ? 'lawn' : 'pest']} />
         )}
       </div>
       {!results && lists.other.length > 0 && (
