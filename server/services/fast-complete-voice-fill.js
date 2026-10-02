@@ -429,6 +429,10 @@ function readUnitAfter(tokens, i) {
   return unit.unit ? { ...unit, skipped } : { unit: null, length: 0, skipped: 0 };
 }
 
+// Every spoken quantity in `text`: { value, unit, ambiguous, start, end, nameAt }.
+// start / end are token positions (end is past the unit word); nameAt is where a
+// name would begin if the quantity is joined to it by "of" ("four ounces of
+// Taurus", "five of Talstar"), else null.
 function quantitiesIn(text) {
   const tokens = tokensOf(text);
   const found = [];
@@ -436,12 +440,21 @@ function quantitiesIn(text) {
     const number = readSpokenNumber(tokens, i);
     if (!number) { i += 1; continue; }
     const { unit, length, skipped } = readUnitAfter(tokens, number.next);
-    const after = number.next + skipped + length;
-    found.push({ value: number.value, unit, orNext: tokens[after] === 'or' && readSpokenNumber(tokens, after + 1) !== null });
-    i = Math.max(after, i + 1);
+    const end = number.next + skipped + length;
+    const nameAt = tokens[end] === 'of' ? end + (tokens[end + 1] === 'the' ? 2 : 1) : null;
+    found.push({ value: number.value, unit, start: i, end, nameAt, orNext: tokens[end] === 'or' && readSpokenNumber(tokens, end + 1) !== null });
+    i = Math.max(end, i + 1);
   }
-  // "three or four": neither number is the one that was meant
-  return found.map((q, k) => ({ value: q.value, unit: q.unit, ambiguous: q.orNext || found[k - 1]?.orNext === true }));
+  // "three or four": neither number is the one that was meant. "four ounces of
+  // Taurus and five of Talstar": a number joined to a name by "of" with no unit
+  // word of its own takes the unit of the "of" number before it.
+  const mapped = [];
+  found.forEach(({ orNext, ...q }, k) => {
+    const prev = mapped[k - 1];
+    const unit = q.unit === null && q.nameAt !== null && prev?.nameAt !== null && prev ? prev.unit : q.unit;
+    mapped.push({ ...q, unit, ambiguous: orNext || found[k - 1]?.orNext === true });
+  });
+  return mapped;
 }
 
 const SAME_AS_LAST_RE = /\b(same|last time|the usual|usual|as before|like before|as always|as last)\b/i;
@@ -463,68 +476,103 @@ function sentenceOf(transcript, heard) {
   return String(transcript || '').split(/(?<=[.!?])\s+/).find((sentence) => ` ${norm(sentence)} `.includes(` ${first} `)) || '';
 }
 
-// A spoken number as the schema carries it: 0 / '' / missing is "not spoken"
-// (nothing to flag); otherwise { value, matches } when it is positive, finite and
-// EQUAL to a number said in `heard` (matches: the mentions it equals, each with
-// the unit word spoken after it), or { reason } for the one thing wrong with it.
-function spokenNumber(raw, heard) {
+// The amount as the schema carries it: 0 / '' / missing is "not spoken" (nothing
+// to flag); otherwise { value }, or { reason } when it is not positive and finite.
+function amountValue(raw) {
   if (raw === 0 || raw === '' || raw == null) return {};
   const value = typeof raw === 'number' ? raw : Number(raw);
-  if (!Number.isFinite(value) || value <= 0) return { reason: 'amount_invalid' };
-  const matches = quantitiesIn(heard).filter((q) => !q.ambiguous && Math.abs(q.value - value) < 1e-6);
-  return matches.length ? { value, matches } : { reason: 'amount_not_spoken' };
+  return Number.isFinite(value) && value > 0 ? { value } : { reason: 'amount_invalid' };
+}
+
+// The unambiguous spoken quantities among `quantities` that EQUAL the value.
+const equalQuantities = (value, quantities) => quantities.filter((q) => !q.ambiguous && Math.abs(q.value - value) < 1e-6);
+
+// A number said for a visit field (linear feet): { value } when equal to one
+// spoken in `heard`, else the one thing wrong with it.
+function spokenNumber(raw, heard) {
+  const parsed = amountValue(raw);
+  if (parsed.value === undefined) return parsed;
+  return equalQuantities(parsed.value, quantitiesIn(heard)).length ? parsed : { reason: 'amount_not_spoken' };
 }
 
 // ── Evidence for the SELECTED product ────────────────────────────────────
 // A quote that exists is not proof it names this product: the heard words must
-// carry the product's own name or one of its aliases. Matched on normalized
-// words. A name counts when its whole phrase is said, or one distinctive word of
-// it ("taurus", "talstar", "surfactant"), or two of its letter words; words that
-// name only a kind of product ("gel", "dust", "plus") are not distinctive.
+// carry the product's own name or one of its aliases. Matched on words. A name
+// counts when its whole phrase is said, or one distinctive word of it ("taurus",
+// "talstar", "surfactant"), or two of its letter words; words that name only a
+// kind of product ("gel", "dust", "plus") are not distinctive.
 const GENERIC_NAME_WORDS = new Set([
   'nonionic', 'plus', 'gel', 'bait', 'dust', 'spray', 'insecticide', 'granular', 'liquid', 'concentrate', 'control',
   'professional', 'solution', 'powder', 'wasp', 'ant', 'cockroach', 'roach', 'pest', 'wsg', 'pro',
 ]);
 const isDistinctiveWord = (word) => word.length >= 4 && /^[a-z]+$/.test(word) && !GENERIC_NAME_WORDS.has(word);
+const hasLetters = (word) => /[a-z]/.test(word);
+const containsRun = (tokens, run) => run.length > 0 && tokens.some((_, i) => run.every((word, k) => tokens[i + k] === word));
 
-// { qualifies, words } for one product against the heard words: `words` is every
-// word of its names that was said (used to tell two products apart).
-function nameEvidence(product, heardWords, heardNorm) {
+// For one product against the heard tokens: whether its name is said, every word
+// of its names that was said (to tell two products apart), and where its name
+// sits (the first run of its said letter words) as { start, end } token positions.
+function nameEvidence(product, tokens) {
   const words = new Set();
+  const spots = new Set();
   let qualifies = false;
   for (const name of [product.name, product.fullName, ...product.aliases]) {
-    const tokens = norm(name).split(' ').filter(Boolean);
-    const said = tokens.filter((t) => heardWords.has(t));
-    const letters = said.filter((t) => /[a-z]/.test(t));
-    if (tokens.length && (` ${heardNorm} `.includes(` ${tokens.join(' ')} `) || said.some(isDistinctiveWord) || letters.length >= 2)) qualifies = true;
+    const nameTokens = tokensOf(name);
+    const said = nameTokens.filter((t) => tokens.includes(t));
+    const letters = said.filter(hasLetters);
+    const named = containsRun(tokens, nameTokens) || said.some(isDistinctiveWord) || letters.length >= 2;
+    qualifies = qualifies || named;
     said.forEach((t) => words.add(t));
+    if (named) tokens.forEach((t, i) => letters.includes(t) && spots.add(i));
   }
-  return { qualifies, words };
+  const start = Math.min(...spots);
+  let end = start + 1;
+  while (spots.has(end)) end += 1;
+  return { qualifies, words, start, end };
+}
+
+// Every product's evidence against one heard snippet, computed once per row.
+function heardProducts(ctx, heard) {
+  const tokens = tokensOf(heard);
+  return ctx.products.map((product) => ({ id: product.id, ...nameEvidence(product, tokens) }));
 }
 
 // Why the heard words do not back this product, as a refusal reason, or null:
 // product_not_heard when its name is not there, ambiguous_product when another
 // product is named by at least all the same words (the tech said "the Alpine").
-function productEvidenceVerdict(product, ctx, heard) {
-  const heardNorm = norm(heard);
-  const heardWords = new Set(heardNorm.split(' ').filter(Boolean));
-  const mine = nameEvidence(product, heardWords, heardNorm);
+function productEvidenceVerdict(product, evidence) {
+  const mine = evidence.find((e) => e.id === product.id);
   if (!mine.qualifies) return 'product_not_heard';
-  const tied = ctx.products.some((other) => {
-    if (other.id === product.id) return false;
-    const theirs = nameEvidence(other, heardWords, heardNorm);
-    return theirs.qualifies && [...mine.words].every((w) => theirs.words.has(w));
-  });
+  const tied = evidence.some((other) => other.id !== product.id && other.qualifies && [...mine.words].every((w) => other.words.has(w)));
   return tied ? 'ambiguous_product' : null;
+}
+
+// The spoken quantities that belong to THIS product when one snippet names
+// several. A quantity joined to a name by "of" ("four ounces of Taurus", "five of
+// Talstar") belongs to that name. Otherwise a quantity belongs to the product
+// whose name it follows, up to the next product's name ("Taurus four ounces and
+// Talstar five ounces"); failing that, a number right before the first name
+// said. Deterministic: position only.
+function productQuantities(product, evidence, quantities) {
+  const named = evidence.filter((e) => e.qualifies);
+  const mine = named.find((e) => e.id === product.id);
+  const joined = (q) => q.nameAt !== null && named.some((e) => e.start === q.nameAt);
+  const joinedToMe = quantities.filter((q) => q.nameAt === mine.start);
+  if (joinedToMe.length) return joinedToMe;
+  const nextStart = Math.min(Infinity, ...named.filter((e) => e.start > mine.start).map((e) => e.start));
+  const after = quantities.filter((q) => !joined(q) && q.start >= mine.end && q.end <= nextStart);
+  if (after.length) return after;
+  // "four Taurus": a number right before the FIRST name said, with no product named earlier to own it
+  return quantities.filter((q) => q.end === mine.start && !named.some((e) => e.start < q.start));
 }
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
 // Check chip shows), or null. Checked in order; the first refusal wins.
-function productRefusal(raw, product, heard, normTranscript, seen, ctx) {
+function productRefusal(raw, product, heard, normTranscript, seen, evidence) {
   if (!product) return { reason: 'not_on_sheet', text: heard || raw.productId };
   if (!heardInTranscript(heard, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
   if (seen.has(product.id)) return { reason: 'duplicate_product', text: heard };
-  const reason = productEvidenceVerdict(product, ctx, heard);
+  const reason = productEvidenceVerdict(product, evidence);
   return reason ? { reason, text: heard } : null;
 }
 
@@ -540,21 +588,27 @@ function unitVerdict(spoken, unit, product) {
   return heardUnit === unit ? null : 'unit_not_heard';
 }
 
-// The amount and unit that survive the checks: a number said for this product,
-// in the unit word said next to it, in a unit the sheet offers for the product;
-// else none (and a Check for what was wrong, the product tap stays).
-function productAmount(raw, product, heard, unclear) {
+// The amount and unit that survive the checks: a number said FOR THIS PRODUCT
+// (by position), in the unit word attached to that number, in a unit the sheet
+// offers for the product; else none (and a Check for what was wrong, the product
+// tap stays).
+function productAmount(raw, product, heard, unclear, evidence) {
   const none = { amount: null, unit: '' };
-  const spoken = spokenNumber(raw.amount, heard);
-  if (spoken.reason) pushUnclear(unclear, heard, spoken.reason);
-  if (spoken.value === undefined) return none;
+  const parsed = amountValue(raw.amount);
+  if (parsed.reason) pushUnclear(unclear, heard, parsed.reason);
+  if (parsed.value === undefined) return none;
   const unit = sheetUnit(raw.unit, product.measure);
   if (!unit) {
     pushUnclear(unclear, heard, 'bad_unit');
     return none;
   }
-  const verdicts = spoken.matches.map((q) => unitVerdict(q.unit, unit, product));
-  if (verdicts.includes(null)) return { amount: spoken.value, unit };
+  const matches = equalQuantities(parsed.value, productQuantities(product, evidence, quantitiesIn(heard)));
+  if (!matches.length) {
+    pushUnclear(unclear, heard, 'amount_not_spoken');
+    return none;
+  }
+  const verdicts = matches.map((q) => unitVerdict(q.unit, unit, product));
+  if (verdicts.includes(null)) return { amount: parsed.value, unit };
   pushUnclear(unclear, heard, verdicts[0]);
   return none;
 }
@@ -575,13 +629,14 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     if (!raw || typeof raw !== 'object') continue;
     const heard = cleanText(raw.heard, CAPS.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
-    const refusal = productRefusal(raw, product, heard, normTranscript, seen, ctx);
+    const evidence = product ? heardProducts(ctx, heard) : null;
+    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
       continue;
     }
     seen.add(product.id);
-    const { amount, unit } = productAmount(raw, product, heard, unclear);
+    const { amount, unit } = productAmount(raw, product, heard, unclear, evidence);
     const sameAsLast = productSameAsLast(raw, amount, heard, transcript, unclear);
     const method = ctx.productMethods.includes(raw.method) ? raw.method : '';
     out.push({ productId: product.id, amount, unit, sameAsLast, method, heard });
@@ -611,10 +666,11 @@ function pickVisitField(value, allowed, dropped, isList) {
 }
 
 // ── Evidence for the SELECTED visit values ──────────────────────────────
-// Each value the model picked must be backed by words in the visit's heard text
-// or in the transcript sentence that text sits in. One lexicon per field, keyed
-// by the sheet's own value; a value with no lexicon entry has no evidence (fails
-// closed). Matched against normalized text (punctuation and hyphens are spaces).
+// Each value the model picked must be backed by words somewhere in the
+// transcript: techs spread a visit across sentences ("Ants were the issue. ...
+// Activity was light."). One lexicon per field, keyed by the sheet's own value;
+// a value with no lexicon entry has no evidence (fails closed). Matched against
+// normalized text (punctuation and hyphens are spaces).
 const VISIT_LEXICON = {
   pests: {
     Ants: /\bants?\b/,
@@ -644,12 +700,9 @@ const VISIT_LEXICON = {
   },
 };
 
-// The text a visit value must be found in: the visit's heard words plus the
-// transcript sentence each piece of them sits in.
-function visitEvidenceText(heard, transcript) {
-  const pieces = String(heard).split(/\.{3}|…/);
-  return norm([heard, ...pieces.map((piece) => sentenceOf(transcript, piece))].join(' '));
-}
+// The text a visit value must be found in: the whole transcript (plus the heard
+// words, which are checked against it separately).
+const visitEvidenceText = (heard, transcript) => norm(`${heard} ${transcript}`);
 
 function valueHeard(field, value, evidence, otherPest) {
   if (field === 'pests' && value === 'Other') return evidence.includes(norm(otherPest));

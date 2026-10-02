@@ -522,13 +522,22 @@ describe('every selected visit value needs words that support it', () => {
     expect(out.unclear).toEqual([{ heard: 'Spiders', reason: 'value_not_heard' }]);
   });
 
-  test('support may sit in the transcript sentence the heard words are in', () => {
-    const transcript = 'Ants in the kitchen. Did the perimeter outside, light activity. Gate was locked.';
-    const out = run({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light', heard: 'Did the perimeter outside' }, transcript);
-    expect(out.visit).toMatchObject({ areas: ['Outside'], method: 'perimeter_spray', activity: 'light' });
-    // the pest was said in a DIFFERENT sentence: not supported
-    expect(out.visit.pests).toEqual([]);
-    expect(out.unclear).toEqual([{ heard: 'Ants', reason: 'value_not_heard' }]);
+  test('support may sit anywhere in the transcript, not only in the heard sentence', () => {
+    const transcript = 'Ants were the issue in the kitchen. Did the perimeter, light activity. Gate was locked.';
+    const out = run({ pests: ['Ants'], areas: ['Inside'], method: 'perimeter_spray', activity: 'light', heard: 'Did the perimeter' }, transcript);
+    expect(out.visit).toMatchObject({ pests: ['Ants'], areas: ['Inside'], method: 'perimeter_spray', activity: 'light' });
+    expect(out.unclear).toEqual([]);
+  });
+
+  test('a word never said anywhere in the transcript is dropped (the audit reproduction)', () => {
+    const transcript = 'Treated ants outside. Gate was locked.';
+    const out = run({ pests: ['Ants', 'Roaches'], areas: ['Outside', 'Inside'], activity: 'heavy', heard: 'Treated ants outside' }, transcript);
+    expect(out.visit).toMatchObject({ pests: ['Ants'], areas: ['Outside'], activity: '' });
+    expect(out.unclear).toEqual([
+      { heard: 'Roaches', reason: 'value_not_heard' },
+      { heard: 'Inside', reason: 'value_not_heard' },
+      { heard: 'heavy', reason: 'value_not_heard' },
+    ]);
   });
 
   test('"Other" needs its named pest in the words', () => {
@@ -551,5 +560,65 @@ describe('every selected visit value needs words that support it', () => {
     const out = run(v, words);
     expect(out.unclear).toEqual([]);
     expect(out.visit[field]).toEqual(field === 'pests' || field === 'areas' ? [value] : value);
+  });
+});
+
+describe('an amount belongs to the product whose name it sits with', () => {
+  const both = 'Taurus four ounces and Talstar five ounces';
+  const run = (rows, transcript = both) => validateFill(answer({ products: rows }), ctx, transcript);
+  const row = (productId, amount, unit = 'fl_oz', heard = both) => product({ productId, amount, unit, heard });
+
+  test('the correct pairing passes', () => {
+    const out = run([row('p-taurus', 4), row('p-talak', 5)]);
+    expect(out.products.map((p) => [p.productId, p.amount, p.unit])).toEqual([['p-taurus', 4, 'fl_oz'], ['p-talak', 5, 'fl_oz']]);
+    expect(out.unclear).toEqual([]);
+  });
+
+  test('a swap is not authorized: each amount is dropped to amount_not_spoken, both product taps stay', () => {
+    const out = run([row('p-taurus', 5), row('p-talak', 4)]);
+    expect(out.products.map((p) => [p.productId, p.amount])).toEqual([['p-taurus', null], ['p-talak', null]]);
+    expect(out.unclear).toEqual([{ heard: both, reason: 'amount_not_spoken' }]);
+  });
+
+  test('"of" joins a number to the name after it, so a number before a name is that name\'s', () => {
+    const text = 'four ounces of Taurus and five of Talstar';
+    const good = run([row('p-taurus', 4, 'fl_oz', text), row('p-talak', 5, 'fl_oz', text)], text);
+    expect(good.products.map((p) => [p.productId, p.amount])).toEqual([['p-taurus', 4], ['p-talak', 5]]);
+    const swapped = run([row('p-taurus', 5, 'fl_oz', text), row('p-talak', 4, 'fl_oz', text)], text);
+    expect(swapped.products.map((p) => p.amount)).toEqual([null, null]);
+  });
+
+  test('"of the" is read through ("four ounces of the Taurus")', () => {
+    const text = 'four ounces of the Taurus, five ounces of the Talstar';
+    const out = run([row('p-taurus', 4, 'fl_oz', text), row('p-talak', 5, 'fl_oz', text)], text);
+    expect(out.products.map((p) => p.amount)).toEqual([4, 5]);
+  });
+
+  test('a product with no number in its own span gets none, even if the snippet has numbers', () => {
+    const text = 'Taurus and Talstar, five ounces';
+    const out = run([row('p-taurus', 5, 'fl_oz', text), row('p-talak', 5, 'fl_oz', text)], text);
+    expect(out.products.find((p) => p.productId === 'p-taurus').amount).toBeNull();
+    expect(out.products.find((p) => p.productId === 'p-talak').amount).toBe(5);
+  });
+
+  test('the unit word is the one attached to the amount: 4 ounces + 5 gallons are not mixed up', () => {
+    const text = 'Taurus four ounces and Talstar five gallons';
+    const out = run([row('p-taurus', 4, 'fl_oz', text), row('p-talak', 5, 'fl_oz', text)], text);
+    expect(out.products.find((p) => p.productId === 'p-taurus')).toMatchObject({ amount: 4, unit: 'fl_oz' });
+    expect(out.products.find((p) => p.productId === 'p-talak').amount).toBeNull();
+    expect(out.unclear).toEqual([{ heard: text, reason: 'unit_not_heard' }]);
+  });
+
+  test('a correction inside the product\'s own span is allowed ("four ounces, no wait, five ounces")', () => {
+    const text = 'Taurus, four ounces, no wait, five ounces';
+    expect(run([row('p-taurus', 5, 'fl_oz', text)], text).products[0].amount).toBe(5);
+  });
+
+  test('without punctuation the same position rule holds', () => {
+    const text = 'taurus four ounces talstar five ounces surfactant a quarter ounce';
+    const out = run([row('p-taurus', 4, 'fl_oz', text), row('p-talak', 5, 'fl_oz', text), row('p-surf', 0.25, 'fl_oz', text)], text);
+    expect(out.products.map((p) => p.amount)).toEqual([4, 5, 0.25]);
+    const swapped = run([row('p-taurus', 5, 'fl_oz', text), row('p-surf', 4, 'fl_oz', text)], text);
+    expect(swapped.products.map((p) => p.amount)).toEqual([null, null]);
   });
 });
