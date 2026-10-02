@@ -575,6 +575,32 @@ describe('validateVoiceFacts', () => {
     expect(quiet).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [], pests: [{ name: 'ants' }], unclearPests: [], unclearSpray: false });
   });
 
+  test('work said for later, and a pest the note denies, never count as treated (codex local r24 on #5538)', () => {
+    // A denied pest is never one the reading left out.
+    expect(validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Sprayed outside for ants' }],
+      pests: [{ name: 'ants', quote: 'Sprayed outside for ants' }],
+      spray: { method: 'not_said', quote: '' },
+    }, "Sprayed outside for ants, no roaches. Roaches weren't an issue.").unclearPests).toEqual([]);
+    // Planned work is not a place, pest or spray treated today.
+    const note = 'Sprayed outside for ants. Will spray inside next time. Need to treat for roaches next visit. Going to spray around the house next month.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Sprayed outside for ants' }],
+      pests: [{ name: 'ants', quote: 'Sprayed outside for ants' }, { name: 'roaches', quote: 'treat for roaches' }],
+      spray: { method: 'not_said', quote: '' },
+    }, note);
+    expect(facts).toMatchObject({ unclearAreas: [], unclearPests: [], unclearSpray: false });
+    expect(facts.pests.map((pest) => pest.name)).toEqual(['ants']);
+    // Nor when the reading itself quotes the plan.
+    const planned = validateVoiceFacts({
+      areas: [{ area: 'inside', quote: 'Will spray inside next time' }],
+      pests: [],
+      spray: { method: 'perimeter', quote: 'Going to spray around the house next month' },
+    }, note);
+    expect(placeIn(planned, 'Inside')).toBe('unclear');
+    expect(planned).toMatchObject({ spray: null, unclearSpray: true });
+  });
+
   test('a place only looked at, or a quote naming only another place, is unclear (GitHub Codex on #5538)', () => {
     const note = 'Checked the bait stations inside; treated outside for ants.';
     const read = (area, quote) => validateVoiceFacts({ areas: [{ area, quote }, { area: 'outside', quote: 'treated outside for ants' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);

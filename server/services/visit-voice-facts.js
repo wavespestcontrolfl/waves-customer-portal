@@ -154,6 +154,14 @@ function clauseBounds(quote, offset) {
   };
 }
 const spanOf = (match) => (match ? { offset: match.index, length: match[0].length } : null);
+// Work said as not done yet is never a treatment done today: "will spray
+// inside next time", "need to treat for roaches" (codex local r24 on #5538).
+const FUTURE_BEFORE_RE = /\b(?:will|won'?t|shall|going\s+to|gonna|plan(?:s|ned|ning)?\s+to|needs?\s+to|ha(?:ve|s)\s+to|should|would|could|might|may|wants?\s+to)\s+(?:(?:also|then|come\s+back\s+and)\s+)?$/;
+const FUTURE_CLAUSE_RE = /\bnext\s+(?:time|visit|service|month|week|quarter)\b/;
+function notDoneYet(text, at) {
+  const { from, to } = clauseBounds(text, at);
+  return FUTURE_BEFORE_RE.test(text.slice(from, at)) || FUTURE_CLAUSE_RE.test(text.slice(from, to));
+}
 function areaAssertion(area) {
   return (quote) => {
     // The first place the quote names in its plain words.
@@ -218,6 +226,7 @@ const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DE
 // So a pest only seen stays out: "treated for ants outside and saw roaches
 // inside" (codex local r19 on #5538).
 const SENTENCE_BREAK_RE = /[.!?;\n]/g;
+const PEST_NEGATED_AFTER_RE = /^\s*(?:[,:]\s*)?(?:(?:were|was|are|is)\s+)?(?:not|no|none|never|weren'?t|wasn'?t|aren'?t|isn'?t)\b/;
 // Between two treatment words of one phrase ("applied bait", "placed bait
 // stations"): nothing, or only an article.
 const PHRASE_GAP_RE = /^\s*(?:(?:the|a|an|some|more)\s+)*$/;
@@ -250,7 +259,8 @@ function treatedInSentence(name, note, others) {
   const sentenceBreaks = breaksOf(SENTENCE_BREAK_RE);
   const clauseBreaks = breaksOf(CLAUSE_BREAK_RE);
   const mentionsOf = (words) => new RegExp(`(?<![a-z])${escapeRegExp(words)}(?![a-z])`, 'g');
-  const undenied = (word) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, word.at));
+  // A treatment counts only done: not denied, not said for later.
+  const undenied = (word) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, word.at)) && !notDoneYet(note, word.at);
   // What a treatment word names after it is its own, up to the next
   // treatment word that starts another action: in "for ants I baited inside
   // and sprayed outside for roaches" the baiting names no pest (codex local
@@ -270,6 +280,9 @@ function treatedInSentence(name, note, others) {
   };
   return [...note.matchAll(mentionsOf(name))].some(({ index: at }) => {
     const end = at + name.length;
+    // A mention whose own words deny the pest ties nothing: "no roaches",
+    // "roaches weren't an issue" (codex local r24 on #5538).
+    if (DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at)) || PEST_NEGATED_AFTER_RE.test(note.slice(end))) return false;
     const start = Math.max(0, ...sentenceBreaks.filter((i) => i < at).map((i) => i + 1));
     const stop = Math.min(note.length, ...sentenceBreaks.filter((i) => i >= end));
     const clauseStart = Math.max(start, ...clauseBreaks.filter((i) => i < at));
@@ -395,6 +408,17 @@ function namesOnlyAnotherPlace(area, quote) {
   return !AREA_PLACE_RE[area].test(quote)
     && AREA_ORDER.some((other) => other !== area && AREA_PLACE_RE[other].test(quote));
 }
+// Why a grounded, undenied place quote still does not hold the place up: it
+// names no treatment ("ants in the kitchen" is a sighting), denies the
+// place's own words ("sprayed outside but not the garage"), only looked
+// there, or names another place and never this one.
+const PLACE_REFUSALS = [
+  (area, quote) => !treatmentAssertion(quote),
+  (area, quote) => AREA_DENIED_RE[area].test(quote),
+  placeOnlyLookedAt,
+  namesOnlyAnotherPlace,
+];
+
 // The places the note itself says were treated, in their plain words,
 // whatever the reading listed (Codex #5538): a mention an action governs that
 // the note neither denies nor calls undone. Never "inside the garage" (the
@@ -407,7 +431,8 @@ function placesTreatedInNote(note) {
     const { from, to } = clauseBounds(note, at);
     if (AREA_DENIED_RE[area].test(note.slice(from, end)) || UNDONE_RE.test(note.slice(from, to))) return false;
     const governor = placeGovernor(note, at, end);
-    return governor?.kind === 'treatment' && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at));
+    return governor?.kind === 'treatment' && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at))
+      && !notDoneYet(note, governor.at);
   })));
 }
 const AREA_DENIED_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area, words]) => [
@@ -470,7 +495,11 @@ function pestName(name, quote) {
 // the quote, else the quote and whether the note denies it there.
 function readQuote(quote, note, fact) {
   const grounded = groundedQuote(quote, note);
-  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note, fact) || undoneInQuote(grounded, fact) } : null;
+  if (!grounded) return null;
+  const span = fact.assertion(grounded);
+  const denied = deniedInNote(grounded, note, fact) || undoneInQuote(grounded, fact)
+    || (!!span && notDoneYet(grounded, span.offset));
+  return { quote: grounded, denied };
 }
 const listOf = (value) => (Array.isArray(value) ? value : []);
 
@@ -487,8 +516,7 @@ function validateVoiceFacts(json, note) {
     // treated inside): never recorded, and never silently dropped either,
     // since a missed indoor treatment loses the customer's indoor wait. The
     // sheet holds until the note is read again or the tech says it plainly.
-    if (!read || read.denied || !treatmentAssertion(read.quote) || AREA_DENIED_RE[entry.area].test(read.quote)
-      || placeOnlyLookedAt(entry.area, read.quote) || namesOnlyAnotherPlace(entry.area, read.quote)) unresolvedAreas.add(entry.area);
+    if (!read || read.denied || PLACE_REFUSALS.some((refuses) => refuses(entry.area, read.quote))) unresolvedAreas.add(entry.area);
     else if (!heardAreas.has(entry.area)) heardAreas.set(entry.area, read.quote);
   }
   // A place the note says was treated that the reading left out holds the
@@ -558,7 +586,7 @@ function sprayInNote(note) {
     if (SPOT_WORDS_RE.test(note.slice(from, to)) || UNDONE_RE.test(note.slice(from, to))) return false;
     const governor = placeGovernor(note, m.index, m.index + m[0].length);
     return governor?.kind === 'treatment' && SPRAY_ACTION_RE.test(governor.word)
-      && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at));
+      && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at)) && !notDoneYet(note, governor.at);
   });
   const denied = [...note.matchAll(/\bspray(?:ed|ing|s)?\b/g)].some((m) => DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, m.index)));
   return { perimeter, denied };
