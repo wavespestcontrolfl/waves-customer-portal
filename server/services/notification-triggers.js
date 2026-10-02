@@ -1020,7 +1020,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1129,6 +1129,26 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               // A standing thread row (sms_reply, one per customer) is rewritten
               // in place by each new message instead of inserting another row.
               ...(dedupeKey && refreshOnDedupe ? { refreshOnDedupe: true, ...(bumpOnRefresh ? { bumpOnRefresh: true } : {}) } : {}),
+              // Decided inside notifyAdmin's keyed lock against the row as it stands:
+              // refreshPayload(existingRow, existingPayload) -> null | { payload, keepContent }.
+              // keepContent: this emission is OLDER than what the row shows, so the
+              // row keeps its text, link and position and only its payload (the
+              // count) moves, quietly.
+              ...(dedupeKey && refreshOnDedupe && typeof refreshPayload === 'function' ? {
+                standingRefresh: async (existing, existingMeta) => {
+                  const base = existingMeta?.payload || {};
+                  const r = await refreshPayload(existing, base);
+                  if (!r) return null;
+                  if (r.keepContent) {
+                    const kept = { ...base, ...r.payload };
+                    const rebuilt = sanitizeBuiltNotification(trigger.build(kept), trigger);
+                    return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept }, quiet: true };
+                  }
+                  const merged = { ...payload, ...r.payload };
+                  const rebuilt = sanitizeBuiltNotification(trigger.build(merged), trigger);
+                  return { title: rebuilt.title, body: rebuilt.body, link: rebuilt.link, detail: rebuilt.detail, metadata: { payload: sanitizeNotificationPayload(triggerKey, merged) } };
+                },
+              } : {}),
               ...(shouldContinue ? { shouldContinue } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );

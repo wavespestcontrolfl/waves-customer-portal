@@ -579,7 +579,7 @@ const NotificationService = {
     // moves the row's created_at to now, so a standing row that keeps getting
     // newer news (one row per customer thread: "3 texts") rises to the top of
     // the newest-first bell instead of staying where its first text put it.
-    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
@@ -598,18 +598,27 @@ const NotificationService = {
         // one — never an arbitrary older row.
         const existing = await existingQuery.orderBy('created_at', 'desc').first();
         if (existing) {
+          const existingMeta = typeof existing.metadata === 'string'
+            ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
+            : (existing.metadata || {});
+          // standingRefresh runs HERE, inside the key's lock, against the row as it
+          // stands now: a caller that must compare this emission with what the row
+          // already holds (a count, which of two concurrent messages is newer) cannot
+          // do it before the lock. Returns null (no change) or the content this
+          // refresh should write; `quiet` writes it without ringing or bumping.
+          const adjusted = refreshOnDedupe && typeof standingRefresh === 'function'
+            ? await standingRefresh(existing, existingMeta) : null;
+          const useMeta = adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata;
+          const useDetail = adjusted && 'detail' in adjusted ? adjusted.detail : createOpts.detail;
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an
           // emoji title, an over-length body) would read as "changed" on
           // every emission and re-bell for no real reason.
-          const normalized = normalizeAdminNotificationText({ category, title, body, detail: createOpts.detail });
+          const normalized = normalizeAdminNotificationText({ category, title: adjusted?.title ?? title, body: adjusted?.body ?? body, detail: useDetail });
           const nextTitle = normalized.title;
           const nextBody = normalized.body;
           const nextDetail = normalized.detail;
-          const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
-          const existingMeta = typeof existing.metadata === 'string'
-            ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
-            : (existing.metadata || {});
+          const nextLink = adjusted && 'link' in adjusted ? adjusted.link : (createOpts.link === undefined ? existing.link : createOpts.link || null);
           // A same-count backlog can contain new deadlines or reopened work.
           // Its optional version refreshes the one standing bell as well.
           const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
@@ -622,29 +631,29 @@ const NotificationService = {
           // (full text in `detail`) and the same whole text arriving uncut.
           // Only when the caller supplied no detail of its own, so the stored
           // detail can only be the guard's copy of that body.
-          const storedCut = !createOpts.detail && Boolean(existing.detail) && !nextDetail && existing.detail === nextBody;
+          const storedCut = !useDetail && Boolean(existing.detail) && !nextDetail && existing.detail === nextBody;
           const sameText = storedUncut || storedCut;
           const detailChanged = !sameText && (existing.detail || null) !== (nextDetail || null);
           // Routing metadata is content too: a FIX -> ACT flip with identical
           // text must still merge the new feed/kind/audience, or the owner's
           // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
           // #5236). Only keys this emission actually carries are compared.
-          const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
-            && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
+          const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
+            && (existingMeta[k] ?? null) !== (useMeta[k] ?? null));
           // Ring-only-on-change stamps are content too (admin-alerts-ring-v2
           // follow-up): count/newCount growing, or itemKeys naming a
           // different item, must trigger the refresh (and ringOnRefresh's
           // evaluation) even when title/body/link/routing are unchanged.
           // Compared by JSON so an itemKeys array compares by value.
-          const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
-            && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(metadata[k] ?? null));
+          const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
+            && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(useMeta[k] ?? null));
           if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
             // A row that newly enters the owner audience (engineering/fyi ->
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
-            const enteredOwner = metadata.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
-            const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
-            const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
+            const enteredOwner = useMeta.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
+            const shouldRing = adjusted?.quiet ? false : (enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
+            const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
             const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };

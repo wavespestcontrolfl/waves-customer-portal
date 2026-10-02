@@ -329,6 +329,24 @@ describe('triggerNotification bell outcome', () => {
     expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
   });
 
+  test('refreshPayload becomes a lock-time standingRefresh: an older message keeps the row content, a newer one rebuilds it with the new count', async () => {
+    const payload = { threadId: 'cust-1', fromName: 'Dana Example', twilioSid: 'SM-new', message: 'Newer text', textCount: 1 };
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'thread-row', deduped: true, refreshed: true });
+    await triggerNotification('sms_reply', payload, {
+      dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true,
+      refreshPayload: (_row, base) => ({ payload: { textCount: base.textCount + 1 }, keepContent: base.twilioSid === 'SM-held' }),
+    });
+    const { standingRefresh } = NotificationService.notifyAdmin.mock.calls.at(-1)[3];
+    const row = { body: 'Held text', link: '/admin/communications?thread=cust-1&message=SM-held', detail: null };
+    const kept = await standingRefresh(row, { payload: { threadId: 'cust-1', fromName: 'Dana Example', twilioSid: 'SM-held', textCount: 2 } });
+    expect(kept).toMatchObject({ title: '3 texts from Dana Example', body: 'Held text', link: row.link, quiet: true });
+    expect(kept.metadata.payload).toMatchObject({ twilioSid: 'SM-held', textCount: 3 });
+    const took = await standingRefresh(row, { payload: { twilioSid: 'SM-older', textCount: 2 } });
+    expect(took).toMatchObject({ title: '3 texts from Dana Example', body: 'Newer text', link: '/admin/communications?thread=cust-1&message=SM-new' });
+    expect(took.quiet).toBeUndefined();
+    expect(took.metadata.payload).toMatchObject({ twilioSid: 'SM-new', textCount: 3 });
+  });
+
   test('a thread row hit with identical content (a replayed text) is not a refresh and does not push again', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'thread-row', deduped: true });
     const PushService = require('../services/push-notifications');

@@ -490,3 +490,50 @@ describe('bumpOnRefresh (one standing row per thread)', () => {
     expect(mockUpdates).toEqual([]);
   });
 });
+
+// Two texts from one customer processed at once: the older one can win the key's
+// lock second. standingRefresh runs inside that lock against the row as it stands.
+describe('standingRefresh (decided inside the keyed lock)', () => {
+  const opts = (n, extra = {}) => ({
+    dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true,
+    link: `/admin/communications?thread=cust-1&message=SM${n}`,
+    metadata: { triggerKey: 'sms_reply', payload: { twilioSid: `SM${n}`, textCount: 1 } }, ...extra,
+  });
+  const seed = async () => {
+    await NotificationService.notifyAdmin('inbound_sms', 'SMS from Dana', 'Newer text', opts(2));
+    Object.assign(mockRows.notifications[0], { created_at: new Date('2026-10-01T14:00:00Z') });
+  };
+
+  test('an OLDER message keeps the newer text, sid, link, read state and place; only the count and title move', async () => {
+    await seed();
+    mockRows.notifications[0].read_at = new Date('2026-10-01T14:05:00Z');
+    const older = await NotificationService.notifyAdmin('inbound_sms', 'SMS from Dana', 'Older text', {
+      ...opts(1),
+      standingRefresh: async (existing, meta) => ({
+        title: '2 texts from Dana', body: existing.body, link: existing.link, detail: undefined,
+        metadata: { payload: { ...meta.payload, textCount: 2 } }, quiet: true,
+      }),
+    });
+    expect(older).toMatchObject({ deduped: true, refreshed: true, rung: false });
+    expect(mockRows.notifications).toHaveLength(1);
+    const row = mockRows.notifications[0];
+    expect(row).toMatchObject({ title: '2 texts from Dana', body: 'Newer text', link: '/admin/communications?thread=cust-1&message=SM2' });
+    expect(row.read_at).toEqual(new Date('2026-10-01T14:05:00Z'));
+    expect(row.created_at).toEqual(new Date('2026-10-01T14:00:00Z'));
+    expect(JSON.parse(row.metadata).payload).toEqual({ twilioSid: 'SM2', textCount: 2 });
+  });
+
+  test('a NEWER message through the same hook takes over, rings and bumps', async () => {
+    await seed();
+    const newer = await NotificationService.notifyAdmin('inbound_sms', 'SMS from Dana', 'Third text', {
+      ...opts(3),
+      standingRefresh: async (_e, meta) => ({
+        title: '2 texts from Dana', body: 'Third text', link: opts(3).link,
+        metadata: { payload: { twilioSid: 'SM3', textCount: meta.payload.textCount + 1 } },
+      }),
+    });
+    expect(newer).toMatchObject({ refreshed: true, rung: true });
+    expect(mockRows.notifications[0]).toMatchObject({ body: 'Third text', link: opts(3).link, read_at: null });
+    expect(mockRows.notifications[0].created_at).toEqual(new Date('2026-10-01T15:00:00Z'));
+  });
+});

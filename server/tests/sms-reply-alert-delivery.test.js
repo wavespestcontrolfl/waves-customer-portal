@@ -233,39 +233,36 @@ describe('known-sender thread bell', () => {
   const lastCall = () => triggerNotification.mock.calls.at(-1);
   const openRow = (over = {}) => ({ read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-1', textCount: 1 }, dedupeKey: 'sms-thread:cust-1' }, ...over });
 
-  test('keys the row on the customer and asks for an in-place refresh that bumps it', async () => {
+  test('keys the row on the customer and asks for an in-place refresh that bumps it, deciding the count under the lock', async () => {
     await ring();
     const [key, payload, options] = lastCall();
     expect(key).toBe('sms_reply');
     expect(options).toMatchObject({ dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
-    expect(payload).toMatchObject({ threadId: 'cust-1', twilioSid: 'SM-2', message: 'Second text', textCount: 1 });
+    expect(typeof options.refreshPayload).toBe('function');
+    expect(payload).toMatchObject({ threadId: 'cust-1', twilioSid: 'SM-2', message: 'Second text', textCount: 1, receivedAtMs: expect.any(Number) });
   });
 
-  test('a second text on a still-open row counts 2, a third counts 3', async () => {
-    bell = openRow();
-    await ring('SM-2');
-    expect(lastCall()[1].textCount).toBe(2);
-    bell = openRow({ metadata: { payload: { twilioSid: 'SM-2', textCount: 2 } } });
-    await ring('SM-3');
-    expect(lastCall()[1].textCount).toBe(3);
+  // refreshPayload runs inside notifyAdmin's keyed lock on the row as it stands.
+  const decide = async (row, sid = 'SM-3', at = 3000) => {
+    await ring(sid);
+    return lastCall()[2].refreshPayload(row, row.metadata.payload);
+  };
+  const rowAt = (over = {}, payload = {}) => ({ read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-2', textCount: 2, receivedAtMs: 0, ...payload } }, ...over });
+
+  test('a newer text on a still-open row counts one more and takes over the row', async () => {
+    expect(await decide(rowAt())).toEqual({ payload: { textCount: 3 }, keepContent: false });
   });
 
-  test.each([['read', { read_at: new Date() }], ['done', { done_at: new Date() }]])('a text after the row was %s starts the count over', async (_n, over) => {
-    bell = openRow({ metadata: { payload: { twilioSid: 'SM-1', textCount: 4 } }, ...over });
-    await ring('SM-2');
-    expect(lastCall()[1].textCount).toBe(1);
+  test('an OLDER text (it lost the lock race) only moves the count; the row keeps the newer text', async () => {
+    expect(await decide(rowAt({}, { receivedAtMs: Date.now() + 60000 }))).toEqual({ payload: { textCount: 3 }, keepContent: true });
+  });
+
+  test.each([['read', { read_at: new Date() }], ['done', { done_at: new Date() }]])('a text after the row was %s starts the count over and takes over the row', async (_n, over) => {
+    expect(await decide(rowAt(over, { textCount: 4, receivedAtMs: Date.now() + 60000 }))).toEqual({ payload: { textCount: 1 } });
   });
 
   test('a replay of the text already on the row does not count it twice', async () => {
-    bell = openRow({ metadata: { payload: { twilioSid: 'SM-2', textCount: 2 } } });
-    await ring('SM-2');
-    expect(lastCall()[1].textCount).toBe(2);
-  });
-
-  test('a failed count lookup still rings the row (count 1) rather than losing the alert', async () => {
-    bell = openRow({ metadata: '{not json' });
-    await ring();
-    expect(lastCall()[1].textCount).toBe(1);
+    expect(await decide(rowAt({}, { twilioSid: 'SM-3', textCount: 2 }))).toEqual({ payload: { textCount: 2 } });
   });
 
   test('an unknown sender keeps one bell per message and never refreshes', async () => {
