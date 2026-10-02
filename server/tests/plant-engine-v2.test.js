@@ -2279,6 +2279,50 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
     });
 
+    test('workup: an empty Call A AND an empty Call C hands off to OpenAI (Codex #5596 r1 P1)', async () => {
+      queue(
+        candidatesLeg({}),
+        conditionsLeg([]),
+        escalationLeg({ turf: [{ ...idItem('fixture-st-augustine', 0.9), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-large-patch', 0.9]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toContain('no_identity_candidate');
+    });
+
+    test('workup: an empty Call A with a usable Call C stays Gemini-only', async () => {
+      queue(candidatesLeg({}), conditionsLeg([['fixture-large-patch', 0.9]]));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(result.internal.escalation_reasons).toEqual([]);
+    });
+
+    test('a stand-in for a failed Call C never overrides the plant Gemini named (Codex #5596 r1 P1)', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.9)] }),
+        MISS, // Call C
+        escalationLeg({ turf: [{ ...idItem('fixture-bahia', 0.95), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-large-patch', 0.9]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine' });
+      expect(result.v2.possibilities.map((p) => p.slug)).toContain('fixture-large-patch');
+    });
+
+    test('a stand-in for a failed Call A never overrides the conditions Gemini read', async () => {
+      queue(
+        MISS, // Call A
+        conditionsLeg([['fixture-large-patch', 0.9]]),
+        escalationLeg({ turf: [{ ...idItem('fixture-st-augustine', 0.9), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-drought', 0.95]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      const slugs = result.v2.possibilities.map((p) => p.slug);
+      expect(slugs).toContain('fixture-large-patch');
+      expect(slugs).not.toContain('fixture-drought');
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine' });
+    });
+
     test('callers that do not ask (visit prep) keep the full ladder on plantIdVision', async () => {
       queue(
         candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.6)] }),

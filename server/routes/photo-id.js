@@ -852,6 +852,18 @@ function storedPlantV2(value) {
   return v2 && v2.answer ? v2 : null;
 }
 
+// The workup's own next step drives the response's `next_step` while its v2
+// is active (docs/photo-id/plant-engine.md "What L4 must do"; Codex #5596
+// r1): specialist -> referral, inspection -> inspection, fix_conditions/none
+// -> none, unclear -> unclear. No hint (or an unknown kind) keeps v1's.
+const PLANT_HINT_NEXT_STEP = Object.freeze({
+  specialist: 'referral', inspection: 'inspection', fix_conditions: 'none', none: 'none', unclear: 'unclear',
+});
+function plantNextStepKind(v2) {
+  const hint = v2 && v2.next_step_hint;
+  return (hint && PLANT_HINT_NEXT_STEP[hint.kind]) || null;
+}
+
 async function handleLawn(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
   // codex GH r10 P1: loadCustomerGrassContext is account-wide by design —
@@ -873,7 +885,10 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
     : {};
 
   const v2Enabled = isEnabled('photoIdV2');
-  const plantContext = grassContext && grassContext.grassType ? { grass_type_on_file: grassContext.grassType } : {};
+  const plantContext = {
+    ...(grassContext && grassContext.grassType ? { grass_type_on_file: grassContext.grassType } : {}),
+    ...(grassContext && grassContext.irrigationSystem ? { irrigation_type: grassContext.irrigationSystem } : {}),
+  };
   const [analyses, v2Result] = await Promise.all([
     Promise.all(photoInputs.map((photo) => lawnAssessment
       .analyzePhoto(photo.data, photo.mimeType, context)
@@ -944,7 +959,7 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
     build: () => lawnResult,
   });
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = lawnUnclear ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
+  const kind = plantNextStepKind(v2Result && v2Result.v2) || (lawnUnclear ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary));
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('lawn', kind, { location, note }),
@@ -1142,7 +1157,8 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
   // explicitly excludes it from both 'pest' and 'lawn' — codex r5 P1) — a
   // null lane always resolves to 'request', whatever the customer's plan
   // covers.
-  const kind = (noUsableScores || unreliable) ? 'unclear' : laneOutcomeKind(null, access, isSecondary);
+  const kind = plantNextStepKind(v2Result && v2Result.v2)
+    || ((noUsableScores || unreliable) ? 'unclear' : laneOutcomeKind(null, access, isSecondary));
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor(null, kind, { location, note }),
@@ -1351,6 +1367,8 @@ function lawnRowIsUnreliable(row) {
 }
 
 function lawnNextStepKindFromRow(row, access, isSecondary) {
+  const fromV2 = plantNextStepKind(storedPlantV2(parseJsonSafe(row.report_contract).v2));
+  if (fromV2) return fromV2;
   if (lawnRowIsUnreliable(row)) return 'unclear';
   return laneOutcomeKind('lawn', access, isSecondary);
 }
@@ -1365,6 +1383,8 @@ function treeShrubIsUnreliable(row) {
 }
 
 function treeNextStepKindFromRow(row, access, isSecondary) {
+  const fromV2 = plantNextStepKind(storedPlantV2(row.result_v2));
+  if (fromV2) return fromV2;
   if (row.overall_score == null || treeShrubIsUnreliable(row)) return 'unclear';
   return laneOutcomeKind(null, access, isSecondary); // tree & shrub is never reservice-eligible — see handleTreeShrub
 }

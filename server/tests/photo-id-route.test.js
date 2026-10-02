@@ -1998,6 +1998,36 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2)', () => {
     });
   });
 
+  test('gate on: the workup next_step_hint drives next_step in POST, detail and history', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPlantV2
+      .mockResolvedValueOnce({ ok: true, v2: { ...plantV2('Brown patches in the lawn'), next_step_hint: { kind: 'specialist' } }, internal: {} })
+      .mockResolvedValueOnce({ ok: true, v2: { ...plantV2('Spots on the leaves'), next_step_hint: { kind: 'inspection' } }, internal: {} });
+    await withServer(async (base) => {
+      const lawn = await (await post(base, '/api/photo-id/lawn', photoBody())).json();
+      expect(lawn.next_step.kind).toBe('referral');
+      const tree = await (await post(base, '/api/photo-id/tree_shrub', photoBody())).json();
+      expect(tree.next_step.kind).toBe('inspection');
+      expect((await fetch(`${base}/api/photo-id/lawn/${lawn.id}`).then((r) => r.json())).next_step.kind).toBe('referral');
+      expect((await fetch(`${base}/api/photo-id/tree_shrub/${tree.id}`).then((r) => r.json())).next_step.kind).toBe('inspection');
+      const list = await fetch(`${base}/api/photo-id`).then((r) => r.json());
+      expect(list.items.find((i) => i.id === lawn.id).next_step_kind).toBe('referral');
+      expect(list.items.find((i) => i.id === tree.id).next_step_kind).toBe('inspection');
+    });
+  });
+
+  test('gate on: lawn passes the saved grass type and irrigation to the plant engine', async () => {
+    mockGateState.photoIdV2 = true;
+    mockLoadCustomerGrassContext.mockResolvedValue({ grassType: 'st_augustine', grassTypeLabel: 'St. Augustine', irrigationSystem: 'system' });
+    mockIdentifyPlantV2.mockResolvedValue(plantOk());
+    await withServer(async (base) => {
+      expect((await post(base, '/api/photo-id/lawn', photoBody())).status).toBe(200);
+      expect(mockIdentifyPlantV2).toHaveBeenCalledWith(expect.objectContaining({
+        context: { grass_type_on_file: 'st_augustine', irrigation_type: 'system' },
+      }));
+    });
+  });
+
   test('gate off: lawn/tree_shrub never call the plant engine and send no v2', async () => {
     await withServer(async (base) => {
       const lawn = await (await post(base, '/api/photo-id/lawn', photoBody({ subject: 'lawn' }))).json();

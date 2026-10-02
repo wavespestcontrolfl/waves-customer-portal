@@ -1790,8 +1790,21 @@ async function reconcileCorrectedHost(run, conditions, hostCombined, escalationJ
  * entirely: Gemini stands, but no TRIGGERED scope may read `pretty_sure`.
  * `skip` (an irrevocably unusable read) runs nothing and records no
  * trigger. */
+/** Gemini-only workup: a valid Call A with no candidate in any of the
+ * subject's identity lanes AND no condition possibility is a read with
+ * nothing usable, so OpenAI stands in (Codex #5596 r1 P1). */
+function singleReadEmptyWorkup(run, identity, conditions) {
+  return run.singleRead && run.mode !== 'identify' && !!identity.candidatesJson
+    && identifyLaneSlotsFor(run.subject).every((slot) => identity.slots[slot].length === 0)
+    && conditions.possibilities.length === 0;
+}
+
 async function runEscalation(run, identity, conditions, { skip = false } = {}) {
-  const slotReasons = skip ? mapSlots(() => []) : identitySlotTriggers(identity, run);
+  const triggers = skip ? mapSlots(() => []) : identitySlotTriggers(identity, run);
+  const emptyWorkup = !skip && singleReadEmptyWorkup(run, identity, conditions);
+  const laneSlots = identifyLaneSlotsFor(run.subject);
+  const slotReasons = mapSlots((slot) => (emptyWorkup && laneSlots.includes(slot) && !triggers[slot].includes('no_identity_candidate')
+    ? [...triggers[slot], 'no_identity_candidate'] : triggers[slot]));
   const reasons = {
     identity: REASON_ORDER.filter((r) => IDENTITY_SLOTS.some((slot) => slotReasons[slot].includes(r))),
     conditions: skip ? [] : conditionTriggerReasons(conditions, run.singleRead),
@@ -1815,9 +1828,18 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
   const json = validJson(result, 'escalation');
   if (!json) return { ...base, result };
   const contextSlugs = new Set(identity.catalogCandidates.map((c) => c.slug));
-  const combined = mapSlots((slot) => combineIdentity(identity.slots[slot], json[slot], run.indexes[slot], contextSlugs));
-  const conditionCombined = await reconcileCorrectedHost(run, conditions, combined.host, json,
-    combinePossibilities(conditions.possibilities, json.conditions, conditions.index));
+  // Gemini-only: OpenAI is a stand-in, not a second opinion, so its answer
+  // fills only the scopes whose Gemini leg triggered it; a scope Gemini read
+  // fine keeps Gemini's read untouched (Codex #5596 r1 P1).
+  const keepSlot = (slot) => run.singleRead && !slotTriggered[slot];
+  const keepConditions = run.singleRead && !conditionsTriggered;
+  const combined = mapSlots((slot) => (keepSlot(slot)
+    ? { candidates: identity.slots[slot] }
+    : combineIdentity(identity.slots[slot], json[slot], run.indexes[slot], contextSlugs)));
+  const conditionCombined = keepConditions
+    ? { possibilities: conditions.possibilities, observedTerms: conditions.observedTerms, rerun: null }
+    : await reconcileCorrectedHost(run, conditions, combined.host, json,
+      combinePossibilities(conditions.possibilities, json.conditions, conditions.index));
   return {
     ...base,
     result,
@@ -1827,7 +1849,9 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
     identityFlags: mapSlots((slot) => scopeFlags(slotTriggered[slot], combined[slot])),
     conditionFlags: scopeFlags(conditionsTriggered, conditionCombined),
     possibilities: conditionCombined.possibilities,
-    observedTerms: [json.observed_terms, conditionCombined.observedTerms, conditions.observedTerms].find((t) => t?.length) || [],
+    observedTerms: keepConditions
+      ? conditions.observedTerms
+      : [json.observed_terms, conditionCombined.observedTerms, conditions.observedTerms].find((t) => t?.length) || [],
   };
 }
 
