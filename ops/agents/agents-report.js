@@ -21,10 +21,12 @@
  * Connection: run under `railway run --service Postgres`, where DATABASE_URL
  * is the unreachable internal host — the script points the app's knexfile at
  * DATABASE_PUBLIC_URL (ops/agents/README.md recipe). The Postgres service does
- * not carry the portal's GATE_* variables, so this process sets the two READ
- * gates the hub modules consult (cost tracking, dispatch metrics) for itself:
- * that changes nothing in production — both only decide whether this process
- * reads the cost table and the chain rows. Nothing here writes.
+ * not carry the portal's GATE_* variables, so this process sets the four READ
+ * gates the hub modules consult for itself — cost tracking, dispatch metrics,
+ * the ops queue and the Activity feed (the last two are where a lane's
+ * "needs attention" reasons come from; without them a failed run would read
+ * as merely active): that changes nothing in production — each only decides
+ * whether this process reads that source. Nothing here writes.
  */
 
 if (!process.env.DATABASE_PUBLIC_URL) {
@@ -37,11 +39,15 @@ process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'error';
 process.env.GATE_LLM_COST_TRACKING = 'true';
 process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+process.env.GATE_ADMIN_OPS_QUEUE = 'true';
+process.env.GATE_AGENT_ACTIVITY = 'true';
 
 const path = require('path');
 const SERVER = path.join(__dirname, '..', '..', 'server');
 const db = require(path.join(SERVER, 'models', 'db'));
 const { readAreas, readLanes } = require(path.join(SERVER, 'services', 'agent-control', 'hub-read'));
+const { REVIEW_WINDOW_DAYS } = require(path.join(SERVER, 'services', 'typed-decisions', 'daily-review-item'));
+const { etDateString, addETDays, parseETDateTime } = require(path.join(SERVER, 'utils', 'datetime-et'));
 
 const args = Object.fromEntries(process.argv.slice(2)
   .filter((a) => a.startsWith('--'))
@@ -49,8 +55,6 @@ const args = Object.fromEntries(process.argv.slice(2)
 const WINDOW = ['today', '7d', '30d'].includes(args.window) ? args.window : '7d';
 const SHOW_ALL = args.all === true;
 const JSON_OUT = args.json === true;
-// The daily review item's own window (typed-decisions/daily-review-item.js).
-const REVIEW_WINDOW_DAYS = 14;
 
 const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
 const ms = (v) => (v == null ? '—' : v >= 10_000 ? `${(v / 1000).toFixed(0)}s` : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`);
@@ -65,7 +69,9 @@ function table(headers, rows, rightCols = new Set()) {
 }
 
 async function waitingOnYou(now) {
-  const since = new Date(now.getTime() - REVIEW_WINDOW_DAYS * 24 * 3600 * 1000);
+  // The daily review item's own cutoff: ET midnight, REVIEW_WINDOW_DAYS calendar
+  // days back — so this count and the owner's review queue agree on the boundary day.
+  const since = parseETDateTime(`${etDateString(addETDays(now, -REVIEW_WINDOW_DAYS))}T00:00:00`);
   const [typed, approvals] = await Promise.all([
     db('decision_reviews').where({ label_status: 'unreviewed' }).whereIn('sampled_for', ['disagreement', 'random_audit'])
       .where('created_at', '>=', since).count({ n: '*' }).first().then((r) => Number(r?.n || 0)).catch(() => null),
