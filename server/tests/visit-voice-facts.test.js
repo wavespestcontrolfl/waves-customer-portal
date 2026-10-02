@@ -421,6 +421,29 @@ describe('validateVoiceFacts', () => {
     ])).toEqual(['ants']);
   });
 
+  test('a quote of the whole sentence never ties a pest only seen there (pre-push P1 on #5538)', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    const sentence = 'Treated for ants outside and saw roaches inside.';
+    expect(read(sentence, [
+      { name: 'ants', quote: sentence },
+      { name: 'roaches', quote: sentence },
+    ])).toEqual(['ants']);
+    expect(read('Saw ants inside, treated outside for spiders.', [
+      { name: 'ants', quote: 'Saw ants inside, treated outside for spiders' },
+      { name: 'spiders', quote: 'Saw ants inside, treated outside for spiders' },
+    ])).toEqual(['spiders']);
+    // A treatment after an observation is the observed pest's, unless it
+    // names another pest after it.
+    expect(read('Found roaches under the sink and sprayed. Treated outside for ants.', [
+      { name: 'roaches', quote: 'Found roaches under the sink and sprayed' },
+      { name: 'ants', quote: 'Treated outside for ants' },
+    ])).toEqual(['roaches', 'ants']);
+    expect(read('Saw roaches inside and sprayed for ants.', [
+      { name: 'roaches', quote: 'Saw roaches inside and sprayed for ants' },
+      { name: 'ants', quote: 'sprayed for ants' },
+    ])).toEqual(['ants']);
+  });
+
   test('an undone place in another clause is that place\'s, never the fact\'s (codex local r21 on #5538)', () => {
     const note = 'Sprayed inside for ants, left the garage untreated. Sprayed around the house, garage untreated. The inside was left untreated, sprayed outside. The perimeter was left unsprayed, sprayed the kitchen.';
     const area = (name, quote) => validateVoiceFacts({ areas: [{ area: name, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);

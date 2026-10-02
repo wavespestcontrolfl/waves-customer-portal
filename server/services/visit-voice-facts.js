@@ -215,28 +215,39 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
 const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DENIAL.treatment };
 
 // A pest named with others shares a treatment its sentence ties to it, at
-// any mention of it the note holds: the nearest treatment or observation
-// word before it in its clause decides ("treated for ants outside and
-// roaches inside"); with neither there, the nearest after it in its sentence
-// ("for ants and roaches I sprayed around the house", codex local r21 on
-// #5538), else the nearest before it in its sentence ("treated for ants
-// outside, roaches inside"). A treatment word the note denies, or an
-// observation word, deciding leaves the pest out: "saw ants inside, treated
-// outside for spiders", "treated for ants outside and saw roaches inside"
-// (codex local r19 on #5538), "ants seen in the kitchen, sprayed for
-// roaches", "didn't treat for ants or roaches".
+// any mention of it the note holds:
+//   - a treatment word nearest before it in its clause ties it ("treated for
+//     ants outside and roaches inside"), unless the note denies that word
+//     ("treated for ants, did not spray for roaches");
+//   - else, the next treatment word after it in its sentence ties it ("for
+//     ants and roaches I sprayed around the house", codex local r21 on
+//     #5538), also after an observation ("found roaches under the sink and
+//     sprayed"), unless the note denies that word or it names another pest
+//     heard after it in its clause, which makes it that pest's ("saw ants
+//     inside, treated outside for spiders", "ants seen in the kitchen,
+//     sprayed for roaches");
+//   - else, with no observation before it in its clause, a treatment word
+//     earlier in its sentence ties it ("treated for ants outside, roaches
+//     inside").
+// So a pest only seen stays out: "treated for ants outside and saw roaches
+// inside" (codex local r19 on #5538).
 const SENTENCE_BREAK_RE = /[.!?;\n]/g;
 const OBSERVATION_WORDS_RE = /\b(?:saw|see|sees|seen|seeing|noticed|notice|found|find|spotted|observed|checked|check(?:ing)?|inspected|inspect(?:ing)?|looked|look(?:ing)?|heard|showed|shows)\b/;
 function wordsIn(note, from, to, re, kind) {
   return [...note.slice(from, to).matchAll(new RegExp(re.source, 'g'))]
     .map((m) => ({ kind, at: from + m.index, end: from + m.index + m[0].length }));
 }
-function treatedInSentence(name, note) {
+function treatedInSentence(name, note, others) {
   const breaksOf = (re) => [...note.matchAll(re)].map((m) => m.index);
   const sentenceBreaks = breaksOf(SENTENCE_BREAK_RE);
   const clauseBreaks = breaksOf(CLAUSE_BREAK_RE);
-  const mentions = [...note.matchAll(new RegExp(`(?<![a-z])${escapeRegExp(name)}(?![a-z])`, 'g'))];
-  return mentions.some(({ index: at }) => {
+  const mentionsOf = (words) => new RegExp(`(?<![a-z])${escapeRegExp(words)}(?![a-z])`, 'g');
+  const undenied = (word) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, word.at));
+  const namesAnother = (word) => {
+    const rest = note.slice(word.end, Math.min(note.length, ...clauseBreaks.filter((i) => i >= word.end)));
+    return others.some((other) => mentionsOf(other).test(rest));
+  };
+  return [...note.matchAll(mentionsOf(name))].some(({ index: at }) => {
     const end = at + name.length;
     const start = Math.max(0, ...sentenceBreaks.filter((i) => i < at).map((i) => i + 1));
     const stop = Math.min(note.length, ...sentenceBreaks.filter((i) => i >= end));
@@ -244,8 +255,12 @@ function treatedInSentence(name, note) {
     const words = [...wordsIn(note, start, stop, TREATMENT_WORD_RE, 'treatment'), ...wordsIn(note, start, stop, OBSERVATION_WORDS_RE, 'observation')]
       .sort((a, b) => a.at - b.at);
     const before = words.filter((w) => w.end <= at);
-    const decider = before.filter((w) => w.at >= clauseStart).pop() || words.find((w) => w.at >= end) || before.pop();
-    return decider?.kind === 'treatment' && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, decider.at));
+    const nearest = before.filter((w) => w.at >= clauseStart).pop();
+    if (nearest?.kind === 'treatment') return undenied(nearest);
+    const next = words.find((w) => w.at >= end && w.kind === 'treatment');
+    if (next) return undenied(next) && !namesAnother(next);
+    const earlier = before.pop();
+    return !nearest && earlier?.kind === 'treatment' && undenied(earlier);
   });
 }
 
@@ -341,15 +356,17 @@ function validateVoiceFacts(json, note) {
     if (!name || pests.has(name)) continue;
     if (!deniedInNote(quote, grounding, { assertion: nameAssertion(name), denialAfter: TRAILING_DENIAL.pest })) pests.set(name, quote);
   }
-  // Every product's targets come from these. A pest whose own words deny the
-  // treatment ("didn't treat for roaches") is never one; and with more than
-  // one pest heard, each must be tied to the treatment, in its own words
-  // ("treated outside for spiders") or by its sentence (treatedInSentence),
-  // so one only seen ("saw ants inside") is left out (Codex #5538). A single
-  // pest is the note's one subject.
-  const targets = [...pests].filter(([name, quote]) => (treatmentAssertion(quote)
-    ? !deniedInNote(quote, grounding, TREATMENT_FACT)
-    : pests.size === 1 || treatedInSentence(name, grounding)));
+  // Every product's targets come from these. A single pest is the note's one
+  // subject, unless its own words deny the treatment ("didn't treat for
+  // roaches"). With more than one pest heard, each must be tied to a
+  // treatment by its sentence (treatedInSentence) whatever its quote holds,
+  // so one only seen ("saw ants inside") is left out (Codex #5538), even when
+  // its quote is the whole sentence ("treated for ants outside and saw
+  // roaches inside", pre-push P1 on #5538).
+  const heardNames = [...pests.keys()];
+  const targets = [...pests].filter(([name, quote]) => (pests.size === 1
+    ? !treatmentAssertion(quote) || !deniedInNote(quote, grounding, TREATMENT_FACT)
+    : treatedInSentence(name, grounding, heardNames.filter((other) => other !== name))));
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
