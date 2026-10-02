@@ -216,6 +216,20 @@ describe('validateVoiceFacts', () => {
     expect(facts.spray).toMatchObject({ method: 'perimeter' });
   });
 
+  test('a negative inside the quote but after what it asserts is about something else too (codex r4 on #5538)', () => {
+    const sentence = 'Sprayed around the outside of the house with no issues';
+    const note = `${sentence}. Treated for roaches without any trouble. No roaches seen so treated the kitchen baseboards.`;
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: sentence }, { area: 'inside', quote: 'treated the kitchen baseboards' }],
+      pests: [{ name: 'roaches', quote: 'Treated for roaches without any trouble' }],
+      spray: { method: 'perimeter', quote: sentence },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Inside', 'Outside']);
+    expect(facts.unclearAreas).toEqual([]);
+    expect(facts.pests.map((pest) => pest.name)).toEqual(['roaches']);
+    expect(facts.spray).toMatchObject({ method: 'perimeter' });
+  });
+
   test('a short denial right after a fact denies it, comma or not', () => {
     const note = 'Checked for spiders none found. Inside not treated. The garage was not needed.';
     const facts = validateVoiceFacts({

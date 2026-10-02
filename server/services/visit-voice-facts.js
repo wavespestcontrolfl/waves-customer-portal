@@ -94,28 +94,47 @@ const VOICE_FACTS_SCHEMA = {
   additionalProperties: false,
 };
 
-// A denial ("no roaches", "did not treat inside", "didn't spray") before a
-// quote in its clause, or in the quote itself, denies it: a fact the note
-// denies never stands, whatever was quoted. Checked in code; the prompt asks
-// for it, the code makes sure. A clause ends at punctuation or a turn of the
-// sentence ("no activity inside but sprayed the kitchen baseboards" is two
-// clauses). A negative after the quote is about something else ("sprayed
-// around the outside of the house with no issues") unless it is a short
-// denial of that same fact right after it (TRAILING_DENIAL).
+// A denial ("no roaches", "did not treat inside", "didn't spray") before
+// what a quote asserts, in its clause, denies it: a fact the note denies
+// never stands, whatever was quoted. Checked in code; the prompt asks for it,
+// the code makes sure. What a quote asserts is its first treatment word for a
+// place or a spray (the prompt's own: sprayed, treated, baited, dusted,
+// spread, granules, placed, applied, stations, glue boards) and the pest's
+// own name for a pest; a quote without one is read whole. A clause ends at
+// punctuation or a turn of the sentence ("no activity inside but sprayed the
+// kitchen baseboards", "no roaches seen so treated the kitchen" are two
+// clauses each). A negative after the assertion is about something else
+// ("sprayed around the outside of the house with no issues") unless it is a
+// short denial of that same fact right after it (TRAILING_DENIAL).
 const NEGATION_RE = /\b(no|not|none|never|nothing|zero|without|nowhere|didn'?t|doesn'?t|don'?t|wasn'?t|weren'?t|isn'?t|aren'?t|hadn'?t|haven'?t|couldn'?t|cannot|can'?t)\b/;
-const CLAUSE_BREAK_RE = /[.,;!?]|\b(?:but|however|although|though|except)\b/g;
-// A short denial right after the quote, comma or not, in the words of the
+const CLAUSE_BREAK_RE = /[.,;!?]|\b(?:but|however|although|though|except|so|then)\b/g;
+const TREATMENT_WORD_RE = /\b(?:spray|treat|bait|dust|spread|granul|plac|appli|apply|station|glue board)[a-z]*/;
+// A short denial right after the assertion, comma or not, in the words of the
 // fact it denies: a pest looked for and not there ("checked for spiders,
 // none found"), a treatment that did not happen ("inside not treated", "the
 // garage was not needed"). A pest's absence never denies a treatment
 // ("baited inside, nothing found" still baited inside), and a clause about
 // something else denies nothing ("sprayed the perimeter, no activity seen").
-const DENIAL_LEAD = String.raw`^\s*,?\s*(?:(?:was|were)\s+)?(?:no|none|not|nothing|never|wasn'?t|weren'?t)`;
+const DENIAL_LEAD = String.raw`^\s*[,:\-–—]?\s*(?:(?:was|were)\s+)?(?:no|none|not|nothing|never|wasn'?t|weren'?t)`;
 const trailingDenial = (words) => new RegExp(`${DENIAL_LEAD}(?:\\s+(?:${words})){0,2}\\s*(?:[.,;!?]|$)`);
 const TRAILING_DENIAL = {
   pest: trailingDenial('found|seen|present|there|today|anywhere|at all'),
   treatment: trailingDenial('treated|sprayed|baited|dusted|needed|done|today'),
 };
+
+// What a place or spray quote asserts: its first treatment word.
+function treatmentAssertion(quote) {
+  const match = TREATMENT_WORD_RE.exec(quote);
+  return match ? { offset: match.index, length: match[0].length } : null;
+}
+
+// What a pest quote asserts: the pest's own name, as a whole word.
+function nameAssertion(name) {
+  return (quote) => {
+    const match = new RegExp(`(?:^|[^a-z])(${escapeRegExp(name)})(?:$|[^a-z])`).exec(quote);
+    return match ? { offset: match.index + match[0].indexOf(match[1]), length: match[1].length } : null;
+  };
+}
 
 // Where the clause holding `from` starts: right after the last break before it.
 function clauseStart(note, from) {
@@ -127,20 +146,25 @@ function clauseStart(note, from) {
   return start;
 }
 
-// Whether the note denies what a quote says: every place the quote appears
-// has a denial before it in its clause or in it, or a short denial of the
-// same kind of fact right after it.
-function deniedInNote(quote, note, denialAfter) {
+// Whether the note denies what a quote asserts: every place the quote appears
+// has a denial before the assertion in its clause, or a short denial of the
+// same kind of fact right after it. A quote with no assertion is read whole.
+function deniedInNote(quote, note, { assertion, denialAfter }) {
+  const span = assertion(quote);
+  const from = span ? span.offset : quote.length;
+  const to = span ? span.offset + span.length : quote.length;
   let at = note.indexOf(quote);
   if (at < 0) return true;
   while (at >= 0) {
-    const end = at + quote.length;
-    const denied = NEGATION_RE.test(note.slice(clauseStart(note, at), end)) || denialAfter.test(note.slice(end));
+    const denied = NEGATION_RE.test(note.slice(clauseStart(note, at), at + from))
+      || denialAfter.test(note.slice(at + to));
     if (!denied) return false;
     at = note.indexOf(quote, at + 1);
   }
   return true;
 }
+
+const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DENIAL.treatment };
 
 // Rules only; the note rides the user channel as labeled data.
 const VOICE_FACTS_SYSTEM_PROMPT = `You read a Waves Pest Control technician's own note about the visit they just finished and pick out three facts, using ONLY the note.
@@ -195,9 +219,9 @@ function pestName(name, quote) {
  */
 // What the note says about one quoted fact: null when the note does not hold
 // the quote, else the quote and whether the note denies it there.
-function readQuote(quote, note, denialAfter) {
+function readQuote(quote, note, fact) {
   const grounded = groundedQuote(quote, note);
-  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note, denialAfter) } : null;
+  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note, fact) } : null;
 }
 const listOf = (value) => (Array.isArray(value) ? value : []);
 
@@ -208,7 +232,7 @@ function validateVoiceFacts(json, note) {
   const unresolvedAreas = new Set();
   for (const entry of listOf(answer.areas)) {
     if (!AREA_LABELS[entry?.area]) continue;
-    const read = readQuote(entry.quote, grounding, TRAILING_DENIAL.treatment);
+    const read = readQuote(entry.quote, grounding, TREATMENT_FACT);
     // Heard, but the note does not hold the quote or denies it there: never
     // recorded, and never silently dropped either, since a missed indoor
     // treatment loses the customer's indoor wait. The sheet holds until the
@@ -218,13 +242,14 @@ function validateVoiceFacts(json, note) {
   }
   const pests = new Map();
   for (const entry of listOf(answer.pests)) {
-    const read = readQuote(entry?.quote, grounding, TRAILING_DENIAL.pest);
-    const name = read && !read.denied && pestName(entry.name, read.quote);
-    if (name && !pests.has(name)) pests.set(name, read.quote);
+    const quote = groundedQuote(entry?.quote, grounding);
+    const name = quote && pestName(entry.name, quote);
+    if (!name || pests.has(name)) continue;
+    if (!deniedInNote(quote, grounding, { assertion: nameAssertion(name), denialAfter: TRAILING_DENIAL.pest })) pests.set(name, quote);
   }
   // How the sprays went down: only a grounded quote the note does not deny.
   const spray = answer.spray || {};
-  const sprayRead = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, TRAILING_DENIAL.treatment);
+  const sprayRead = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, TREATMENT_FACT);
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
