@@ -112,6 +112,31 @@ it('a confirmed-wrong row opens with its saved reason pressed, and a re-label ca
   }));
 });
 
+it('successive Replaces on a still-mounted confirmed-wrong row keep its reason', async () => {
+  const labeled = yesNoRow({ label: { verdict: 'jev_wrong', correct_value: false, note: null, reason: 'missing_promise' }, labelStatus: 'confirmed_error' });
+  let posts = 0;
+  adminFetch.mockImplementation(async (url, options) => {
+    if (options?.method !== 'POST') return { reviews: [labeled], count: 1 };
+    posts += 1;
+    if (posts % 2 === 1) throw Object.assign(new Error('Already labeled'), { status: 409, details: { labelStatus: 'confirmed_error' } });
+    return { review: labeled };
+  });
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'all' } });
+  await screen.findByText('Does the customer want a call back?');
+  for (let round = 1; round <= 2; round += 1) {
+    expect(screen.getByRole('button', { name: 'Missing promise' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+      method: 'POST',
+      body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false, reason: 'missing_promise', force: true }),
+    }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull());
+  }
+});
+
 it('offers no Jev wrong button for choice questions', async () => {
   mockList([yesNoRow({ jevAnswer: { choice: 'reschedule' }, baselineAnswers: {} })]);
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);

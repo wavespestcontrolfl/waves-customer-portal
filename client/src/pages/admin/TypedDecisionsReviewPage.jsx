@@ -147,9 +147,11 @@ function ReviewRow({ review, onLabeled, onStale }) {
         body: JSON.stringify(body),
       });
       setConflict(null);
-      // The label is saved and shown on the row; a chip tapped before a
-      // right/unclear verdict must not ride into a later Jev wrong unasked.
-      setReason(null);
+      // The chip follows the label the server just saved: cleared after a
+      // right/unclear verdict (a chip tapped before it must not ride into a
+      // later Jev wrong unasked), kept after a wrong one so a further Replace
+      // on a still-mounted row resends it instead of nulling it.
+      setReason(result?.review?.label?.reason ?? null);
       onLabeled(review.id, result?.review || null);
     } catch (err) {
       const kind = labelFailure(err);
