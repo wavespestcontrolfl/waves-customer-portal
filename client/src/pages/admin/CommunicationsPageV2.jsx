@@ -126,6 +126,15 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// Home-line PR 3: whether the composer may take the server's sender for a
+// fresh text — no draft in progress (body, attachments, or a loaded draft)
+// and the line still the one the request was made with.
+export function composerAcceptsServerSender(state, requestedLine) {
+  if (!state) return false;
+  return !state.loadedDraft && !String(state.body || "").trim() && !state.attachmentCount
+    && (state.line || "") === (requestedLine || "");
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -1316,18 +1325,21 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // main. It answers null while the gate is off or the thread is on a
   // non-customer line (recruiting, tech), leaving the thread-line choice
   // above untouched. Never overrides a draft in progress.
-  const fromNumberRef = useRef(fromNumber);
-  fromNumberRef.current = fromNumber;
+  const composerStateRef = useRef(null);
+  composerStateRef.current = { line: fromNumber || "", body: msgBody, attachmentCount: attachments.length, loadedDraft: !!loadedMessageDraft };
   useEffect(() => {
     const phone = toNumber.trim();
-    if (phone.replace(/\D/g, "").length < 10 || loadedMessageDraft || msgBody.trim() || attachments.length) return undefined;
+    const requested = composerStateRef.current;
+    if (phone.replace(/\D/g, "").length < 10 || !composerAcceptsServerSender(requested, requested.line)) return undefined;
     let cancelled = false;
     const params = new URLSearchParams({ phone });
     if (selectedCustomerId) params.set("customerId", selectedCustomerId);
-    if (fromNumberRef.current) params.set("currentLine", fromNumberRef.current);
+    if (requested.line) params.set("currentLine", requested.line);
     adminFetch(`/admin/communications/sender?${params.toString()}`)
       .then((r) => {
-        if (cancelled || !r?.fromNumber) return;
+        // Re-read the composer at response time: a line staff picked, or a
+        // draft started, while the request was in flight must stand.
+        if (cancelled || !r?.fromNumber || !composerAcceptsServerSender(composerStateRef.current, requested.line)) return;
         setFromNumber(r.fromNumber);
         setThreadLock({ contactPhone: phone, ourNumber: r.fromNumber, label: NUMBER_LABEL_MAP[r.fromNumber] || r.label || r.fromNumber });
       })
