@@ -1,6 +1,7 @@
 {
   "name": "Waves Tech",
   "short_name": "Waves Tech",
+  "id": "/tech/",
   "description": "Waves Pest Control field portal \u2014 route, protocols, on-site estimating.",
   "start_url": "/admin/today",
   "scope": "/",

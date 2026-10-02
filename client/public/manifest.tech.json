@@ -1,6 +1,7 @@
 {
   "name": "Waves Field Tools",
   "short_name": "Field Tools",
+  "id": "/tech",
   "description": "Waves field technician tools \u2014 route, estimates, and protocols.",
   "start_url": "/admin/today",
   "scope": "/",

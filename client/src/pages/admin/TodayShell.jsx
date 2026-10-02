@@ -3,6 +3,7 @@ import TechFieldShell from '../../components/tech/TechFieldShell';
 import { useTechNavigationLock } from '../../components/tech/TechNavigationLock';
 import { TechBasePathContext } from '../../components/tech/techBasePath';
 import useStaffDocumentsAvailable from '../../hooks/useStaffDocumentsAvailable';
+import useIsMobile from '../../hooks/useIsMobile';
 import usePayGrowthAvailable from '../../hooks/usePayGrowthAvailable';
 
 // Layout route for /admin/today. The technician field workspace lives inside
@@ -20,6 +21,7 @@ export default function TodayShell() {
   const payGrowthAvailable = usePayGrowthAvailable(true);
   const lock = useTechNavigationLock();
   const { pathname } = useLocation();
+  const isMobile = useIsMobile();
   // Same document gate the field shell applies (and the retired /tech shell
   // applied) when the flag is off: a bookmarked /admin/today/documents must
   // not mount the library against dark-gated endpoints.
@@ -30,8 +32,10 @@ export default function TodayShell() {
   // The legacy route UI paints light text for the retired /tech shell's dark
   // page; keep that wrapper so a flag-off (or flag-fetch-failure) render is
   // readable inside the light admin surface.
+  // The wrapper cancels .admin-main's padding (16px sides on a phone, 24/28px
+  // on desktop) so the dark page reaches the edges without overflowing them.
   const legacy = (
-    <div style={{ minHeight: '100%', margin: '-24px -28px', padding: 16, background: '#0f1923', color: '#e2e8f0', fontFamily: "'Nunito Sans', sans-serif" }} data-legacy-field-shell>
+    <div style={{ minHeight: '100%', margin: isMobile ? '0 -16px' : '-24px -28px', padding: 16, background: '#0f1923', color: '#e2e8f0', fontFamily: "'Nunito Sans', sans-serif" }} data-legacy-field-shell>
       {documentsGated ? <p>Staff documents are unavailable.</p> : <Outlet context={{
         fieldWorkspace: false,
         techRole: user?.role,
