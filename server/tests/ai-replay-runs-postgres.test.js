@@ -80,7 +80,9 @@ test('export refuses a directory inside the repository, however it is spelled', 
     await migration.up(database);
     await database.raw(`CREATE TABLE ??.message_drafts (id uuid PRIMARY KEY, inbound_message text, draft_response text,
       facts_block text, prompt_version varchar(40), created_at timestamptz, campaign_type varchar(30), intent varchar(50),
-      scheduling_intent boolean)`, [schema]);
+      scheduling_intent boolean, intended_actions text)`, [schema]);
+    await database.raw('CREATE TABLE ??.voice_profiles (version integer PRIMARY KEY, profile_text text)', [schema]);
+    await database('voice_profiles').insert({ version: 7, profile_text: 'PROFILE SEVEN' });
     await database.raw(`CREATE TABLE ??.shadow_draft_judgments (id uuid PRIMARY KEY, draft_id uuid UNIQUE, verdict varchar(20),
       human_replied boolean, human_reply_text text, intent varchar(50))`, [schema]);
   });
@@ -103,6 +105,8 @@ test('export refuses a directory inside the repository, however it is spelled', 
         id: key, inbound_message: 'when are you coming?', draft_response: `See you Wednesday at ${i + 1}pm!`,
         facts_block: 'UPCOMING: Quarterly Pest 2026-10-06 (Tue) window 14:00-16:00', prompt_version: V12, created_at: new Date('2026-10-01T15:00:00Z'),
         intent: 'SCHEDULING', scheduling_intent: i % 2 === 0,
+        // Drafts under profile 7, one under a profile no longer stored, the rest profile-free.
+        intended_actions: JSON.stringify({ voice_profile_version: i < 6 ? 7 : i === 6 ? 99 : null }),
       });
       await database('shadow_draft_judgments').insert({ id: judgmentId, draft_id: key, verdict: 'human_better', human_replied: true, human_reply_text: 'Tuesday 2-4.', intent: 'scheduling' });
       await database('ai_incidents').insert({
@@ -188,7 +192,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-'));
     const drafter = {
       buildUserPromptFromFacts: (facts, inbound, intent, scheduling) => `${facts}\n\nCUSTOMER: ${inbound}\nINTENT: ${intent.intent}${scheduling ? ' (scheduling)' : ''}`,
-      buildSystemPrompt: () => 'SYSTEM PROMPT',
+      buildSystemPromptWithProfile: (text) => ({ system: `SYSTEM PROMPT${text ? ` + ${text}` : ''}` }),
       currentPromptVersion: () => V12,
     };
     const lines = [];
@@ -202,7 +206,17 @@ test('export refuses a directory inside the repository, however it is spelled', 
     expect(new Set(cases.map((c) => c.scheduling_intent)).size).toBe(2);
     expect(cases[0].unsupported_quotes).toHaveLength(2);
     expect(cases[0].user_prompt).toContain('CUSTOMER: when are you coming?');
-    expect(fs.readFileSync(path.join(dir, 'system-prompt.txt'), 'utf8')).toBe('SYSTEM PROMPT');
+    // Each case points at the system prompt for the voice profile it was drafted under.
+    expect(fs.readFileSync(path.join(dir, 'system-prompt-v7.txt'), 'utf8')).toBe('SYSTEM PROMPT + PROFILE SEVEN');
+    expect(fs.readFileSync(path.join(dir, 'system-prompt-base.txt'), 'utf8')).toBe('SYSTEM PROMPT');
+    const byKey = new Map(cases.map((c) => [c.incident_key, c]));
+    for (const [i, key] of KEYS.entries()) {
+      const c = byKey.get(key);
+      if (!c) continue;
+      if (i < 6) expect(c).toMatchObject({ system_prompt_file: 'system-prompt-v7.txt', replay_omits: ['few_shot_exemplars', 'verify_revise_loop', 'thread_mixed_hint'] });
+      else if (i === 6) expect(c).toMatchObject({ system_prompt_file: 'system-prompt-base.txt', replay_omits: ['few_shot_exemplars', 'verify_revise_loop', 'thread_mixed_hint', 'voice_profile'] });
+      else expect(c.system_prompt_file).toBe('system-prompt-base.txt');
+    }
     // No line the CLI prints carries customer text.
     expect(lines.join('\n')).not.toMatch(/when are you coming|Wednesday/);
 
@@ -217,6 +231,13 @@ test('export refuses a directory inside the repository, however it is spelled', 
     const done = await cli.run({ dbi: database, argv: ['record', `--file=${file}`, '--execute'], log: () => {} });
     expect(done.run).toMatchObject({ status: 'passed', case_count: 10 });
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('a few-shot leak or verifier miss is refused: a single re-draft cannot reproduce it', async () => {
+    for (const surface of ['few_shot_leak', 'verifier_miss']) {
+      await database('ai_fix_proposals').where({ id: proposal.id }).update({ surface });
+      await expect(replay.exportCases({ dbi: database, proposalId: proposal.id, split: 'dev' })).rejects.toMatchObject({ code: 'unsupported_surface' });
+    }
   });
 
   test('an empty split exports nothing and writes no files', async () => {

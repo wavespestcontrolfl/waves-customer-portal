@@ -27,6 +27,13 @@ const METHODS = Object.freeze(['subagent', 'code']);
 const PURPOSES = Object.freeze(['fix', 'recurrence']);
 const RUN_STATUSES = Object.freeze(['passed', 'failed', 'inconclusive', 'underpowered']);
 const VERDICTS = Object.freeze(['fixed', 'reproduces', 'inconclusive']);
+// A single re-draft can reproduce only a failure that lives in the draft
+// itself. A few-shot leak needs the exemplars the drafter was shown, and a
+// verifier miss needs the verify/revise loop; neither is stored, so those
+// cells are proven by their fix's fixture test and by recurrence instead.
+const REPLAYABLE_SURFACES = Object.freeze(['facts_block_gap', 'prompt_discipline', 'other']);
+// What every replay leaves out, printed on each exported case.
+const REPLAY_OMITS = Object.freeze(['few_shot_exemplars', 'verify_revise_loop', 'thread_mixed_hint']);
 // A holdout run on fewer cases than this is labelled underpowered, never passed.
 const MIN_HOLDOUT_CASES = 5;
 
@@ -57,6 +64,9 @@ async function exportCases({ dbi, proposalId, split }) {
   const proposal = await dbi('ai_fix_proposals').where({ id: proposalId }).first();
   if (!proposal) throw new TransitionError('not_found', `no proposal ${proposalId}`);
   if (proposal.area !== 'sms') throw new TransitionError('unsupported_area', `export supports sms only, not ${proposal.area}`);
+  if (!REPLAYABLE_SURFACES.includes(proposal.surface)) {
+    throw new TransitionError('unsupported_surface', `${proposal.surface} cannot be replayed from a single re-draft (its exemplars or verify loop are not stored): prove the fix with its fixture test and recurrence`);
+  }
   const keys = splitKeys(proposal, split);
   if (!keys.length) return { proposal, cases: [], missing: [] };
   const rows = await dbi({ i: 'ai_incidents' })
@@ -70,6 +80,7 @@ async function exportCases({ dbi, proposalId, split }) {
     .select(
       'i.incident_key', 'i.prompt_version', 'i.produced_at', 'i.summary', 'i.adjudication',
       'md.inbound_message', 'md.draft_response', 'md.facts_block', 'md.intent', 'md.scheduling_intent',
+      dbi.raw("md.intended_actions::jsonb ->> 'voice_profile_version' as voice_profile_version"),
       'j.human_reply_text', 'j.intent as judge_intent'
     );
   const seen = new Set();
@@ -87,6 +98,9 @@ async function exportCases({ dbi, proposalId, split }) {
       // The drafter's own classification, as the production prompt saw it.
       intent: r.intent || r.judge_intent || null,
       scheduling_intent: r.scheduling_intent === true,
+      // The owner-approved voice profile that shaped the draft (null = base).
+      voice_profile_version: r.voice_profile_version == null ? null : Number(r.voice_profile_version),
+      replay_omits: [...REPLAY_OMITS],
       inbound_message: r.inbound_message,
       facts_block: r.facts_block,
       draft_as_produced: r.draft_response,
@@ -238,6 +252,8 @@ module.exports = {
   RUN_STATUSES,
   VERDICTS,
   MIN_HOLDOUT_CASES,
+  REPLAYABLE_SURFACES,
+  REPLAY_OMITS,
   runStatus,
   exportCases,
   recordReplayRun,

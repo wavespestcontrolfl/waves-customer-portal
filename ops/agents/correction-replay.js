@@ -7,10 +7,12 @@
 //   export --proposal=<id|8-char> --split=dev|holdout --out=<dir outside the repo>
 //       Writes <dir>/cases.jsonl (one frozen case per incident: the customer's
 //       text, the facts the drafter was given, the draft, the person's reply,
-//       the quotes both readers verified), <dir>/system-prompt.txt (the
-//       drafter's system prompt as THIS checkout renders it under the
-//       process's gates: run it from the fix branch), and
-//       <dir>/results-template.json. Claude Code subagents re-draft each case
+//       the quotes both readers verified, what the replay leaves out),
+//       <dir>/system-prompt-<v|base>.txt (the drafter's system prompt as THIS
+//       checkout renders it under the process's gates with the voice profile
+//       each draft was written under: run it from the fix branch), and
+//       <dir>/results-template.json. Few-shot leaks and verifier misses are
+//       refused: their exemplars and verify loop are not stored. Claude Code subagents re-draft each case
 //       from system-prompt.txt + the case's user_prompt and grade it
 //       (fixed | reproduces | inconclusive). Customer text: the dir must be
 //       outside the repository (the session scratchpad).
@@ -107,13 +109,33 @@ async function runExport({ dbi, args, log, drafter }) {
   const { proposal, cases, missing } = await exportCases({ dbi, proposalId: id, split: args.split });
   if (!cases.length) throw usageError(`the proposal has no ${args.split} cases to export${missing.length ? ` (${missing.length} without a stored draft)` : ''}`, 1);
   const d = drafter || require(path.join(REPO_ROOT, 'server', 'services', 'sms-shadow-drafter'));
+  // One system prompt per voice profile the drafts were written under, as
+  // THIS checkout renders it with that profile's stored text.
+  const versions = [...new Set(cases.map((c) => c.voice_profile_version).filter((v) => v != null))];
+  const profiles = versions.length
+    ? await dbi('voice_profiles').whereIn('version', versions).select('version', 'profile_text')
+    : [];
+  const profileText = new Map(profiles.map((p) => [Number(p.version), p.profile_text]));
   fs.mkdirSync(dir, { recursive: true });
-  const lines = cases.map((c) => JSON.stringify({
-    ...c,
-    user_prompt: d.buildUserPromptFromFacts(c.facts_block, c.inbound_message, { intent: String(c.intent || 'GENERAL').toUpperCase() }, c.scheduling_intent),
-  }));
+  const promptFiles = new Map();
+  const promptFileFor = (version) => {
+    const name = version == null ? 'system-prompt-base.txt' : `system-prompt-v${version}.txt`;
+    if (!promptFiles.has(name)) {
+      fs.writeFileSync(path.join(dir, name), d.buildSystemPromptWithProfile(version == null ? '' : profileText.get(version)).system);
+      promptFiles.set(name, true);
+    }
+    return name;
+  };
+  const lines = cases.map((c) => {
+    const lost = c.voice_profile_version != null && !profileText.has(c.voice_profile_version);
+    return JSON.stringify({
+      ...c,
+      system_prompt_file: promptFileFor(lost ? null : c.voice_profile_version),
+      replay_omits: lost ? [...c.replay_omits, 'voice_profile'] : c.replay_omits,
+      user_prompt: d.buildUserPromptFromFacts(c.facts_block, c.inbound_message, { intent: String(c.intent || 'GENERAL').toUpperCase() }, c.scheduling_intent),
+    });
+  });
   fs.writeFileSync(path.join(dir, 'cases.jsonl'), lines.length ? `${lines.join('\n')}\n` : '');
-  fs.writeFileSync(path.join(dir, 'system-prompt.txt'), d.buildSystemPrompt());
   fs.writeFileSync(path.join(dir, 'results-template.json'), `${JSON.stringify({
     proposal_id: proposal.id,
     split: args.split,
