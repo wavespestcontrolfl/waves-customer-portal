@@ -117,7 +117,7 @@ describe('buildTreeShrubWarnings', () => {
   const kontos = cat('kontos', 'Kontos Insecticide/Miticide', { irac_group: '23' });
   const mainspring = cat('mainspring', 'Mainspring GNL Insecticide', { irac_group: '28' });
   const kphite = cat('kphite', 'KPHITE 7LP Systemic Fungicide', { frac_group: 'P07' });
-  const palm = cat('palm', 'LESCO 8-2-12 Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' });
+  const palm = cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' });
   const orn = cat('orn', 'LESCO 13-0-13 60% PolyPlus Landscape', { category: 'fertilizer' });
   const plain = cat('plain', 'Cytogro Liquid Biostimulant');
   const catalogRows = [kontos, mainspring, kphite, palm, orn, plain];
@@ -207,10 +207,10 @@ describe('buildTreeShrubWarnings', () => {
   });
 
   test('an unlinked palm fertilizer application (named through its service product) still warns on spacing', () => {
-    const palmCandidate = cat('palm', 'LESCO 8-2-12 100% Poly Plus Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' });
+    const palmCandidate = cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' });
     const unlinked = {
       application_date: '2026-08-12', product_id: null, category: 'fertilizer',
-      product_name: 'LESCO 8-2-12 Palm & Tropical Ornamental Granular Fertilizer', moa_group: null, history_moa_group: null,
+      product_name: 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', moa_group: null, history_moa_group: null,
     };
     expect(buildTreeShrubWarnings({ catalogRows: [palmCandidate], applications: [unlinked], visitDate }))
       .toEqual([expect.objectContaining({ type: 'palm_fertilizer_spacing', productId: 'palm', daysAgo: 50 })]);
@@ -279,7 +279,7 @@ describe('per-area rate units never pre-fill', () => {
 describe('buildTreeShrubFastContext', () => {
   const catalog = [
     cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' }),
-    cat('palm', 'LESCO 8-2-12 100% Poly Plus Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' }),
+    cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' }),
     cat('orn', 'LESCO 13-0-13 60% PolyPlus Landscape', { category: 'fertilizer' }),
     cat('kphite', 'KPHITE 7LP Systemic Fungicide', { category: 'fungicide', frac_group: 'P07' }),
   ];
@@ -308,7 +308,7 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx).toMatchObject({ ok: true, eligible: true, reason: null, lastVisit: null, warnings: [] });
     expect(ctx.warningsUnavailable).toBeUndefined();
     expect(ctx.service).toMatchObject({ id: 'visit-1', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1', serviceKey: 'tree_shrub_program' });
-    // October protocol: Snapshot, 8-2-12, 13-0-13, KPHITE — suggestions, no amounts invented.
+    // October protocol: Snapshot, 8-0-12 palm, 13-0-13, KPHITE — suggestions, no amounts invented.
     expect(ctx.monthProducts).toEqual([
       { productId: 'snapshot', method: 'granular_broadcast' },
       { productId: 'palm', method: 'granular_broadcast' },

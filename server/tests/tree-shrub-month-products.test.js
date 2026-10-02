@@ -9,7 +9,11 @@ const row = (id, name, extra = {}) => ({ id, name, active: true, ...extra });
 // Names as the prod catalog carries them (verified read-only 2026-10-01).
 const CATALOG = [
   row('snapshot', 'Snapshot 2.5TG'),
-  row('palm', 'LESCO 8-2-12 100% Poly Plus OPTI Kieserite Palm & Tropical Ornamental Granular Fertilizer'),
+  // Palm SKUs as #5089's migration seeds them (owner 2026-10-01 palm program).
+  row('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)'),
+  row('palm16', 'LESCO 0-0-16 Palm & Tropical Ornamental Fertilizer (#510513)'),
+  // The lawn winterizer shares the 0-0-16 analysis and must never stand in.
+  row('winterizer', 'LESCO 0-0-16 Winterizer'),
   row('orn', 'LESCO 13-0-13 60% PolyPlus Landscape'),
   row('tritek', 'TriTek Spray Oil Emulsion (OMRI)'),
   row('iron', 'LESCO Chelated Iron Plus'),
@@ -32,14 +36,17 @@ const ids = (date, rows = CATALOG) => resolveMonthProducts(date, rows).map((entr
 describe('resolveMonthProducts', () => {
   test('every month matches the protocol primary list; the ambiguous NutriRoot entry is skipped', () => {
     expect(ids('2026-01-15')).toEqual(['snapshot', 'palm', 'orn']);
-    expect(ids('2026-02-10')).toEqual(['tritek', 'iron']);
-    expect(ids('2026-03-10')).toEqual(['kontos', 'mainspring', 'distance', 'kphite']);
+    expect(ids('2026-02-10')).toEqual(['tritek']);
+    expect(ids('2026-03-10')).toEqual(['mainspring', 'distance', 'kphite']);
     expect(ids('2026-04-10')).toEqual(['snapshot', 'palm', 'orn']);
-    expect(ids('2026-05-10')).toEqual(['kontos', 'mainspring', 'iron', 'palm', 'orn']);
-    expect(ids('2026-06-10')).toEqual(['tritek', 'kphite', 'copper', 'iron']);
-    expect(ids('2026-07-10')).toEqual(['snapshot']);
+    expect(ids('2026-05-10')).toEqual(['mainspring', 'palm', 'orn']);
+    // June's "Fe/Mn micros" line is not a suggestion: Iron Plus is 12-0-0 N.
+    expect(ids('2026-06-10')).toEqual(['tritek', 'kphite', 'copper']);
+    // The summer palm feeding is the 0-0-16 palm SKU, never the lawn winterizer.
+    expect(ids('2026-07-10')).toEqual(['snapshot', 'palm16']);
     expect(ids('2026-08-10')).toEqual(['mainspring', 'distance', 'tritek', 'cytogro']);
-    expect(ids('2026-09-10')).toEqual(['talus', 'distance', 'iron', 'tritek']);
+    // Sep Talus is "(held: … prohibits residential use)" — never suggested.
+    expect(ids('2026-09-10')).toEqual(['distance', 'tritek']);
     expect(ids('2026-10-01')).toEqual(['snapshot', 'palm', 'orn', 'kphite']);
     expect(ids('2026-11-10')).toEqual(['tritek', 'espoma', 'sequestar']);
     expect(ids('2026-12-10')).toEqual(['palm', 'cytogro', 'sequestar']);
@@ -59,24 +66,30 @@ describe('resolveMonthProducts', () => {
   });
 
   test('zero matches: the entry is skipped, never substituted', () => {
-    expect(ids('2026-07-10', CATALOG.filter((r) => r.id !== 'snapshot'))).toEqual([]);
+    expect(ids('2026-07-10', CATALOG.filter((r) => r.id !== 'snapshot'))).toEqual(['palm16']);
     // A broad lookalike must not stand in for the missing exact row.
     expect(ids('2026-07-10', [row('x', 'Snapshot Lawn Pre-Emergent 2.5 TG blend')])).toEqual([]);
   });
 
   test('multiple active matches: skipped, not first-wins', () => {
     const dup = [...CATALOG, row('snapshot-2', 'Snapshot 2.5TG')];
-    expect(ids('2026-07-10', dup)).toEqual([]);
+    expect(ids('2026-07-10', dup)).toEqual(['palm16']);
   });
 
   test('inactive rows do not count: an inactive near-duplicate neither matches nor makes the entry ambiguous', () => {
-    const withInactiveDup = [...CATALOG, row('iron-old', 'LESCO Chelated Iron Plus', { active: false })];
-    expect(ids('2026-02-10', withInactiveDup)).toEqual(['tritek', 'iron']);
-    expect(ids('2026-07-10', CATALOG.map((r) => (r.id === 'snapshot' ? { ...r, active: false } : r)))).toEqual([]);
+    const withInactiveDup = [...CATALOG, row('tritek-old', 'TriTek Spray Oil Emulsion', { active: false })];
+    expect(ids('2026-02-10', withInactiveDup)).toEqual(['tritek']);
+    expect(ids('2026-07-10', CATALOG.map((r) => (r.id === 'snapshot' ? { ...r, active: false } : r)))).toEqual(['palm16']);
   });
 
-  test('the Iron Plus pattern is exact: a longer near-duplicate name does not match', () => {
-    expect(ids('2026-02-10', [row('iron-x', 'LESCO Chelated Iron Plus Granular'), row('tritek', 'TriTek Spray Oil Emulsion (OMRI)')])).toEqual(['tritek']);
+  test('a lawn 0-0-16 winterizer alone never fills the palm feeding', () => {
+    expect(ids('2026-07-10', [row('winterizer', 'LESCO 0-0-16 Winterizer')])).toEqual([]);
+  });
+
+  test('Iron Plus is never suggested in any month (owner 2026-10-01: 12-0-0 N, dropped from T&S)', () => {
+    const months = ['01-15', '02-10', '03-10', '04-10', '05-10', '06-10', '07-10', '08-10', '09-10', '10-01', '11-10', '12-10'];
+    const withIron = [...CATALOG, row('iron', 'LESCO Chelated Iron Plus')];
+    for (const m of months) expect(ids(`2026-${m}`, withIron)).not.toContain('iron');
   });
 
   test('names match case-insensitively and anchored at the start', () => {

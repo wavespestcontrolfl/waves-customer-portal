@@ -23,11 +23,13 @@ const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const PROTOCOL_PRODUCTS = [
   { token: /\bsnapshot\b/i, pattern: /^snapshot\s*2\.5\s*tg\b/i, method: 'granular_broadcast' },
-  { token: /\b8-2-12\b/, pattern: /^lesco\s+8-2-12\b/i, method: 'granular_broadcast' },
+  // Palm program (owner 2026-10-01, #5089): LESCO 8-0-12, plus LESCO 0-0-16
+  // for the summer feeding. The 0-0-16 pattern is palm-specific because the
+  // catalog also carries a lawn "0-0-16 Winterizer".
+  { token: /\b8-0-12\b/, pattern: /^lesco\s+8-0-12\s+palm\b/i, method: 'granular_broadcast' },
+  { token: /\b0-0-16\b/, pattern: /^lesco\s+0-0-16\s+palm\b/i, method: 'granular_broadcast' },
   { token: /\b13-0-13\b/, pattern: /^lesco\s+13-0-13\b/i, method: 'granular_broadcast' },
   { token: /\btritek\b/i, pattern: /^tritek\s+spray\s+oil\s+emulsion\b/i, method: 'foliar_spray' },
-  // "Iron Plus", and June's "Fe/Mn micros" line (the same chelated Fe + Mn).
-  { token: /\biron\s+plus\b|\bfe\/mn\s+micros\b/i, pattern: /^lesco\s+chelated\s+iron\s+plus$/i, method: 'foliar_spray' },
   // Three package rows (1 gal / 1 qt / 2.5 gal) share this name, so it resolves
   // ambiguous and is skipped until the catalog carries one row.
   { token: /\bnutriroot\b/i, pattern: /^arborjet\s+nutriroot\b/i, method: 'soil_drench' },
@@ -44,7 +46,12 @@ const PROTOCOL_PRODUCTS = [
 
 // Primary lines that name no product to suggest: scouting and reporting work,
 // the blackout reminder, and "Mn Combo" (no products_catalog row).
-const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report|mn combo\b)/i;
+// Lines the sheet never turns into a suggestion. "(held" marks a product
+// the protocol withholds (Sep Talus: label prohibits residential use).
+// "Fe/Mn micros" has no verified catalog product: the old mapping was LESCO
+// Chelated Iron Plus, a 12-0-0 nitrogen source the owner dropped from T&S
+// (2026-10-01, #5089), and June sits inside the summer N blackout.
+const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report|mn combo\b|fe\/mn micros\b)|\(held\b/i;
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
