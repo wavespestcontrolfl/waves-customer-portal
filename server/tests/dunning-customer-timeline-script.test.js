@@ -272,8 +272,34 @@ describe('what is never printed', () => {
     // ids and codes still print
     expect(text).toContain(INVOICE_A);
     expect(text).toContain('admin_paused');
-    expect(text).toContain('customer_disputed');
+    // a typed stop reason shaped like a code is still something a person typed: withheld
+    expect(text).not.toContain('customer_disputed');
     expect(text).toContain('collection_hold');
+    expect(text).toContain('[text withheld]');
+  });
+
+  test('knownReason prints only the engines\' own reason codes: a typed single token shaped like a code is withheld', () => {
+    for (const code of ['admin_paused', 'final_notice_delivered', 'balance_cleared', 'released_admin', 'no_channel_delivered']) {
+      expect(Timeline.knownReason(code)).toBe(code);
+    }
+    // what a person can type into a pause / stop reason, or a provider error string
+    for (const typed of ['Jane.Doe', '555-0100', 'Jane', 'a@b.test', 'customer said wait', 'payment_plan:1234:prev=active', 'unknown_code']) {
+      expect(Timeline.knownReason(typed)).toBe('[text withheld]');
+    }
+    expect(Timeline.knownReason(null)).toBeNull();
+    expect(Timeline.knownReason('')).toBeNull();
+  });
+
+  test('the report withholds a single-token name or phone typed as a pause or stop reason, on both tables', () => {
+    const report = {
+      customerId: '00000000-0000-4000-8000-000000000001', now: new Date('2026-08-01T00:00:00Z'), days: 30,
+      windowStart: new Date('2026-07-02T00:00:00Z'), attempts: [], holds: [], controls: [], notes: [],
+      sequences: [{ invoice_id: 'inv-1', status: 'paused', step_index: 1, touches_sent: 1, paused_reason: 'Jane.Doe', stopped_reason: '555-0100' }],
+      schedules: [{ episode: 1, status: 'paused', step_index: 1, touches_sent: 1, created_at: new Date('2026-07-05T00:00:00Z'), paused_reason: 'Jane', held_reason: 'collection_hold', closed_reason: null }],
+    };
+    const text = Timeline.formatReport(report).join('\n');
+    for (const typed of ['Jane.Doe', '555-0100', 'Jane']) expect(text).not.toContain(typed);
+    expect(text).toContain('held_reason collection_hold');
     expect(text).toContain('[text withheld]');
   });
 

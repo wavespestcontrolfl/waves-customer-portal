@@ -94,10 +94,32 @@ function formatTimes(value) {
   return `${d.toISOString()} | ${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${p.timeZoneName}`;
 }
 
-/** A reason column is printed only when it is a machine code; anything else is free text and is withheld. */
+/**
+ * For columns only the system writes from a fixed vocabulary (step id, variant, hold flag, staff-press
+ * action): printed when it is shaped like a machine code, withheld otherwise.
+ */
 function codeOnly(value) {
   if (value == null || value === '') return null;
   return CODE.test(String(value)) ? String(value) : '[text withheld]';
+}
+
+// The reason codes the reminder engines themselves write. A reason column can also hold what a person
+// typed (a pause or stop reason) or a provider error string, and a single typed token ("Jane.Doe",
+// "555-0100") is shaped exactly like a code, so shape proves nothing: only these are ever printed.
+const KNOWN_REASON_CODES = new Set([
+  'admin_paused', 'no_channel_delivered',
+  'member_paused', 'member_autopay_hold', 'account_credit_available', 'delivered_evidence_unreadable',
+  'over_cap', 'no_reachable_channel', 'all_channels_terminal', 'customer_deleted', 'collection_hold',
+  'COLLECTIONS_POLICY', 'REMINDER_OUTCOME_UNCONFIRMED', 'prefs_unreadable', 'progress_unreadable',
+  'autopay_unreadable', 'autopay_hold', 'balance_cleared', 'no_active_member', 'final_notice_delivered',
+  'released_admin', 'released_gate_off', 'released_prereq_off', 'released_final_notice_unreadable',
+  'released_past_final_step',
+]);
+
+/** A reason column: printed only when it is one of the engines' own codes; everything else is withheld. */
+function knownReason(value) {
+  if (value == null || value === '') return null;
+  return KNOWN_REASON_CODES.has(String(value)) ? String(value) : '[text withheld]';
 }
 
 const parseJson = (value, fallback) => {
@@ -226,7 +248,7 @@ function buildEvents(report) {
   }
   for (const s of report.schedules || []) {
     push(s.created_at, 'schedule', `schedule created  episode ${s.episode}`);
-    push(s.closed_at, 'schedule', `schedule closed  episode ${s.episode}  status ${s.status}  reason ${codeOnly(s.closed_reason) || '-'}`);
+    push(s.closed_at, 'schedule', `schedule closed  episode ${s.episode}  status ${s.status}  reason ${knownReason(s.closed_reason) || '-'}`);
   }
   for (const h of report.holds || []) {
     push(h.created_at, 'hold', `hold placed  id ${h.id}  kind ${codeOnly(h.kind) || '-'}`);
@@ -243,10 +265,10 @@ const stamp = (value) => (validDate(value) ? validDate(value).toISOString() : '-
 const section = (title, rows, formatRow, empty) => [title, ...(rows.length ? rows.map(formatRow) : [`  ${empty}`]), ''];
 
 const sequenceLine = (s) => `  invoice ${s.invoice_id}  status ${s.status}  step ${s.step_index}  touches ${s.touches_sent}  last ${stamp(s.last_touch_at)}  next ${stamp(s.next_touch_at)}`
-  + `  paused_reason ${codeOnly(s.paused_reason) || '-'}  stopped_reason ${codeOnly(s.stopped_reason) || '-'}`;
+  + `  paused_reason ${knownReason(s.paused_reason) || '-'}  stopped_reason ${knownReason(s.stopped_reason) || '-'}`;
 
 const scheduleLine = (s) => `  episode ${s.episode}  status ${s.status}  step ${s.step_index}  touches ${s.touches_sent}  last ${stamp(s.last_touch_at)}  next ${stamp(s.next_touch_at)}`
-  + `  closed ${stamp(s.closed_at)} reason ${codeOnly(s.closed_reason) || '-'}  held_reason ${codeOnly(s.held_reason) || '-'}  paused_reason ${codeOnly(s.paused_reason) || '-'}`;
+  + `  closed ${stamp(s.closed_at)} reason ${knownReason(s.closed_reason) || '-'}  held_reason ${knownReason(s.held_reason) || '-'}  paused_reason ${knownReason(s.paused_reason) || '-'}`;
 
 const holdLine = (h) => `  hold ${h.id}  kind ${codeOnly(h.kind) || '-'}  placed ${stamp(h.created_at)}  released ${h.released_at ? stamp(h.released_at) : 'ACTIVE'}`;
 
@@ -372,6 +394,8 @@ module.exports = {
   prepareDatabaseEnv,
   formatTimes,
   codeOnly,
+  knownReason,
+  KNOWN_REASON_CODES,
   deliveryState,
   annotateAttempts,
   buildEvents,
