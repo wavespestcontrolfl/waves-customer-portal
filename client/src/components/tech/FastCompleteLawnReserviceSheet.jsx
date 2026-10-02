@@ -16,9 +16,16 @@
 // Nothing is assumed applied. The products this property's last lawn visit
 // recorded are SUGGESTION tiles, off until tapped; an amount fills only from
 // what that visit recorded (labeled "last time"), else it is blank and
-// required. "+ Other product" adds any catalog product. Every row is a spot
-// treatment: the server asks for a measured area on a broadcast or granular
-// lawn row, and this sheet never collects one.
+// required. "+ Other product" adds any catalog product.
+//
+// Each row carries the method the tech really used, never a guess. A last-visit
+// tile starts on the method that visit recorded (when the server offers it); an
+// added product, or a tile with no usable recorded method, starts with none and
+// Complete waits for a tap. The methods come from the server's context (exactly
+// what /complete accepts for a lawn row, with its own verdict on which need a
+// measured area). A row whose method needs square feet asks for them, prefilled
+// only from a fact and labeled: what that product recorded last time, else the
+// property's lawn size. Otherwise blank and required. Spot rows send no area.
 //
 // Customer text: the sheet sends the full typed form's own default (completion
 // text on, pay link on), minus the review ask the owner kept off re-services.
@@ -43,7 +50,7 @@ import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
   SheetHeader, VisitNote, toggleInSet, useProductPicker, visitChangedSinceSchedule,
 } from './FastCompleteParts';
-import { Button, ActionFeedback, cn } from '../ui';
+import { Button, ActionFeedback, Input, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // The typed form's option lists (server/services/project-types.js
@@ -57,11 +64,6 @@ export const TURF_ISSUE_OPTIONS = [
 export const WEED_PRESSURE_OPTIONS = ['None observed', 'Light', 'Moderate', 'Heavy'];
 export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Recovering', 'Stressed'];
 
-// The only method this sheet records: a spot treatment needs no measured area,
-// while /complete refuses a broadcast spray or granular lawn row without square
-// feet (complete-scheduled-service.js requiresSqftForReportApplication).
-const METHOD = 'spot_treatment';
-
 // The completion text the full typed form posts by default for this visit
 // (SchedulePage: sendSms starts true; includePayLink is true whenever there is
 // no invoice to link). The review ask is the one flag that differs: the owner
@@ -71,8 +73,8 @@ const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: false, inc
 // A product on the sheet. `last` is the amount the server says the last lawn
 // visit recorded: the only thing an amount ever starts from, in the unit it
 // was recorded in. Anything else leaves it blank for the tech.
-function productRow(product, { last = null, added = false }) {
-  const own = productUnits(product, { method: METHOD });
+function productRow(product, { last = null, added = false, ctx }) {
+  const own = productUnits(product, { method: '' });
   const lastAmount = Number(last?.totalAmount);
   // Read last time's unit in the product's own measure first: a bare "oz" is a
   // fluid ounce for a liquid and a weight ounce for a dry product. Only a unit
@@ -86,7 +88,11 @@ function productRow(product, { last = null, added = false }) {
     dimension = lastDimension;
     seeded = seededAmount(lastAmount, measureUnit(last.amountUnit, lastDimension));
   }
-  return {
+  // The recorded method, only when the server offers it; otherwise none.
+  const method = ctx.methods.some((choice) => choice.value === last?.method) ? last.method : '';
+  // The area that product recorded last time, in square feet only.
+  const areaLast = last?.areaUnit === 'sqft' && Number(last.areaValue) > 0 ? Number(last.areaValue) : null;
+  return withAreaSeed({
     product,
     productId: product.id,
     name: product.name,
@@ -96,7 +102,24 @@ function productRow(product, { last = null, added = false }) {
     totalAmount: seeded.amount,
     amountUnit: seeded.unit,
     fromLast: seeded.amount !== '',
-  };
+    method,
+    areaLast,
+    area: '',
+    areaFrom: '',
+  }, ctx);
+}
+
+const methodChoice = (ctx, value) => ctx.methods.find((choice) => choice.value === value) || null;
+const needsSqft = (ctx, row) => methodChoice(ctx, row.method)?.requiresSqft === true;
+
+// A row whose method needs square feet and has none yet starts from a fact:
+// what the product recorded last time, else the property's lawn size. Nothing
+// else is ever filled in; the tech's own entry is never replaced.
+function withAreaSeed(row, ctx) {
+  if (!needsSqft(ctx, row) || row.area !== '') return row;
+  if (row.areaLast) return { ...row, area: String(row.areaLast), areaFrom: 'last time' };
+  if (Number(ctx.lawnSqft) > 0) return { ...row, area: String(Number(ctx.lawnSqft)), areaFrom: 'lawn size' };
+  return row;
 }
 
 // Why the live context can't be completed here, or '' when it can.
@@ -110,7 +133,7 @@ function blockedReasonFor(data, service) {
 
 // The suggestion rows: what the last lawn visit recorded, each starting off.
 // The server already dropped products the catalog no longer has.
-function lastVisitRows(products, lastVisit) {
+function lastVisitRows(products, lastVisit, ctx) {
   const byId = new Map(products.map((product) => [String(product.id), product]));
   const seen = new Set();
   const rows = [];
@@ -119,7 +142,7 @@ function lastVisitRows(products, lastVisit) {
     const product = byId.get(id);
     if (!product || seen.has(id)) continue;
     seen.add(id);
-    rows.push(productRow(product, { last: item }));
+    rows.push(productRow(product, { last: item, ctx }));
   }
   return rows;
 }
@@ -128,22 +151,33 @@ function lastVisitRows(products, lastVisit) {
 const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']);
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], lastVisit: null, customerRequest: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], methods: [], lawnSqft: null, lastVisit: null, customerRequest: null,
   visitIdentity: null, visit: null,
 };
+
+// What decides a row's method and area: the server's offered methods and the
+// property's lawn size (a positive number, else none).
+function methodContext(data) {
+  return {
+    methods: (Array.isArray(data?.methods) ? data.methods : []).filter((choice) => choice?.value),
+    lawnSqft: Number(data?.lawnSqft) > 0 ? Number(data.lawnSqft) : null,
+  };
+}
 
 function contextFrom(data, service) {
   if (data?.eligible !== true && RETRYABLE_REASONS.has(data?.reason)) {
     return { ...EMPTY_CONTEXT, loading: false, loadError: 'Couldn’t load this visit’s products. Try again.' };
   }
   const products = (Array.isArray(data?.products) ? data.products : []).filter(Boolean);
+  const base = methodContext(data);
   return {
     loading: false,
     loadError: '',
     blockedReason: blockedReasonFor(data, service),
     visit: data?.service || {},
     products,
-    rows: lastVisitRows(products, data?.lastVisit),
+    ...base,
+    rows: lastVisitRows(products, data?.lastVisit, base),
     lastVisit: data?.lastVisit && typeof data.lastVisit === 'object' ? data.lastVisit : null,
     customerRequest: data?.customerRequest && typeof data.customerRequest === 'object' ? data.customerRequest : null,
     visitIdentity: recapVisitIdentity(data?.service),
@@ -188,17 +222,25 @@ function useProductRows(ctx) {
     return amounts;
   }, [ctx.lastVisit]);
   const updateRow = useCallback((productId, patch) => {
-    setRows((prev) => prev.map((row) => (row.productId === productId
-      // An amount the tech changed is no longer last time's.
-      ? { ...row, ...patch, ...('totalAmount' in patch || 'amountUnit' in patch ? { fromLast: false } : {}) }
-      : row)));
-  }, []);
+    setRows((prev) => prev.map((row) => {
+      if (row.productId !== productId) return row;
+      const next = {
+        ...row,
+        ...patch,
+        // An amount the tech changed is no longer last time's; an area the
+        // tech typed is no longer a fact the sheet filled in.
+        ...('totalAmount' in patch || 'amountUnit' in patch ? { fromLast: false } : {}),
+        ...('area' in patch ? { areaFrom: '' } : {}),
+      };
+      return 'method' in patch ? withAreaSeed(next, ctx) : next;
+    }));
+  }, [ctx]);
   const addProduct = useCallback((product) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      { ...productRow(product, { last: lastAmounts[String(product.id)] || null, added: true }), active: true },
+      { ...productRow(product, { last: lastAmounts[String(product.id)] || null, added: true, ctx }), active: true },
     ]));
-  }, [lastAmounts]);
+  }, [lastAmounts, ctx]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
@@ -212,16 +254,22 @@ function useProductRows(ctx) {
 
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
 
-function missingRequirement({ form, rows, dictationPending }) {
+function missingRequirement({ form, rows, ctx, dictationPending }) {
   const active = rows.filter((row) => row.active);
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
+  // Every active row needs the method the tech used, and square feet when that
+  // method needs them. Nothing is defaulted.
+  const missingMethod = active.find((row) => !methodChoice(ctx, row.method));
+  const missingArea = active.find((row) => needsSqft(ctx, row) && !(Number(row.area) > 0));
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
     [!active.length, 'Select at least one product.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
+    [missingMethod, missingMethod && `Pick how ${missingMethod.name} went down.`],
+    [missingArea, missingArea && `Enter the square feet treated for ${missingArea.name}.`],
     [!form.issues.size, 'Select what you treated for.'],
     [!form.pressure, 'Select the weed pressure.'],
     [!form.condition, 'Select the lawn condition.'],
@@ -235,7 +283,15 @@ function completionBody({ form, rows, ctx }) {
     ...(ctx.visitIdentity ? { expectedVisit: ctx.visitIdentity } : {}),
     products: rows.filter((row) => row.active).map((row) => {
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
-      return { productId: row.productId, applicationMethod: METHOD, totalAmount, amountUnit, targets: [] };
+      return {
+        productId: row.productId,
+        applicationMethod: row.method,
+        totalAmount,
+        amountUnit,
+        targets: [],
+        // Only a method /complete needs an area for sends one.
+        ...(needsSqft(ctx, row) ? { areaValue: Number(row.area), areaUnit: 'sqft' } : {}),
+      };
     }),
     structuredFindings: {
       type: 'one_time_lawn_treatment',
@@ -322,7 +378,7 @@ function LawnForm({ ctx, service, submission, locked, dictationPending, onDictat
     onPick: products.addProduct,
   });
 
-  const missingReason = missingRequirement({ form, rows, dictationPending });
+  const missingReason = missingRequirement({ form, rows, ctx, dictationPending });
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the note and taps.
   const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -420,7 +476,7 @@ function ProductsSection({ ctx, products, locked, other, popover }) {
         ))}
       </div>
       {rows.filter((row) => row.active).map((row) => (
-        <ProductEditor key={row.productId} row={row} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
+        <ProductEditor key={row.productId} row={row} methods={ctx.methods} sqft={needsSqft(ctx, row)} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
       <OtherProductButton {...other} popover={popover} />
     </section>
@@ -459,10 +515,13 @@ function ProductTile({ row, locked, onClick }) {
 }
 
 // An applied product: how much (blank until the tech enters it, or last
-// time's amount, labeled) and the one method this sheet records.
-function ProductEditor({ row, locked, onChange, onRemove }) {
+// time's amount, labeled), how it went down (the tech's tap), and the area
+// when that method needs one.
+function ProductEditor({ row, methods, sqft, locked, onChange, onRemove }) {
   const nameId = useId();
   const amountId = useId();
+  const methodId = useId();
+  const areaId = useId();
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
@@ -471,7 +530,31 @@ function ProductEditor({ row, locked, onChange, onRemove }) {
       </div>
       <AmountEntry id={amountId} row={row} locked={locked} onChange={onChange} />
       {row.fromLast && <p className="tech-visit-muted">last time</p>}
-      <p className="tech-visit-muted">How: Spot treatment</p>
+      <div>
+        <span id={methodId} className="tech-product-editor-label">How</span>
+        <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid">
+          {methods.map((choice) => (
+            <Chip disabled={locked} key={choice.value} label={choice.label} pressed={row.method === choice.value} onClick={() => onChange({ method: choice.value })} />
+          ))}
+        </div>
+      </div>
+      {sqft && (
+        <div>
+          <label htmlFor={areaId} className="tech-product-editor-label">Area treated (sq ft)</label>
+          <Input
+            id={areaId}
+            className="tech-visit-control tech-product-amount-input"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="any"
+            disabled={locked}
+            value={row.area}
+            onChange={(e) => onChange({ area: e.target.value })}
+          />
+          {row.areaFrom && <p className="tech-visit-muted">{row.areaFrom}</p>}
+        </div>
+      )}
       {row.added && (
         <div className="tech-product-editor-actions">
           <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>

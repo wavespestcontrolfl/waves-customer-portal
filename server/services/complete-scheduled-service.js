@@ -14372,3 +14372,8 @@ module.exports = {
   parseCompletionReviewDelayMinutes,
   deriveCockroachWorkFromSubmittedProducts,
 };
+// The method vocabulary and area rules /complete enforces per product row,
+// exported so the lawn re-service fast-context offers exactly what it accepts.
+module.exports.normalizeServiceReportApplicationMethod = normalizeServiceReportApplicationMethod;
+module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportApplication;
+module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;

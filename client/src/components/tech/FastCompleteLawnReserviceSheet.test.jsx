@@ -41,14 +41,21 @@ const CONTEXT = {
   service: VISIT,
   customerRequest: { text: 'Weeds are back along the driveway.', pests: ['Weeds'] },
   products: CATALOG,
+  methods: [
+    { value: 'spot_treatment', label: 'Spot treatment', requiresSqft: false },
+    { value: 'broadcast_spray', label: 'Broadcast spray', requiresSqft: true },
+    { value: 'granular_broadcast', label: 'Granular broadcast', requiresSqft: true },
+  ],
+  lawnSqft: 6400,
   lastVisit: {
     serviceRecordId: 'rec-1',
     serviceDate: '2026-09-20',
     serviceType: 'Lawn Care',
     products: [
-      { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment' },
-      { productId: 'talak', name: 'Talak 7.9%', totalAmount: 4, amountUnit: 'fl_oz', method: 'broadcast_spray' },
-      { productId: 'headway', name: 'Headway G', totalAmount: null, amountUnit: null, method: null },
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null },
+      { productId: 'talak', name: 'Talak 7.9%', totalAmount: 4, amountUnit: 'fl_oz', method: 'broadcast_spray', areaValue: 5200, areaUnit: 'sqft' },
+      // No usable recorded method (the server nulls anything it does not offer).
+      { productId: 'headway', name: 'Headway G', totalAmount: null, amountUnit: null, method: null, areaValue: null, areaUnit: null },
     ],
   },
 };
@@ -126,8 +133,9 @@ describe('products', () => {
     expect(within(celsius).getByLabelText('How much?').value).toBe('1.5');
     expect(within(within(celsius).getByRole('group', { name: 'Unit' })).getByRole('button', { name: 'oz' }).getAttribute('aria-pressed')).toBe('true');
     expect(within(celsius).getByText('last time')).toBeTruthy();
-    // Only one method: no chips, never a measured area.
-    expect(within(celsius).getByText('How: Spot treatment')).toBeTruthy();
+    // The recorded method is preselected; a spot row asks for no area.
+    expect(within(within(celsius).getByRole('group', { name: 'How' })).getByRole('button', { name: 'Spot treatment' }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(celsius).queryByLabelText('Area treated (sq ft)')).toBeNull();
 
     fireEvent.click(tile('Talak 7.9%'));
     const talak = editorFor('Talak 7.9%');
@@ -155,6 +163,9 @@ describe('products', () => {
     enterAmount('Headway G', 0);
     expect(completeButton().disabled).toBe(true);
     enterAmount('Headway G', 6);
+    // Headway recorded no usable method last time: the tech's tap is still owed.
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(within(within(editorFor('Headway G')).getByRole('group', { name: 'How' })).getByRole('button', { name: 'Spot treatment' }));
     expect(completeButton().disabled).toBe(false);
   });
 
@@ -167,7 +178,10 @@ describe('products', () => {
     fireEvent.click(within(picker).getByRole('button', { name: /Empty Jug Surfactant/ }));
     const editor = editorFor('Empty Jug Surfactant');
     expect(within(editor).getByLabelText('How much?').value).toBe('');
-    expect(within(editor).getByText('How: Spot treatment')).toBeTruthy();
+    // An added product has no method preselected, and Complete waits for a tap.
+    for (const button of within(within(editor).getByRole('group', { name: 'How' })).getAllByRole('button')) {
+      expect(button.getAttribute('aria-pressed')).toBe('false');
+    }
     // A tracked stock at zero holds Complete before the server refuses it.
     enterAmount('Empty Jug Surfactant', 2);
     expect(screen.getByText('Empty Jug Surfactant shows 0 in stock. Update inventory, then tap Check stock.')).toBeTruthy();
@@ -184,6 +198,7 @@ describe('products', () => {
     fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /Empty Jug Surfactant/ }));
     enterAmount('Empty Jug Surfactant', 2);
+    fireEvent.click(within(within(editorFor('Empty Jug Surfactant')).getByRole('group', { name: 'How' })).getByRole('button', { name: 'Spot treatment' }));
     expect(completeButton().disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Check stock' }));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
@@ -195,6 +210,111 @@ describe('products', () => {
     render(<FastCompleteLawnReserviceSheet service={SERVICE} request={request} onClose={() => {}} />);
     expect(await screen.findByText('No earlier lawn visit products on record. Add what you applied.')).toBeTruthy();
     expect(screen.getByRole('button', { name: '+ Other product' })).toBeTruthy();
+  });
+});
+
+describe('application method and area', () => {
+  const howGroup = (name) => within(editorFor(name)).getByRole('group', { name: 'How' });
+  const pressed = (name, label) => within(howGroup(name)).getByRole('button', { name: label }).getAttribute('aria-pressed');
+  const areaInput = (name) => within(editorFor(name)).getByLabelText('Area treated (sq ft)');
+
+  test('a seeded last-visit method is preserved, and the body carries each row\'s own method', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(tile('Talak 7.9%'));
+    expect(pressed('Celsius WG', 'Spot treatment')).toBe('true');
+    expect(pressed('Talak 7.9%', 'Broadcast spray')).toBe('true');
+    expect(pressed('Talak 7.9%', 'Spot treatment')).toBe('false');
+    // The tech changes Celsius to granular: that is what goes to the server.
+    fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Granular broadcast' }));
+    const body = await completeBody(request);
+    expect(body.products.map((p) => [p.productId, p.applicationMethod])).toEqual([['celsius', 'granular_broadcast'], ['talak', 'broadcast_spray']]);
+  });
+
+  test('a last-visit tile with no usable recorded method has none selected, and Complete waits for a tap', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(tile('Headway G'));
+    enterAmount('Headway G', 6);
+    for (const label of ['Spot treatment', 'Broadcast spray', 'Granular broadcast']) expect(pressed('Headway G', label)).toBe('false');
+    expect(screen.getByText('Pick how Headway G went down.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(within(howGroup('Headway G')).getByRole('button', { name: 'Spot treatment' }));
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'headway')).toEqual({
+      productId: 'headway', applicationMethod: 'spot_treatment', totalAmount: 6, amountUnit: 'oz', targets: [],
+    });
+  });
+
+  test('an added product has no default method', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /Empty Jug Surfactant/ }));
+    for (const label of ['Spot treatment', 'Broadcast spray', 'Granular broadcast']) expect(pressed('Empty Jug Surfactant', label)).toBe('false');
+    expect(screen.queryByLabelText('Area treated (sq ft)')).toBeNull();
+  });
+
+  test('a broadcast row without square feet keeps Complete disabled; with sqft it sends areaValue and areaUnit sqft', async () => {
+    const request = makeRequest({ context: { ...CONTEXT, lawnSqft: null, lastVisit: { ...CONTEXT.lastVisit, products: [
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null },
+    ] } } });
+    await readyVisit(request);
+    expect(completeButton().disabled).toBe(false);
+    fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Broadcast spray' }));
+    // No recorded area and no lawn size: blank and required.
+    expect(areaInput('Celsius WG').value).toBe('');
+    expect(screen.queryByText('last time', { selector: 'p' })).toBeTruthy();
+    expect(screen.getByText('Enter the square feet treated for Celsius WG.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(areaInput('Celsius WG'), { target: { value: '0' } });
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(areaInput('Celsius WG'), { target: { value: '3200' } });
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products[0]).toEqual({
+      productId: 'celsius', applicationMethod: 'broadcast_spray', totalAmount: 1.5, amountUnit: 'oz', targets: [], areaValue: 3200, areaUnit: 'sqft',
+    });
+  });
+
+  test('area prefills from what that product recorded last time, labeled, else from the lawn size, labeled', async () => {
+    await openSheet();
+    // Talak recorded 5200 sq ft last time.
+    fireEvent.click(tile('Talak 7.9%'));
+    expect(areaInput('Talak 7.9%').value).toBe('5200');
+    expect(within(editorFor('Talak 7.9%')).getAllByText('last time').length).toBeGreaterThan(0);
+    // Celsius recorded none: switching it to granular uses the property's lawn size.
+    fireEvent.click(tile('Celsius WG'));
+    expect(within(editorFor('Celsius WG')).queryByLabelText('Area treated (sq ft)')).toBeNull();
+    fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Granular broadcast' }));
+    expect(areaInput('Celsius WG').value).toBe('6400');
+    expect(within(editorFor('Celsius WG')).getByText('lawn size')).toBeTruthy();
+    // A typed area is the tech's own: the label goes and a method change keeps it.
+    fireEvent.change(areaInput('Celsius WG'), { target: { value: '3000' } });
+    expect(within(editorFor('Celsius WG')).queryByText('lawn size')).toBeNull();
+    fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Broadcast spray' }));
+    expect(areaInput('Celsius WG').value).toBe('3000');
+  });
+
+  test('a spot row never sends an area, even after the tech tried a broadcast method on it', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Broadcast spray' }));
+    expect(areaInput('Celsius WG').value).toBe('6400');
+    fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Spot treatment' }));
+    const body = await completeBody(request);
+    expect(body.products[0]).toEqual({ productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: [] });
+  });
+
+  test('a context with no methods cannot complete a product (nothing is guessed)', async () => {
+    await openSheet(makeRequest({ context: { ...CONTEXT, methods: [] } }));
+    fireEvent.click(tile('Celsius WG'));
+    fireEvent.click(screen.getByRole('button', { name: 'Dollarweed' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    expect(screen.getByText('Pick how Celsius WG went down.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
   });
 });
 
@@ -258,7 +378,7 @@ describe('required taps', () => {
 });
 
 describe('the /complete body', () => {
-  test('is typed one_time_lawn_treatment findings with spot-treatment rows and the full form\'s customer-text defaults', async () => {
+  test('is typed one_time_lawn_treatment findings with each row\'s own method (and sqft where needed) and the full form\'s customer-text defaults', async () => {
     const request = makeRequest();
     await readyVisit(request);
     fireEvent.click(tile('Talak 7.9%'));
@@ -276,7 +396,7 @@ describe('the /complete body', () => {
       },
       products: [
         { productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: [] },
-        { productId: 'talak', applicationMethod: 'spot_treatment', totalAmount: 4, amountUnit: 'fl_oz', targets: [] },
+        { productId: 'talak', applicationMethod: 'broadcast_spray', totalAmount: 4, amountUnit: 'fl_oz', targets: [], areaValue: 5200, areaUnit: 'sqft' },
       ],
       structuredFindings: {
         type: 'one_time_lawn_treatment',
@@ -291,7 +411,9 @@ describe('the /complete body', () => {
     expect(body).not.toHaveProperty('customerRecapMode');
     expect(body).not.toHaveProperty('completionPhotos');
     expect(body.structuredFindings.values).not.toHaveProperty('work_completed');
-    expect(new Set(body.products.map((p) => p.applicationMethod))).toEqual(new Set(['spot_treatment']));
+    // A spot row sends no area.
+    expect(body.products[0]).not.toHaveProperty('areaValue');
+    expect(body.products[0]).not.toHaveProperty('areaUnit');
   });
 
   test('a product left off the sheet is not sent, and an empty note is an empty string', async () => {
@@ -310,7 +432,7 @@ describe('the /complete body', () => {
     fireEvent.click(within(within(editor).getByRole('group', { name: 'Unit' })).getByRole('button', { name: 'tsp' }));
     fireEvent.change(within(editor).getByLabelText('How much?'), { target: { value: '3' } });
     const body = await completeBody(request);
-    expect(body.products[1]).toMatchObject({ productId: 'talak', totalAmount: 0.5, amountUnit: 'fl_oz', applicationMethod: 'spot_treatment' });
+    expect(body.products[1]).toMatchObject({ productId: 'talak', totalAmount: 0.5, amountUnit: 'fl_oz', applicationMethod: 'broadcast_spray' });
   });
 
   test('after Complete the saved view shows the summary, and Next stop closes the sheet', async () => {

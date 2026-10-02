@@ -14,6 +14,8 @@ const { resolveCompletionProfileForScheduledService } = require('../services/ser
 const {
   buildLawnReserviceFastContext,
   lawnReserviceIneligibleReason,
+  lawnMethodChoices,
+  LAWN_METHODS,
 } = require('../services/lawn-reservice-fast-context');
 
 const LAWN_PROFILE = {
@@ -162,8 +164,8 @@ describe('buildLawnReserviceFastContext', () => {
     expect(ctx.lastVisit).toEqual({
       serviceRecordId: 'rec-legacy', serviceDate: '2026-09-20', serviceType: 'Lawn Care Treatment',
       products: [
-        { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment' },
-        { productId: 'talak', name: 'Talak 7.9%', totalAmount: 4, amountUnit: 'fl_oz', method: 'broadcast_spray' },
+        { productId: 'celsius', name: 'Celsius WG', totalAmount: 1.5, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null },
+        { productId: 'talak', name: 'Talak 7.9%', totalAmount: 4, amountUnit: 'fl_oz', method: 'broadcast_spray', areaValue: null, areaUnit: null },
       ],
     });
   });
@@ -197,8 +199,8 @@ describe('buildLawnReserviceFastContext', () => {
       ],
     }));
     expect(ctx.lastVisit.products).toEqual([
-      { productId: 'headway', name: 'Headway G', totalAmount: null, amountUnit: null, method: null },
-      { productId: 'celsius', name: 'Celsius WG', totalAmount: 3, amountUnit: 'oz', method: 'spot_treatment' },
+      { productId: 'headway', name: 'Headway G', totalAmount: null, amountUnit: null, method: null, areaValue: null, areaUnit: null },
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: 3, amountUnit: 'oz', method: 'spot_treatment', areaValue: null, areaUnit: null },
     ]);
   });
 
@@ -262,5 +264,78 @@ describe('buildLawnReserviceFastContext', () => {
       scheduled_services: visit({ customer_request_pests: ['lawn_insects'] }), products_catalog: catalog,
     }));
     expect(ctx.customerRequest).toEqual({ text: null, pests: ['Bugs in the lawn'] });
+  });
+});
+
+describe('methods, areas and lawn size', () => {
+  const lawnRecord = [{ id: 'rec-1', service_type: 'Lawn Care', service_line: 'lawn', service_date: '2026-09-20' }];
+  const build = (tables, visitExtra = {}) => buildLawnReserviceFastContext('visit-1', fakeKnex({
+    scheduled_services: visit(visitExtra), products_catalog: catalog, ...tables,
+  }));
+
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(LAWN_PROFILE);
+  });
+
+  test('the offered methods are exactly what /complete accepts for a lawn row, with its own sqft verdict', () => {
+    const {
+      normalizeServiceReportApplicationMethod, requiresSqftForReportApplication, requiresLinearFtForReportApplication,
+    } = require('../services/complete-scheduled-service');
+    const choices = lawnMethodChoices();
+    expect(choices.map((c) => c.value)).toEqual(['spot_treatment', 'broadcast_spray', 'granular_broadcast']);
+    for (const { value, requiresSqft } of choices) {
+      expect(normalizeServiceReportApplicationMethod(value)).toBe(value);
+      expect(requiresLinearFtForReportApplication(value)).toBe(false);
+      expect(requiresSqft).toBe(requiresSqftForReportApplication(value, 'lawn'));
+    }
+    expect(Object.fromEntries(choices.map((c) => [c.value, c.requiresSqft]))).toEqual({
+      spot_treatment: false, broadcast_spray: true, granular_broadcast: true,
+    });
+    // A method that needs linear feet is never offered (the sheet collects none).
+    expect(LAWN_METHODS.some((m) => requiresLinearFtForReportApplication(m.value))).toBe(false);
+    expect(requiresLinearFtForReportApplication('perimeter_spray')).toBe(true);
+  });
+
+  test('the context carries the methods, the recorded area per product, and the lawn size', async () => {
+    const ctx = await build({
+      'service_records as sr': lawnRecord,
+      service_products: [
+        { product_id: 'talak', product_name: 'Talak 7.9%', total_amount: '4', amount_unit: 'fl_oz', application_method: 'broadcast_spray', area_value: '5200.00', area_unit: 'sqft' },
+        { product_id: 'celsius', product_name: 'Celsius WG', total_amount: '1.5', amount_unit: 'oz', application_method: 'spot_treatment', area_value: null, area_unit: null },
+      ],
+      customer_turf_profiles: { lawn_sqft: 6400 },
+    });
+    expect(ctx.methods).toEqual([
+      { value: 'spot_treatment', label: 'Spot treatment', requiresSqft: false },
+      { value: 'broadcast_spray', label: 'Broadcast spray', requiresSqft: true },
+      { value: 'granular_broadcast', label: 'Granular broadcast', requiresSqft: true },
+    ]);
+    expect(ctx.lawnSqft).toBe(6400);
+    expect(ctx.lastVisit.products).toEqual([
+      expect.objectContaining({ productId: 'talak', method: 'broadcast_spray', areaValue: 5200, areaUnit: 'sqft' }),
+      expect.objectContaining({ productId: 'celsius', method: 'spot_treatment', areaValue: null, areaUnit: null }),
+    ]);
+  });
+
+  test('a recorded method the sheet does not offer (or cannot read) comes back null, never guessed', async () => {
+    const ctx = await build({
+      'service_records as sr': lawnRecord,
+      service_products: [
+        { product_id: 'talak', product_name: 'Talak', total_amount: '4', amount_unit: 'fl_oz', application_method: 'perimeter_spray', area_value: '300', area_unit: 'linear_ft' },
+        { product_id: 'celsius', product_name: 'Celsius', total_amount: '1', amount_unit: 'oz', application_method: null },
+        { product_id: 'headway', product_name: 'Headway', total_amount: '2', amount_unit: 'lb', application_method: 'Granular Broadcast' },
+      ],
+    });
+    expect(ctx.lastVisit.products.map((p) => [p.productId, p.method])).toEqual([['talak', null], ['celsius', null], ['headway', 'granular_broadcast']]);
+    // The recorded area travels with its own unit; the sheet only reads sqft.
+    expect(ctx.lastVisit.products[0]).toMatchObject({ areaValue: 300, areaUnit: 'linear_ft' });
+  });
+
+  test('no turf profile, a zero size, or a failed read: lawnSqft null, the context still serves', async () => {
+    expect((await build({ customer_turf_profiles: undefined })).lawnSqft).toBeNull();
+    expect((await build({ customer_turf_profiles: { lawn_sqft: 0 } })).lawnSqft).toBeNull();
+    const failed = await build({ customer_turf_profiles: new Error('boom') });
+    expect(failed).toMatchObject({ eligible: true, lawnSqft: null });
   });
 });

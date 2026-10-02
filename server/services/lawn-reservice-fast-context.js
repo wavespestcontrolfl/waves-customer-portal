@@ -18,6 +18,17 @@ const { pestLabels } = require('./reservice-request');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const SERVICE_KEY = 'lawn_re_service';
+// The application methods the sheet offers on a lawn row, in screen order. Each
+// value is one /complete accepts as is (normalizeServiceReportApplicationMethod
+// keeps it); `requiresSqft` is /complete's own verdict for the lawn line
+// (requiresSqftForReportApplication), so the sheet never decides it. A method
+// that needs linear feet (perimeter spray) is not offered: the sheet does not
+// collect them.
+const LAWN_METHODS = [
+  { value: 'spot_treatment', label: 'Spot treatment' },
+  { value: 'broadcast_spray', label: 'Broadcast spray' },
+  { value: 'granular_broadcast', label: 'Granular broadcast' },
+];
 const FINDINGS_TYPE = 'one_time_lawn_treatment';
 const HISTORY_PAGE_SIZE = 50;
 const HISTORY_MAX_ROWS = 300;
@@ -42,6 +53,8 @@ async function lawnReserviceIneligibleReason(svc, profile, knex) {
   return null;
 }
 
+const normalizedMethod = (value) => require('./complete-scheduled-service').normalizeServiceReportApplicationMethod(value);
+
 const positiveOrNull = (value) => {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : null;
@@ -54,6 +67,19 @@ const quantityUnit = (unit) => {
   const value = String(unit || '').trim();
   return value && !value.includes('/') ? value : null;
 };
+
+// The offered lawn methods with /complete's area verdict on each. The helpers
+// load lazily: complete-scheduled-service is a very large module.
+function lawnMethodChoices() {
+  const {
+    normalizeServiceReportApplicationMethod,
+    requiresSqftForReportApplication,
+    requiresLinearFtForReportApplication,
+  } = require('./complete-scheduled-service');
+  return LAWN_METHODS
+    .filter(({ value }) => normalizeServiceReportApplicationMethod(value) === value && !requiresLinearFtForReportApplication(value))
+    .map(({ value, label }) => ({ value, label, requiresSqft: requiresSqftForReportApplication(value, 'lawn') }));
+}
 
 /**
  * The most recent COMPLETED lawn service_record at this visit's property
@@ -97,13 +123,13 @@ async function findLastLawnRecord(svc, knex, visitDate) {
  * catalog, is dropped (it cannot be selected). `catalogIds` is the set of
  * active catalog ids.
  */
-async function loadLastVisit(svc, knex, visitDate, catalogIds) {
+async function loadLastVisit(svc, knex, visitDate, catalogIds, methodValues = new Set()) {
   const record = await findLastLawnRecord(svc, knex, visitDate);
   if (!record) return null;
   const rows = await knex('service_products')
     .where('service_record_id', record.id)
     .orderBy('created_at')
-    .select('product_id', 'product_name', 'total_amount', 'amount_unit', 'application_method');
+    .select('product_id', 'product_name', 'total_amount', 'amount_unit', 'application_method', 'area_value', 'area_unit');
   const seen = new Set();
   const products = [];
   for (const row of rows) {
@@ -111,12 +137,19 @@ async function loadLastVisit(svc, knex, visitDate, catalogIds) {
     if (!id || !catalogIds.has(id) || seen.has(id)) continue;
     seen.add(id);
     const unit = quantityUnit(row.amount_unit);
+    const recordedMethod = normalizedMethod(row.application_method);
+    const areaValue = positiveOrNull(row.area_value);
     products.push({
       productId: row.product_id,
       name: row.product_name,
       totalAmount: unit ? positiveOrNull(row.total_amount) : null,
       amountUnit: unit,
-      method: row.application_method || null,
+      // The recorded method, only when the sheet offers it: anything else
+      // leaves the tile with no method for the tech to pick.
+      method: methodValues.has(recordedMethod) ? recordedMethod : null,
+      // The area recorded with it, as recorded (the sheet reads sqft only).
+      areaValue,
+      areaUnit: areaValue ? String(row.area_unit || '').trim() || null : null,
     });
   }
   return {
@@ -125,6 +158,18 @@ async function loadLastVisit(svc, knex, visitDate, catalogIds) {
     serviceType: record.service_type || null,
     products,
   };
+}
+
+// The property's lawn size from the customer's turf profile (the typed form's
+// own prefill source, GET /admin/customers/:id/turf-profile), or null.
+async function loadLawnSqft(svc, knex) {
+  try {
+    const profile = await knex('customer_turf_profiles').where({ customer_id: svc.customer_id }).first('lawn_sqft');
+    return positiveOrNull(profile?.lawn_sqft);
+  } catch (err) {
+    logger.warn(`[lawn-reservice-fast-context] lawn size unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
 }
 
 // The customer's own words from booking, for the sheet's "They said" line.
@@ -157,9 +202,10 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
   if (!catalog.length) return { ok: true, eligible: false, reason: 'catalog_unavailable', service };
 
   const visitDate = etCalendarDayOf(svc.scheduled_date);
+  const methods = lawnMethodChoices();
   let lastVisit = null;
   try {
-    lastVisit = await loadLastVisit(svc, knex, visitDate, new Set(catalog.map((row) => String(row.id))));
+    lastVisit = await loadLastVisit(svc, knex, visitDate, new Set(catalog.map((row) => String(row.id))), new Set(methods.map((m) => m.value)));
   } catch (err) {
     // No driver message: it can echo SQL and bound values. No suggestion tiles
     // is the safe degradation: the tech adds what they applied.
@@ -173,6 +219,8 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
     service,
     customerRequest: customerRequestOf(svc),
     products: catalog,
+    methods,
+    lawnSqft: await loadLawnSqft(svc, knex),
     lastVisit,
   };
 }
@@ -180,6 +228,8 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
 module.exports = {
   SERVICE_KEY,
   FINDINGS_TYPE,
+  LAWN_METHODS,
+  lawnMethodChoices,
   buildLawnReserviceFastContext,
   lawnReserviceIneligibleReason,
   findLastLawnRecord,
