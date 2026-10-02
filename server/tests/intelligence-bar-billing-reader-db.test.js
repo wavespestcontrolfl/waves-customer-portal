@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let C; let D;
+  let A; let B; let H; let C; let D; let E;
   const inv = {}; // seeded invoices by key
   const tokens = [];
 
@@ -48,12 +48,12 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const json = (value) => JSON.stringify(value);
 
   async function snapshot() {
-    const q = (table) => db(table).whereIn('customer_id', [A, B, H, C, D]).count('* as n').first();
+    const q = (table) => db(table).whereIn('customer_id', [A, B, H, C, D, E]).count('* as n').first();
     return {
-      invoices: await db('invoices').whereIn('customer_id', [A, B, H, C, D]).select('id', 'status', 'total', 'credit_applied', 'updated_at').orderBy('id'),
+      invoices: await db('invoices').whereIn('customer_id', [A, B, H, C, D, E]).select('id', 'status', 'total', 'credit_applied', 'updated_at').orderBy('id'),
       payments: await q('payments'), attempts: await db('stripe_invoice_charge_attempts').count('* as n').first(),
       ledger: await q('customer_credit_ledger'), notifications: await db('notifications').count('* as n').first(),
-      credits: await db('customers').whereIn('id', [A, B, H, C, D]).select('id', 'account_credits').orderBy('id'),
+      credits: await db('customers').whereIn('id', [A, B, H, C, D, E]).select('id', 'account_credits').orderBy('id'),
     };
   }
 
@@ -135,6 +135,17 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('d_ach', D, { total: 25, due_date: day(5) });
     await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_bank_${run}`, customer_id: D, invoice_id: inv.d_ach.id, amount: 25,
       source: 'invoice_card_on_file', original_db_error: 'synthetic ledger failure' });
+    // Overlapping subsets (a payer-billed draft) and a credit-only settlement (a succeeded attempt with no PaymentIntent).
+    E = await customer(`Overlap${run}`, `Sorter${run}`);
+    const [payer] = await db('payers').insert({ display_name: `Synthetic Payer ${run}` }).returning('id');
+    const payerId = payer.id || payer;
+    await invoice('e_self', E, { total: 100 });
+    await invoice('e_draft', E, { total: 40, status: 'draft', due_date: null });
+    await invoice('e_payer_draft', E, { total: 30, status: 'draft', due_date: null, payer_id: payerId });
+    await invoice('e_payer_sent', E, { total: 20, payer_id: payerId });
+    const creditPaid = await invoice('e_credit', E, { total: 80, status: 'paid', paid_at: new Date(), credit_applied: 80 });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: creditPaid.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-credit-${run}`,
+      status: 'succeeded', amount: 0, credit_applied_delta: 80, credit_applied_total: 80, resolved_at: new Date(), submitted_at: new Date() });
     await invoice('h_open', H, { total: 80 });
     await db('collections_flags').insert({ customer_id: H, flag: 'collection_hold', reason: 'dispute on call: synthetic' });
   }, 60000);
@@ -306,6 +317,25 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(orphan.state_note).toMatch(/not confirmed received/i);
     expect(detail.payment_summary).toMatchObject({ received: false, unreconciled_stripe_charges: 0, attempts_in_flight_or_unknown: 1 });
     expect(detail.payment_summary.statement).toMatch(/^No payment has been received/);
+  });
+
+  test('overlapping subsets: the presented personal balance excludes the union, so nothing is subtracted twice', async () => {
+    const { account_summary: summary } = await read('get_customer_invoices', { customer_id: E });
+    // 100 + 40 draft + 30 payer-billed draft + 20 payer-billed sent = 190; drafts 70, payer-billed 50, overlap 30.
+    expect(summary).toMatchObject({ total_due: 190, not_yet_sent_due: 70, payer_billed_due: 50, presented_self_pay_due: 100 });
+    expect(summary.basis).toMatch(/never subtract/);
+    const oracle = await pageOracle(E);
+    expect(summary.total_due).toBe(oracle.total);
+  });
+
+  test('a credit-only settlement (succeeded attempt, no PaymentIntent) is not a Stripe charge and not a payment received', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.e_credit.id });
+    const attempt = detail.payments_timeline.find((e) => e.type === 'stripe_charge_attempt');
+    expect(attempt).toMatchObject({ state: 'succeeded', received: false, settled_by: 'account_credit' });
+    expect(attempt.ledger_recorded).toBeUndefined();
+    expect(detail.payment_summary).toMatchObject({ received: false, stripe_succeeded_not_in_ledger: 0, settled_by_account_credit: 1, attempts_in_flight_or_unknown: 0 });
+    expect(detail.payment_summary.statement).toMatch(/^Settled by account credit, not by a payment/);
+    expect(detail.invoice).toMatchObject({ status: 'paid', credit_applied: 80, balance_due: 0 });
   });
 
   test('applied credit: lines, discounts and the credit movement stay separate from payments', async () => {

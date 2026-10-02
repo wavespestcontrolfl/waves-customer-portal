@@ -313,22 +313,29 @@ const ATTEMPT_STATE_NOTES = {
 
 function attemptEntry(row, ledgerStates) {
   const inFlight = row.status === 'claimed' && Boolean(row.submitted_at);
-  const ledgerState = row.stripe_payment_intent_id ? ledgerStates.get(row.stripe_payment_intent_id) || null : null;
+  // A saved-card attempt also closes as succeeded when account credit alone
+  // covered the invoice: it then has no PaymentIntent and no card was charged.
+  // Only an attempt that carries a PaymentIntent is evidence of a Stripe charge.
+  const stripeCharge = Boolean(row.stripe_payment_intent_id);
+  const creditOnly = row.status === 'succeeded' && !stripeCharge;
+  const ledgerState = stripeCharge ? ledgerStates.get(row.stripe_payment_intent_id) || null : null;
   // The payment's CURRENT recorded state governs: a succeeded attempt whose
   // ledger row is now disputed is not "paid", and one whose ledger row is
   // refunded or disputed is not a charge missing from the ledger.
-  const succeeded = row.status === 'succeeded' && ledgerState !== 'disputed';
+  const succeeded = row.status === 'succeeded' && stripeCharge && ledgerState !== 'disputed';
+  let stateNote = ATTEMPT_STATE_NOTES[row.status] || 'Unrecognized attempt state: treat as not received.';
+  if (creditOnly) stateNote = 'The attempt closed as succeeded without a Stripe PaymentIntent: account credit settled the invoice and no card was charged. A credit settlement is not a payment received.';
+  else if (row.status === 'succeeded' && ledgerState === 'disputed') stateNote = 'Stripe reported this charge succeeded, but a dispute is now recorded on the matching payment: do not call it paid.';
   return {
     type: 'stripe_charge_attempt',
     id: row.id,
     at: iso(row.created_at),
     state: row.status,
     state_label: inFlight ? 'processing (submitted to Stripe, no result recorded yet)' : row.status,
-    state_note: row.status === 'succeeded' && ledgerState === 'disputed'
-      ? 'Stripe reported this charge succeeded, but a dispute is now recorded on the matching payment: do not call it paid.'
-      : ATTEMPT_STATE_NOTES[row.status] || 'Unrecognized attempt state: treat as not received.',
+    state_note: stateNote,
     received: succeeded,
-    ...(row.status === 'succeeded' ? { ledger_recorded: Boolean(ledgerState), ledger_state: ledgerState } : {}),
+    ...(creditOnly ? { settled_by: 'account_credit' } : {}),
+    ...(row.status === 'succeeded' && stripeCharge ? { ledger_recorded: Boolean(ledgerState), ledger_state: ledgerState } : {}),
     ...(succeeded ? { received_basis: 'Stripe attempt state succeeded' } : {}),
     amount: money(row.amount),
     credit_applied_with_attempt: money(row.credit_applied_delta) || 0,
@@ -397,17 +404,19 @@ async function accountSummary(InvoiceService, customer, today) {
   const totalDue = sum(unpaid.rows);
   const notYetSent = unpaid.rows.filter((invoice) => NOT_YET_SENT_STATUSES.includes(invoiceStatusKey(invoice.status)));
   const payerBilled = unpaid.rows.filter(isPayerBilled);
+  const presentedSelfPay = unpaid.rows.filter((invoice) => !NOT_YET_SENT_STATUSES.includes(invoiceStatusKey(invoice.status)) && !isPayerBilled(invoice));
   const summary = {
     total_due: totalDue,
     outstanding_count: unpaid.total,
     overdue_count: overdue.total,
     not_yet_sent_due: sum(notYetSent),
     payer_billed_due: sum(payerBilled),
+    presented_self_pay_due: sum(presentedSelfPay),
     processing: { count: processing.total, amount: fromCents(processing.rows.reduce((total, invoice) => total + cents(invoiceAmountDue(invoice)), 0)), note: 'Payments in flight (for example ACH): not received yet, and not counted in total_due.' },
     ...credit,
     dispute_hold: hold,
     as_of: today,
-    basis: 'Admin Invoices page rules for this customer, archived invoices excluded: owes = total minus applied credit on every invoice not paid, prepaid, processing, void, refunded or canceled; overdue = still owed and (status overdue or due date before today, Eastern). total_due includes not_yet_sent_due (drafts and scheduled invoices the customer has not been sent) and payer_billed_due (billed to a third party); subtract them for what the customer was presented and owes personally.',
+    basis: 'Admin Invoices page rules for this customer, archived invoices excluded: owes = total minus applied credit on every invoice not paid, prepaid, processing, void, refunded or canceled; overdue = still owed and (status overdue or due date before today, Eastern). total_due includes not_yet_sent_due (drafts and scheduled invoices the customer has not been sent) and payer_billed_due (billed to a third party); the two can overlap, so never subtract them from total_due: presented_self_pay_due is what the customer was actually sent and owes personally.',
     complete: unpaid.complete && processing.complete,
   };
   if (!summary.complete) summary.unknown = 'More invoices than the summary reads in one call: total_due may be understated.';
@@ -604,6 +613,7 @@ function summarizePayments(entries, invoice) {
   const inFlight = notReceived.filter((entry) => entry.status === 'processing' || entry.state === 'claimed' || entry.state === 'ambiguous' || entry.unconfirmed === true);
   const failed = notReceived.filter((entry) => entry.status === 'failed' || entry.status === 'canceled' || entry.state === 'failed');
   const unreconciled = entries.filter((entry) => entry.type === 'stripe_unreconciled_charge' && entry.received);
+  const creditSettled = entries.filter((entry) => entry.settled_by === 'account_credit');
   const netRecorded = fromCents(recorded.reduce((total, entry) => total + cents(entry.net_received), 0));
   const receivedAny = recorded.length > 0 || stripeConfirmed.length > 0;
 
@@ -614,9 +624,11 @@ function summarizePayments(entries, invoice) {
   if (inFlight.length) parts.push(`${inFlight.length} attempt(s) still in flight or with an unknown outcome (NOT received)`);
   if (failed.length) parts.push(`${failed.length} failed or canceled attempt(s) (NOT received)`);
   if (disputed.length) parts.push(`${disputed.length} disputed payment(s) (not counted as received)`);
+  if (creditSettled.length) parts.push('settled by account credit with no card charge (a credit settlement is not a payment received)');
   let statement;
   if (receivedAny) statement = `Payment was received: ${parts.join('; ')}.`;
   else if (invoiceStatusKey(invoice.status) === 'prepaid') statement = 'Settled as prepaid (account credit or an annual prepay): no payment row; nothing is owed.';
+  else if (creditSettled.length) statement = `Settled by account credit, not by a payment: ${parts.join('; ')}.`;
   else if (invoiceStatusKey(invoice.status) === 'paid') statement = `The invoice is marked paid but no received payment is linked to it in the portal's records${parts.length ? `; ${parts.join('; ')}` : ''}. Say the payment evidence is unknown.`;
   else statement = `No payment has been received${parts.length ? `: ${parts.join('; ')}` : ' and none has been attempted that the portal recorded'}.`;
 
@@ -628,6 +640,7 @@ function summarizePayments(entries, invoice) {
     attempts_in_flight_or_unknown: inFlight.length,
     attempts_failed_or_canceled: failed.length,
     disputed_payments: disputed.length,
+    settled_by_account_credit: creditSettled.length,
     statement,
   };
 }
