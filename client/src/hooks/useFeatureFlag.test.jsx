@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import React from 'react';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import '@testing-library/jest-dom/vitest';
 import { afterEach, expect, it, vi } from 'vitest';
 
 afterEach(() => {
@@ -39,4 +42,28 @@ it('resolves to no flags, without a network read, when nobody is signed in', asy
 
   await expect(refetchFlags()).resolves.toEqual({});
   expect(fetchMock).not.toHaveBeenCalled();
+});
+
+// A cold start in a dead zone fails the flag read closed; when the phone is
+// back online the read is retried and screens already showing the gate update.
+it('retries a failed flag read when the browser comes back online and updates mounted gates', async () => {
+  let online = false;
+  vi.stubGlobal('fetch', vi.fn(async () => {
+    if (!online) throw new TypeError('Failed to fetch');
+    return { ok: true, status: 200, json: async () => ({ flags: { 'pest-recap-v1': true } }) };
+  }));
+  localStorage.setItem('waves_admin_token', 'login-a');
+  const { useFeatureFlag } = await import('./useFeatureFlag');
+  function Gate() {
+    return useFeatureFlag('pest-recap-v1', false) ? <p>Recap capture</p> : <p>Recap hidden</p>;
+  }
+
+  render(<Gate />);
+  expect(await screen.findByText('Recap hidden')).toBeInTheDocument();
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+
+  online = true;
+  await act(async () => { window.dispatchEvent(new Event('online')); });
+
+  expect(await screen.findByText('Recap capture')).toBeInTheDocument();
 });

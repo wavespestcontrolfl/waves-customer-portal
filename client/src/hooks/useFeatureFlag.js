@@ -9,6 +9,27 @@ let inflight = null;
 // becomes the cache, so a previous user's flags cannot win a switch.
 let generation = 0;
 let inflightAbort = null;
+// Mounted hooks hear every successful load, so a refetch (a toggle, a login
+// change, connectivity back) updates screens already showing a flag.
+const listeners = new Set();
+// The last load failed and failed closed (e.g. a cold start in a dead zone):
+// a gate stays off until the next successful read, which the browser's
+// `online` event triggers below.
+let lastLoadFailed = false;
+function subscribe(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+function publish(flags) {
+  listeners.forEach((listener) => {
+    try { listener(flags); } catch { /* one screen never breaks another */ }
+  });
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    if (lastLoadFailed) refetchFlags().catch(() => {});
+  });
+}
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // A flag read that never answers (a field dead zone) must not hold a gated
 // screen on its loading state: give up and fail closed like any other error.
@@ -39,11 +60,14 @@ async function loadFlags() {
       const data = await res.json();
       if (!current()) return loadFlags();
       cache = data.flags || {};
+      lastLoadFailed = false;
+      publish(cache);
       return cache;
     } catch (err) {
       if (!current()) return loadFlags();
       console.warn('[useFeatureFlag] load failed — failing closed', err);
       cache = {}; // fail closed — everyone gets stable UI
+      lastLoadFailed = true;
       return cache;
     } finally {
       if (timer) clearTimeout(timer);
@@ -65,12 +89,14 @@ export function useFeatureFlag(key, defaultValue = false) {
   const [enabled, setEnabled] = useState(defaultValue);
   useEffect(() => {
     let mounted = true;
-    loadFlags().then((flags) => {
-      if (!mounted) return;
-      setEnabled(Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue);
-    });
+    const apply = (flags) => {
+      if (mounted) setEnabled(Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue);
+    };
+    const unsubscribe = subscribe(apply);
+    loadFlags().then(apply);
     return () => {
       mounted = false;
+      unsubscribe();
     };
   }, [key, defaultValue]);
   return enabled;
@@ -89,22 +115,19 @@ export function useFeatureFlagReady(key, defaultValue = false) {
   }));
   useEffect(() => {
     let mounted = true;
-    if (cache !== null) {
-      setState({
-        enabled: Object.prototype.hasOwnProperty.call(cache, key) ? !!cache[key] : defaultValue,
-        ready: true,
-      });
-      return undefined;
-    }
-    loadFlags().then((flags) => {
+    const apply = (flags) => {
       if (!mounted) return;
       setState({
         enabled: Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue,
         ready: true,
       });
-    });
+    };
+    const unsubscribe = subscribe(apply);
+    if (cache !== null) apply(cache);
+    else loadFlags().then(apply);
     return () => {
       mounted = false;
+      unsubscribe();
     };
   }, [key, defaultValue]);
   return state;
@@ -134,7 +157,7 @@ export function usePairedFeatureFlag(keyA, keyB, defaultValue = false) {
   }));
   useEffect(() => {
     let mounted = true;
-    loadFlags().then((flags) => {
+    const apply = (flags) => {
       if (!mounted) return;
       const a = Object.prototype.hasOwnProperty.call(flags, keyA) ? !!flags[keyA] : defaultValue;
       const b = Object.prototype.hasOwnProperty.call(flags, keyB) ? !!flags[keyB] : defaultValue;
@@ -150,9 +173,12 @@ export function usePairedFeatureFlag(keyA, keyB, defaultValue = false) {
         }
       }
       setState({ enabled: !mismatched && a && b, ready: true, mismatched });
-    });
+    };
+    const unsubscribe = subscribe(apply);
+    loadFlags().then(apply);
     return () => {
       mounted = false;
+      unsubscribe();
     };
   }, [keyA, keyB, defaultValue]);
   return state;
