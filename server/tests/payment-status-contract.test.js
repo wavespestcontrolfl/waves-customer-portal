@@ -1005,3 +1005,35 @@ describe('inboundIsGenericStatusQuestion', () => {
     expect(c.autoSendScopeBlock({ reply: S, inboundText: 'Did you receive my payment?', snapshot: { sentences: [S], family_counts: { payment: 1 } } })).toBeNull();
   });
 });
+
+// Codex round-74 P2: the ambiguity hold counts RECORDS, not only rendered lines
+describe('candidateFamilyCounts / snapshot family_counts count unrenderable records', () => {
+  const PAID = { id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const DISPUTED = { id: 'p2', amount: 80, status: 'disputed', payment_date: '2026-09-20', payment_method_type: 'card' };
+  test('one paid + one disputed row: the payment family has 2 candidates though only one line renders', () => {
+    const b = { recentPayments: [PAID, DISPUTED], hasProcessingPayment: false, invoiceStatuses: [] };
+    expect(c.candidateFamilyCounts(['We received your $120.00 card payment on Sep 12, 2026.'], b)).toEqual({ payment: 2 });
+    expect(c.candidateFamilyCounts(['We received your $120.00 card payment on Sep 12, 2026.'], { ...b, recentPayments: [PAID] })).toEqual({ payment: 1 });
+  });
+  test('money in flight (or unknown) and a cut window are candidates too', () => {
+    expect(c.candidateFamilyCounts([], { recentPayments: [PAID], hasProcessingPayment: null })).toEqual({ payment: 2 });
+    expect(c.candidateFamilyCounts([], { recentPayments: [PAID], hasProcessingPayment: false, recentPaymentsTruncated: true })).toEqual({ payment: 2 });
+  });
+  test('the snapshot carries the record count, so auto-send holds the copied receipt', () => {
+    const S = 'We received your $120.00 card payment on Sep 12, 2026.';
+    const snap = c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [S], reply: S, inboundText: 'Did my payment go through?', billing: { recentPayments: [PAID, DISPUTED], hasProcessingPayment: false } });
+    expect(snap.family_counts).toEqual({ payment: 2 });
+    expect(c.autoSendScopeBlock({ reply: S, inboundText: 'Did my payment go through?', snapshot: snap })).toBe('payment_status_ambiguous');
+  });
+});
+
+// Codex round-74 P2: only receipt / invoice-status copies are exempt from the auto-send price-quote rung
+test('withoutSnapshotCopies strips receipt copies only; plan-price and balance copies stay', () => {
+  const R = 'We received your $120.00 card payment on Sep 12, 2026.';
+  const P = 'Your monthly plan price is $99.00.';
+  const B = 'Your account balance is $45.00.';
+  const snap = { sentences: [R, P, B] };
+  expect(c.withoutSnapshotCopies(R, snap)).not.toMatch(/\$/);
+  expect(c.withoutSnapshotCopies(P, snap)).toContain('$99.00');
+  expect(c.withoutSnapshotCopies(B, snap)).toContain('$45.00');
+});

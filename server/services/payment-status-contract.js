@@ -693,9 +693,11 @@ function remainderIsInert(remainder) {
 // The reply with every verbatim copy of a snapshotted rendered sentence removed (Codex round-72 P2): a copied receipt / invoice / Zelle
 // line carries a record's own figure, so the auto-send price-quote rung reads only what the model wrote itself. The copies are gated by
 // autoSendScopeBlock below and re-rendered at dispatch.
+// Codex round-74 P2: ONLY the receipt / invoice-status families (the case the owner's hold-when-ambiguous ruling opened, gated by the
+// family count + generic-question allow-list in autoSendScopeBlock); a balance, plan-price or Zelle line with a figure stays a quote.
 function withoutSnapshotCopies(reply, snapshot) {
   const text = String(reply ?? '');
-  return withoutCopies(text, copiedSentences(text, asTexts(snapshot?.sentences)));
+  return withoutCopies(text, copiedSentences(text, asTexts(snapshot?.sentences)).filter((t) => sentenceFamily(t) != null));
 }
 function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   const sentences = asTexts(snapshot?.sentences);
@@ -764,6 +766,25 @@ function copiesAnswerNamedSpecifics(copied, inboundText) {
   const answers = copied.some((t) => sentenceFamily(String(t)) || ACCOUNT_SUMMARY_RE.test(String(t)));
   return answers && (inboundNamesSpecifics(inboundText) || !inboundIsGenericStatusQuestion(inboundText));
 }
+// Codex round-74 P2: the candidates are the RECORDS, not only the lines that rendered - a disputed / unknown-status row in the window
+// renders nothing yet may be the payment the customer means, and money still in flight (or unknown) or a cut window may be too. Each
+// family's count is the larger of its rendered lines and its records; no billing => rendered lines only.
+function recordFamilyCounts(billing) {
+  if (!billing || typeof billing !== 'object') return {};
+  const rows = Array.isArray(billing.recentPayments) ? billing.recentPayments.length : 0;
+  const unseen = billing.recentPaymentsTruncated === true || billing.hasProcessingPayment !== false ? 1 : 0;
+  return { payment: rows + unseen, invoice: Array.isArray(billing.invoiceStatuses) ? billing.invoiceStatuses.length : 0 };
+}
+function candidateFamilyCounts(texts, billing = null) {
+  const rendered = familyCounts(texts);
+  const records = recordFamilyCounts(billing);
+  const out = {};
+  for (const f of new Set([...Object.keys(rendered), ...Object.keys(records)])) {
+    const n = Math.max(rendered[f] || 0, records[f] || 0);
+    if (n) out[f] = n;
+  }
+  return out;
+}
 function copiesAmbiguousFamily(copied, snapshot) {
   const counts = snapshot?.family_counts && typeof snapshot.family_counts === 'object' ? snapshot.family_counts : {};
   return copied.some((t) => { const f = sentenceFamily(String(t)); return f != null && counts[f] !== 1; });
@@ -773,7 +794,7 @@ function copiesAmbiguousFamily(copied, snapshot) {
  * What a decision persists (input_snapshot.payment_status_snapshot): the sentences its final reply copies, and whether the draft was
  * payment-scoped (the reply, the customer's message or the thread it was written from touches money). null when it is neither.
  */
-function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inboundText = null, scopeTexts = [], zelleInvoiceId = null }) {
+function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inboundText = null, scopeTexts = [], zelleInvoiceId = null, billing = null }) {
   const copied = copiedSentences(reply, (sentences || []).map((s) => (typeof s === 'string' ? s : s.text)));
   // (a snapshot that copied a sentence is payment-scoped by that alone; `scoped` marks the draft that copied none)
   const scoped = !copied.length && isPaymentScoped({ reply, inboundText, scopeTexts });
@@ -781,7 +802,7 @@ function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inbound
   // a copied Zelle sentence is re-rendered at send for the SAME invoice (its live eligibility and the current recipient)
   const zelle = copied.some((t) => ZELLE_WORD_RE.test(t)) && zelleInvoiceId ? { invoice_id: String(zelleInvoiceId) } : null;
   // how many lines of each family the draft could have copied (the auto-send ambiguity hold reads it)
-  const counts = copied.some((t) => sentenceFamily(t)) ? familyCounts((sentences || []).map((s) => (typeof s === 'string' ? s : s.text))) : null;
+  const counts = copied.some((t) => sentenceFamily(t)) ? candidateFamilyCounts((sentences || []).map((s) => (typeof s === 'string' ? s : s.text)), billing) : null;
   return {
     customer_id: customerId ?? null, sentences: copied, ...(scoped ? { scoped: true } : {}), ...(zelle ? { zelle } : {}), ...(counts ? { family_counts: counts } : {}),
   };
@@ -807,6 +828,7 @@ module.exports = {
   RESOLVED_PAYMENT_STATUSES,
   withoutSnapshotCopies,
   inboundIsGenericStatusQuestion,
+  candidateFamilyCounts,
   canonText,
   copiedSentences,
   withoutCopies,

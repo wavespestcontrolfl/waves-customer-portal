@@ -243,7 +243,8 @@ async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx,
     // Codex round-70 P2 (hold when ambiguous, owner 2026-10-02): the AUTO-send recheck recounts each copied line's family from the LIVE
     // render - a second receipt that arrived after drafting makes the copy a guess again
     if (autoSend) {
-      const counts = paymentStatus.familyCounts(live);
+      // (Codex round-74 P2: records too - a disputed / unknown row renders nothing but is still a candidate)
+      const counts = paymentStatus.candidateFamilyCounts(live, context.billing);
       if (copied.some((t) => { const f = paymentStatus.sentenceFamily(t); return f != null && counts[f] !== 1; })) return { reason: 'payment_status_ambiguous', zelle: null };
     }
     return { reason: null, zelle };

@@ -4054,7 +4054,7 @@ function computePaymentStatusSnapshot({ customerId, reply, factsBlock, inboundMe
   return paymentStatus.paymentStatusSnapshotFor({
     customerId, sentences: paymentStatus.sentencesFromFactsBlock(factsBlock), reply,
     inboundText: inboundMessage == null ? null : String(inboundMessage), scopeTexts: paymentThreadTexts(context),
-    zelleInvoiceId: context?.billing?.zelleFacts?.invoiceId || null,
+    zelleInvoiceId: context?.billing?.zelleFacts?.invoiceId || null, billing: context?.billing || null,
   });
 }
 // The recent thread messages the draft was written from (the newest few of the facts window, either direction): a reply to a thread

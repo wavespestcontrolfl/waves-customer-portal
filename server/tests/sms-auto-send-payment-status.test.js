@@ -233,3 +233,14 @@ describe('price-quote rung reads only what the model wrote (real hasPriceQuote)'
     await expect(attempt({ paymentStatusSnapshot: null })).resolves.toEqual({ sent: false, reason: 'price_quote' });
   });
 });
+
+test('round-74: a copied plan-price line is still a price quote at the auto-send rung (real hasPriceQuote)', async () => {
+  const suggest = require('../services/sms-suggest-mode');
+  suggest.hasPriceQuote.mockImplementation(jest.requireActual('../services/sms-suggest-mode').hasPriceQuote);
+  try {
+    const PLAN = 'Your monthly plan price is $99.00.';
+    ContextAggregator.getContextForCustomer.mockResolvedValue(live());
+    await expect(attempt({ inboundMessage: "What's my monthly price?", reply: PLAN, paymentStatusSnapshot: { customer_id: SNAP.customer_id, sentences: [PLAN] } }))
+      .resolves.toEqual({ sent: false, reason: 'price_quote' });
+  } finally { suggest.hasPriceQuote.mockImplementation(() => false); }
+});
