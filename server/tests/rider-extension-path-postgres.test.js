@@ -446,6 +446,30 @@ postgres('series extension keeps riding the lawn', () => {
       } finally { await trx.rollback(); }
     });
 
+    test('an off-cadence rider visit that stays booked keeps the minimum gap: no D168 next to a kept D160', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const w = await world(trx);
+        // A movable (pending, ungrouped) rider visit off the lawn rhythm. The
+        // preview would MOVE it to D84 and insert D168; the extension never
+        // moves it, so D168 would be only 8 days after it.
+        await trx('scheduled_services').insert({
+          customer_id: w.customerId, property_id: w.propertyId, service_id: ids.pest_general_quarterly,
+          service_type: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_general_quarterly',
+          scheduled_date: addDays(w.d0, 160), status: 'pending', window_start: '09:00', window_end: '10:00',
+          estimated_duration_minutes: 60, recurring_pattern: 'quarterly', is_recurring: true, recurring_ongoing: true,
+          recurring_parent_id: w.pestParent.id,
+        });
+        await extend(trx, w.pestParent.id);
+        const dates = (await extensionRows(trx, w.pestParent.id)).map((r) => dateOf(r.scheduled_date)).sort();
+        const added = dates.filter((d) => d !== addDays(w.d0, 160));
+        expect(added).toHaveLength(1);
+        expect(added[0]).not.toBe(addDays(w.d0, 168));
+        const gapDays = Math.round((Date.parse(added[0]) - Date.parse(addDays(w.d0, 160))) / 86400000);
+        expect(gapDays).toBeGreaterThanOrEqual(77);
+      } finally { await trx.rollback(); }
+    });
+
     test('a lapsed rider revived by top-up keeps off the protected week and rides the first lawn date after the floor', async () => {
       const trx = await mockPg.transaction();
       try {

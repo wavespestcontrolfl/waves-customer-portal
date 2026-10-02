@@ -19138,8 +19138,13 @@ async function rideLawnExtension(ctx) {
     return null;
   }
   if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
+  // The preview's insert list assumes its proposed MOVES happen too; this
+  // extension only appends. So spacing is enforced against the latest rider
+  // visit that is actually still booked: at least the rule's minimum gap after
+  // it (never, say, D168 next to a kept off-cadence D160).
   const after = dateOnly(latest.scheduled_date);
-  const date = plan.insert.find((d) => d >= plan.planFloor && d > after && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
+  const gapFloor = Preview._internals.addDaysStr(after, Preview.MIN_GAP_DAYS);
+  const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
   // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
   const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
   const window = host && normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
