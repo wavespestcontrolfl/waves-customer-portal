@@ -71,6 +71,9 @@ const { resolveCompletionProfileForScheduledService } = require('../services/ser
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
+const {
+  techFindingsCopyLive, hasTechFindingLines, filterCaptionsForCustomer, summaryForCustomer, PALM_CROWN_PROMPT_RULE,
+} = require('../services/service-report/tree-shrub-tech-findings');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -2997,6 +3000,15 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
   return false;
 }
 
+// Whether an add-on line can be due on any occurrence after the series
+// anchor, by lineDueOnRecurringDate's own rule: a one-time service key or a
+// 'one_time' pattern is due on the anchor only; every other line recurs.
+function addonRecursAfterAnchor(line) {
+  const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
+  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) return false;
+  return (line?.recurringPattern || line?.recurring_pattern || null) !== 'one_time';
+}
+
 function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
   return (Array.isArray(addons) ? addons : [])
     .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates, skipWeekendsOverride));
@@ -5129,6 +5141,12 @@ async function loadProjectCompletionContextByServiceId(services) {
       // palm: another lane owns those completions and their photo steps.
       noteBoxPhotosEnabled: require('../config/feature-gates').noteBoxPhotosLive()
         && !['lawn', 'tree_shrub', 'palm'].includes(detectServiceLine(service.service_type)),
+      // GATE_LANE_VOICE_FILL: Generate on the completion form fills a
+      // specialty visit's own record from the notes; only a visit whose lane
+      // the reader reads, resolved as the completion resolves it
+      // (services/visit-lane-facts.js voiceLaneFor).
+      laneVoiceFillEnabled: require('../config/feature-gates').laneVoiceFillLive()
+        && require('../services/visit-lane-facts').voiceLaneFor({ profile: completionProfile, serviceType: service.service_type }) != null,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -5875,6 +5893,17 @@ router.get('/', async (req, res, next) => {
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+    // Neighborhood gate-code directory (dark behind GATE_NEIGHBORHOOD_ACCESS):
+    // the shared entry for a visit whose customer has no gate code. A failed
+    // read just shows no fallback.
+    let neighborhoodGateByVisit = new Map();
+    try {
+      if (require('../config/feature-gates').neighborhoodAccessLive()) {
+        neighborhoodGateByVisit = await require('../services/neighborhood-access').neighborhoodGateEntriesForVisits(db, services);
+      }
+    } catch (err) {
+      logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
+    }
 
     // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
     // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
@@ -6050,6 +6079,7 @@ router.get('/', async (req, res, next) => {
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
+        neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -6275,6 +6305,7 @@ router.get('/', async (req, res, next) => {
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
         fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
         noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
+        laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6869,6 +6900,7 @@ router.get('/week', async (req, res, next) => {
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
+          laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -23472,7 +23504,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         if (require('../config/feature-gates').rateReviewLive()) {
           const RateReviewApply = require('../services/rate-review-apply');
           const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, {
-            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, today: etDateString(), lock: true,
+            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, visitCount: mintPayload.visitCount ?? null, today: etDateString(), lock: true,
           });
           if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
           if (noticed) {
@@ -25124,11 +25156,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // summary alone never opens this block (mirrors the generation-gate rule
     // above: real, tech-vetted photo text is substantive, a bare count or an
     // unreviewed summary is not).
-    const photoObservationsBlock = cappedPhotoCaptions.length
+    // Built at use time (below) for a tree & shrub visit with GATE_TS_TECH_FINDINGS_COPY
+    // on: a hidden / edited finding withholds the photo-read captions and summary,
+    // so the block never repeats what the technician replaced.
+    const buildPhotoObservationsBlock = (captions, summary) => (captions.length
       ? `\n\nTECHNICIAN PHOTO OBSERVATIONS (tech-reviewed captions; observations only — never a diagnosis or a product claim)\n`
-        + (photoSummaryText ? `Summary: ${photoSummaryText}\n` : '')
-        + cappedPhotoCaptions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
-      : '';
+        + (summary ? `Summary: ${summary}\n` : '')
+        + captions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
+      : '');
     // Pre-push P2 (Codex #5145 r3): the client's generated-draft-invalidation
     // watcher needs to know whether THIS generation actually included the
     // photo block — with the gate off (the default), cappedPhotoCaptions is
@@ -25137,7 +25172,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // mirrors when photoObservationsBlock is non-empty; reused across every
     // response branch below (a cache hit reuses a prior generation built
     // from this SAME identity, so it carries the same grounding truth).
-    const photoGroundingUsed = cappedPhotoCaptions.length > 0;
+    // Re-derived from the technician-filtered captions once grounding is known.
+    let photoGroundingUsed = cappedPhotoCaptions.length > 0;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -25437,6 +25473,23 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       return true;
     });
     const companionCustomerInput = dedupedCompanionEntries.some((entry) => authorizedCompanionTypes.includes(entry.type) && companionEntryHasInput(entry));
+    // GATE_TS_TECH_FINDINGS_COPY: every photo-read category replaced or hidden
+    // leaves no scores, but the technician's own findings still ground the
+    // report (grounding.techFindings exists only while the gate is on).
+    // GATE_TS_TECH_FINDINGS_COPY: the photo text the writer may use, filtered
+    // BEFORE the input gate below so captions withheld by the technician's
+    // decisions can never hold that gate open on their own.
+    let promptPhotoCaptions = cappedPhotoCaptions;
+    let promptPhotoSummary = photoSummaryText;
+    if (techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub') {
+      const techDecisions = treeShrubReviewGrounding?.techFindings || [];
+      promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);
+      // The summary was written about the photos as a whole: a replaced finding
+      // withdraws it.
+      promptPhotoSummary = summaryForCustomer(photoSummaryText, techDecisions) || '';
+    }
+    photoGroundingUsed = promptPhotoCaptions.length > 0;
+    const treeShrubTechFindingsGrounded = hasTechFindingLines(treeShrubReviewGrounding?.techFindings);
     const baseHasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
@@ -25447,8 +25500,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // generic report with none of the submitted findings.
       || primaryTypedConfirmed
       || hasValidLawnAssessment
+      || treeShrubTechFindingsGrounded
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
-      || cappedPhotoCaptions.length > 0;
+      || promptPhotoCaptions.length > 0;
     // The technician's promise marks, resolved against this customer's open
     // promises (owner "ok yes add these" 2026-10-01): with the writer rules
     // on a grounded visit only. Fail-soft: no record, no mention. Resolved
@@ -25530,6 +25584,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       });
     }
 
+    if (treeShrubTechFindingsGrounded && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
+      return res.status(503).json({
+        error: 'Tree & shrub photo review grounding is unavailable right now — try Generate again in a moment.',
+        code: 'tree_shrub_review_grounding_unavailable',
+        retryable: true,
+      });
+    }
+
     // Scores-only requests live or die by the assessment grounding: when the
     // validated assessment was the ONLY substantive input and the grounding
     // load then failed (or resolved to retake-pending), there is nothing real
@@ -25553,7 +25615,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // proceed on the photo block even when the assessment load itself
       // fails; only a TRUE assessment-only request (no captions either)
       // still 503s retryable.
-      && !cappedPhotoCaptions.length;
+      && !promptPhotoCaptions.length;
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
@@ -25585,11 +25647,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       }
     }
 
-    const effectiveSystemPrompt = selectReportCopyPrompt(
+    const selectedSystemPrompt = selectReportCopyPrompt(
       systemPrompt,
       groundingServiceType,
       writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
     );
+    // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
+    // instruction is THE guard, no word filter). In the system prompt so it
+    // reaches every tree & shrub generation even when the grounding context
+    // fails, and joins the draft cache key with it.
+    const effectiveSystemPrompt = selectedSystemPrompt
+      && techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub'
+      ? `${selectedSystemPrompt}\n\n${PALM_CROWN_PROMPT_RULE}`
+      : selectedSystemPrompt;
     if (!effectiveSystemPrompt) {
       return res.status(503).json({
         error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
@@ -25641,6 +25711,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         if (block) bookedReason = `\n\n${block}`;
       } catch { /* no booked reason: the paragraph leads with the work */ }
     }
+    const photoObservationsBlock = buildPhotoObservationsBlock(promptPhotoCaptions, promptPhotoSummary);
     const fullUserMessage = `${userMessage}${bookedReason}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
@@ -27117,6 +27188,7 @@ router._test = {
   addOneReseedVisit,
   RESEED_STALE_READ_ATTEMPTS,
   lineDueOnRecurringDate,
+  addonRecursAfterAnchor,
   filterAddonLinesForDate,
   ONE_TIME_ADDON_SERVICE_KEYS,
   negativePricePosted,
