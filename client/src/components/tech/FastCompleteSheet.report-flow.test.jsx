@@ -179,11 +179,21 @@ describe('the visit step', () => {
     await openSheet(request);
     expect(screen.getByRole('button', { name: '5, high' }).getAttribute('aria-pressed')).toBe('true');
     await generate({ rating: null });
+    // The untouched 5 is a scoring default, never an observed finding for the
+    // report writer (codex local r28 on #5538).
+    expect(request.bodies('/generate-report')[0].pestActivityRating).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');
     expect(body.clientPestRating).toBe(5);
     expect(body.clientPestRatingPrefilled).toBe(true);
+  });
+
+  test('choosing the first visit\'s 5 itself reaches the report writer (codex local r28 on #5538)', async () => {
+    const request = makeRequest({ rating: { allowed: true, firstVisit: true, scaleLabels: null } });
+    await openSheet(request);
+    await generate({ rating: '5, high' });
+    expect(request.bodies('/generate-report')[0].pestActivityRating).toBe(5);
   });
 
   test('a stock at zero holds the report, and Check stock on the visit step re-reads it', async () => {

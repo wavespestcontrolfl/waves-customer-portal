@@ -736,6 +736,8 @@ function writerSignature(form, rows, promiseMarks, photos) {
       .sort(([a], [b]) => a.localeCompare(b)),
     customerHome: form.customerHome,
     rating: form.rating,
+    // Choosing the default's own value still changes what the writer reads.
+    ratingPrefilled: !!form.ratingPrefilled,
     promiseMarks,
     photos: [photos.length, photoCaptionsOf(photos)],
   });
@@ -759,7 +761,10 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
     products: active.map((row) => ({ productId: row.productId || null, name: row.name, ...recordedApplication(row, facts) })),
     areasServiced: facts?.areas || [],
     customerInteraction: customerHomeWriterLabel(form.customerHome),
-    pestActivityRating: ratingAllowed && Number.isInteger(form.rating) ? form.rating : null,
+    // The first-visit 5 is a scoring default, not something the technician
+    // saw: the writer gets a rating only once they choose one (codex local
+    // r28 on #5538), as the completion recap leaves the default out.
+    pestActivityRating: ratingAllowed && !form.ratingPrefilled && Number.isInteger(form.rating) ? form.rating : null,
     photoCount: photos.length,
     ...(captions.length ? { photoCaptions: captions } : {}),
     // The full form's default: the customer's texts and calls ground the report.
