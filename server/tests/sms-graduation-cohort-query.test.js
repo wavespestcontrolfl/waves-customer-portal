@@ -216,3 +216,22 @@ describe('fetchLiveJudgeSignals — voice-profile pin reaches the readiness quer
     await expect(fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT] })).rejects.toThrow();
   });
 });
+
+describe('fetchLiveJudgeSignals — judge-graded evidence for suggest → auto_send path (b) (owner D2 2026-10-01)', () => {
+  test('totals select graded_accepted / graded_corrected from verdicts graded against a human reply', async () => {
+    const dbi = makeFakeDb([]);
+    await fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT], voiceProfileVersion: null });
+    const selects = dbi.calls.filter(([m]) => m === 'select').map(([, args]) => String(args[0]));
+    expect(selects.some((s) => /verdict IN \('draft_better', 'equivalent'\)/.test(s) && /graded_accepted/.test(s))).toBe(true);
+    expect(selects.some((s) => /verdict IN \('human_better', 'draft_unsafe'\)/.test(s) && /graded_corrected/.test(s))).toBe(true);
+  });
+
+  test('maps the graded counts per intent, defaulting to 0 when the row lacks them', async () => {
+    const dbi = makeFakeDb([{ intent: 'i', judged: 50, unsafe: 0, avg_safety: '9.1', graded_accepted: 30, graded_corrected: 20 }]);
+    const map = await fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT], voiceProfileVersion: null });
+    expect(map.get('i')).toMatchObject({ judged: 50, gradedAccepted: 30, gradedCorrected: 20 });
+    const bare = makeFakeDb([{ intent: 'k', judged: 3, unsafe: 0, avg_safety: null }]);
+    const bareMap = await fetchLiveJudgeSignals(bare, { cohortVersions: [CURRENT], voiceProfileVersion: null });
+    expect(bareMap.get('k')).toMatchObject({ gradedAccepted: 0, gradedCorrected: 0 });
+  });
+});

@@ -47,6 +47,21 @@ function tokensLine(tokens) {
   return parts.join(" · ") || null;
 }
 
+// Estimated spend (GATE_LLM_COST_TRACKING): the ledger's tokens times the
+// weekly-pulled list prices. Calls on a model with no price, or with no
+// usage recorded, are counted, never guessed.
+function costCell(lane, basis) {
+  if (lane.estCostUsd == null) {
+    if (!basis?.cost) return { label: "Cost", reason: NOT_YET.cost };
+    if (lane.ledger === "unrecordable") return { label: "Cost", reason: "not in the ledger" };
+    return { label: "Cost", reason: basis.cost.priced ? "no cost recorded" : "waiting for the first price pull" };
+  }
+  const usd = lane.estCostUsd;
+  const value = usd > 0 && usd < 0.01 ? "< $0.01" : `$${usd.toFixed(2)}`;
+  const sub = lane.unpricedCalls > 0 ? `est. · ${nf.format(lane.unpricedCalls)} unpriced` : "estimate";
+  return { label: "Cost", value, sub };
+}
+
 function deltaLine(delta) {
   if (!delta || delta.calls === 0) return null;
   return `${delta.calls > 0 ? "+" : ""}${nf.format(delta.calls)} vs prior`;
@@ -65,7 +80,7 @@ export function metricCells(lane, basis) {
     unrecordable
       ? { label: "Calls", reason: UNRECORDABLE[lane.unrecordableReason] || "no per-call row" }
       : { label: "Calls", value: nf.format(lane.calls), sub: deltaLine(lane.deltaVsPrior) || tokensLine(lane.tokens) },
-    { label: "Cost", reason: NOT_YET.cost },
+    costCell(lane, basis),
     lane.p50LatencyMs == null ? { label: "Duration", reason: notRecorded } : { label: "Duration", value: ms(lane.p50LatencyMs), sub: `p95 ${ms(lane.p95LatencyMs)}` },
     lane.okRate == null
       ? { label: "Errors", reason: noCalls || unrecordable ? notRecorded : "no outcome recorded" }
