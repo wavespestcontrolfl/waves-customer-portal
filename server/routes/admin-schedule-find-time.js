@@ -15,6 +15,10 @@
  *     slotStepMinutes?,       // snap starts to this granularity (1–120)
  *     arrivalWindows?,        // supported edit/drag picker opt-in
  *     hint?,                  // advisory best-times consumer — gated (GATE_BEST_TIME_HINTS)
+ *     summary?,               // hint mode only: also answer `summary.days`, one row per date in
+ *                             // the range with every hour that fits (GATE_RESCHEDULE_AVAILABILITY;
+ *                             // gate off = the flag is ignored and the answer is the plain hint)
+ *     pickedDate?,            // summary mode: the date `pickedStart` is on (default dateFrom)
  *   }
  */
 
@@ -24,7 +28,9 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour } = require('../services/scheduling/find-time-hints');
+const {
+  validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour, summarizeHintDays, summaryRangeEnd,
+} = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -202,6 +208,7 @@ router.post('/', async (req, res) => {
       topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
+      summary, pickedDate,
     } = req.body || {};
     let { technicianId } = req.body || {};
 
@@ -263,7 +270,7 @@ router.post('/', async (req, res) => {
     }
     // Picker-hint params (the hour in the picker, its window end, the
     // picker's same-day floor) — shapes and meaning in find-time-hints.js.
-    const hintParamError = validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin });
+    const hintParamError = validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin, summary, pickedDate });
     if (hintParamError) throw httpError(400, hintParamError);
     // A pending Service address only means something for an existing
     // visit (the edit form); the stamp helper 422s on an id that is not
@@ -280,7 +287,23 @@ router.post('/', async (req, res) => {
     const to = dateTo || etDateString(addETDays(parseETDateTime(`${from}T12:00`), 7));
     if (to < from) throw httpError(400, 'dateTo must be on or after dateFrom');
     const maxTo = etDateString(addETDays(parseETDateTime(`${from}T12:00`), MAX_FIND_TIME_DAYS));
-    const clampedTo = to > maxTo ? maxTo : to;
+    // Availability-strip summary (one row per date around the picked day) —
+    // its own call-time gate on top of the hint gate, so turning it off
+    // leaves today's three-line hint exactly as it is: the flag is ignored
+    // and the response carries no `summary`. The strip shows about eleven
+    // days; the search is capped at SUMMARY_MAX_DAYS so a caller cannot turn
+    // a debounced picker hint into a 90-day full enumeration.
+    const summaryMode = hint === true && summary === true && gateEnvValue('GATE_RESCHEDULE_AVAILABILITY');
+    const startedAt = Date.now();
+    const rangeTo = to > maxTo ? maxTo : to;
+    const clampedTo = summaryMode ? summaryRangeEnd(from, rangeTo) : rangeTo;
+    // The picked hour's verdict is scored on ONE date. The plain hint
+    // searches a single day, so that date is dateFrom; a summary search
+    // starts days before the pick and names it.
+    const verdictDate = summaryMode && pickedDate !== undefined ? String(pickedDate) : from;
+    if (summaryMode && (verdictDate < from || verdictDate > clampedTo)) {
+      throw httpError(400, 'pickedDate must be inside the searched range');
+    }
 
     const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
     // Arrival checks load the saved appointment too. Request coordinates or
@@ -345,20 +368,46 @@ router.post('/', async (req, res) => {
     const excluded = (excludeServiceIds || []).map(String);
     const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
     const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
-    const slots = hint
-      ? await guardHintSlots(rawSlots, { today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN })
+    // Summary mode keeps every guarded hour (one per day + start) for the
+    // per-day rows; `slots` is still the ranked top-N the plain hint answers.
+    const guarded = hint
+      ? await guardHintSlots(rawSlots, {
+        today, sameDayFloorMin, step, spanMin, excluded, topN: summaryMode ? Number.POSITIVE_INFINITY : requestedTopN,
+      })
       : rawSlots;
+    const slots = summaryMode ? guarded.slice(0, requestedTopN) : guarded;
     const picked = hint && pickedStart
       ? await scorePickedHour({
-        rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
+        rawSlots, from: verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
+        withReason: summaryMode,
       })
       : undefined;
 
+    // The engine's per-date refusal counts feed the summary's day status
+    // only; they are not part of any response contract.
+    const { rejections_by_date: rejectionsByDate, ...engineResult } = result || {};
+    let summaryBody;
+    if (summaryMode) {
+      const elapsedMs = Date.now() - startedAt;
+      // Budget: 1.5 s for the strip's eleven days (the plain hint's range
+      // search covers four). Logged so the first week of use says whether
+      // the range has to shrink.
+      if (elapsedMs > 1500) {
+        logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${from}..${clampedTo}`);
+      }
+      summaryBody = {
+        // Dates before today are never searched (the engine skips them).
+        days: summarizeHintDays(guarded, { from: from < today ? today : from, to: clampedTo, rejectionsByDate }),
+        elapsed_ms: elapsedMs,
+      };
+    }
+
     res.json({
-      ...result,
+      ...engineResult,
       slots,
       ...(picked ? { picked } : {}),
+      ...(summaryBody ? { summary: summaryBody } : {}),
       target,
       range: { dateFrom: from, dateTo: clampedTo },
     });

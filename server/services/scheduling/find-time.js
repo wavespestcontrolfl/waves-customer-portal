@@ -243,7 +243,15 @@ async function findCapacitySlots(opts) {
   // Why each refused candidate was refused (arrival_window, day_overcommitted,
   // return_time, detour_cap, ...), so a thin week explains itself.
   const rejections = {};
-  const reject = (reason) => { rejections[reason] = (rejections[reason] || 0) + 1; };
+  // The same counts per date, so a picker can tell a day the route could not
+  // be verified on (in progress, coordless stop) from a day that is full.
+  const rejectionsByDate = {};
+  const reject = (reason, date) => {
+    rejections[reason] = (rejections[reason] || 0) + 1;
+    if (!date) return;
+    if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
+    rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + 1;
+  };
   // Zone route days (GATE_ZONE_ROUTE_DAYS): a customer-facing caller that
   // resolved the request's zone (opts.zoneSlug — /book and the estimate
   // picker) gets a per-candidate cap, lifted on that zone's route weekday
@@ -258,13 +266,13 @@ async function findCapacitySlots(opts) {
   for (const candidate of candidates) {
     const { context, date, tech, start, options } = candidate;
     const fit = evaluateArrivalPlacement(context, options);
-    if (!fit.feasible) { reject(fit.reason); continue; }
+    if (!fit.feasible) { reject(fit.reason, date); continue; }
     // Existing save probes have no traffic preload; their fallback must fit too.
     if (!opts.capacityPlacement && !evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) {
-      reject('conservative_travel');
+      reject('conservative_travel', date);
       continue;
     }
-    if (fit.detourMinutes > capFor(date, tech.id)) { reject('detour_cap'); continue; }
+    if (fit.detourMinutes > capFor(date, tech.id)) { reject('detour_cap', date); continue; }
     const index = fit.routeOrder.indexOf(context.target.id);
     const byId = new Map(context.rows.map(row => [row.id, row]));
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
@@ -305,7 +313,8 @@ async function findCapacitySlots(opts) {
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
   return { slots: packed.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
-    evaluated: candidates.length, total_feasible: packed.length, rejections, travel: travel.diagnostics() };
+    evaluated: candidates.length, total_feasible: packed.length, rejections, rejections_by_date: rejectionsByDate,
+    travel: travel.diagnostics() };
 }
 
 // Route neighbours of a capacity placement, BY TIME rather than
