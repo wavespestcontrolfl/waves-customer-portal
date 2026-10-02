@@ -69,7 +69,8 @@ async function exportCases({ dbi, proposalId, split }) {
     .orderBy('i.adjudicated_at', 'asc')
     .select(
       'i.incident_key', 'i.prompt_version', 'i.produced_at', 'i.summary', 'i.adjudication',
-      'md.inbound_message', 'md.draft_response', 'md.facts_block', 'j.human_reply_text', 'j.intent'
+      'md.inbound_message', 'md.draft_response', 'md.facts_block', 'md.intent', 'md.scheduling_intent',
+      'j.human_reply_text', 'j.intent as judge_intent'
     );
   const seen = new Set();
   const cases = [];
@@ -83,7 +84,9 @@ async function exportCases({ dbi, proposalId, split }) {
       cell: { surface: proposal.surface, failure_mode: proposal.failure_mode },
       prompt_version: r.prompt_version,
       produced_at: r.produced_at,
-      intent: r.intent || null,
+      // The drafter's own classification, as the production prompt saw it.
+      intent: r.intent || r.judge_intent || null,
+      scheduling_intent: r.scheduling_intent === true,
       inbound_message: r.inbound_message,
       facts_block: r.facts_block,
       draft_as_produced: r.draft_response,

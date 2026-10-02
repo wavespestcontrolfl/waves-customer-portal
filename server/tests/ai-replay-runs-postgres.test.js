@@ -79,7 +79,8 @@ test('export refuses a directory inside the repository, however it is spelled', 
     await proposalsMigration.up(database);
     await migration.up(database);
     await database.raw(`CREATE TABLE ??.message_drafts (id uuid PRIMARY KEY, inbound_message text, draft_response text,
-      facts_block text, prompt_version varchar(40), created_at timestamptz, campaign_type varchar(30))`, [schema]);
+      facts_block text, prompt_version varchar(40), created_at timestamptz, campaign_type varchar(30), intent varchar(50),
+      scheduling_intent boolean)`, [schema]);
     await database.raw(`CREATE TABLE ??.shadow_draft_judgments (id uuid PRIMARY KEY, draft_id uuid UNIQUE, verdict varchar(20),
       human_replied boolean, human_reply_text text, intent varchar(50))`, [schema]);
   });
@@ -101,6 +102,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
       await database('message_drafts').insert({
         id: key, inbound_message: 'when are you coming?', draft_response: `See you Wednesday at ${i + 1}pm!`,
         facts_block: 'UPCOMING: Quarterly Pest 2026-10-06 (Tue) window 14:00-16:00', prompt_version: V12, created_at: new Date('2026-10-01T15:00:00Z'),
+        intent: 'SCHEDULING', scheduling_intent: i % 2 === 0,
       });
       await database('shadow_draft_judgments').insert({ id: judgmentId, draft_id: key, verdict: 'human_better', human_replied: true, human_reply_text: 'Tuesday 2-4.', intent: 'scheduling' });
       await database('ai_incidents').insert({
@@ -185,7 +187,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
   test('export writes the frozen dev cases, the system prompt and a results template outside the repo; record dry-runs by default', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-'));
     const drafter = {
-      buildUserPromptFromFacts: (facts, inbound) => `${facts}\n\nCUSTOMER: ${inbound}`,
+      buildUserPromptFromFacts: (facts, inbound, intent, scheduling) => `${facts}\n\nCUSTOMER: ${inbound}\nINTENT: ${intent.intent}${scheduling ? ' (scheduling)' : ''}`,
       buildSystemPrompt: () => 'SYSTEM PROMPT',
       currentPromptVersion: () => V12,
     };
@@ -194,7 +196,10 @@ test('export refuses a directory inside the repository, however it is spelled', 
     const cases = fs.readFileSync(path.join(dir, 'cases.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     expect(cases).toHaveLength(10);
     expect(cases.map((c) => c.incident_key).sort()).toEqual([...proposal.dev_incident_keys].sort());
-    expect(cases[0]).toMatchObject({ split: 'dev', human_reply: 'Tuesday 2-4.', intent: 'scheduling', cell: CELL });
+    expect(cases[0]).toMatchObject({ split: 'dev', human_reply: 'Tuesday 2-4.', intent: 'SCHEDULING', cell: CELL });
+    // The stored scheduling-intent flag reaches the replayed prompt, case by case.
+    for (const c of cases) expect(c.user_prompt.endsWith('(scheduling)')).toBe(c.scheduling_intent);
+    expect(new Set(cases.map((c) => c.scheduling_intent)).size).toBe(2);
     expect(cases[0].unsupported_quotes).toHaveLength(2);
     expect(cases[0].user_prompt).toContain('CUSTOMER: when are you coming?');
     expect(fs.readFileSync(path.join(dir, 'system-prompt.txt'), 'utf8')).toBe('SYSTEM PROMPT');

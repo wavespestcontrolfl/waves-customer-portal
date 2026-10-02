@@ -110,7 +110,7 @@ async function runExport({ dbi, args, log, drafter }) {
   fs.mkdirSync(dir, { recursive: true });
   const lines = cases.map((c) => JSON.stringify({
     ...c,
-    user_prompt: d.buildUserPromptFromFacts(c.facts_block, c.inbound_message, { intent: String(c.intent || 'GENERAL').toUpperCase() }, false),
+    user_prompt: d.buildUserPromptFromFacts(c.facts_block, c.inbound_message, { intent: String(c.intent || 'GENERAL').toUpperCase() }, c.scheduling_intent),
   }));
   fs.writeFileSync(path.join(dir, 'cases.jsonl'), lines.length ? `${lines.join('\n')}\n` : '');
   fs.writeFileSync(path.join(dir, 'system-prompt.txt'), d.buildSystemPrompt());
