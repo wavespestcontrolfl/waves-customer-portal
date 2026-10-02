@@ -15,11 +15,6 @@
  *   - every stored address_key that differs from addressKey(row) is
  *     rewritten.
  *
- *   - first, every fold 20261001200000 recorded (its system_settings state)
- *     whose two rows no longer share a live key (an address edited while
- *     it ran turned the copy into a different house) is undone: the
- *     references it moved go back and the copy is reactivated.
- *
  * On a database where 20261001200000 ran undisturbed this changes nothing.
  * No customer communication. down() reverses exactly what this pass did,
  * from its own system_settings state row.
@@ -27,7 +22,6 @@
 const { addressKey } = require('../../services/customer-properties');
 
 const STATE_KEY = 'migration.20261001200100.state';
-const FIRST_PASS_STATE_KEY = 'migration.20261001200000.state';
 
 // Every uuid property reference in production (information_schema,
 // 2026-10-01). Tables or columns missing in an environment are skipped.
@@ -94,37 +88,8 @@ exports.up = async function up(knex) {
   await knex.raw(LOCK_SQL);
   const rows = await knex('customer_properties')
     .select('id', 'customer_id', 'address_line1', 'address_line2', 'city', 'zip', 'address_key', 'active', 'is_primary', 'created_at');
-  const state = { keys: {}, merged: [], unmerged: [] };
+  const state = { keys: {}, merged: [] };
   const tables = await referenceTables(knex);
-  const byId = new Map(rows.map((r) => [r.id, r]));
-
-  // Undo a first-pass fold whose rows are no longer the same house. Only a
-  // copy still retired and a reference still on the keeper move back.
-  const first = hasSettings ? await knex('system_settings').where({ key: FIRST_PASS_STATE_KEY }).first() : null;
-  const firstState = first ? (typeof first.value === 'string' ? JSON.parse(first.value) : first.value) : null;
-  for (const m of firstState?.merged || []) {
-    const loser = byId.get(m.loser);
-    const keeper = byId.get(m.keeper);
-    if (!loser || !keeper || loser.active || addressKey(loser) === addressKey(keeper)) continue;
-    const restored = {};
-    for (const [table, ids] of Object.entries(m.moved || {})) {
-      if (!ids.length || !tables.includes(table)) continue;
-      const back = (await knex(table).whereIn('id', ids).where({ property_id: m.keeper }).select('id')).map((x) => x.id);
-      if (!back.length) continue;
-      await knex(table).whereIn('id', back).where({ property_id: m.keeper }).update({ property_id: m.loser });
-      restored[table] = back;
-    }
-    // Its stored key is still the keeper's (the first pass keyed the old
-    // address), so the live key lands with the reactivation, in one
-    // statement the unique index accepts.
-    const liveKey = addressKey(loser) || null;
-    await knex('customer_properties').where({ id: m.loser })
-      .update({ active: true, is_primary: !!m.wasPrimary, address_key: liveKey, updated_at: knex.fn.now() });
-    state.unmerged.push({ loser: m.loser, keeper: m.keeper, restored, previousKey: loser.address_key || null });
-    loser.active = true;
-    loser.is_primary = !!m.wasPrimary;
-    loser.address_key = liveKey;
-  }
 
   for (const group of sameHouseGroups(rows)) {
     const keeper = pickKeeper(group);
@@ -152,27 +117,14 @@ exports.down = async function down(knex) {
   if (!row) return;
   await knex.raw(LOCK_SQL);
   const state = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
-  // Reverse order of up(). Own folds first: reactivate the copies this pass
-  // retired, with their references.
+  for (const [id, key] of Object.entries(state.keys || {})) {
+    await knex('customer_properties').where({ id }).update({ address_key: key });
+  }
   for (const m of state.merged || []) {
     for (const [table, ids] of Object.entries(m.moved || {})) {
       if (!ids.length) continue;
       await knex(table).whereIn('id', ids).where({ property_id: m.keeper }).update({ property_id: m.loser });
     }
-  }
-  // Re-apply the first-pass folds this pass undid, before any key moves
-  // back onto an active row.
-  for (const u of state.unmerged || []) {
-    for (const [table, ids] of Object.entries(u.restored || {})) {
-      await knex(table).whereIn('id', ids).where({ property_id: u.loser }).update({ property_id: u.keeper });
-    }
-    await knex('customer_properties').where({ id: u.loser })
-      .update({ active: false, is_primary: false, address_key: u.previousKey, updated_at: knex.fn.now() });
-  }
-  for (const [id, key] of Object.entries(state.keys || {})) {
-    await knex('customer_properties').where({ id }).update({ address_key: key });
-  }
-  for (const m of state.merged || []) {
     await knex('customer_properties').where({ id: m.loser }).update({ active: true, is_primary: !!m.wasPrimary, updated_at: knex.fn.now() });
   }
   await knex('system_settings').where({ key: STATE_KEY }).del();

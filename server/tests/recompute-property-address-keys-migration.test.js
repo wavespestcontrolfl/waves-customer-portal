@@ -10,6 +10,7 @@ jest.mock('../models/db', () => ({}), { virtual: false });
 const { addressKey } = require('../services/customer-properties');
 const migration = require('../models/migrations/20261001200000_recompute_property_address_keys');
 const reconcile = require('../models/migrations/20261001200100_reconcile_property_address_keys_locked');
+const undoStale = require('../models/migrations/20261001200200_undo_stale_property_folds');
 
 function fakeKnex(db) {
   const rowsOf = (t) => (db[t] = db[t] || []);
@@ -160,22 +161,47 @@ describe('20261001200100 locked reconcile', () => {
     expect(db.scheduled_services.find((v) => v.id === 'v-late').property_id).toBe('late-a');
     expect(db.system_settings.find((r) => r.key === reconcile.STATE_KEY)).toBeUndefined();
   });
+});
 
-  test('undoes a first-pass fold when the copy was edited into a different house while it ran', async () => {
+describe('20261001200200 undo stale property folds', () => {
+  test('after recompute + reconcile, undoes a fold whose copy was edited into a different house mid-run', async () => {
     const db = seed();
     await migration.up(fakeKnex(db));
     expect(row(db, 'dup-a').active).toBe(false);
     // the office corrected the copy's address while the first pass ran
     row(db, 'dup-a').address_line1 = '210 Example Glen';
     await reconcile.up(fakeKnex(db));
+    expect(row(db, 'dup-a').active).toBe(false); // the reconcile groups active rows only
+    db.__raw = [];
+    await undoStale.up(fakeKnex(db));
+    expect(db.__raw[0]).toBe('LOCK TABLE customer_properties IN SHARE ROW EXCLUSIVE MODE');
     expect(row(db, 'dup-a')).toMatchObject({ active: true, address_key: addressKey(row(db, 'dup-a')) });
     expect(db.scheduled_services.find((v) => v.id === 'v1').property_id).toBe('dup-a');
     expect(db.estimates[0].property_id).toBe('dup-a');
-    // the other first-pass fold still holds
-    expect(row(db, 'dup-b').active).toBe(false);
+    expect(row(db, 'dup-b').active).toBe(false); // a fold the data still supports holds
 
-    await reconcile.down(fakeKnex(db));
+    await undoStale.down(fakeKnex(db));
     expect(row(db, 'dup-a').active).toBe(false);
     expect(db.scheduled_services.find((v) => v.id === 'v1').property_id).toBe('keep-a');
+    expect(db.system_settings.find((r) => r.key === undoStale.STATE_KEY)).toBeUndefined();
+  });
+
+  test('changes nothing after an undisturbed recompute', async () => {
+    const db = seed();
+    await migration.up(fakeKnex(db));
+    await reconcile.up(fakeKnex(db));
+    const snapshot = JSON.stringify([db.customer_properties, db.scheduled_services, db.estimates]);
+    await undoStale.up(fakeKnex(db));
+    expect(JSON.stringify([db.customer_properties, db.scheduled_services, db.estimates])).toBe(snapshot);
+  });
+
+  test('leaves a copy retired when its new address matches another active row', async () => {
+    const db = seed();
+    await migration.up(fakeKnex(db));
+    row(db, 'dup-b').address_line1 = '402 Test Creek Court'; // now other-b's house
+    await reconcile.up(fakeKnex(db));
+    await undoStale.up(fakeKnex(db));
+    expect(row(db, 'dup-b').active).toBe(false);
+    expect(row(db, 'other-b').active).toBe(true);
   });
 });
