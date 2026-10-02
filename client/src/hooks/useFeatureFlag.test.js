@@ -31,3 +31,12 @@ it('never lets a superseded flag read overwrite the new login\'s flags', async (
   await expect(second).resolves.toEqual({ 'tech-field-workspace': false });
   await expect(first).resolves.toEqual({ 'tech-field-workspace': false });
 });
+
+it('resolves to no flags, without a network read, when nobody is signed in', async () => {
+  const fetchMock = vi.fn();
+  vi.stubGlobal('fetch', fetchMock);
+  const { refetchFlags } = await import('./useFeatureFlag');
+
+  await expect(refetchFlags()).resolves.toEqual({});
+  expect(fetchMock).not.toHaveBeenCalled();
+});

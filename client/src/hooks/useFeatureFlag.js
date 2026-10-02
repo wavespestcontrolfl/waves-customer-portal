@@ -47,7 +47,9 @@ async function loadFlags() {
       return cache;
     } finally {
       if (timer) clearTimeout(timer);
-      if (inflight === read) { inflight = null; inflightAbort = null; }
+      // By generation, never by `read`: with no token the body finishes
+      // before `read` is assigned.
+      if (current()) { inflight = null; inflightAbort = null; }
     }
   })();
   inflight = read;
