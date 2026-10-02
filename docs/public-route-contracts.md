@@ -695,10 +695,40 @@ an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,
 version, creditPending? }` only when `ZELLE_RECIPIENT` is set (unset ⇒ key
 absent, payload byte-identical — that is the kill switch; `VENMO_HANDLE` /
 `PAYPAL_ME_HANDLE` are ignored and cannot resurrect a tender) AND the
-invoice is collectible, not saved-method-required, not fully covered by
-account credit, not riding a combined-balance session, has no saved-card
-charge reconciliation pending, and any stamped PaymentIntent is still
-cancelable (inspect-only, fail-closed — unverifiable ⇒ key withheld). The
+invoice clears `payPageZelleVisibility` (`pay-v2.js`; PR #5331) — the ONE
+function this route, the SMS drafter's draft-time eligibility fetch, and
+the send-time recheck all call, so none of them can quietly disagree.
+EVERY caller first runs ONE dedicated payer-ownership step (`zellePayerOwnership`)
+that always executes, independent of `payIncludeBalance` / combined-balance
+gating: a stamped `payer_id` or `payer_statement_id` (including one stamped
+after an SMS reply was drafted) withholds the key (`payer_owned`); otherwise
+the LIVE payer resolver is called directly (`throwOnError`) — a resolved
+third-party payer on an UNSTAMPED invoice withholds it (`payer_owned`), and a
+resolver error or an invoice with no customer withholds it
+(`payer_unverifiable`, fail closed). Withholding means the `manualPayOptions`
+key is ABSENT; status, headers and every other payload field are unchanged
+(and with `ZELLE_RECIPIENT` unset the step never runs).
+Exhaustively, every condition it applies: the invoice is not payer-owned (the ownership step above), is collectible, not
+withdrawn from the customer (a Bill-To move to a payer after the homeowner
+already held this link, see THIRD-PARTY BILL-TO WITHDRAWAL below), not
+saved-method-required, not fully covered by account credit, not riding a
+combined-balance session — this arm ALSO denies Zelle the instant a live
+payer resolves while probing for a sibling balance, even when that probe
+finds no sibling itself (`payerOwnedLive`: a payer discovered live during
+the combined-siblings lookup withholds Zelle exactly as an already-stamped
+`payer_id` would, so a Bill-To resolved mid-request can never leave a
+Zelle transfer offered to the wrong party) — has no saved-card charge
+reconciliation pending, and any stamped PaymentIntent is still cancelable
+(inspect-only, fail-closed — unverifiable ⇒ key withheld). An account-credit lookup that ERRORS is likewise unverifiable, never zero: the key is withheld (`credit_unverifiable`) — key absent, rest of the payload unchanged. Partial account
+credit is NOT a withholding condition on this route: when a positive PARTIAL
+projected account credit applies (one that would not itself fully cover the
+invoice — a credit that WOULD fully cover it is already excluded above), the
+server STILL INCLUDES `manualPayOptions` and sets `creditPending: true` on it.
+The client (`PayPageV2.jsx`, `creditPending && !stripeSetup`) then HIDES its
+transfer controls until `/setup` resolves the real post-credit amount, since a
+projection is not a reservation. (The SMS drafter and send-time recheck, which
+have no client to hide anything, treat that same state as not-visible and never
+offer Zelle while a partial credit is pending.) The
 recipient is the business's own Zelle contact, never customer data. The
 client re-reads this payload on expand / tab re-focus / 45 s cadence and
 keeps every control disabled until a fresh read succeeds; no pre-filled

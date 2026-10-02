@@ -23,6 +23,7 @@ const { invoiceCustomerAddress } = require('./invoice-address');
 const { formatDateOnly } = require('../utils/date-only');
 const { parseRawAddress } = require('../utils/address-normalizer');
 const featureGates = require('../config/feature-gates');
+const { CARD_BRANDS } = require('./card-brands');
 
 // The one reader every sender in the lane goes through. Read at CALL time; a
 // gates module without the reader (a partial test mock) reads as off, which is
@@ -37,17 +38,12 @@ function clean(value) {
 
 // ── Card / tender labels ────────────────────────────────────────────────
 
-const BRAND_NAMES = Object.freeze({
-  visa: 'Visa',
-  mastercard: 'Mastercard',
-  amex: 'American Express',
-  american_express: 'American Express',
-  discover: 'Discover',
-  diners: 'Diners Club',
-  diners_club: 'Diners Club',
-  jcb: 'JCB',
-  unionpay: 'UnionPay',
-});
+// Derived from the ONE shared brand table (services/card-brands.js, Codex round-42 P1): every brand a payments row can store.
+const BRAND_NAMES = Object.freeze(Object.fromEntries([
+  ...CARD_BRANDS.map((b) => [b.id, b.name]),
+  ['american_express', 'American Express'],
+  ['diners_club', 'Diners Club'],
+]));
 
 // Stripe sends 'visa' / 'amex'; the payments table stores whatever the writer
 // had. Customer copy names the brand the way the card does.

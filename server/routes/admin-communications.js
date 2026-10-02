@@ -136,6 +136,14 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
+        // Independent-review P1 (round 6, PR #5331): the customer's own
+        // inbound wording — the thing a tender/date the customer named must
+        // be bound against, since a confirmation must never bind a generic
+        // "we received your payment" to a DIFFERENT tender than the one the
+        // customer actually asked about. input_snapshot's own `sms.body` is
+        // the same text for a drafted card and is kept as the fallback in
+        // agent-decision-send-checks.js for a row with no linked sms_log.
+        's.message_body as inbound_message',
         'c.phone as customer_phone'
       )
       .first();
@@ -188,7 +196,9 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     // (stale or edited timing), and the billing amounts (re-read now). This
     // route keeps ownership + thread staleness and orchestrates. Any block
     // refuses and retires the decision the same way a stale anchor does.
-    const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+    const { agentDecisionSendBlockReason, billingFingerprintForSend } = require('../services/agent-decision-send-checks');
+    // Codex round-49 P1: the billing fingerprint BEFORE the full recheck - the provider-boundary check refuses if anything changes after
+    decision.billing_fingerprint = await billingFingerprintForSend({ decision, outgoingBody });
     const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
     if (blockReason) {
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
@@ -1126,6 +1136,8 @@ router.post('/sms', async (req, res, next) => {
       // check ran in verifyAgentDraftDecision, before this route's many link / claim /
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      // BILLING FACTS (amounts / payment status / Zelle) at the same boundary (Codex round-48 P1): a payment landing during those
+      // awaits must not let an approved balance / status sentence reach the customer after it became false.
       // Open-loop facts (PR #5499) ride the same boundary: a promise can close, or the
       // visit-status window lapse, during those awaits too.
       ...(verifiedAgentDecision?.id ? {
@@ -1136,6 +1148,7 @@ router.post('/sms', async (req, res, next) => {
             checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
+            checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
           );
         })(),
       } : {}),

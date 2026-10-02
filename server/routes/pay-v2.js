@@ -194,16 +194,16 @@ async function rejectIfInvoiceCollectionPending(invoice, res, { recordExistingPa
 //     stay exempt too.
 // Payer-billed invoices never save on the homeowner account.
 // Column-guarded: pre-migration environments require nothing.
-async function invoiceRequiresSavedMethod(invoice) {
+async function invoiceRequiresSavedMethod(invoice, { database = db } = {}) {
   const customerId = invoice?.customer_id || invoice?.customer?.id;
   if (!customerId || invoice?.payer_id) return false;
   try {
-    const row = await db('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate');
+    const row = await database('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate');
     if (['per_application', 'annual_prepay'].includes(row?.billing_mode)) return true;
     if (!(Number(row?.monthly_rate) > 0)) return false;
     const scheduledServiceId = invoice?.scheduled_service_id || invoice?.scheduledServiceId;
     if (!scheduledServiceId) return false;
-    const ss = await db('scheduled_services')
+    const ss = await database('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('source_estimate_id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
     if (!ss?.source_estimate_id) return false;
@@ -263,14 +263,269 @@ async function invoiceCaptureNeeded(invoice) {
 // Account credit /setup WILL auto-apply to this invoice (same gate + opt-in
 // as invoiceCreditWouldFullyCover), so the pay page can show the post-credit
 // amount before /setup answers. 0 when the gate is off / opted out / no credit.
-async function invoiceProjectedCreditApplied(invoice) {
+async function invoiceProjectedCreditApplied(invoice, { database = db } = {}) {
   if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return 0;
   if (!invoice?.customer_id || invoice?.payer_id) return 0;
-  const row = await db('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
   if (row?.auto_apply_account_credit !== true) return 0;
   const credit = Number(row?.account_credits) || 0;
   if (!(credit > 0)) return 0;
   return Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
+}
+
+// The SINGLE eligibility predicate for offering an off-Stripe transfer
+// (Zelle today) on this invoice — extracted (independent-review P1, PR
+// #5331) so the SMS real-answers PAYMENT OPTIONS fact can ask the exact
+// same question the public pay page answers here, instead of maintaining
+// a second copy that can silently disagree. Byte-identical to the inline
+// predicate this replaced: off-Stripe tenders are offered only when a
+// transfer is actually the right thing to do (codex #3610 P1 ×2) — never
+// when the invoice must capture a saved method (a Zelle transfer creates
+// neither the Stripe method nor the consent a recurring signup needs;
+// owner ruling 2026-09-28: new customers pay at visit, card on file only),
+// never when account credit will settle the whole invoice at /setup (the
+// customer owes no cash), never on a combined-balance session (codex r2
+// P1 — a transfer + record-payment would settle only the anchor while the
+// panel advertised the COMBINED total), and never on a WITHDRAWN packet
+// invoice (codex r25 P1 — a transfer happens entirely off-platform and
+// can't be clawed back). Two further live checks run only once every
+// other condition already passed (same short-circuit as before, so a
+// non-collectible/save-required/etc. invoice never reaches Stripe): no
+// saved-card charge in flight or awaiting reconciliation (codex r5 P1),
+// and no attached PaymentIntent Stripe has already moved to
+// succeeded/processing (codex r6 P1, inspect-only via prepaid-pi-guard).
+//
+// NOTE (independent-review P1 round 2, PR #5331): this predicate does NOT
+// check estimate-deposit settlement readiness itself — GET /:token already
+// refuses the whole page for a pending receipt via withInvoiceDepositSettlement
+// before it ever reaches this predicate, so re-checking here would only
+// duplicate work on every call and risk a second, unmocked DB read for every
+// caller of this shared predicate (pay-v2's own tests mock estimate-deposits
+// narrowly). The two ASYNC callers that do NOT run inside that fence —
+// fetchZelleEligibility (sms-shadow-drafter.js) and zelleInvoiceStillEligible
+// (sms-amount-recheck.js) — run the SAME assertInvoiceDepositSettlementReady
+// check themselves, alongside this predicate, so pay-v2's own route behavior
+// stays byte-identical while both other callers gain the missing condition.
+// `creditWillCoverAnchor`, `hasPreviousBalance`, and `saveRequired` are
+// accepted as overrides so THIS route reuses its own already-computed
+// values instead of re-querying; an omitted one is derived fresh so a
+// caller with only the invoice row (e.g. the SMS drafter) still gets a
+// faithful answer.
+// `payerOwnedLive` (independent-review P1, round 5, finding 3): a caller
+// that already ran its OWN combinedEligibleSiblings against this anchor
+// (GET /:token, for the previousBalance itemization) can pass through what
+// that call's onPayerResolved callback captured, so this predicate doesn't
+// need a second DB/Stripe round trip to learn it. A caller with no
+// precomputed siblings (hasPreviousBalance == null) discovers it itself,
+// below, via the SAME callback on its own internal call — either path
+// denies Zelle the instant the anchor resolves to a LIVE payer, never
+// silently falling through as "no previous balance" the way a bare null
+// return from combinedEligibleSiblings used to.
+async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly = false, database = db } = {}) {
+  if (!invoice) return false;
+  // Phased verdicts, each short-circuiting in the original order (a later live check never runs once an earlier one denies).
+  if (await zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, saveRequired, database })) return false;
+  if (await zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payerOwnedLive, readOnly, database })) return false;
+  if (await zelleDeniedByChargeReconciliation(invoice, readOnly, database)) return false;
+  if (await zelleDeniedByPaymentIntent(invoice)) return false;
+  return true;
+}
+
+// Collectibility, withdrawn packet invoice, saved-method requirement and account credit that settles the whole invoice.
+async function zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, saveRequired, database }) {
+  if (!isInvoiceCollectibleStatus(invoice.status)) return true;
+  if (invoiceWithdrawnFromCustomer(invoice)) return true;
+  const needsSavedMethod = saveRequired != null ? saveRequired : await invoiceRequiresSavedMethod(invoice, { database });
+  if (needsSavedMethod) return true;
+  const creditCovers = creditWillCoverAnchor != null ? creditWillCoverAnchor : await invoiceCreditWouldFullyCover(invoice, { database });
+  return !!creditCovers;
+}
+
+// Combined-balance siblings and a live third-party payer. A caller-supplied hasPreviousBalance skips the sibling lookup; a
+// payer-stamped invoice has no siblings to discover. `payerOwned` is set by the resolver callback on the lookup itself.
+async function zelleDeniedByPayerOrSiblings(invoice, { hasPreviousBalance, payerOwnedLive, readOnly, database }) {
+  let hasPrevBalance = hasPreviousBalance;
+  let payerOwned = payerOwnedLive === true;
+  if (hasPrevBalance == null) {
+    hasPrevBalance = false;
+    if (!invoice.payer_id) {
+      const PayCombined = require('../services/pay-combined');
+      // Codex round-57 P1: a null result means "no siblings" ONLY for `none` / `gate_off`; an incomplete / over-cap / payer-unresolved
+      // read is UNVERIFIED sibling debt - a transfer would settle only this invoice - so Zelle is denied (fail closed)
+      let siblingsUnverified = false;
+      const siblings = await PayCombined.combinedEligibleSiblings(invoice, {
+        database,
+        reusePaymentIntentId: invoice.stripe_payment_intent_id || null,
+        onPayerResolved: () => { payerOwned = true; },
+        // (read-only callers - the SMS draft / send rechecks; the pay page GET keeps its existing behavior)
+        ...(readOnly ? { onDegrade: (reason) => { if (!['none', 'gate_off'].includes(reason)) siblingsUnverified = true; } } : {}),
+        // read-only: the sibling charge-claim fences must not release / promote anything either
+        ...(readOnly ? { readOnly: true } : {}),
+      });
+      hasPrevBalance = siblingsUnverified || !!(siblings && siblings.length);
+    }
+  }
+  return !!(payerOwned || hasPrevBalance);
+}
+
+// true when a saved-card charge in flight / awaiting reconciliation suppresses alternate collection; any other error rethrows.
+async function zelleDeniedByChargeReconciliation(invoice, readOnly, database = db) {
+  try {
+    // Codex round-26 P1: callers that only ASK (SMS drafting and send-time rechecks) pass readOnly — the
+    // writing default would release a stale pre-submit claim / promote a submitted one while the original
+    // charge worker can still commit, exposing a second payment rail. The public pay page GET keeps main's
+    // behavior (default, writing) — the same call main's own GET makes.
+    if (readOnly) await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true });
+    else await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
+  } catch (err) {
+    if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
+    return true;
+  }
+  return false;
+}
+
+// An attached PaymentIntent Stripe has already moved to succeeded/processing (inspect-only); an unreadable one denies.
+async function zelleDeniedByPaymentIntent(invoice) {
+  if (!invoice.stripe_payment_intent_id) return false;
+  const verdict = await require('../services/prepaid-pi-guard')
+    .guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly: true })
+    .catch(() => ({ ok: false }));
+  return !verdict.ok;
+}
+
+// Live payer-ownership verdict for Zelle visibility (see
+// payPageZelleVisibility): null when the invoice is
+// verifiably the homeowner's to pay, else the rejection reason.
+async function zellePayerOwnership(inv, dbh) {
+  // the ONE live payer-ownership verdict (services/invoice-payer-ownership.js), shared with the SMS invoice-status facts
+  return require('../services/invoice-payer-ownership').invoicePayerOwnership(inv, dbh);
+}
+
+// A received estimate deposit still awaiting invoice reconciliation (the GET's own opening fence, repeated without a lock): 'deposit_pending'.
+async function zelleDeniedByDepositSettlement(invoice, dbh) {
+  try {
+    await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(dbh, invoice, { lock: false });
+    return null;
+  } catch (err) {
+    if (err?.code === 'DEPOSIT_RECONCILIATION_REQUIRED') return 'deposit_pending';
+    throw err;
+  }
+}
+
+// { reason } when Zelle must be withheld; else { reason: null, invoice: <the fresh row>, projectedCredit }. Order: the PaymentIntent's live
+// Stripe state (the one slow await) FIRST, then the fresh row, its DB-side predicate (no caller overrides), the live payer, the projected
+// (partial) credit, and LAST the DB fences (deposit settlement, saved-card claim - Codex rounds 69/70/75: no slow await follows a DB read).
+async function zelleFinalPass(inv, { dbh, readOnly }) {
+  // Codex round-75 P0 (owner ruling: the full DB pass runs AFTER the slow Stripe probes): the attached PaymentIntent's live Stripe state
+  // is read FIRST, from the caller's row; every DB read below follows it, and the fresh row must still carry that same PaymentIntent.
+  try {
+    if (await withTimeout(zelleDeniedByPaymentIntent(inv), ZELLE_ELIGIBILITY_TIMEOUT_MS)) return { reason: 'invoice_changed' };
+  } catch { return { reason: 'eligibility_unverifiable' }; }
+  let fresh;
+  try { fresh = await dbh('invoices').where({ id: inv.id }).first(); } catch { return { reason: 'eligibility_unverifiable' }; }
+  if (!fresh) return { reason: 'invoice_not_found' };
+  const changed = String(fresh.status || '') !== String(inv.status || '')
+    || (fresh.stripe_payment_intent_id || null) !== (inv.stripe_payment_intent_id || null)
+    || invoiceAmountDue(fresh) !== invoiceAmountDue(inv);
+  if (changed) return { reason: 'invoice_changed' };
+  try {
+    if (await zelleDeniedByInvoiceState(fresh, { database: dbh })) return { reason: 'invoice_changed' };
+    if (await zelleDeniedByPayerOrSiblings(fresh, { readOnly, database: dbh })) return { reason: 'invoice_changed' };
+  } catch { return { reason: 'eligibility_unverifiable' }; }
+  const owned = await zellePayerOwnership(fresh, dbh);
+  if (owned) return { reason: owned };
+  let projectedCredit;
+  try { projectedCredit = await invoiceProjectedCreditApplied(fresh, { database: dbh }); } catch { return { reason: 'credit_unverifiable' }; }
+  // the DB fences as the last reads (Codex round-70 P0s): a received estimate deposit awaiting reconciliation, and a saved-card charge
+  // claim (read-only: never releases or promotes anything)
+  try {
+    const deposit = await zelleDeniedByDepositSettlement(fresh, dbh);
+    if (deposit) return { reason: deposit };
+    if (await zelleDeniedByChargeReconciliation(fresh, true, dbh)) return { reason: 'invoice_changed' };
+  } catch { return { reason: 'eligibility_unverifiable' }; }
+  return { reason: null, invoice: fresh, projectedCredit };
+}
+
+const ZELLE_ELIGIBILITY_TIMEOUT_MS = 8000;
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error('timed out'), { code: 'ZELLE_ELIGIBILITY_TIMEOUT' })), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// STRUCTURAL (independent-review P1, round 5, findings 3 & 4, PR #5331): the
+// ONE place that answers "does the pay page offer a Zelle transfer for this
+// invoice RIGHT NOW" — folding isZelleTransferEligible's full predicate
+// together with the credit-pending withholding PayPageV2.jsx applies on the
+// client (hidden until POST /:token/setup answers with the post-credit
+// amount; a projection is not a reservation — codex r3 P1) into one function,
+// so GET /:token, the drafter's draft-time fetchZelleEligibility, and the
+// send-time zelleInvoiceStillEligible recheck can never quietly disagree
+// again. `reason` lets GET tell "structurally ineligible" (withhold the
+// config entirely, exactly as before this function existed) apart from
+// "eligible but a partial credit is pending" (still ride the config, flagged
+// `creditPending: true`, so the client can reveal it once /setup resolves
+// the real amount) — every OTHER caller only ever wants the plain boolean.
+async function payPageZelleVisibility({
+  invoiceId = null, invoice = null, dbh = db,
+  creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly = false,
+} = {}) {
+  if (!manualPayOptionsFromEnv()) return { visible: false, reason: 'not_configured' };
+  const inv = invoice || (invoiceId ? await dbh('invoices').where({ id: invoiceId }).first() : null);
+  if (!inv) return { visible: false, reason: 'invoice_not_found' };
+  // ONE dedicated ownership step, ALWAYS run for every caller — GET /:token
+  // (the pay page), the drafter's draft-time fetch and the send-time recheck —
+  // independent of payIncludeBalance / combined-balance gating (Codex round-6
+  // pre-push audit P1, owner-approved to cover the pay page too):
+  // combinedEligibleSiblings returns null BEFORE resolving a payer when
+  // payIncludeBalance is off, and on any resolver error — neither fires
+  // onPayerResolved — so relying on it let an UNSTAMPED invoice now owned by a
+  // third-party payer through. Stamped payer_id / payer_statement_id ->
+  // reject; otherwise the LIVE payer resolver is called directly (the same one
+  // combinedEligibleSiblings uses, with throwOnError so an outage is not
+  // misread as self-pay). A payer -> 'payer_owned'; a throw or an invoice with
+  // no customer to resolve for -> 'payer_unverifiable' (fail closed).
+  const ownership = await zellePayerOwnership(inv, dbh);
+  if (ownership) return { visible: false, reason: ownership };
+  // Codex round-10 P1 (PR #5331): a credit lookup that ERRORS is unknown, not
+  // zero — never offer Zelle on an unverifiable credit state (an unseen credit
+  // could fully cover the invoice or change the amount). Fail closed.
+  let coverage = creditWillCoverAnchor;
+  if (coverage == null) {
+    try { coverage = await invoiceCreditWouldFullyCover(inv, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
+  }
+  // Pre-push audit P1: isZelleTransferEligible RETHROWS a non-suppression error from
+  // the charge-reconciliation check (and any probe below it can throw or hang on
+  // Stripe). On the public pay page that must never 500 the page — fail CLOSED:
+  // withhold Zelle, log the invoice id only. Bounded so a slow Stripe read cannot
+  // stall the page either (the PI inspect also carries its own request timeout).
+  let eligible;
+  try {
+    eligible = await withTimeout(
+      isZelleTransferEligible(inv, { creditWillCoverAnchor: coverage, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly, database: dbh }),
+      ZELLE_ELIGIBILITY_TIMEOUT_MS,
+    );
+  } catch (err) {
+    logger.warn(`[pay-v2] Zelle eligibility check failed for invoice ${inv.id}: ${err.code || err.name || 'error'}; withholding Zelle`);
+    return { visible: false, reason: 'eligibility_unverifiable' };
+  }
+  if (!eligible) return { visible: false, reason: 'not_eligible' };
+  // ONE FINAL FULL PASS (owner ruling 2026-10-02, after Codex rounds 63-66 named one field at a time): after the credit / reconciliation /
+  // Stripe awaits, the invoice row is read again and the whole predicate reruns on it with NO caller overrides (zelleFinalPass), ending
+  // with the active-collection guards. A change after that is the accepted residual window. A failed read fails closed.
+  return finalZelleVerdict(await zelleFinalPass(inv, { dbh, readOnly }));
+}
+// Finding 4 / Codex round-13: any positive projected (partial) credit withholds Zelle (PayPageV2.jsx's `creditPending && !stripeSetup`),
+// and rides the verdict so GET /:token reuses it. Codex round-68 P0: one that covers the WHOLE invoice is full coverage, never pending.
+function finalZelleVerdict(final) {
+  if (final.reason) return { visible: false, reason: final.reason };
+  const { projectedCredit } = final;
+  if (projectedCredit > 0 && projectedCredit >= invoiceAmountDue(final.invoice)) return { visible: false, reason: 'credit_covers' };
+  if (projectedCredit > 0) return { visible: false, reason: 'credit_pending', projectedCredit };
+  return { visible: true, reason: null, projectedCredit };
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -337,6 +592,15 @@ router.get('/:token', async (req, res, next) => {
     // charged); payer-billed anchors and admin-stopped-dunning invoices
     // never appear.
     let previousBalance = null;
+    // Independent-review P1 (round 5, finding 3): captured from the SAME
+    // combinedEligibleSiblings call below via its onPayerResolved callback —
+    // a live-resolved payer (assigned via the scheduled service or the
+    // customer default AFTER this invoice was created, so invoices.payer_id
+    // is still null) must deny Zelle, not read as "no previous balance,
+    // continue" the way a bare null return used to. Threaded into
+    // isZelleTransferEligible/payPageZelleVisibility below so this route
+    // never re-derives the live resolution a second time.
+    let payerOwnedLive = false;
     // Account credit that will FULLY cover the anchor suppresses the
     // combined preview (codex r18 P1): /setup's auto-apply transitions the
     // anchor to prepaid and returns covered_by_credit with NO PaymentIntent
@@ -345,11 +609,16 @@ router.get('/:token', async (req, res, next) => {
     let creditWillCoverAnchor = false;
     try {
       creditWillCoverAnchor = await invoiceCreditWouldFullyCover(data);
-    } catch { creditWillCoverAnchor = false; }
+    } catch {
+      // Unknown, not false: null makes payPageZelleVisibility re-probe and fail
+      // closed (credit_unverifiable) instead of offering Zelle on an unseen credit.
+      creditWillCoverAnchor = null;
+    }
     if (isInvoiceCollectibleStatus(data.status) && !data.payer_id && !creditWillCoverAnchor) {
       const PayCombined = require('../services/pay-combined');
       const siblings = await PayCombined.combinedEligibleSiblings(data, {
         reusePaymentIntentId: data.stripe_payment_intent_id || null,
+        onPayerResolved: () => { payerOwnedLive = true; },
       });
       if (siblings?.length) {
         const prevTotalCents = siblings.reduce((sum, inv) => sum + PayCombined.amountDueCents(inv), 0);
@@ -371,51 +640,47 @@ router.get('/:token', async (req, res, next) => {
     }
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
-    // Off-Stripe tenders are offered only when a transfer is actually the
-    // right thing to do (codex #3610 P1 ×2): never when the invoice must
-    // capture a saved method (a Zelle/Venmo/PayPal transfer creates neither
-    // the Stripe method nor the consent the recurring signup needs), and
-    // never when account credit will settle the whole invoice at /setup
-    // (the customer owes no cash — a transfer of `amountDue` would be an
-    // overpayment).
-    // …nor on a combined-balance session (codex r2 P1): the panel advertises
-    // the COMBINED total but a transfer + record-payment settles only the
-    // anchor — the siblings would stay open while the customer believes
-    // they paid "Total due today". No manual tenders whenever siblings ride.
-    // …nor on a WITHDRAWN packet invoice (codex r25 P1): the guarded POST
-    // routes can refuse a card, but a Zelle/Venmo/PayPal transfer happens
-    // entirely off-platform — advertising an amount here is the one collection
-    // rail this application cannot claw back. Collectibility is not a property
-    // of `status` alone for these rows, so the status-only read is not enough.
-    let manualPayOptions = isInvoiceCollectibleStatus(data.status) && !invoiceWithdrawnFromCustomer(data) && !getSaveRequired && !creditWillCoverAnchor && !previousBalance
-      ? manualPayOptionsFromEnv()
-      : null;
-    if (manualPayOptions) {
-      // Cross-rail fence (codex r5 P1): the SAME guard /setup applies before
-      // minting a public PI. A committed saved-card claim (off-session charge
-      // in flight or awaiting reconciliation) must not be offered a second
-      // rail — the customer could transfer while the attempt also settles.
-      // Read-only here (this GET never parks the invoice); a fenced state
-      // simply withholds the block, the way /setup 409s.
-      try {
-        await StripeService.assertNoInvoiceChargeReconciliationPending(data.id);
-      } catch (err) {
-        if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
-        manualPayOptions = null;
+    // Off-Stripe tenders (see isZelleTransferEligible for the full
+    // predicate and its history) — extracted so every other caller that
+    // needs to know "would the pay page offer Zelle for this invoice"
+    // (e.g. the SMS real-answers PAYMENT OPTIONS fact) asks the SAME
+    // question this route answers, rather than re-deriving it and risking
+    // disagreement (independent-review P1).
+    //
+    // Independent-review P1 (round 3, PR #5331): read the config FIRST —
+    // manualPayOptionsFromEnv() is a synchronous env read with no I/O — and
+    // run isZelleTransferEligible's async probes (which include
+    // assertNoInvoiceChargeReconciliationPending, a DB/Stripe call that can
+    // throw) ONLY when Zelle is actually configured. Awaiting the
+    // eligibility probe unconditionally let an unrelated reconciliation-
+    // check failure 500 this PUBLIC, unauthenticated pay page even with
+    // ZELLE_RECIPIENT unset. This restores the pre-#5331 order: with Zelle
+    // unset, behavior here is byte-identical to before this lane.
+    //
+    // Independent-review P1 (round 5, findings 3 & 4): payPageZelleVisibility
+    // is now the ONE decision (see its own comment) — this route keeps its
+    // exact prior behavior by reading `reason`: 'credit_pending' still rides
+    // the config (flagged below) exactly as before this function existed,
+    // while any OTHER non-visible reason (not configured, structurally
+    // ineligible, and now also the live-payer-owned case) withholds it
+    // entirely, same as the old plain-boolean isZelleTransferEligible check.
+    const configuredManualPayOptions = manualPayOptionsFromEnv();
+    let manualPayOptions = null;
+    let visibilityProjectedCredit = null;
+    if (configuredManualPayOptions) {
+      const zelleVisibility = await payPageZelleVisibility({
+        invoice: data,
+        creditWillCoverAnchor,
+        hasPreviousBalance: !!previousBalance,
+        saveRequired: getSaveRequired,
+        payerOwnedLive,
+      });
+      if (zelleVisibility.visible || zelleVisibility.reason === 'credit_pending') {
+        // Codex round-61 P1: the recipient is read AGAIN after the eligibility awaits - a ZELLE_RECIPIENT rotated (or removed) while
+        // the probes ran must never surface the old destination (removed => no Zelle at all)
+        manualPayOptions = manualPayOptionsFromEnv();
+        visibilityProjectedCredit = zelleVisibility.projectedCredit ?? null;
       }
-    }
-    if (manualPayOptions && data.stripe_payment_intent_id) {
-      // Attached pay-page PaymentIntent (codex r6 P1): Stripe may already have
-      // moved the stamped PI to succeeded/processing while the row is still
-      // collectible (webhook delayed or failed). Same verdict the off-Stripe
-      // settlement paths use — services/prepaid-pi-guard.js, inspect-only
-      // (this GET cancels nothing): money in flight or unverifiable ⇒ no
-      // second rail. A fresh, still-cancelable PI (the page's own mint) is
-      // fine. Only runs when a PI is stamped, so a fresh link costs nothing.
-      const verdict = await require('../services/prepaid-pi-guard')
-        .guardOpenPaymentIntentForPrepaid(data, { inspectOnly: true })
-        .catch(() => ({ ok: false }));
-      if (!verdict.ok) manualPayOptions = null;
     }
     if (manualPayOptions) {
       // Transfer amount = what the invoice owes RIGHT NOW (gross amount due).
@@ -425,15 +690,22 @@ router.get('/:token', async (req, res, next) => {
       // credit WILL apply at /setup, flag it: the client withholds the
       // transfer links until /setup answers with the post-credit amount, and
       // never pre-fills either the gross or a projected figure meanwhile.
-      const projectedCredit = await invoiceProjectedCreditApplied(data).catch(() => 0);
-      manualPayOptions = {
-        ...manualPayOptions,
-        amountDue: invoiceAmountDue(data),
-        ...(projectedCredit > 0 ? { creditPending: true } : {}),
-      };
-      // The same row the amount came from, so the client can fence a
-      // pre-filled transfer against a later admin edit (codex r3 P1).
-      manualPayOptions.version = data.updated_at ? new Date(data.updated_at).getTime() : null;
+      // Reuse the projection payPageZelleVisibility already computed (no third
+      // credit read); a missing value is unverifiable => withheld, as before.
+      const projectedCredit = visibilityProjectedCredit;
+      if (projectedCredit == null) {
+        // Codex round-10 P1: an unverifiable credit is never read as zero.
+        manualPayOptions = null;
+      } else {
+        manualPayOptions = {
+          ...manualPayOptions,
+          amountDue: invoiceAmountDue(data),
+          ...(projectedCredit > 0 ? { creditPending: true } : {}),
+        };
+        // The same row the amount came from, so the client can fence a
+        // pre-filled transfer against a later admin edit (codex r3 P1).
+        manualPayOptions.version = data.updated_at ? new Date(data.updated_at).getTime() : null;
+      }
     }
 
     const getCaptureNeeded = getSaveRequired
@@ -1750,3 +2022,5 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
 module.exports = router;
 module.exports.invoiceRequiresSavedMethod = invoiceRequiresSavedMethod;
 module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;
+module.exports.isZelleTransferEligible = isZelleTransferEligible;
+module.exports.payPageZelleVisibility = payPageZelleVisibility;
