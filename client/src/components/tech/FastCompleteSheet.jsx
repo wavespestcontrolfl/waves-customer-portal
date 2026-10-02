@@ -872,8 +872,9 @@ function useReportDraft({ request, base }) {
         unclearAreas: listOf(heard.unclearAreas),
         pests: listOf(heard.pests),
         spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null,
+        unclearSpray: heard.unclearSpray === true,
       }
-      : { status: 'failed', areas: [], unclearAreas: [], pests: [], spray: null };
+      : { status: 'failed', areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false };
     if (sequence !== sequenceRef.current) return;
     const payload = buildPayload(facts);
     let written = null;

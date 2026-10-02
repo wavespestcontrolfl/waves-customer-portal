@@ -326,6 +326,10 @@ export function factsHold(facts) {
   if (unclear.length) {
     return `It isn’t clear whether you treated ${joinAnd(unclear.map((area) => area.toLowerCase()))}. Say plainly where you treated, then write it again.`;
   }
+  // A perimeter heard but not held up: never recorded as spot spraying.
+  if (facts.unclearSpray) {
+    return 'It isn’t clear whether you sprayed all the way around the house. Say plainly how you sprayed, then write it again.';
+  }
   return facts.areas.length ? '' : 'Say where you treated (inside, outside or garage) in your note, then write it again.';
 }
 
@@ -337,7 +341,7 @@ function HeardLine({ facts }) {
   const heard = [
     facts.areas.length ? `treated ${joinAnd(facts.areas.map((area) => area.toLowerCase()))}` : (unclear.length ? '' : 'where you treated: not heard'),
     unclear.length ? `not clear: ${joinAnd(unclear.map((area) => area.toLowerCase()))}` : '',
-    SPRAY_HEARD[facts.spray],
+    SPRAY_HEARD[facts.spray] || (facts.unclearSpray ? 'not clear: how you sprayed' : ''),
     facts.pests.length ? `for ${facts.pests.join(', ')}` : '',
   ].filter(Boolean);
   return (

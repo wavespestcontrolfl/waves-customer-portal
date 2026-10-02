@@ -88,7 +88,7 @@ describe('validateVoiceFacts', () => {
     }, NOTE);
     // A place heard on a quote the note does not hold is unresolved (the
     // sheet holds), never recorded and never silently dropped.
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Garage'], pests: [], spray: null });
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Garage'], pests: [], spray: null, unclearSpray: false });
   });
 
   test('a species the technician did not say never stands', () => {
@@ -167,7 +167,8 @@ describe('validateVoiceFacts', () => {
     }, note);
     // A denied area is never recorded and never silently dropped: the sheet
     // asks for it plainly.
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside'], pests: [], spray: null });
+    // The perimeter heard on a denied quote is unclear too: never a spot treatment.
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside'], pests: [], spray: null, unclearSpray: true });
   });
 
   test('an inexact quote for a place never drops it silently', () => {
@@ -250,7 +251,7 @@ describe('validateVoiceFacts', () => {
       pests: [{ name: 'spiders', quote: 'Checked for spiders' }],
       spray: { method: 'none', quote: '' },
     }, note);
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside', 'Garage'], pests: [], spray: null });
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside', 'Garage'], pests: [], spray: null, unclearSpray: false });
   });
 
   test('a negative earlier in the sentence is about something else (codex r5 on #5538)', () => {
@@ -272,6 +273,15 @@ describe('validateVoiceFacts', () => {
     expect(facts.areas.map((entry) => entry.area)).toEqual(['Inside']);
   });
 
+  test('a perimeter spray the note does not hold up is unclear, never a spot treatment (GitHub Codex P1 on #5538)', () => {
+    const note = 'Sprayed all the way around the house. Spot sprayed the garage door frames.';
+    const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
+    expect(read({ method: 'perimeter', quote: 'sprayed around the house' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'perimeter', quote: 'Sprayed all the way around the house' })).toMatchObject({ spray: { method: 'perimeter' }, unclearSpray: false });
+    // A spot quote that does not hold reads as no method, which is spot anyway.
+    expect(read({ method: 'spot', quote: 'spot sprayed the frames' })).toMatchObject({ spray: null, unclearSpray: false });
+  });
+
   test('how the sprays went down stands only on a grounded quote that says it happened', () => {
     const note = 'Sprayed around the outside of the house. Didn\'t spray the garage door frames.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note).spray;
@@ -284,8 +294,9 @@ describe('validateVoiceFacts', () => {
   });
 
   test('a malformed answer is no facts', () => {
-    expect(validateVoiceFacts(null, NOTE)).toEqual({ areas: [], unclearAreas: [], pests: [], spray: null });
-    expect(validateVoiceFacts({ areas: 'inside', pests: {} }, NOTE)).toEqual({ areas: [], unclearAreas: [], pests: [], spray: null });
+    const none = { areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false };
+    expect(validateVoiceFacts(null, NOTE)).toEqual(none);
+    expect(validateVoiceFacts({ areas: 'inside', pests: {} }, NOTE)).toEqual(none);
   });
 });
 

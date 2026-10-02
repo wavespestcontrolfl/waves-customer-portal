@@ -246,6 +246,9 @@ function validateVoiceFacts(json, note) {
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
     pests: [...pests].slice(0, MAX_PESTS).map(([name, quote]) => ({ name, quote })),
     spray: sprayRead && !sprayRead.denied ? { method: spray.method, quote: sprayRead.quote } : null,
+    // A perimeter spray decides the trace and the sprays' method, so one the
+    // note does not hold up is never silently a spot treatment.
+    unclearSpray: spray.method === 'perimeter' && (!sprayRead || sprayRead.denied),
   };
 }
 
@@ -259,7 +262,7 @@ function validateVoiceFacts(json, note) {
  */
 async function readVoiceFacts(note) {
   const empty = (status) => ({
-    status, areas: [], unclearAreas: [], pests: [], spray: null, heard: { areas: [], unclearAreas: [], pests: [], spray: null }, version: VOICE_FACTS_VERSION,
+    status, areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, heard: { areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false }, version: VOICE_FACTS_VERSION,
   });
   // Access codes never reach a provider; quotes are checked against what
   // the model was shown.
@@ -290,6 +293,9 @@ async function readVoiceFacts(note) {
     pests: heard.pests.map((entry) => entry.name),
     // 'perimeter' | 'spot' | null (not said)
     spray: heard.spray?.method || null,
+    // A perimeter heard that the note does not hold up: the sheet asks for it
+    // plainly rather than record a spot treatment with no trace.
+    unclearSpray: heard.unclearSpray,
     heard,
     version: VOICE_FACTS_VERSION,
   };
