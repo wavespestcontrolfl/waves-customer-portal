@@ -1147,3 +1147,10 @@ test('an office note the tech never said is a Check, not a note', () => {
   expect(out.officeNote).toBe('');
   expect(out.unclear).toContainEqual({ heard: 'Customer refused payment and requested cancellation.', reason: 'note_not_heard' });
 });
+
+test('invented internal text offered as customer note is a Check, not an office note', () => {
+  const out = validateFill(answer({ customerNote: 'Customer refused payment and requested cancellation.' }), ctx, 'Treated the garage.');
+  expect(out.customerNote).toBe('');
+  expect(out.officeNote).toBe('');
+  expect(out.unclear).toContainEqual({ heard: 'Customer refused payment and requested cancellation.', reason: 'note_not_heard' });
+});

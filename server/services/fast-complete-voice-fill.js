@@ -1170,7 +1170,9 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   for (const sentence of String(customerRaw ?? '').split(SENTENCE_SPLIT_RE)) {
     const text = sentence.trim();
     if (!text) continue;
-    const scope = isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) ? 'office' : spokenClauseScope(text, spoken);
+    // Said first (either note), then routed: internal-sounding text is office-only.
+    const said = spokenClauseScope(text, spoken);
+    const scope = said && isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) ? 'office' : said;
     if (scope === 'office') office.push(text);
     else if (scope === 'customer') customer.push(text);
     else pushUnclear(unclear, text, scope === 'unclear' ? 'note_audience_unclear' : 'note_not_heard');
