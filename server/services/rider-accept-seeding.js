@@ -182,22 +182,31 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
       ctx.lawn = null;
     }
   }
+  // seedWithRide already verified this rider inside its savepoint.
   if (!rider?.hostParentId) return;
-  // Link only what was actually persisted: on a retried/resumed accept the
-  // seeder keeps a series' existing dates and may insert nothing, so the
-  // proposed override proves nothing. Every live rider follow-up must sit on a
-  // live date of the lawn series.
-  let rides = false;
-  try {
-    rides = await persistedRiderOnHost(conn, parentRow.id, rider.hostParentId);
-  } catch (err) {
-    logger.warn(`[rider-accept] could not verify rider ${parentRow.id} dates (left unlinked): ${err.message}`);
-  }
-  if (!rides) {
-    logger.warn(`[rider-accept] rider ${parentRow.id}'s saved dates are not all lawn dates — left unlinked`);
-    return;
-  }
   await linkRider(conn, parentRow.id, rider.hostParentId);
+}
+
+// Seeds a rider's follow-ups on the lawn dates INSIDE a savepoint and keeps
+// them only when every saved follow-up is on a lawn date AND in that lawn
+// row's visit (a seeded row whose grouping failed or was refused is a separate
+// stop). Otherwise the savepoint rolls back and the normal walk is seeded.
+// No rider = the normal seed, untouched. `seed(conn, overrideDates|null)`.
+async function seedWithRide(conn, parentRow, rider, seed) {
+  if (!rider) return { seedResult: await seed(conn, null), rides: false };
+  try {
+    const seedResult = await conn.transaction(async (sp) => {
+      const result = await seed(sp, rider.overrideDates);
+      if (!(await persistedRiderOnHost(sp, parentRow.id, rider.hostParentId))) {
+        throw new Error('saved follow-ups are not all in the lawn visits');
+      }
+      return result;
+    });
+    return { seedResult, rides: true };
+  } catch (err) {
+    logger.warn(`[rider-accept] rider ${parentRow.id} does not ride (${err.message}) — seeding the quarterly walk`);
+    return { seedResult: await seed(conn, null), rides: false };
+  }
 }
 
 // Live plan rows of the given series — the one shared reader
@@ -234,5 +243,5 @@ async function linkRider(conn, riderId, hostParentId) {
 }
 
 module.exports = {
-  createContext, isHostPlan, noteLawn, forgetLawn, beforeSeed, afterSeed,
+  createContext, isHostPlan, noteLawn, forgetLawn, beforeSeed, seedWithRide, afterSeed,
 };

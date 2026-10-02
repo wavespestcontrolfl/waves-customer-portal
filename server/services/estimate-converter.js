@@ -4303,18 +4303,21 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   // on; a quarterly series that starts with a lawn series takes its dates from
   // the lawn's (rider-accept-seeding.js).
   const rider = await RiderAcceptSeeding.beforeSeed(opts.riderCtx, database, parentRow, plan);
-  let seedResult;
+  let ride;
   try {
-    seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
-      ...plan.seedOpts,
-      ...(rider ? { overrideDates: rider.overrideDates } : {}),
-    });
+    // No rider (gate off, not a rider, not riding) = the plain seed below.
+    ride = await RiderAcceptSeeding.seedWithRide(database, parentRow, rider, (conn, overrideDates) => (
+      RecurringAppointmentSeeder.seedFollowUpsForParent(conn, parentRow, {
+        ...plan.seedOpts,
+        ...(overrideDates ? { overrideDates } : {}),
+      })));
   } catch (seedErr) {
     // A lawn that failed to seed hosts nothing for the units after it.
     RiderAcceptSeeding.forgetLawn(opts.riderCtx, parentRow);
     throw seedErr;
   }
-  await RiderAcceptSeeding.afterSeed(opts.riderCtx, database, parentRow, rider, seedResult);
+  const { seedResult } = ride;
+  await RiderAcceptSeeding.afterSeed(opts.riderCtx, database, parentRow, ride.rides ? rider : null, seedResult);
   if (opts.registerReminders !== false) {
     await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
   }

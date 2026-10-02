@@ -274,7 +274,7 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
-  test('the link is written only when every SAVED rider follow-up sits on a lawn date AND in that lawn visit', async () => {
+  test('seedWithRide keeps the lawn-date follow-ups only when every one is in its lawn visit; otherwise rolls back to the quarterly walk', async () => {
     const RiderAcceptSeeding = require('../services/rider-accept-seeding');
     const VisitGroups = require('../services/visit-groups');
     const trx = await mockPg.transaction();
@@ -291,30 +291,37 @@ postgres('pest rides the lawn from accept', () => {
       for (let i = 1; i <= 8; i++) {
         await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', service_id: lawnId, scheduled_date: addDays(first, 42 * i), recurring_parent_id: lawn.id }));
       }
-      const pestSeries = async (days, { group }) => {
-        const [p] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: first })).returning('*');
-        for (const d of days) {
-          const [c] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: addDays(first, d), recurring_parent_id: p.id })).returning('*');
-          if (group) await VisitGroups.maybeGroupRow(c.id, { database: trx, createdBy: 'test' });
+      const overrideDates = [84, 168, 252].map((d) => addDays(first, d));
+      const walkDates = [91, 182, 273].map((d) => addDays(first, d));
+      // A seed that inserts the given dates (overrides) or the walk, grouping each row unless told not to.
+      const seedFor = (pestParent, { groupOverrides }) => async (conn, dates) => {
+        const insertedRows = [];
+        for (const d of dates || walkDates) {
+          const [c] = await conn('scheduled_services').insert(row({
+            service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: d, recurring_parent_id: pestParent.id,
+          })).returning('*');
+          if (!dates || groupOverrides) await VisitGroups.maybeGroupRow(c.id, { database: conn, createdBy: 'test' });
+          insertedRows.push(c);
         }
-        return p;
+        return { insertedRows };
       };
-      const linkOf = async (p) => (await trx('scheduled_services').where({ id: p.id }).first('rides_parent_id')).rides_parent_id;
+      const savedDates = async (p) => (await trx('scheduled_services').where({ recurring_parent_id: p.id }).orderBy('scheduled_date'))
+        .map((r) => dateOf(r.scheduled_date));
+      const newPest = async () => (await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: first })).returning('*'))[0];
 
-      // A retried accept that kept its own quarterly-walk dates: off the lawn days.
-      const off = await pestSeries([91, 182, 273], { group: true });
-      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, off, { hostParentId: lawn.id }, { insertedRows: [] });
-      expect(await linkOf(off)).toBeNull();
-      // On the lawn days but never grouped into the lawn visits.
-      const ungrouped = await pestSeries([84, 168, 252], { group: false });
-      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, ungrouped, { hostParentId: lawn.id }, { insertedRows: [] });
-      expect(await linkOf(ungrouped)).toBeNull();
-      await trx('scheduled_services').where({ recurring_parent_id: ungrouped.id }).del();
-      await trx('scheduled_services').where({ id: ungrouped.id }).del();
-      // On the lawn days and in the lawn visits: linked.
-      const on = await pestSeries([84, 168, 252], { group: true });
-      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, on, { hostParentId: lawn.id }, { insertedRows: [] });
-      expect(await linkOf(on)).toBe(lawn.id);
+      // Grouping fails for the lawn-date rows: rolled back, the quarterly walk is seeded instead.
+      const failed = await newPest();
+      const r1 = await RiderAcceptSeeding.seedWithRide(trx, failed, { overrideDates, hostParentId: lawn.id }, seedFor(failed, { groupOverrides: false }));
+      expect(r1.rides).toBe(false);
+      expect(await savedDates(failed)).toEqual(walkDates);
+
+      // Every lawn-date row joins its lawn visit: kept.
+      const ok = await newPest();
+      const r2 = await RiderAcceptSeeding.seedWithRide(trx, ok, { overrideDates, hostParentId: lawn.id }, seedFor(ok, { groupOverrides: true }));
+      expect(r2.rides).toBe(true);
+      expect(await savedDates(ok)).toEqual(overrideDates);
+      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, ok, { hostParentId: lawn.id }, r2.seedResult);
+      expect((await trx('scheduled_services').where({ id: ok.id }).first('rides_parent_id')).rides_parent_id).toBe(lawn.id);
     } finally { await trx.rollback(); }
   });
 

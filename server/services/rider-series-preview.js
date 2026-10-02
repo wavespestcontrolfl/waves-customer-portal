@@ -776,8 +776,9 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
 
 /**
  * Read-only preview of ONE rider/host pairing — computable whether or not
- * `scheduled_services.rides_parent_id` is actually set (nothing writes it
- * yet): pass `hostParentId` explicitly to preview a CANDIDATE pair the ops
+ * `scheduled_services.rides_parent_id` is actually set (only accept-time
+ * rider seeding writes it, behind GATE_PEST_RIDES_LAWN_AT_ACCEPT): pass
+ * `hostParentId` explicitly to preview a CANDIDATE pair the ops
  * report found by its own heuristic (same customer, same property, an
  * active ongoing lawn series + an active ongoing pest series), or omit it
  * to read the rider's own already-stamped link.

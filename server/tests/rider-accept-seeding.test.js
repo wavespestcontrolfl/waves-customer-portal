@@ -144,7 +144,7 @@ describe('rider context fall-backs', () => {
       // persistedRiderOnHost: the saved series rows.
       ? { where: () => ({ select: async () => conn.persisted }) }
       : { update: async (u) => { conn.updates.push({ table, w, u }); return 1; } }),
-  }), { updates: [], persisted: [] });
+  }), { updates: [], persisted: [], transaction: async (fn) => fn(conn) });
   // The lawn seeds first in this accept, with these follow-up dates.
   // Saved lawn rows, each in its own visit v<date>.
   const lawnRows = (n) => [
@@ -208,7 +208,12 @@ describe('rider context fall-backs', () => {
     expect(conn.updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
   });
 
-  test('a rider follow-up on a lawn date but NOT in the lawn visit (its grouping failed) is not linked', async () => {
+  // seedWithRide: overrides seeded in a savepoint, kept only when verified.
+  const seedCalls = [];
+  const seed = async (_c, overrideDates) => { seedCalls.push(overrideDates); return { insertedRows: [] }; };
+
+  test('a rider follow-up on a lawn date but NOT in the lawn visit (its grouping failed): rolled back to the normal walk, not linked', async () => {
+    seedCalls.length = 0;
     const ctx = RiderAccept.createContext();
     await seedLawn(ctx);
     const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
@@ -216,8 +221,34 @@ describe('rider context fall-backs', () => {
       ...lawnRows(8),
       ...rider.overrideDates.map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: i === 1 ? null : `v${d}` })),
     ];
-    await RiderAccept.afterSeed(ctx, conn, pest(), rider, { insertedRows: [] });
+    const ride = await RiderAccept.seedWithRide(conn, pest(), rider, seed);
+    expect(ride.rides).toBe(false);
+    expect(seedCalls).toEqual([rider.overrideDates, null]); // tried riding, then the normal walk
+    await RiderAccept.afterSeed(ctx, conn, pest(), null, ride.seedResult);
     expect(conn.updates).toEqual([]);
+  });
+
+  test('every saved follow-up in its lawn visit: the ride is kept and linked', async () => {
+    seedCalls.length = 0;
+    const ctx = RiderAccept.createContext();
+    await seedLawn(ctx);
+    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    conn.persisted = [
+      ...lawnRows(8),
+      ...rider.overrideDates.map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: `v${d}` })),
+    ];
+    const ride = await RiderAccept.seedWithRide(conn, pest(), rider, seed);
+    expect(ride.rides).toBe(true);
+    expect(seedCalls).toEqual([rider.overrideDates]);
+    await RiderAccept.afterSeed(ctx, conn, pest(), rider, ride.seedResult);
+    expect(conn.updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
+  });
+
+  test('no rider: the plain seed runs once, no savepoint ride', async () => {
+    seedCalls.length = 0;
+    const ride = await RiderAccept.seedWithRide(conn, pest(), null, seed);
+    expect(ride.rides).toBe(false);
+    expect(seedCalls).toEqual([null]);
   });
 
   test('a resumed lawn seed that inserted nothing still hosts from its SAVED follow-ups', async () => {
@@ -252,7 +283,8 @@ describe('rider context fall-backs', () => {
     expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
   });
 
-  test('a retried accept whose saved rider dates are NOT lawn dates is not linked', async () => {
+  test('a retried accept whose saved rider dates are NOT lawn dates: rolled back to the normal walk, not linked', async () => {
+    seedCalls.length = 0;
     const ctx = RiderAccept.createContext();
     await seedLawn(ctx);
     const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
@@ -261,17 +293,10 @@ describe('rider context fall-backs', () => {
       ...lawnRows(8),
       ...['2098-04-06', '2098-07-06', '2098-10-05'].map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: null })),
     ];
-    await RiderAccept.afterSeed(ctx, conn, pest(), rider, { insertedRows: [] });
+    const ride = await RiderAccept.seedWithRide(conn, pest(), rider, seed);
+    expect(ride.rides).toBe(false);
+    await RiderAccept.afterSeed(ctx, conn, pest(), null, ride.seedResult);
     expect(conn.updates).toEqual([]);
-  });
-
-  test.each([
-    ['no lawn follow-ups at all', 0],
-    ['too few lawn follow-ups (the rule would fall back to its own +84 dates)', 3],
-  ])('%s: not a ride, the normal walk seeds and nothing links', async (_, n) => {
-    const ctx = RiderAccept.createContext();
-    await seedLawn(ctx, n);
-    expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
   });
 
   test('a lawn that has not seeded yet in this accept hosts nothing', async () => {
