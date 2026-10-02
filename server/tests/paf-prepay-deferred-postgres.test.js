@@ -67,10 +67,12 @@ jest.mock('../services/invoice', () => ({
   ...jest.requireActual('../services/invoice'),
   sendViaSMSAndEmail: jest.fn(async () => ({ ok: true, payUrl: '/pay/synthetic' })),
 }));
-jest.mock('../services/admin-alert-compose', () => ({
-  ...jest.requireActual('../services/admin-alert-compose'),
-  raiseAdminAlert: jest.fn(async () => ({ id: 'alert' })),
-}));
+// The real rule check runs on every alert (docs/admin-notifications.md), so an
+// over-long headline or why fails here; only the write is faked.
+jest.mock('../services/admin-alert-compose', () => {
+  const actual = jest.requireActual('../services/admin-alert-compose');
+  return { ...actual, raiseAdminAlert: jest.fn(async (category, spec) => { actual.composeAdminAlert(spec); return { id: 'alert' }; }) };
+});
 
 const { randomUUID } = require('node:crypto');
 

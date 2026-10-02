@@ -206,7 +206,7 @@ async function reconcileJobAlerts(estimateId) {
   if (job.status === 'cancelled_after_visit' && !job.unbilled_alert_raised_at) {
     await raise({
       action: 'Bill a visit done before the prepay was cancelled',
-      why: 'The first visit was performed, then the annual prepay was cancelled before it was charged; the visit is unbilled.',
+      why: 'The first visit was done, then the annual prepay was cancelled before it was charged; that visit is unbilled.',
       link: job.customer_id ? `/admin/customers?customerId=${job.customer_id}` : `/admin/invoices?invoice=${job.invoice_id}`,
       subject: { type: 'visit', id: String(job.performed_visit_id) },
       doneWhen: 'visit_billed',
