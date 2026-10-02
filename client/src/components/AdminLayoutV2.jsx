@@ -1,3 +1,4 @@
+import { clearStaffDeviceData } from "../lib/adminAuth";
 import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
 import ScheduleSaveNotice, { clearScheduleSaveNotices } from './schedule/ScheduleSaveNotice';
 /*
@@ -144,6 +145,7 @@ export default function AdminLayoutV2() {
         if (profile.mustChangePassword) {
           localStorage.removeItem("waves_admin_token");
           localStorage.removeItem("waves_admin_user");
+          clearStaffDeviceData();
           refetchFlags().catch(() => {});
           navigate("/admin/forgot-password", {
             replace: true,
@@ -159,6 +161,7 @@ export default function AdminLayoutV2() {
         if (err?.status === 401) {
           localStorage.removeItem("waves_admin_token");
           localStorage.removeItem("waves_admin_user");
+          clearStaffDeviceData();
           refetchFlags().catch(() => {});
           navigate(adminLoginUrl(location), { replace: true });
           return;
@@ -215,6 +218,7 @@ export default function AdminLayoutV2() {
     clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
+    clearStaffDeviceData();
     refetchFlags().catch(() => {});
     navigate("/admin/login", { replace: true });
   };

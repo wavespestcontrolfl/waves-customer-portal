@@ -797,7 +797,7 @@ describe('POST /calls/:id/adopt-recording', () => {
     expect(retired.patch.resolution_note).toContain(CURRENT);
     // The owed dispatch-blocking question and the email-review cards survive the swap (codex r3 + r4 P1) — the shared kept list.
     expect(retired.wheres).toContainEqual(['notin', 'reason_code', require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES]);
-    expect(require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES).toEqual(expect.arrayContaining(['additional_recording', 'missing_unit_number', 'email_unverified', 'email_invalid', 'email_bounce_reverify']));
+    expect(require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES).toEqual(expect.arrayContaining(['additional_recording', 'missing_unit_number', 'email_unverified', 'email_invalid', 'email_bounce_reverify', 'missing_first_name']));
     expect(db.transaction).toHaveBeenCalled();
     // The pass is fenced to the chosen recording: a callback that replaces
     // it before the claim makes the pass refuse instead of processing audio

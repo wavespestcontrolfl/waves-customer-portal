@@ -1418,6 +1418,7 @@ router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
 const featureGates = require('../config/feature-gates');
 const {
   saveTreatmentZoneMap,
+  deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
 } = require('../services/treatment-zone-maps');
 const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
@@ -1436,7 +1437,7 @@ router.post('/:id/treatment-zone', upload.fields([
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type', 'property_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
@@ -1451,6 +1452,17 @@ router.post('/:id/treatment-zone', upload.fields([
       payload = JSON.parse(req.body?.payload || '');
     } catch {
       return res.status(400).json({ error: 'payload must be valid JSON' });
+    }
+    // A caller that loaded the visit at a property (the Fast Complete report
+    // flow) binds the trace to it: a visit the office has moved to another
+    // property since is refused, so a map of the old home never lands on the
+    // new one. Callers that send nothing are unchanged.
+    if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId')
+      && String(payload.expectedPropertyId ?? '') !== String(svc.property_id ?? '')) {
+      return res.status(409).json({
+        error: 'This visit moved to another property. Close it and reopen it from the schedule.',
+        code: 'visit_property_changed',
+      });
     }
     {
       // Eligibility AND capture-mode agreement (codex P2 r19) — the
@@ -1481,7 +1493,19 @@ router.post('/:id/treatment-zone', upload.fields([
       snapshotPngBuffer: snapshotFile?.buffer || null,
       maskPngBuffer: maskFile?.buffer || null,
       captureMode: payload.captureMode,
+      // Rechecked under the visit row's lock at the write (the read above is
+      // unlocked): a move that commits in between is refused too.
+      ...(Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId') ? { expectedPropertyId: payload.expectedPropertyId ?? null } : {}),
+      // The report flow's trace is judged with the report: refused once the
+      // visit is completed.
+      openVisitOnly: payload.openVisitOnly === true,
+    }).catch((err) => {
+      if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') return { refused: err };
+      throw err;
     });
+    if (row?.refused) {
+      return res.status(409).json({ error: row.refused.message, code: row.refused.code });
+    }
 
     logger.info(
       `[tech-track] treatment zone saved service=${svc.id} tech=${req.technicianId} ` +
@@ -1501,6 +1525,39 @@ router.post('/:id/treatment-zone', upload.fields([
     return res.json({ treatmentZone: row });
   } catch (err) {
     logger.error(`[tech-track] treatment zone save failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+// DELETE /api/tech/services/:id/treatment-zone — "Remove the trace" on the
+// Fast Complete report flow: a trace that no longer matches the note (it now
+// says spots only, or not inside) comes off before the visit is completed.
+// Same gate as the save; the actor's current assignment is judged on the
+// locked visit row (a technician reassigned meanwhile is refused).
+// `expectedPropertyId` binds it to the property the sheet loaded, as the
+// save does; a completed visit keeps its trace (409).
+const TRACE_REMOVE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, service_not_assigned: 403, not_found: 404 };
+router.delete('/:id/treatment-zone', async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const removed = await deleteTreatmentZoneMap({
+      scheduledServiceId: req.params.id,
+      actor: req,
+      ...(Object.prototype.hasOwnProperty.call(req.query, 'expectedPropertyId') ? { expectedPropertyId: req.query.expectedPropertyId || null } : {}),
+    }).catch((err) => {
+      if (TRACE_REMOVE_REFUSALS[err?.code]) return { refused: err };
+      throw err;
+    });
+    if (removed?.refused) {
+      const { code, message } = removed.refused;
+      return res.status(TRACE_REMOVE_REFUSALS[code]).json({ error: message, code });
+    }
+    logger.info(`[tech-track] treatment zone removed service=${req.params.id} tech=${req.technicianId} removed=${!!removed}`);
+    return res.json({ removed: !!removed });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone remove failed: ${err.message}`);
     return next(err);
   }
 });

@@ -214,6 +214,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'scripts/speaker-label-eval.js': 'requires transcript_structured, which only the recording processor writes',
     'scripts/v2-promotion-readiness.js': 'requires v2_extraction_status, which only extraction sets',
     'scripts/verify-v2-shadow-path.js': 'requires processing_status = processed, which only the recording processor sets',
+    'scripts/voice-relay-turn-timing.js': 'read-only Sandy timing report: measures sandbox calls on purpose, writes nothing',
   };
   // A query keyed by a row id, CallSid, call_log_id, customer_id (a sandbox
   // row never gains one) or the processor's token: knex form or raw SQL.
