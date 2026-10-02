@@ -186,7 +186,9 @@ describe('stored turn stats carry the join keys', () => {
     const [stored] = storedTurnStats([{ turn: 1, promptAt: 5, promptWallAt: T0, toolCount: 10, tools }]);
     expect(stored.promptWallAt).toBe(T0);
     expect(stored.tools).toHaveLength(8);
-    expect(stored.tools[0]).toEqual({ name: 'tool_0', ms: 10, ok: true });
+    expect(stored.tools[0]).toEqual({ name: 'unknown_tool', ms: 10, ok: true }); // digits never stored
+    const [named] = storedTurnStats([{ turn: 1, tools: [{ name: 'lookup_customer', ms: 5, ok: true }, { name: '4111111111111111', ms: 5, ok: false }, { name: 'Call +1 941', ms: 1, ok: false }] }]);
+    expect(named.tools.map((t) => t.name)).toEqual(['lookup_customer', 'unknown_tool', 'unknown_tool']);
     expect(JSON.stringify(stored)).not.toContain('+1941');
   });
 

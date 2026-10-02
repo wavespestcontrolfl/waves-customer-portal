@@ -439,6 +439,9 @@ const STORED_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhi
 
 /** Numeric timing observations only; live stats also contain raw utterance objects. */
 const MAX_STORED_TOOLS_PER_TURN = 8;
+// Registered tool names are lowercase snake_case; anything else (digits
+// included) is stored as unknown_tool, never verbatim.
+const TOOL_NAME_RE = /^[a-z_]{1,64}$/;
 
 function storedTurnStats(stats = []) {
   const numeric = ['turn', 'callerSpeechStoppedAt', 'promptAt', 'promptWallAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
@@ -453,7 +456,7 @@ function storedTurnStats(stats = []) {
     // Per-call tool timing (Sandy PR 0a): name, duration, ok — never input.
     tools: (Array.isArray(turn.tools) ? turn.tools : []).slice(0, MAX_STORED_TOOLS_PER_TURN)
       .filter((t) => t && typeof t.name === 'string' && Number.isFinite(t.ms))
-      .map((t) => ({ name: t.name.slice(0, 64), ms: Math.round(t.ms), ok: t.ok === true })),
+      .map((t) => ({ name: TOOL_NAME_RE.test(t.name) ? t.name : 'unknown_tool', ms: Math.round(t.ms), ok: t.ok === true })),
   }));
 }
 

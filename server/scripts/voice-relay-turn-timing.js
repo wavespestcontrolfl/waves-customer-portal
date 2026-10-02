@@ -69,7 +69,9 @@ async function loadRows() {
     if (ARGS.call) q.where('twilio_call_sid', String(ARGS.call));
     else {
       if (ARGS.sandbox) q.where('source', 'voice_relay_sandbox');
-      else q.whereRaw("transcription_metadata->>'source' = 'voice_relay_session'");
+      // Inbound Sandy only: outbound collections calls write the same
+      // transcript source marker through the shared buildTranscriptUpdate.
+      else q.whereRaw("transcription_metadata->>'source' = 'voice_relay_session'").where('direction', 'inbound');
       q.where('created_at', '>=', sinceDate(ARGS.since)).orderBy('created_at', 'desc').limit(Number(ARGS.limit) || 20);
     }
     return await q;
@@ -122,6 +124,13 @@ async function main() {
     allJoined.push(...joined.map((t) => ({ callSid: sid, ...t })));
     perCall.push({ callSid: sid, createdAt: row.created_at, summary: summarizeTimeline(joined), turns: joined });
     printSummary(`${sid}  ${new Date(row.created_at).toISOString()}  ${row.source || ''}`, summarizeTimeline(joined));
+  }
+  if (!perCall.length) {
+    // Every Insights read failed or came back empty: an outage or bad
+    // credentials, never a successful empty measurement.
+    console.error(`No timeline for any of ${rows.length} call(s); no report written.`);
+    process.exitCode = 1;
+    return;
   }
   if (perCall.length > 1) printSummary(`ALL ${perCall.length} CALLS`, summarizeTimeline(allJoined));
   if (ARGS.json) {
