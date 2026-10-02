@@ -72,10 +72,22 @@ describe('quoteInDraft / humanContradictsSchedule', () => {
     expect(quoteInDraft('', 'anything')).toBe(false);
   });
 
-  test('the person naming a different time than the draft is a contradiction', () => {
+  test('a conflicting day, date or clock time is a contradiction', () => {
     expect(humanContradictsSchedule({ draft: 'See you Tuesday at 2pm', humanReply: 'We are coming Thursday' })).toBe(true);
+    expect(humanContradictsSchedule({ draft: 'See you Tuesday at 2pm', humanReply: 'It will be 3pm, sorry' })).toBe(true);
+    expect(humanContradictsSchedule({ draft: 'You are set for Oct 6', humanReply: 'We have you on 10/8' })).toBe(true);
+  });
+
+  test('added detail, a restatement, a list or a window that includes the draft value is not', () => {
     expect(humanContradictsSchedule({ draft: 'See you Tuesday at 2pm', humanReply: 'Yes, Tuesday at 2pm' })).toBe(false);
+    expect(humanContradictsSchedule({ draft: 'See you Tuesday at 2pm', humanReply: 'See you Tuesday at 2pm on October 6' })).toBe(false);
+    expect(humanContradictsSchedule({ draft: 'See you Tuesday', humanReply: 'Tuesday or Wednesday, your pick' })).toBe(false);
+    expect(humanContradictsSchedule({ draft: 'See you at 2pm', humanReply: 'The window is 2-4pm' })).toBe(false);
+    expect(humanContradictsSchedule({ draft: 'See you at 2pm', humanReply: 'Between 2 and 4 pm' })).toBe(false);
+    // A component only one side states is never compared.
+    expect(humanContradictsSchedule({ draft: 'See you Tuesday', humanReply: 'See you at 9am' })).toBe(false);
     expect(humanContradictsSchedule({ draft: 'Happy to help!', humanReply: 'Thursday works' })).toBe(false);
+    expect(humanContradictsSchedule({ draft: 'See you tomorrow', humanReply: 'See you tonight' })).toBe(false);
   });
 });
 

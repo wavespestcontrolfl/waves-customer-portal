@@ -153,12 +153,28 @@ function runPredicates({ draft, facts }) {
   return hits;
 }
 
-/** The person named a different time/day than the draft did. Corroboration only. */
+/**
+ * The person gave a CONFLICTING value for a schedule component the draft also
+ * stated: a different weekday, a different calendar date, or a different clock
+ * time. Added detail is not a conflict ("Tuesday at 2pm" then "Tuesday at 2pm
+ * on October 6"), nor is a list or window that still includes the draft's
+ * value ("Tuesday or Wednesday", "2-4pm"). Each component is compared only
+ * with itself, and only when BOTH sides state it.
+ */
 function humanContradictsSchedule({ draft, humanReply }) {
-  const mine = new Set(scheduleTokens(draft));
-  const theirs = scheduleTokens(humanReply);
-  if (!mine.size || !theirs.length) return false;
-  return theirs.some((t) => !mine.has(t));
+  const disjoint = (mine, theirs) => mine.size > 0 && theirs.size > 0 && ![...theirs].some((t) => mine.has(t));
+  if (disjoint(weekdayTokens(draft), weekdayTokens(humanReply))) return true;
+  if (disjoint(monthDayTokens(draft), monthDayTokens(humanReply, { numeric: true }))) return true;
+  const mine = clockTokens(draft);
+  const theirs = clockTokens(humanReply);
+  if (disjoint(mine, theirs)) {
+    // A window that starts or ends on the draft's hour is the same time said
+    // as a range ("2-4pm", "between 2 and 4 pm"): the bare hour is in the reply.
+    const reply = norm(humanReply);
+    const hourRestated = [...mine].some((c) => new RegExp(`\\b${c.match(/^\d{1,2}/)[0]}\\b(?!:)`).test(reply.replace(/\b\d{1,2}(?::[0-5]\d)?\s?[ap]\.?m\b\.?/g, ' ')));
+    if (!hourRestated) return true;
+  }
+  return false;
 }
 
 /** Is the model's quoted claim text the draft really contains? */
