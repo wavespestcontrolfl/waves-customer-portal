@@ -2955,3 +2955,20 @@ another customer's id, or a failed lookup is `office`, which is never quoted.
 The suggestion skips empty bodies, STOP / HELP / opt-in keywords and
 natural-language opt-outs (the inbound opt-out detector's own rules), and
 spam or voicemail calls. Nothing is sent to a customer.
+
+## 2026-10-01 — "From the Waves blog" on the service report (dark)
+
+Owner "ok go" on the Fast Complete mockup: the technician or the office can
+pick one Waves blog post while completing a pest visit, searched the way
+Quick Links searches links, and the customer's report shows it at the bottom
+as "From the Waves blog": the post's title as a link and where it lives
+(`wavespestcontrol.com/pest-control/…`). Behind `GATE_REPORT_BLOG_POST`
+(dark). Only a published post that is live on the hub links, at its live
+URL on the site's own host (`server/services/service-report/report-blog-post.js`,
+the share gate's live rule); the pick is frozen on the record at completion
+and checked against the host again when the report renders. The card is a
+glass card with an `h2` title (the glass theme hides `.section-eyebrow`
+outside the hero), live view only, the last card above the footer on every
+layout. Never on lawn or tree, shrub & palm (another lane owns those
+completions). Off, the search answers unavailable, a pick is ignored and no
+report shows a post.

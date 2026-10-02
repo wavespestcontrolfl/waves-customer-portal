@@ -502,6 +502,38 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
   return output;
 }
 
+// GET /api/admin/dispatch/:serviceId/blog-posts?q= — the completion forms'
+// Waves blog search (GATE_REPORT_BLOG_POST, owner "ok go" 2026-10-01): live
+// hub posts matching every typed word, newest first, at most eight, each as
+// { id, title, url } under the one link rule (report-blog-post.js). The pick
+// rides /complete as blogPostId and is frozen there. Read-only; off = the
+// answer is { available: false } with no database read.
+router.get('/:serviceId/blog-posts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').reportBlogPostLive()) {
+      return res.json({ available: false, posts: [] });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician searches only from their own current visit; admins keep
+    // office-wide reach (the completion routes' rule).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const { searchReportBlogPosts } = require('../services/service-report/report-blog-post');
+    const posts = await searchReportBlogPosts(db, req.query?.q);
+    res.json({ available: true, posts });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
 // tip-picker payload plus the independently gated completion-choice history.
 // When both gates are off this remains a no-read availability probe. Read-only.

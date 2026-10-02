@@ -482,6 +482,21 @@ function genericCompletionFacts(opts = {}) {
       notes: 'The tech picks tip ids; the server resolves and freezes the copy (freezeTechTips). Merges into the Recommendations list per the 2026-09-28 ruling.',
     },
     {
+      key: 'blog_post',
+      label: 'A Waves blog post for the customer (one, picked from a search of the live blog)',
+      capture: ['tap'],
+      tapOnly: true,
+      reason: 'The tech searches the live Waves blog and picks one post; a dictated note never names a post.',
+      storage: 'structured_notes.blogPost',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'blogPostId')],
+      readers: [
+        { file: REPORT_DATA, section: 'From the Waves blog (payload.blogPost, GATE_REPORT_BLOG_POST)' },
+        { file: REPORT_VIEW_PAGE, section: 'From the Waves blog card', readerSymbol: 'blogPost' },
+      ],
+      whenMissing: 'hidden',
+      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Pest visits only, never lawn or tree, shrub & palm.',
+    },
+    {
       key: 'protocol_actions_completed',
       label: 'Protocol actions completed',
       capture: ['prefill', 'tap'],

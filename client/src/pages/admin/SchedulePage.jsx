@@ -43,6 +43,7 @@ import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../.
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
+import BlogPostPicker from "../../components/schedule/BlogPostPicker";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -13301,6 +13302,10 @@ export function CompletionPanel({
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
   const [customTip, setCustomTip] = useState("");
+  // A Waves blog post for the customer (GATE_REPORT_BLOG_POST): pest visits
+  // only; the search answers available:false while the switch is off.
+  const [blogPostAvailable, setBlogPostAvailable] = useState(false);
+  const [blogPost, setBlogPost] = useState(null);
   // Free-typed [Found]/[Next] note lines parked when an AI draft replaces
   // the notes (parkTaggedNoteLines). Their own state, NOT the textarea
   // state: they ground the AI draft, the recap and the photo context, but
@@ -14653,6 +14658,24 @@ export function CompletionPanel({
       return kept.length === prev.length ? prev : kept;
     });
   }, [techTips, selectedTipIds]);
+
+  // The blog search is offered on pest visits while it answers available
+  // (an empty query reads nothing but the visit). Never lawn or tree, shrub
+  // & palm: another lane owns those completions.
+  useEffect(() => {
+    let cancelled = false;
+    setBlogPostAvailable(false);
+    setBlogPost(null);
+    if (!service.id || serviceCategory !== "pest") return () => { cancelled = true; };
+    adminFetch(`/admin/dispatch/${service.id}/blog-posts`)
+      .then((data) => { if (!cancelled) setBlogPostAvailable(data?.available === true); })
+      .catch(() => { if (!cancelled) setBlogPostAvailable(false); });
+    return () => { cancelled = true; };
+  }, [service.id, serviceCategory]);
+  const searchBlogPosts = useCallback(
+    (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
+    [service.id],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -17926,6 +17949,9 @@ export function CompletionPanel({
         techTips: techTips?.available === true
           ? { ids: selectedTipIds, custom: customTip.trim() || null }
           : null,
+        // The Waves blog post picked for the customer: the id only; the server
+        // checks it is live on the site and freezes its title and URL.
+        ...(blogPostAvailable && blogPost ? { blogPostId: blogPost.id } : {}),
         internalRecommendations,
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
@@ -19875,6 +19901,17 @@ export function CompletionPanel({
                     chipBorder: M.hairline,
                     chipText: M.ink2,
                   }}
+                />
+              </Field>
+            )}
+            {blogPostAvailable && (
+              <Field label="Blog post for the customer">
+                <BlogPostPicker
+                  search={searchBlogPosts}
+                  value={blogPost}
+                  onChange={setBlogPost}
+                  disabled={generating || submitting}
+                  tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, font, inputStyle: mInput }}
                 />
               </Field>
             )}
@@ -22322,6 +22359,18 @@ export function CompletionPanel({
                     chipBorder: D.border,
                     chipText: D.text,
                   }}
+                />
+              </div>
+            )}
+            {blogPostAvailable && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>Blog post for the customer</label>{" "}
+                <BlogPostPicker
+                  search={searchBlogPosts}
+                  value={blogPost}
+                  onChange={setBlogPost}
+                  disabled={generating || submitting}
+                  tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, inputStyle }}
                 />
               </div>
             )}

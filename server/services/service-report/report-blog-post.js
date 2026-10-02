@@ -1,0 +1,101 @@
+/**
+ * A Waves blog post on the service report (GATE_REPORT_BLOG_POST, owner "ok
+ * go" 2026-10-01): the technician (Fast Complete) or the office (Complete
+ * Service) searches the Waves blog like Quick Links, picks one post, and the
+ * customer's report shows it at the bottom as "From the Waves blog".
+ *
+ * One rule decides what a report may link (reportBlogLink): a published row
+ * that is live on the hub (content/blog-share-gate.js, the one share policy:
+ * astro_status 'live'), with its live URL on the marketing site's own host
+ * (link-library.js isSiteUrl). The URL is used verbatim, never rebuilt from
+ * the slug: legacy rows keep a planned-era slug that never became a path.
+ * The pick is frozen at completion (id, title, URL) so the report shows what
+ * the customer was sent to on the day; the read side checks the frozen value
+ * against the same host rule before it renders.
+ */
+
+const { blogPostShareability } = require('../content/blog-share-gate');
+const { isSiteUrl } = require('../link-library');
+
+const MAX_RESULTS = 8;
+const MAX_TERMS = 4;
+const MAX_TITLE_CHARS = 200;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const COLUMNS = ['id', 'title', 'status', 'astro_status', 'astro_live_url'];
+
+// What a report may link, or null.
+function reportBlogLink(row) {
+  if (!row || row.status !== 'published' || !blogPostShareability(row).ok) return null;
+  const url = String(row.astro_live_url || '').trim();
+  const title = String(row.title || '').trim();
+  if (!title || !isSiteUrl(url)) return null;
+  return { id: String(row.id), title: title.slice(0, MAX_TITLE_CHARS), url };
+}
+
+// The words a search matches on: each must appear in the title or the
+// keyword. LIKE wildcards in what was typed match literally.
+function searchTerms(query) {
+  return String(query || '')
+    .toLowerCase()
+    .split(/\s+/)
+    .map((term) => term.replace(/[^a-z0-9'-]/g, ''))
+    .filter((term) => term.length >= 2)
+    .slice(0, MAX_TERMS);
+}
+const likeArg = (term) => `%${term.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+
+/**
+ * Live hub posts matching every typed word, newest first, at most eight.
+ * No usable words, no results.
+ */
+async function searchReportBlogPosts(knex, query) {
+  const terms = searchTerms(query);
+  if (!terms.length) return [];
+  let q = knex('blog_posts')
+    .where('status', 'published')
+    .where('astro_status', 'live')
+    .whereNotNull('astro_live_url');
+  for (const term of terms) {
+    q = q.where(function eachTerm() {
+      this.whereRaw('title ILIKE ?', [likeArg(term)]).orWhereRaw("COALESCE(keyword, '') ILIKE ?", [likeArg(term)]);
+    });
+  }
+  const rows = await q
+    .orderByRaw('astro_published_at DESC NULLS LAST')
+    .orderBy('publish_date', 'desc')
+    .limit(MAX_RESULTS * 2)
+    .select(COLUMNS);
+  return rows.map(reportBlogLink).filter(Boolean).slice(0, MAX_RESULTS);
+}
+
+/**
+ * The post a completion picked, checked against the link rule. Returns
+ * { post } for a linkable pick, { post: null, rejected: true } for one that
+ * is not (unknown, unpublished, not live, off the site, or unreadable), and
+ * { post: null, rejected: false } when nothing was picked.
+ */
+async function resolveReportBlogPostPick(read, blogPostId) {
+  if (blogPostId == null || blogPostId === '') return { post: null, rejected: false };
+  if (typeof blogPostId !== 'string' || !UUID_RE.test(blogPostId)) return { post: null, rejected: true };
+  const row = await read((k) => k('blog_posts').where({ id: blogPostId }).first(COLUMNS));
+  const post = reportBlogLink(row);
+  return post ? { post } : { post: null, rejected: true };
+}
+
+// The frozen pick as the report reads it back: a title and a URL on the
+// site's own host, or null.
+function frozenBlogPost(value) {
+  if (!value || typeof value !== 'object') return null;
+  const url = String(value.url || '').trim();
+  const title = String(value.title || '').trim();
+  if (!title || !isSiteUrl(url)) return null;
+  return { title: title.slice(0, MAX_TITLE_CHARS), url };
+}
+
+module.exports = {
+  reportBlogLink,
+  searchReportBlogPosts,
+  resolveReportBlogPostPick,
+  frozenBlogPost,
+  searchTerms,
+};

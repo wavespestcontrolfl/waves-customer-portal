@@ -3909,6 +3909,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const techTipsFreeze = techTipsGateOn()
       ? freezeTechTips(completionInput.body?.techTips)
       : { tips: [], dropped: [] };
+    // A Waves blog post the completion picked (GATE_REPORT_BLOG_POST): the id
+    // is checked against the one link rule (report-blog-post.js) and its
+    // title and live URL frozen, so the report shows the post the customer
+    // was sent to on the day. Gated here too: with the switch off a stale or
+    // crafted client cannot keep it alive. An optional read: in a grouped
+    // closeout `db` is the packet's transaction, so it runs in a savepoint,
+    // and a failed read is a pick that cannot be verified (refused below).
+    // Pest visits only (the approved design); never lawn or tree, shrub &
+    // palm, whose completions another lane owns: a post sent for any other
+    // line is ignored, never frozen.
+    const blogPostPick = require('../config/feature-gates').reportBlogPostLive() && reportServiceLine === 'pest'
+      ? await require('../services/service-report/report-blog-post').resolveReportBlogPostPick(
+        (reader) => failSoftRead(db, reader, null),
+        completionInput.body?.blogPostId,
+      )
+      : { post: null, rejected: false };
     // Typed lanes (mosquito_event, one-time pest, …) record their work in the
     // typed findings schema, never through the specialty presets, even when
     // their profile key aliases onto a specialty lane (mosquito_one_time →
@@ -4288,6 +4304,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
         code: unknownTip ? 'TECH_TIP_UNKNOWN' : overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
         techTip: { ...(drop.id ? { id: drop.id } : {}), ...(drop.copy ? { copy: drop.copy } : {}), violations: drop.violations },
+      } });
+    }
+    // A blog post that is no longer live on the site (unpublished, moved,
+    // never live) is an actionable 400 for a fresh attempt, before any write,
+    // like a retired tip: a link the tech chose never vanishes silently.
+    if (claim.action === 'proceed' && blogPostPick.rejected) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('blog_post_unavailable'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: 'That blog post is not live on the Waves site right now. Pick another or remove it, then complete.',
+        code: 'BLOG_POST_UNAVAILABLE',
       } });
     }
     if (claim.action === 'proceed') {
@@ -6151,6 +6181,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             formObservations,
             formRecommendations,
             ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
+            ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
