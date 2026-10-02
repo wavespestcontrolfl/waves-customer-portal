@@ -115,7 +115,11 @@ async function snapshot(task, actorId) {
 }
 
 function exposedTaskState(task, receipts) {
-  if (task.state !== 'awaiting_approval' || !receipts.length) return task.state;
+  // outcome_unknown is derived too (Codex r2 P2 on #5563): a direct commit
+  // that saved a completed receipt, followed by a failed model round or
+  // checkpoint, leaves the raw state unknown while the receipt knows the
+  // answer; the receipts, not the interrupted run, state the outcome.
+  if (!['awaiting_approval', 'outcome_unknown'].includes(task.state) || !receipts.length) return task.state;
   const outcomes = new Set(receipts.map(receipt => receipt.outcome));
   if (outcomes.has('awaiting_approval')) return 'awaiting_approval';
   if (outcomes.has('outcome_unknown')) return 'outcome_unknown';

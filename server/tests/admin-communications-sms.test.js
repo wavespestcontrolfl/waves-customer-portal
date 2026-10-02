@@ -150,6 +150,7 @@ jest.mock('../utils/cron-lock', () => ({
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
   existingShortUrlFor: jest.fn(async () => null),
+  allShortUrlsFor: jest.fn(async () => []),
   createTrackedShortLink: jest.fn(async (url) => ({ code: null, shortUrl: url })),
   invoiceShortCodePrefix: jest.fn(() => 'wpc'),
   shortLinkBaseUrl: () => 'https://wavespest.co',

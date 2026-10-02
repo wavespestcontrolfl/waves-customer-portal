@@ -17,4 +17,70 @@ function commitPromiseOf(trx) {
   return cur && cur.executionPromise ? cur.executionPromise : null;
 }
 
-module.exports = { commitPromiseOf };
+/**
+ * The executionPromise of `trx` and of every transaction enclosing it, inner
+ * to outer. Each savepoint's resolves on RELEASE and rejects on ROLLBACK; the
+ * root's on COMMIT / ROLLBACK. All resolving = the work really landed.
+ */
+function allCommitPromisesOf(trx) {
+  const out = [];
+  for (let cur = trx; cur; cur = cur.parentTransaction) {
+    if (cur.executionPromise) out.push(cur.executionPromise);
+  }
+  return out;
+}
+
+const ROLLED_BACK = Symbol('waves.trxRolledBack');
+const WATCHED = Symbol('waves.trxRollbackWatched');
+
+// Marks `trx` and every enclosing transaction when its rollback() is called
+// (idempotent per transaction). knex's callback form rolls back WITH the
+// thrown error, which already rejects executionPromise; an explicit
+// rollback() without an error resolves it — this is what tells them apart.
+function watchRollbacks(trx) {
+  const out = [];
+  for (let cur = trx; cur; cur = cur.parentTransaction) {
+    if (typeof cur.rollback === 'function' && !cur[WATCHED]) {
+      const original = cur.rollback;
+      const target = cur;
+      target.rollback = function rollbackWatched(...args) {
+        target[ROLLED_BACK] = true;
+        return original.apply(this, args);
+      };
+      target[WATCHED] = true;
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
+/**
+ * A commit scope for work done inside a SAVEPOINT that may be thrown away
+ * (an insert kept only when it ends up grouped into another row's visit).
+ * Post-commit hooks (coverage alerts, tier sync, shortfall bell) read only
+ * `isTransaction` / `executionPromise` off the scope they are handed. Its
+ * executionPromise resolves only after keep() AND every enclosing transaction
+ * (savepoints included) completes successfully (a pool caller's savepoint has already committed by keep()); drop()
+ * rejects it, so nothing is filed for rows that were rolled back. Shared by
+ * accept-time riders (rider-accept-seeding.seedWithRide) and the series
+ * extension (admin-schedule.js#extendSeriesOnceLocked).
+ */
+function deferredCommitScope(conn) {
+  let keep;
+  let drop;
+  const kept = new Promise((resolve, reject) => { keep = resolve; drop = reject; });
+  // EVERY enclosing transaction must succeed, not just the root: a savepoint
+  // between this scope and the root can roll back while the root commits, and
+  // its executionPromise is what rejects then.
+  const chain = (conn && conn.isTransaction) ? allCommitPromisesOf(conn) : [];
+  const watched = (conn && conn.isTransaction) ? watchRollbacks(conn) : [];
+  const executionPromise = kept.then(() => Promise.all(chain)).then(() => {
+    // knex resolves (not rejects) a plain rollback() — doNotRejectOnRollback
+    // defaults to true — so a resolved promise is not proof of a commit.
+    if (watched.some((t) => t[ROLLED_BACK])) throw new Error('an enclosing transaction rolled back');
+  });
+  executionPromise.catch(() => {});
+  return { isTransaction: true, executionPromise, keep: () => keep(), drop: (err) => drop(err) };
+}
+
+module.exports = { commitPromiseOf, allCommitPromisesOf, deferredCommitScope };

@@ -4,7 +4,7 @@
  *
  * Response contract:
  *   - 302 → target_url on hit (fastest for mail/SMS clients)
- *   - 410 Gone on expired
+ *   - 410 Gone on expired (and, under GATE_SHORTLINK_LEGACY_EXPIRE, on a legacy 1-7 char code)
  *   - 404 on unknown code (generic not-found HTML, don't leak enumeration)
  *
  * Click-count + last-click telemetry is updated fire-and-forget inside
@@ -15,7 +15,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { resolveShortCode } = require('../services/short-url');
+const { resolveShortCode, isLegacyShortCode } = require('../services/short-url');
+const { shortlinkLegacyExpireLive } = require('../config/feature-gates');
 const { isBotUserAgent } = require('../utils/bot-ua');
 const { shouldRecord } = require('../services/customer-page-views');
 const {
@@ -32,7 +33,9 @@ const CODE_RE = /^[a-z0-9-]{3,80}$/;
 // far above any human click rate while making enumeration of even the
 // legacy 5-char space impractical; the key collapses IPv6 /64s so subnet
 // rotation doesn't reset the budget. Kept deliberately high because
-// carrier-NAT IPs aggregate many customers.
+// carrier-NAT IPs aggregate many customers. The limiter alone does not retire
+// the legacy space (~2k live 5-char codes fronting bearer-token URLs, audit
+// 2026-10-02): GATE_SHORTLINK_LEGACY_EXPIRE=true answers those with 410 below.
 const shortlinkLimiter = require('express-rate-limit')({
   windowMs: 60 * 1000,
   max: 120,
@@ -53,6 +56,9 @@ router.get('/:code', async (req, res) => {
     const row = await db('short_codes').where({ code }).first();
     if (!row) return res.status(404).type('html').send(notFoundPage());
     if (row.expires_at && new Date(row.expires_at).getTime() < Date.now()) {
+      return res.status(410).type('html').send(expiredPage());
+    }
+    if (shortlinkLegacyExpireLive() && isLegacyShortCode(code)) {
       return res.status(410).type('html').send(expiredPage());
     }
 
