@@ -3642,9 +3642,12 @@ router.get('/:id/followup', async (req, res, next) => {
     const seq = await db('invoice_followup_sequences').where({ invoice_id: req.params.id }).first();
     // A customer on combined reminders (customer-dunning/wiring.js): the panel shows the combined step
     // and invoice count, and send-now must confirm that step (Codex #5503 r2 P1). null otherwise.
+    // An invoice with no reminder row of its own can still be on the combined balance: the summary is
+    // then answered only when the combined reminder really names this invoice.
+    const Wiring = require('../services/customer-dunning/wiring');
     const customerSchedule = seq
-      ? await require('../services/customer-dunning/wiring').customerScheduleSummary(seq.customer_id)
-      : null;
+      ? await Wiring.customerScheduleSummary(seq.customer_id)
+      : await Wiring.customerScheduleSummaryForInvoice(req.params.id);
     res.json({
       sequence: seq || null,
       customerSchedule,

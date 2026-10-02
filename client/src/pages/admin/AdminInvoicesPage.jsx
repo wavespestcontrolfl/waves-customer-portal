@@ -9030,6 +9030,16 @@ const combinedAudience = (invoiceCount) => {
   return invoiceCount === 1 ? "the 1 invoice" : `all ${invoiceCount} invoices`;
 };
 
+// Why combined reminders are paused, as the server reported it: what the
+// office typed, or the system's own reason. null when it gave none.
+const combinedPausedReasonText = (customerSchedule) => {
+  const reason = String(customerSchedule?.pausedReason || "").trim();
+  if (!reason) return null;
+  return customerSchedule.pausedBy === "staff"
+    ? `by the office: "${reason}"`
+    : `automatically: ${reason}`;
+};
+
 // The panel's line for a customer on combined reminders (GET /:id/followup
 // `customerSchedule`): this invoice is reminded together with the customer's
 // other overdue invoices, at the combined step. Exported for tests.
@@ -9040,7 +9050,12 @@ export function combinedReminderSummary(customerSchedule) {
   const lead = Number.isInteger(invoiceCount) && invoiceCount > 0
     ? `On combined reminders with ${pluralInvoices(invoiceCount)} for this customer.`
     : "On combined reminders for this customer.";
-  if (status === "paused") return `${lead} Combined reminders are paused.`;
+  if (status === "paused") {
+    const why = combinedPausedReasonText(customerSchedule);
+    return why
+      ? `${lead} Combined reminders are paused (${why}).`
+      : `${lead} Combined reminders are paused.`;
+  }
   if (!stepLabel) return lead;
   // Eastern wall clock (the portal is Eastern-only), whatever zone the browser is in.
   const when = nextTouchAt ? ` on ${formatETDateTime(nextTouchAt)} ET` : "";
@@ -9074,14 +9089,26 @@ export function followupActionErrorMessage(err) {
 // /admin/customers/:id/dunning-schedule/{pause,resume}): which button the
 // panel offers for the schedule's status and what it asks first. These act on
 // the CUSTOMER's combined reminders, not on this one invoice. No button
-// without the customer id (an older server). Release is deliberately not
-// offered here: with the schedule gate on, the next run combines a released
-// customer's invoices again, so a button could not keep what it promised.
+// without the customer id (an older server), and none unless the server says
+// the schedule is controllable (combined reminders are switched on for this
+// customer; a schedule waiting to be handed back offers nothing). Resume
+// always confirms, naming why the reminders were paused. Release is
+// deliberately not offered here: the next run combines a released customer's
+// invoices again, so a button could not keep what it promised.
 // Exported for tests.
 export function combinedReminderControls(customerSchedule) {
-  if (!customerSchedule?.customerId) return [];
+  if (!customerSchedule?.customerId || customerSchedule.controllable !== true) return [];
   if (customerSchedule.status === "paused") {
-    return [{ control: "resume", label: "Resume combined" }];
+    const why = combinedPausedReasonText(customerSchedule);
+    return [
+      {
+        control: "resume",
+        label: "Resume combined",
+        confirmText: why
+          ? `Resume combined reminders for this customer? They were paused ${why}.`
+          : "Resume combined reminders for this customer?",
+      },
+    ];
   }
   return [
     {
@@ -9091,14 +9118,6 @@ export function combinedReminderControls(customerSchedule) {
         'Why pause combined reminders for this customer? (e.g. "customer said they\'ll pay Friday")',
     },
   ];
-}
-
-// What the toast says once a combined-reminder control went through.
-// Exported for tests.
-export function combinedReminderDoneMessage(control) {
-  if (control === "pause") return "Combined reminders paused";
-  if (control === "resume") return "Combined reminders resumed";
-  return "Done";
 }
 
 function FollowupPanel({ invoiceId, showToast, isMobile }) {
@@ -9151,7 +9170,11 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           body: body ? JSON.stringify(body) : undefined,
         },
       );
-      showToast(combinedReminderDoneMessage(control));
+      showToast(
+        control === "pause"
+          ? "Combined reminders paused"
+          : "Combined reminders resumed",
+      );
       await load();
     } catch (err) {
       showToast(followupActionErrorMessage(err));
@@ -9219,6 +9242,17 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           <Badge className="max-w-full whitespace-normal">not scheduled</Badge>
         )}
       </div>
+      {!seq && combinedSummary && (
+        <div
+          style={{
+            marginBottom: 10,
+            lineHeight: 1.6,
+          }}
+          className="text-ui-body text-ink-secondary"
+        >
+          {combinedSummary}
+        </div>
+      )}
       {seq && (
         <div
           style={{
@@ -9402,6 +9436,7 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
                       });
                     return;
                   }
+                  if (c.confirmText && !confirm(c.confirmText)) return;
                   actCombined(customerId, c.control);
                 }}
                 variant={"secondary"}
