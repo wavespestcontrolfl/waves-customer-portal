@@ -1815,7 +1815,10 @@ router.get('/sender', async (req, res, next) => {
     const customerId = UUID_RE.test(rawCustomerId) ? rawCustomerId : null;
     const { fromNumber, reason } = await require('../services/home-line').staffTextSender({ phone, customerId });
     const line = TWILIO_NUMBERS.findByNumber(fromNumber);
-    res.json({ fromNumber, label: line?.label || fromNumber, reason });
+    // replaceableLines: the composer applies fromNumber only while its own
+    // line is empty or one of these, so a recruiting / tech / tracking line
+    // set after the request (or without currentLine) is never replaced.
+    res.json({ fromNumber, label: line?.label || fromNumber, reason, replaceableLines: customerLines });
   } catch (err) { next(err); }
 });
 

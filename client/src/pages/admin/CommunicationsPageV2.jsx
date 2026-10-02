@@ -131,9 +131,12 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // and no staff pick since the request: the line is still the one the
 // request was made with, or the one the automatic customer-sender effect set
 // (state.autoLine), which is initialization, not a staff choice.
-export function composerAcceptsServerSender(state, requestedLine) {
+// replaceableLines (from the server's answer) bounds it further: a current
+// line that is not an office/main line — recruiting, tech, tracking — stays.
+export function composerAcceptsServerSender(state, requestedLine, replaceableLines = null) {
   if (!state) return false;
   const line = state.line || "";
+  if (replaceableLines && line && !replaceableLines.includes(line)) return false;
   return !state.loadedDraft && !String(state.body || "").trim() && !state.attachmentCount
     && (line === (requestedLine || "") || (!!state.autoLine && line === state.autoLine));
 }
@@ -1345,7 +1348,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       .then((r) => {
         // Re-read the composer at response time: a line staff picked, or a
         // draft started, while the request was in flight must stand.
-        if (cancelled || !r?.fromNumber || !composerAcceptsServerSender(composerStateRef.current, requested.line)) return;
+        if (cancelled || !r?.fromNumber
+          || !composerAcceptsServerSender(composerStateRef.current, requested.line, Array.isArray(r.replaceableLines) ? r.replaceableLines : [])) return;
         setFromNumber(r.fromNumber);
         setThreadLock({ contactPhone: phone, ourNumber: r.fromNumber, label: NUMBER_LABEL_MAP[r.fromNumber] || r.label || r.fromNumber });
       })

@@ -27,6 +27,13 @@ describe("composerAcceptsServerSender", () => {
     expect(composerAcceptsServerSender({ ...fresh, line: "+19412972606", autoLine: "+19415550199" }, "")).toBe(false);
   });
 
+  it("a recruiting / tech line set after the request is never replaced", () => {
+    const officeLines = ["+19412975749", "+19412972817"];
+    expect(composerAcceptsServerSender({ ...fresh, line: "+19415551234", autoLine: "+19415551234" }, "", officeLines)).toBe(false);
+    expect(composerAcceptsServerSender({ ...fresh, line: "+19412975749", autoLine: "+19412975749" }, "", officeLines)).toBe(true);
+    expect(composerAcceptsServerSender({ ...fresh, line: "" }, "", officeLines)).toBe(true);
+  });
+
   it("a loaded draft keeps its own line", () => {
     expect(composerAcceptsServerSender({ ...fresh, loadedDraft: true }, "+19412975749")).toBe(false);
   });

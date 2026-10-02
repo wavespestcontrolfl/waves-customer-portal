@@ -259,7 +259,7 @@ it("GATE_HOME_LINE: a late /sender answer replaces the automatic history line, t
   let answer;
   const base = fetch.getMockImplementation();
   fetch.mockImplementation(async (url, options) => (String(url).includes("/admin/communications/sender?")
-    ? new Promise((resolve) => { answer = () => resolve(response({ fromNumber: homeLine, label: "Parrish (Pest)", reason: "home_line" })); })
+    ? new Promise((resolve) => { answer = () => resolve(response({ fromNumber: homeLine, label: "Parrish (Pest)", reason: "home_line", replaceableLines: [line, homeLine] })); })
     : base(url, options)));
   const { field } = setup();
   // The automatic effect has already put the customer's last thread line in place…
@@ -281,6 +281,19 @@ it("GATE_HOME_LINE: a /sender answer landing after staff started typing leaves t
     : base(url, options)));
   const { field } = setup();
   fireEvent.change(field, { target: { value: "Already typing" } });
+  await act(async () => { answer(); });
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+});
+
+it("GATE_HOME_LINE: a late /sender answer never replaces a recruiting/tech history line (home-line PR 3)", async () => {
+  // The test customer's history line is NOT in replaceableLines (not an office/main line).
+  let answer;
+  const base = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => (String(url).includes("/admin/communications/sender?")
+    ? new Promise((resolve) => { answer = () => resolve(response({ fromNumber: "+19412972817", reason: "home_line", replaceableLines: ["+19412975749", "+19412972817"] })); })
+    : base(url, options)));
+  setup();
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
   await act(async () => { answer(); });
   expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
 });

@@ -299,6 +299,7 @@ describe('admin communications voice route', () => {
       const { status, body } = await get('phone=%2B15551234567&customerId=11111111-1111-4111-8111-111111111111');
       expect(status).toBe(200);
       expect(body).toMatchObject({ fromNumber: '+19412973337', reason: 'conversation' });
+      expect(body.replaceableLines).toEqual(expect.arrayContaining(['+19412975749', '+19412973337']));
     });
 
     test('gate on: a thread on a non-customer line (recruiting / tech) keeps it', async () => {
