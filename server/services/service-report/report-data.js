@@ -5670,6 +5670,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // applied empty rather than fall back to the AI treatment narrative
           // that has replaced snapshot.treatmentSummary by now.
           Object.defineProperty(reportV2, 'copyV6', { value: outcome.copy || LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
+          // The frozen headline IS this report's status line from now on: the
+          // lead's banner rule may drop it and fall back to the snapshot, and
+          // the PDF prints the snapshot's Overall line, so a later assessment
+          // correction must not reach either through statusHeadline (a no-op
+          // on the render that froze it: the copy was built from this value).
+          if (outcome.copy && outcome.copy.headline && reportV2.snapshot) {
+            reportV2.snapshot.statusHeadline = outcome.copy.headline;
+          }
           if (outcome.unfrozen) {
             lawnAssessment.weekWeatherUncacheable = true;
             // DELIVERY: an emailed PDF is permanent, so it must not carry copy a

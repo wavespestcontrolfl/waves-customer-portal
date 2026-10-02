@@ -247,6 +247,22 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(JSON.stringify(again.reportV2.copyV6)).toBe(JSON.stringify(first.reportV2.copyV6));
   });
 
+  test('a frozen headline replaces the live status line, so a later assessment correction cannot reach the lead fallback or the PDF', async () => {
+    live();
+    const recs = records();
+    await render(recs);
+    // The record froze an older headline (the assessment was corrected since).
+    recs['svc-cur'].structured_notes.lawnCopyV6['la-cur'].fields.headline = 'Stable — watching watering';
+    const { data } = await render(recs, {}, service(recs['svc-cur'].structured_notes));
+    expect(data.reportV2.snapshot.statusHeadline).toBe('Stable — watching watering');
+    // Under a watering banner the lead drops the watering headline; its
+    // fallback is now the same frozen line, never the corrected one.
+    const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.'] };
+    const { deriveLawnLead } = require('../services/service-report/lawn-report-lead');
+    const withBanner = deriveLawnLead({ ...data.reportV2, banner }, { copyV6: data.reportV2.copyV6 });
+    expect([null, 'Stable — watching watering']).toContain(withBanner.headline);
+  });
+
   test('a failed freeze serves the copy and marks the render uncacheable', async () => {
     live();
     const { data } = await render(records(), {}, undefined, { failUpdate: true });

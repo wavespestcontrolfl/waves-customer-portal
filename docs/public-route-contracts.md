@@ -2209,7 +2209,8 @@ assessmentId, frozenAt, fields, expectRows }`, first writer wins per assessment,
 migration, written at the first healthy render, which the completion write gate
 performs) and replay byte for byte afterwards, so a later product edit or row
 approval never changes a sent report; a stored entry replays even when a later
-read fails. A degraded read (any input read failed) or an unverifiable treatment
+read fails, and its headline also replaces `snapshot.statusHeadline` on that
+render, so the lead's banner fallback and the PDF's Overall line replay it too. A degraded read (any input read failed) or an unverifiable treatment
 creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`);
 such a render's lead keeps the snapshot headline and has no applied line (never
 the AI treatment narrative). A render whose copy a retry could still freeze
