@@ -35,11 +35,11 @@ function seedSnapshot(overrides = {}) {
   }));
 }
 
-function mount({ enabled = false, id = 'tech-fixture', path = '/tech', staffProfile, storedProfile = true } = {}) {
+function mount({ enabled = false, id = 'tech-fixture', path = '/admin/today', staffProfile, storedProfile = true } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   if (storedProfile) localStorage.setItem('waves_admin_user', JSON.stringify({ id, name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy, staffProfile }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy, staffProfile }} />}>
       <Route index element={<TechHomePage />} />
     </Route>
   </Routes></MemoryRouter>);
@@ -108,7 +108,7 @@ it('holds the retry control while a route read is already in flight', async () =
 it('shows the saved-copy warning inside the visit view of the field layout', async () => {
   seedSnapshot();
   scheduleMode = 'offline';
-  mount({ enabled: true, path: '/tech?visit=row%3Asaved-one' });
+  mount({ enabled: true, path: '/admin/today?visit=row%3Asaved-one' });
   await screen.findByText(/No connection — showing your route as saved at 7:42 AM/);
   expect(await screen.findByText('Property brief for saved-one')).toBeInTheDocument();
 });

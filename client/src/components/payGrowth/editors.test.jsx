@@ -552,7 +552,7 @@ describe('PayOverview', () => {
   });
 
   it('carries the active visit into the technician documents link', () => {
-    render(<MemoryRouter initialEntries={['/tech/pay-growth?visit=visit%2F42']}><PayOverview view={view()} manage={false} onSaved={vi.fn()} /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={['/admin/today/pay-growth?visit=visit%2F42']}><PayOverview view={view()} manage={false} onSaved={vi.fn()} /></MemoryRouter>);
     expect(screen.getByRole('link', { name: 'Staff documents' })).toHaveAttribute('href', '/admin/today/documents?visit=visit%2F42');
   });
 

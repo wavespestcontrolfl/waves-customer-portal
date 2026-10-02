@@ -48,11 +48,11 @@ const row = (id, overrides = {}) => ({
 
 let rows;
 
-function mount(path = '/tech/tools', { fieldWorkspace = true } = {}) {
+function mount(path = '/admin/today/tools', { fieldWorkspace = true } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
     </Route>
@@ -129,7 +129,7 @@ it('switch off: a re-service under the re-service switch opens the sheet without
 
 it('keeps a completed pest visit on the recap editor with the switch on', async () => {
   rows = [row('svc-done', { fastCompleteReportEnabled: true, status: 'completed' })];
-  mount('/tech/tools', { fieldWorkspace: false });
+  mount('/admin/today/tools', { fieldWorkspace: false });
   await openFromTools();
   expect(await screen.findByText('Existing recap form for svc-done')).toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
