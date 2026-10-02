@@ -339,6 +339,23 @@ describe('verdict 409 with its own instruction', () => {
 // secondary_contact_captured review items carry the second person named on
 // the call (a realtor's buyer, a landlord's tenant) — the card must show the
 // operator WHO to confirm, in both payload shapes the server produces.
+describe('ConfirmEvidence — missing first name', () => {
+  it('links the customer stamped on the task, not the call\'s current customer', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_id: '11111111-2222-4333-8444-555555555555' }} />);
+    const link = screen.getByRole('link', { name: 'Open customer' });
+    expect(link).toHaveAttribute('href', '/admin/customers?customerId=11111111-2222-4333-8444-555555555555');
+    expect(screen.getByText(/the customer this call created/)).toBeInTheDocument();
+  });
+
+  it('shows no customer link without a valid stamped id, or on another reason', () => {
+    const { unmount } = render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_id: 'not-a-uuid' }} />);
+    expect(screen.queryByRole('link', { name: 'Open customer' })).toBeNull();
+    unmount();
+    render(<ConfirmEvidence reasonCode="email_unverified" payload={{ flag: 'email_unverified', customer_id: '11111111-2222-4333-8444-555555555555' }} />);
+    expect(screen.queryByRole('link', { name: 'Open customer' })).toBeNull();
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{
