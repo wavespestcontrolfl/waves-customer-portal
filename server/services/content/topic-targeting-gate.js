@@ -771,7 +771,7 @@ function extraTargetingOf({ frontmatter = {}, body = '', meta_description = null
     meta_description ?? frontmatter.meta_description ?? fromBody.meta_description,
     ...asStringList(secondary_keywords ?? frontmatter.secondary_keywords), ...fromBody.secondary_keywords,
     ...fromBody.headings,
-  ].filter(Boolean).map((v) => String(v).trim()).join(' ');
+  ].filter(Boolean).map((v) => String(v).trim()).join('\n'); // one field per line
 }
 
 function targetingText(fields) {
@@ -1158,6 +1158,25 @@ function canonicalPestNames(text) {
 // served cities, geo qualifiers and framing words dropped — so "how to get
 // rid of paper wasps in Sarasota" and /pest-control/get-rid-of-paper-wasps/
 // both reduce to "paper wasp".
+// topicKey's normalization, in word order (no sort / dedupe) — for phrase
+// matching inside free targeting text.
+function topicWords(text) {
+  const cities = cityTokens();
+  const geoFree = canonicalPestNames(String(text || '')).replace(new RegExp(REGIONAL_RE.source, 'gi'), ' ').replace(/\b(?:florida|fla|fl)\b\.?/gi, ' ');
+  return tokenize(geoFree)
+    .filter((w) => !GEO_TOKENS.has(w) && !cities.has(w) && !GENERIC_TOKENS.has(w))
+    .map(stem)
+    .filter((w) => !RETIRED_FILLER.has(w) && !GENERIC_TOKENS.has(w));
+}
+
+function containsPhrase(words, phrase) {
+  if (!phrase.length || phrase.length > words.length) return false;
+  for (let i = 0; i + phrase.length <= words.length; i++) {
+    if (phrase.every((w, j) => words[i + j] === w)) return true;
+  }
+  return false;
+}
+
 function topicKey(text) {
   const cities = cityTokens();
   // Footprint regions ("Manatee County", "Southwest Fla.") and a bare
@@ -1207,7 +1226,13 @@ function retiredIndex() {
   const liveOwners = [...byTopic]
     .filter(([key, post]) => post.live && key.includes(' '))
     .map(([key, post]) => ({ words: key.split(' '), post }));
-  retiredIndexCache = { byUrl, byLeaf, byTopic, liveOwners };
+  // Ordered phrases of each live owner, for matching inside free targeting
+  // text (a word set across fields would read "dollar weed" + "gray leaf
+  // spot" as "dollar spot").
+  const livePhrases = RETIRED_POSTS.filter((p) => p.live)
+    .flatMap((post) => (post.topics || []).map((t) => ({ phrase: topicWords(t), post })))
+    .filter((x) => x.phrase.length > 1);
+  retiredIndexCache = { byUrl, byLeaf, byTopic, liveOwners, livePhrases };
   return retiredIndexCache;
 }
 
@@ -1234,8 +1259,10 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
     // A live owner's topic also counts when it appears only in the other
     // targeting fields (meta description, secondary keywords, H2/H3s).
     if (!hit && targeting) {
-      const words = new Set(topicKey(targeting).split(' '));
-      const owner = idx.liveOwners.find((o) => o.words.every((w) => words.has(w))
+      // Phrase, field by field (extraTargetingOf joins fields with newlines),
+      // so words from two different fields never combine.
+      const fields = String(targeting).split(/\n+/).map(topicWords);
+      const owner = idx.livePhrases.find((o) => fields.some((f) => containsPhrase(f, o.phrase))
         && (!category || [o.post.url, o.post.merged_into].some((u) => categoryFromSlug(u) === category)));
       if (owner) { hit = owner.post; where = 'targeting (meta description / secondary keywords / headings)'; }
     }
