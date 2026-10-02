@@ -230,6 +230,19 @@ describe('validateVoiceFacts', () => {
     expect(facts.spray).toMatchObject({ method: 'perimeter' });
   });
 
+  test('a quote that starts in an earlier clause is judged in the clause of what it asserts (pre-push P1)', () => {
+    const note = 'No activity inside but sprayed the kitchen baseboards. No ants out front but treated for roaches by the pool.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'inside', quote: 'No activity inside but sprayed the kitchen baseboards' }],
+      pests: [{ name: 'roaches', quote: 'No ants out front but treated for roaches by the pool' }],
+      spray: { method: 'spot', quote: 'No activity inside but sprayed the kitchen baseboards' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Inside']);
+    expect(facts.unclearAreas).toEqual([]);
+    expect(facts.pests.map((pest) => pest.name)).toEqual(['roaches']);
+    expect(facts.spray).toMatchObject({ method: 'spot' });
+  });
+
   test('a short denial right after a fact denies it, comma or not', () => {
     const note = 'Checked for spiders none found. Inside not treated. The garage was not needed.';
     const facts = validateVoiceFacts({

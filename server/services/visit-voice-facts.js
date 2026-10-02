@@ -156,7 +156,10 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
   let at = note.indexOf(quote);
   if (at < 0) return true;
   while (at >= 0) {
-    const denied = NEGATION_RE.test(note.slice(clauseStart(note, at), at + from))
+    // The clause the assertion sits in, even when the quote starts in an
+    // earlier one; a quote read whole from its own clause.
+    const clause = clauseStart(note, span ? at + from : at);
+    const denied = NEGATION_RE.test(note.slice(clause, at + from))
       || denialAfter.test(note.slice(at + to));
     if (!denied) return false;
     at = note.indexOf(quote, at + 1);
