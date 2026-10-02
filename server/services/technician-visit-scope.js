@@ -48,8 +48,13 @@ async function technicianServicesCustomer(req, customerId) {
 // scheduled_services (same current/recent predicate as above). For readers
 // that list across customers — the SMS inbox — a technician's query adds
 // whereIn(<customer column>, technicianCustomerIdsSubquery(req, db)).
+// whereNotNull: a NULL customer_id in the set would make a caller's
+// `NOT IN (subquery)` evaluate to NULL for every row and silently pass
+// foreign threads (pre-push Codex P1).
 function technicianCustomerIdsSubquery(req, db) {
-  return technicianCurrentVisitFilter(req, db('scheduled_services')).select('scheduled_services.customer_id');
+  return technicianCurrentVisitFilter(req, db('scheduled_services'))
+    .whereNotNull('scheduled_services.customer_id')
+    .select('scheduled_services.customer_id');
 }
 
 // MUTATION access (prepaid, invoice mint, status): a LIVE visit only — a
