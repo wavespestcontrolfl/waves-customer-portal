@@ -80,7 +80,9 @@ describe('series move overlap-only findings', () => {
   ])('an accepted overlap with no conflict and no preserved visit rings no bell (%s)', async (_name, extra) => {
     await move({ ...extra, preservedOccurrences: [] });
     expect(notifyAdmin).not.toHaveBeenCalled();
-    expect(markerWrites.some((row) => Object.hasOwn(row, 'conflict_card_at'))).toBe(false);
+    // No card is owed, so the marker is stamped: the recovery sweep counts
+    // overlaps in conflict_count and would otherwise retry the move forever.
+    expect(markerWrites.some((row) => Object.hasOwn(row, 'conflict_card_at'))).toBe(true);
   });
 
   test('a real conflict still rings, and the card lists the overlap beside it', async () => {

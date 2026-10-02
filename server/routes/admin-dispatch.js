@@ -4618,6 +4618,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // The successor owns preserved commitments and accepted overlaps. With
     // no still-untimed conflict, this superseded operation owes no old card.
     if (cardOnly && !dueConflicts.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
+    // An overlap-only move owes no card (above), but its conflict_count still
+    // counts the overlaps: stamp the card marker so the recovery sweep
+    // (conflict_count > 0 AND conflict_card_at IS NULL) treats it as finished.
+    if (!cardOnly && !dueConflicts.length && !preserved.length && overlapDates.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
     if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
