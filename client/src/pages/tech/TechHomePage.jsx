@@ -120,6 +120,10 @@ function isReserviceFastCompleteEligible(service) {
 function isFastCompleteReportEligible(service) {
   return service?.fastCompleteReportEnabled === true
     && isPestControlService(service)
+    // The report flow traces a perimeter: a visit traced as an outline (a
+    // yard treatment such as tick control, under trace eligibility) keeps its
+    // existing path, whose tracer draws that outline (codex local r15).
+    && service?.traceVariant !== 'outline'
     // A closed visit stays on the recap editor, which updates the existing
     // record (/complete would answer service_already_completed).
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));

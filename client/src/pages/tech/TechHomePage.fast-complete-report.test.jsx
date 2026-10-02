@@ -101,6 +101,14 @@ it('passes a trace-ineligible row through, so the sheet leaves the trace out', a
   expect((await sheetService()).traceEligible).toBe(false);
 });
 
+it('keeps a visit traced as an outline (tick control) off the report flow', async () => {
+  rows = [row('svc-outline', { fastCompleteReportEnabled: true, traceVariant: 'outline' })];
+  mount();
+  await openFromTools();
+  expect(await screen.findByText('Existing recap form for svc-outline')).toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
 it.each([false, undefined, 'true'])('switch %p: a regular pest visit keeps the recap modal', async (flag) => {
   rows = [row('svc-off', flag === undefined ? {} : { fastCompleteReportEnabled: flag })];
   mount();
