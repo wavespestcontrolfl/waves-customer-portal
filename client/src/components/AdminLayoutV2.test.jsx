@@ -12,9 +12,11 @@ import TechNavigationLock, { useTechNavigationLock } from "./tech/TechNavigation
 
 const viewport = vi.hoisted(() => ({ mobile: false }));
 vi.mock("../hooks/useIsMobile", () => ({ default: () => viewport.mobile }));
+const fieldWorkspace = vi.hoisted(() => ({ enabled: true }));
 vi.mock("../hooks/useFeatureFlag", () => ({
   refetchFlags: vi.fn(() => Promise.resolve()),
   useFeatureFlag: vi.fn(() => false),
+  useFeatureFlagReady: () => ({ enabled: fieldWorkspace.enabled, ready: true }),
 }));
 vi.mock("../utils/admin-fetch", async (importOriginal) => ({ ...(await importOriginal()), adminFetch: vi.fn() }));
 vi.mock("./NotificationBell", () => ({ default: () => null }));
@@ -58,6 +60,7 @@ describe("AdminLayoutV2", () => {
 
   afterEach(() => {
     viewport.mobile = false;
+    fieldWorkspace.enabled = true;
     cleanup();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
@@ -118,17 +121,21 @@ describe("AdminLayoutV2", () => {
   });
 
   it.each([
-    ["/admin/today", false],
-    ["/admin/today/tools", false],
-    ["/admin/schedule", true],
-  ])("on mobile at %s the admin top bar and tab bar are present: %s", async (path, chrome) => {
+    ["/admin/today", true, false],
+    ["/admin/today/tools", true, false],
+    ["/admin/schedule", true, true],
+    // Field-workspace flag off: /admin/today shows the legacy route UI, which
+    // has no navigation of its own, so the admin chrome must stay.
+    ["/admin/today", false, true],
+  ])("on mobile at %s (field workspace flag %s) the admin top bar and tab bar are present: %s", async (path, flagOn, chrome) => {
     viewport.mobile = true;
+    fieldWorkspace.enabled = flagOn;
     adminFetch.mockResolvedValue({ id: 2, name: "Fixture technician", role: "technician" });
     render(<MemoryRouter initialEntries={[path]}><Routes><Route element={<AdminLayoutV2 />}>
       <Route path="/admin/today/*" element={<div>Today content</div>} />
       <Route path="/admin/schedule" element={<div>Schedule content</div>} />
     </Route></Routes></MemoryRouter>);
-    await screen.findByText(chrome ? "Schedule content" : "Today content");
+    await screen.findByText(path.startsWith("/admin/schedule") ? "Schedule content" : "Today content");
     expect(Boolean(screen.queryByRole("button", { name: "Open menu" }))).toBe(chrome);
     expect(Boolean(screen.queryByRole("navigation", { name: "Primary" }))).toBe(chrome);
     if (chrome) {

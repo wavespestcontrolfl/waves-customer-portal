@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import useModalFocus from "../hooks/useModalFocus";
-import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
+import { refetchFlags, useFeatureFlag, useFeatureFlagReady } from "../hooks/useFeatureFlag";
 import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
@@ -260,7 +260,11 @@ export default function AdminLayoutV2() {
   const sidebarVisible = !isMobile || sidebarOpen;
   // On a phone the field workspace (/admin/today) supplies its own header and
   // bottom nav, so the admin shell's mobile top bar and tab bar step aside.
-  const fieldChrome = isMobile && /^\/admin\/today(\/|$)/.test(location.pathname);
+  // Only while the field workspace actually renders: with the
+  // tech-field-workspace flag off, /admin/today shows the legacy route UI,
+  // which has no navigation of its own, so the admin chrome must stay.
+  const fieldWorkspaceFlag = useFeatureFlagReady("tech-field-workspace", false);
+  const fieldChrome = isMobile && fieldWorkspaceFlag.enabled && /^\/admin\/today(\/|$)/.test(location.pathname);
   // The redirect effect runs after render. Apply its existing role policy to
   // the outlet too, so a restricted child's effects cannot run for one frame.
   const canRenderRoute = authStatus === "ready"
