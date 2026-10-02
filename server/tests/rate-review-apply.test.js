@@ -1365,6 +1365,10 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     // never delivered → the customer was told nothing yet
     mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })], price_change_notices: [pending({ status: 'draft', sent_at: null, email_sent: false, sms_sent: false })] });
     expect(await renew(468)).toBeNull();
+    // the term's dates were edited after delivery (extended through June 30) → a different renewal window: the apply
+    // holds that notice (renewal_window_changed), so it guards the July 1 renewal no more than it would be applied to it
+    mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null, term_end: '2027-06-30' })], price_change_notices: [pending()] });
+    expect(await renew(468, { termStart: '2027-07-01', today: '2027-06-30' })).toBeNull();
   });
   test('editing the successor term itself (the invoice route on its own term) is still guarded: that term is not a successor that settles the guard', async () => {
     const successor = { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '484.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) };

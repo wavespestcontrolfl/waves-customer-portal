@@ -1265,10 +1265,18 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     const told = !n.applied_at && wasDelivered(n)
       && daysBetweenYmd(etDateString(new Date(n.sent_at)), ymd(n.effective_date)) >= MIN_NOTICE_DAYS
       && Number(n.noticed_new_cents ?? n.new_amount_cents);
-    if (told > 0) deliveredCents.set(String(termId), told);
+    if (told > 0) deliveredCents.set(String(termId), { cents: told, effectiveDate: ymd(n.effective_date) });
     if (termId && (n.applied_at || told > 0)) familyByTerm.set(String(termId), n.family_key);
   }
-  const noticedCentsOf = (t) => cents(t.next_term_prepay_amount) ?? deliveredCents.get(String(t.id)) ?? null;
+  // A delivered-but-unapplied notice guards only the renewal window it
+  // named (effective_date = term_end + 1, applyPrepay's
+  // renewal_window_changed rule): a term whose dates were edited since is a
+  // different renewal, and the apply will never write that amount for it.
+  const deliveredCentsOf = (t) => {
+    const d = deliveredCents.get(String(t.id));
+    return d && addDaysYmd(ymd(t.term_end), 1) === d.effectiveDate ? d.cents : null;
+  };
+  const noticedCentsOf = (t) => cents(t.next_term_prepay_amount) ?? deliveredCentsOf(t) ?? null;
   const term = terms
     .filter((t) => noticedCentsOf(t) != null && !['cancel', 'switch_plan'].includes(String(t.renewal_decision || '')))
     .filter((t) => {
