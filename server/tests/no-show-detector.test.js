@@ -1677,6 +1677,25 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     expect(seriesSupersessions([unflagged], all).map((e) => e.visit_id)).toEqual(['sib-1']);
   });
 
+  // GATE_SERIES_MOVE_CARRIES_VISIT: a partner carried WITH the anchor
+  // occurrence is part of the stop the text quoted (its landed start), so it
+  // gets that KNOWN start; a partner of a later occurrence stays unknown.
+  test('a partner carried with the anchor gets the stop start the text quoted; a later partner stays unknown', () => {
+    const carried = {
+      id: 'move-2', sent_at: '2026-09-11T18:00:00.000Z', anchor_service_id: 'anchor',
+      result: { rescheduledOccurrences: [{ id: 'anchor', date: '2026-09-12', windowStart: '10:00', visitId: 'v1', visitWindowStart: '09:00' }] },
+      rows: [
+        { id: 'anchor', anchor: true },
+        { id: 'pest-a', partner: true, forOccurrenceId: 'anchor' },
+        { id: 'pest-b', partner: true, forOccurrenceId: 'sib-1' },
+      ],
+    };
+    const byId = Object.fromEntries(seriesSupersessions([carried], new Set(['anchor', 'pest-a', 'pest-b'])).map((e) => [e.visit_id, e]));
+    // 09:00 ET on 2026-09-12 (EDT, UTC-4).
+    expect(byId['pest-a'].start_at).toBe('2026-09-12T13:00:00.000Z');
+    expect(byId['pest-b'].start_at).toBeNull();
+  });
+
   // rebooker.js's projectOccurrenceDate SHIFTS an exceptional date by the
   // anchor delta and stores the shifted row with exception: true — the move
   // did not leave it where it was. Dropping it here left its old-slot

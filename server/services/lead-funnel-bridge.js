@@ -19,6 +19,10 @@
  *     isn't won (lost / unresponsive / disqualified / duplicate — the
  *     CLOSED_LEAD_STATUSES set) maps here, matching how the funnel card
  *     buckets losses (lead-funnel.js counts a single terminal 'lost' rung).
+ *   • 'handled' (a /book preferred-time request that closed itself because
+ *     the customer booked online) is deliberately ABSENT from the map below:
+ *     it is neither won nor lost, so the funnel row keeps whatever stage it
+ *     has and nothing is settled or uploaded to an ad platform for it.
  *   • lost is recoverable ONLY by a positive close: the admin convert /
  *     schedule / manual paths can legitimately move a lost lead back to won,
  *     so the 'booked' transition may advance FROM lost — which also puts the
@@ -41,6 +45,7 @@
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 
 // The click ids a lead row stores (routes/lead-webhook.js, public-quote.js).
 // The ambient _fbp cookie is never paid evidence — Meta sets it on every
@@ -63,7 +68,8 @@ const FUNNEL_STAGE_RANK = {
 // non-won statuses collapse to 'lost' — the staleness sweep parks stale leads
 // at 'unresponsive', and leaving those rows at an open stage would overstate
 // active/contacted leads while understating losses. Only 'new' (open, pre-
-// funnel) maps to nothing.
+// funnel) maps to nothing, and so does 'handled' (closed, neither won nor lost:
+// the row keeps its stage; see the header).
 const LEAD_STATUS_TO_FUNNEL_STAGE = {
   contacted: 'contacted',
   estimate_sent: 'estimate_sent',
@@ -122,6 +128,51 @@ function runStageUpdate(db, target, scopeRows) {
   return run(db);
 }
 
+// A lead counts among the prospects (scopeToProspects) in every status except the
+// non-engaged ones, 'handled' included. Reaching any prospect status (reopened,
+// won, OR lost / unresponsive / disqualified, codex #5477 r7) is what restores a
+// missing row below, so the funnels count every lead the lead reports count.
+const isProspectStatus = (status) => !!status && !NON_ENGAGED_LEAD_STATUSES.includes(status);
+
+/**
+ * A /book preferred-time request that closed itself as 'handled' gives up its
+ * funnel row once its booking has its own (booking-preferred-time.js). If staff
+ * then reopen it (or win it), the lead is a prospect again with no row, and a
+ * bridge UPDATE cannot create one. This is the ONE place every status writer
+ * already calls (admin Leads route, Intelligence Bar single and bulk, the won
+ * settlement), so it re-stamps the row from the lead's stored first-touch fields
+ * when a preferred-time request that has none reaches a prospect status.
+ * Only that lead type: every other lead without a row has none on purpose.
+ * Best-effort; its own transaction (a savepoint inside a caller's), lead row locked.
+ */
+async function restampMissingPreferredRows(db, leadIds, leadStatus) {
+  const ids = (leadIds || []).filter(Boolean);
+  if (!ids.length || !isProspectStatus(leadStatus)) return 0;
+  // The caller's `leadStatus` is only a hint (the status writers call the bridge AFTER
+  // their commit): eligibility is judged here on the lead's CURRENT status, with the
+  // row locked, so a booking that closed the request meanwhile (status 'handled',
+  // its funnel row dropped) is never given a row back by a stale caller. The close
+  // takes the same row lock, so one of the two goes first and the other sees it.
+  const run = async (trx) => {
+    const rows = await trx('leads').whereIn('id', ids)
+      .where({ lead_type: 'book_preferred_time' }).whereNull('deleted_at')
+      .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+      .whereNotExists(function hasRow() { this.select(1).from('ad_service_attribution').whereRaw('ad_service_attribution.lead_id = leads.id'); })
+      .forUpdate();
+    let stamped = 0;
+    for (const row of rows) {
+      if (await stampLeadFunnelRow(trx, row, { rethrow: true })) stamped += 1;
+    }
+    return stamped;
+  };
+  try {
+    return await db.transaction((trx) => run(trx));
+  } catch (err) {
+    logger.warn(`[lead-funnel-bridge] preferred-request funnel row restamp failed (${leadStatus}): ${err.message}`);
+    return 0;
+  }
+}
+
 /**
  * bridgeLeadFunnelStage(leadId, leadStatus, database?, { onlyIfLead }?)
  * Advance the funnel row linked to `leadId` to the stage `leadStatus` maps to.
@@ -136,6 +187,7 @@ function runStageUpdate(db, target, scopeRows) {
 async function bridgeLeadFunnelStage(leadId, leadStatus, database = null, { onlyIfLead = null } = {}) {
   const db = database || require('../models/db');
   try {
+    await restampMissingPreferredRows(db, [leadId], leadStatus);
     const target = LEAD_STATUS_TO_FUNNEL_STAGE[leadStatus];
     if (!leadId || !target) return { updated: 0, reason: 'no_mapping' };
 
@@ -166,6 +218,7 @@ async function bridgeLeadsFunnelStage(leadIds, leadStatus, database = null) {
   try {
     const target = LEAD_STATUS_TO_FUNNEL_STAGE[leadStatus];
     const ids = (leadIds || []).filter(Boolean);
+    await restampMissingPreferredRows(db, ids, leadStatus);
     if (!ids.length || !target) return { updated: 0, reason: 'no_mapping' };
 
     const updated = await runStageUpdate(db, target, (q) => q.whereIn('lead_id', ids));
@@ -294,8 +347,11 @@ async function stampLeadFunnelRow(database, lead, { customerId = null, serviceIn
 }
 
 module.exports = {
+  CLICK_ID_COLUMNS,
+  PAID_CLICK_ID_COLUMNS,
   bridgeLeadFunnelStage,
   bridgeLeadsFunnelStage,
+  restampMissingPreferredRows,
   stampLeadFunnelRow,
   // exported for unit tests
   FUNNEL_STAGE_RANK,

@@ -116,6 +116,7 @@ function refsFromRow(row) {
     visitIds: [...new Set(visitIds)],
     estimateId: uuidOrNull(first(meta.estimateId, meta.estimate_id, payload.estimateId, params.get('estimateId'))),
     leadId: uuidOrNull(first(payload.leadId, meta.leadId, params.get('lead'))),
+    promiseIds: arr(meta.promise_ids).map(uuidOrNull).filter(Boolean),
   };
 }
 
@@ -130,7 +131,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), promises: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
@@ -142,6 +143,10 @@ async function loadSubjects(rows, conn = db) {
   const ids = (pick) => [...new Set(all.flatMap(pick))];
   const visitIds = ids((r) => r.visitIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
+  const promiseIds = ids((r) => r.promiseIds);
+  if (promiseIds.length) {
+    data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'reviewed_at'));
+  }
   if (visitIds.length) {
     // The service date as text: a DATE parsed to a JS Date lands at the
     // host's midnight, the previous ET day on a UTC host.
@@ -150,7 +155,7 @@ async function loadSubjects(rows, conn = db) {
   }
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
-      .select('id', 'deleted_at', 'customer_id', 'estimate_id'));
+      .select('id', 'deleted_at', 'customer_id', 'estimate_id', 'status'));
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
@@ -193,6 +198,8 @@ function subjectFor(row, data, todayET) {
     bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null,
     // A visit the row names, by id; loaded ids only, so a miss is a visit gone.
     visitOf: (id) => data.visits.get(id),
+    // A promise the row names, by id; loaded ids only, so a miss is a promise gone.
+    promiseOf: (id) => data.promises.get(id),
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
     leadQuotedAt: resolved.lead?.customer_id ? data.leadQuotes.get(String(resolved.lead.customer_id)) : null,
   };
@@ -243,7 +250,8 @@ function seriesMoveMovedOn(s) {
 // happened AFTER the bell counts: the lead deleted, a quote sent (the one it
 // points at, or any to its customer), or a live visit booked for its customer. Timestamped facts only — a status
 // carries no time, and the lead's state can predate the bell (a website
-// submission attached to a lead already quoted or worked). Not converted_at:
+// submission attached to a lead already quoted or worked, and a lead whose current status is 'handled', which no
+// timestamp is needed for). Not converted_at:
 // booking the lead stamps it and cancelling that visit never clears it, so
 // the booking itself — while it is live — is the evidence.
 function newLeadMovedOn(s) {
@@ -253,9 +261,33 @@ function newLeadMovedOn(s) {
   if (!lead || !s.bellAt) return null;
   const after = (at) => !!at && new Date(at).getTime() > s.bellAt.getTime();
   if (after(lead.deleted_at)) return 'Lead was deleted';
+  // A lead whose CURRENT status is 'handled' (a /book request its own booking, or
+  // staff, closed) is moved on whatever the timestamps say: the close can land
+  // before the bell is even written, which no time comparison could see. A lead
+  // reopened since is not 'handled', so it reads relevant again.
+  if (lead.status === 'handled') return 'Request was handled';
   if (after(s.estimate?.sent_at) || after(s.leadQuotedAt)) return 'Estimate was sent';
   if (after(s.leadBookedAt)) return 'A visit was booked';
   return null;
+}
+
+// A promise-mark bell (visit-promises.js alertUnsavedVisitPromiseMarks) is
+// about technician marks that never reached the office's promise list. It is
+// settled once every promise it names is closed (done or dismissed), gone,
+// or acted on by the office after the bell (reviewed_at, stamped by a Mark
+// done, an edit, a confirm, a Reopen). A bell naming no promise is never
+// judged. The emitter closes its own bell when a resumed completion saves the
+// marks.
+function promiseMarksSettled(s) {
+  const ids = s.refs.promiseIds;
+  if (!ids.length || !s.bellAt) return null;
+  const settled = ids.every((id) => {
+    const promise = s.promiseOf(id);
+    if (!promise || String(promise.status) !== 'open') return true;
+    const reviewedAt = promise.reviewed_at ? new Date(promise.reviewed_at).getTime() : NaN;
+    return reviewedAt > s.bellAt.getTime();
+  });
+  return settled ? 'Every promise it named is settled' : null;
 }
 
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
@@ -272,6 +304,10 @@ const CLASSES = [
     // submission filed as a duplicate, an email follow-up's new draft) is
     // fresh work about a lead already on file, never judged.
     key: 'new_lead', categories: ['new_lead'], match: (meta, row) => meta.triggerKey === 'new_lead' && !!refsFromRow(row).leadId, rule: newLeadMovedOn,
+  },
+  { // visit-promises.js alertUnsavedVisitPromiseMarks — one bell per visit,
+    // raised again (same key) only while a mark is still unsaved.
+    key: 'promise_marks', categories: ['alert'], prefix: 'visit-promise-marks:', rule: promiseMarksSettled,
   },
 ];
 

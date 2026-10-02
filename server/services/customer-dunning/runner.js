@@ -1,11 +1,12 @@
 'use strict';
 
 /**
- * The customer-level reminder engine (dunning consolidation §5). PR 2: the
- * live path (`runCustomerSchedules`, `processSchedule`) is complete and tested
- * directly but is NOT called from cron or any route; only `shadowRun` is wired
- * (runPending, under GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW) and it writes
- * nothing.
+ * The customer-level reminder engine (dunning consolidation §5). runPending
+ * calls `runCustomerSchedules` after its per-invoice loop while the live gate
+ * is on (GATE_DUNNING_CUSTOMER_SCHEDULE + prerequisites, narrowed by the
+ * allowlist), else `shadowRun` under GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW,
+ * which writes nothing. `processSchedule` is also the office send-now
+ * (admin.sendNow, through wiring.js).
  *
  * processSchedule runs, in this order: CLAIM -> customer + prefs -> RECOVER
  * FIRST (the ledger, never the render) -> autopay -> SET -> stage
@@ -49,7 +50,7 @@ const Boundary = require('./boundary');
 const { makeSender } = require('./send');
 const { claimVerdict } = require('../collections/contact-ledger');
 
-const { STEPS } = Schedule;
+const { STEPS, namedForFinal, parseIds } = Schedule;
 const FINAL_STEP_IDS = ['d60_reminder', 'd90_final_notice'];
 
 const outcome = (kind, extra = {}) => ({ outcome: kind, ...extra });
@@ -107,16 +108,6 @@ const decideReachable = (run) => (run.channels.length ? null : decision('pause',
 
 // ── stage 3: recover first ───────────────────────────────────────────────
 
-const metadataOf = (entry) => {
-  if (typeof entry?.metadata !== 'string') return entry?.metadata || {};
-  try { return JSON.parse(entry.metadata); } catch { return {}; }
-};
-
-const parseIds = (value) => {
-  if (Array.isArray(value)) return value;
-  try { return JSON.parse(value || '[]'); } catch { return []; }
-};
-
 /** The invoices a delivered reservation named (the reservation is the snapshot). */
 function namedInvoiceIds(event) {
   const ids = new Set();
@@ -124,36 +115,6 @@ function namedInvoiceIds(event) {
     if (event.delivered.has(entry.channel)) parseIds(entry.invoice_ids).forEach((id) => ids.add(String(id)));
   }
   return [...ids];
-}
-
-/**
- * The invoices a final notice named, leg by leg. A leg delivered in THIS tick named the set this tick quoted
- * (run.memberIds) - never an entry: when the post-send progress read fails the loaded entries are the
- * recover-first snapshots, and a failed or pending leg's snapshot may quote other invoices than the notice
- * that actually went out. A leg delivered EARLIER is read from its delivered reservation (event entries,
- * including a restored one); a failed or pending snapshot is never evidence. A delivered leg with neither is
- * unreadable; the caller must not complete anything for it.
- */
-function namedForFinal(run, facts) {
-  const ids = new Set();
-  const covered = new Set();
-  const sentNow = new Set(run.memberIds?.length ? facts.deliveredNow || [] : []);
-  for (const channel of sentNow) {
-    if (!facts.delivered.has(channel)) continue;
-    run.memberIds.forEach((id) => ids.add(String(id)));
-    covered.add(channel);
-  }
-  for (const entry of facts.event?.entries || []) {
-    if (!facts.delivered.has(entry.channel) || covered.has(entry.channel)) continue;
-    const meta = metadataOf(entry);
-    if (meta.send_failed === true && meta.delivered !== true) continue; // a failed attempt's snapshot, not a delivered notice
-    const named = parseIds(entry.invoice_ids);
-    if (!named.length) continue;
-    named.forEach((id) => ids.add(String(id)));
-    covered.add(entry.channel);
-  }
-  const unreadable = [...facts.delivered].filter((channel) => !covered.has(channel));
-  return { ids: [...ids], unreadable };
 }
 
 /**
@@ -401,6 +362,10 @@ async function applyDecision(run, d) {
       const closed = await Schedule.close(run.schedule, d.closeReason, run.now, {
         claimStamp: run.claimStamp, expectedStepIndex: run.schedule.step_index,
       });
+      // The current step's delivery evidence could not be read, so nothing was handed back: the step
+      // stays due and is retried like any unreadable progress (held, revisited at the next run).
+      if (closed?.reason === 'evidence_unreadable') return hold(run, 'progress_unreadable');
+      if (closed?.reason === 'outcome_unconfirmed') return hold(run, 'REMINDER_OUTCOME_UNCONFIRMED');
       // A close refused because the claim was lost (a pause, a resume, another run)
       // changed nothing: report it, alert nobody.
       if (closed && closed.closed === false) return outcome('stale');
@@ -601,10 +566,14 @@ async function runClaimed(claimed, opts) {
  * Process ONE schedule end to end. `force` (operator send-now) skips the
  * "due" test only; every other guard, the claim included, still applies.
  */
-async function processSchedule(scheduleId, now = new Date(), { operatorInitiated = false, force = false, claimAt = null } = {}) {
+async function processSchedule(scheduleId, now = new Date(), {
+  operatorInitiated = false, force = false, claimAt = null, expectedStepIndex = null,
+} = {}) {
   // `claimAt` is when the claim is actually taken (a batch passes its start
   // time plus elapsed wall time); `now` stays the batch clock for cadence.
-  const claimed = await Schedule.claim(scheduleId, claimAt || now, { force });
+  // `expectedStepIndex` (an office send-now): claim only while the schedule is
+  // still at the step the operator confirmed.
+  const claimed = await Schedule.claim(scheduleId, claimAt || now, { force, expectedStepIndex });
   if (!claimed) return outcome('skipped', { reason: 'not_claimable' });
   try {
     return await runClaimed(claimed, { now, operatorInitiated });
@@ -620,14 +589,16 @@ async function dueScheduleIds(now) {
 }
 
 /** Every due schedule, one at a time; one failure never stops the rest. */
-async function runCustomerSchedules(now = new Date()) {
+async function runCustomerSchedules(now = new Date(), { clockStartedAt = Date.now() } = {}) {
   const tally = { processed: 0, failed: 0, outcomes: {} };
   const ids = await dueScheduleIds(now);
   // A sequential batch can outlive CLAIM_TTL_MS: each claim is stamped at the
   // time it is TAKEN (batch clock + elapsed wall time), never the batch start,
   // or later claims would be born expired to admin controls and
-  // InvoiceService's edit fence.
-  const wallStart = Date.now();
+  // InvoiceService's edit fence. `clockStartedAt` is the wall time `now` was
+  // read: runPending passes its own start, so the time its per-invoice loop
+  // spent before this call counts too.
+  const wallStart = clockStartedAt;
   for (const id of ids) {
     try {
       const claimAt = new Date(now.getTime() + (Date.now() - wallStart));
@@ -813,6 +784,30 @@ async function shadowPromote(customerId, now) {
 
 const shadowSchedule = (schedule, now) => judgeShadowSchedule(schedule, { now });
 
+// The schedules shadowRun judges: due, in a status the live run would claim, within the allowlist.
+const SHADOW_STATUSES = Object.freeze(['active', 'held', 'autopay_hold']);
+const inShadowScope = (schedule, now) => SHADOW_STATUSES.includes(schedule.status)
+  && !!schedule.next_touch_at && new Date(schedule.next_touch_at).getTime() <= now.getTime()
+  && allowlisted([schedule]).length === 1;
+
+async function shadowJudge(schedule, now) {
+  try { return await shadowSchedule(schedule, now); } catch (err) {
+    logger.warn(`[customer-dunning] SHADOW schedule check failed for ${schedule.id}: ${redactContact(err.message)}`);
+    return 'failed';
+  }
+}
+
+/**
+ * The full shadow verdict of ONE stored schedule, for the kill switch to log BEFORE it releases a dark
+ * schedule (wiring.releaseIfDark under the shadow gate): released first, the schedule would never reach
+ * shadowRun's scan. The same scope and the same read-only judge as shadowRun; writes nothing, never
+ * throws. Returns the verdict ('send' | 'hold' | 'pause' | 'close' | 'settle' | 'failed'), or null when
+ * the schedule is outside shadowRun's scope (not due, paused, outside the allowlist).
+ */
+async function shadowVerdictBeforeRelease(schedule, now = new Date()) {
+  return inShadowScope(schedule, now) ? shadowJudge(schedule, now) : null;
+}
+
 /**
  * The shadow gate's whole job. It never calls a writer: no promotion, claim,
  * mint, reservation, send, or alert. Table reads go through a READ ONLY
@@ -833,13 +828,8 @@ async function shadowRun(now = new Date()) {
       logger.warn(`[customer-dunning] SHADOW promote check failed for customer ${customerId}: ${redactContact(err.message)}`);
     }
   }
-  const open = allowlisted(await db(Schedule.TABLE).whereIn('status', ['active', 'held', 'autopay_hold']).where('next_touch_at', '<=', now));
-  for (const schedule of open) {
-    try { bump(await shadowSchedule(schedule, now)); } catch (err) {
-      tally.failed += 1;
-      logger.warn(`[customer-dunning] SHADOW schedule check failed for ${schedule.id}: ${redactContact(err.message)}`);
-    }
-  }
+  const open = allowlisted(await db(Schedule.TABLE).whereIn('status', SHADOW_STATUSES).where('next_touch_at', '<=', now));
+  for (const schedule of open) bump(await shadowJudge(schedule, now));
   logger.info(`[customer-dunning] SHADOW summary: promote=${tally.promote} send=${tally.send} hold=${tally.hold} pause=${tally.pause} settle=${tally.settle} close=${tally.close} failed=${tally.failed}`);
   return tally;
 }
@@ -848,6 +838,7 @@ module.exports = {
   processSchedule,
   runCustomerSchedules,
   shadowRun,
+  shadowVerdictBeforeRelease,
   // exported for tests
   namedInvoiceIds,
   snapshotMetadata,

@@ -11,7 +11,7 @@
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 
-const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v2';
+const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v3';
 
 // Remaining-service modules that belong to the lawn and tree/shrub/palm lanes.
 const WRITER_RULES_EXCLUDED_MODULES = new Set(['physical_lawn', 'palm_care']);
@@ -25,7 +25,7 @@ WHAT TO EXPECT: how today's work should change what the customer sees, from the 
 WHAT'S NEXT: what we will check or do next, what the customer can do, and when to contact us.
 
 1. Shape. Exactly the four titles above, in that order, each on its own line and followed by exactly ONE line of plain text (one to four sentences, no line breaks inside a section). No bullets, no greeting, no sign-off, no customer-name header. Length follows the record: a visit with history, several treatments or open questions gets more; a thin record gets a sentence or two per section. Never pad, and never make the same point in two sections. If a section has nothing grounded to say, write one short sentence that only invites the customer to tell us what they notice; never invent an inspection, a check or a follow-up.
-2. Only what was recorded. Every statement must trace to the technician note, a recorded field, a structured finding line, a technician-reviewed photo caption, or a supplied record (EXPECTATIONS, HOW IT WORKS, SERVICE TYPE, REACH-OUT DATE, prior visits). Keep the technician's own words and hedges: never upgrade a general word to a species ("roaches" stays "roaches"), a suspicion to a diagnosis, or one room to the whole house. Keep conditions the technician recorded ("dry and calm") when they bear on the work. If a dictated word looks like a transcription error, leave it out rather than guess.
+2. Only what was recorded. Every statement must trace to the technician note, a recorded field, a structured finding line, a technician-reviewed photo caption, or a supplied record (EXPECTATIONS, HOW IT WORKS, SERVICE TYPE, REACH-OUT DATE, PROMISES, prior visits). Keep the technician's own words and hedges: never upgrade a general word to a species ("roaches" stays "roaches"), a suspicion to a diagnosis, or one room to the whole house. Keep conditions the technician recorded ("dry and calm") when they bear on the work. If a dictated word looks like a transcription error, leave it out rather than guess.
 3. The customer's words. The booked reason, the customer's concern, and any calls, texts or emails are what the customer said, never a finding. Attribute them ("You mentioned…") and keep each remark with its own place and time: never merge two remarks into one. Never quote their messages, never say we read them, and never state that the technician confirmed something only the customer reported.
 4. Every "none" stays local. State an absence only for the place and day the technician checked ("none were seen at the dishwasher today"). Never "all clear", "no problems", "nothing to worry about", or no activity for the whole property.
 5. Products by job, and why. Never name a product, brand, trade name or active ingredient, and never use the word "chemical". Describe each product by its job (bait, an insect-control treatment, an insect growth regulator, a larvicide). For each piece of work, give one plain clause on why it fits what was found, taken from HOW IT WORKS or EXPECTATIONS; when neither covers it, describe the work without a reason. Those lines explain how a product works, never where or how it was applied today: the place and method come only from the record. Never add a mechanism, pest, residual period or effect they do not state.
@@ -41,6 +41,7 @@ WHAT'S NEXT: what we will check or do next, what the customer can do, and when t
 15. History. Prior visits, season, weather and labels are background. Mention an earlier visit only when it bears on today's problem (the same pest or the same spot), always marked as past with its date, and skip visits with nothing to add. Absences in history stay local too. Never present history as something found today, and never say things are better or worse unless the records show both sides.
 16. Next time. Say what we will check or do at a next visit only when the technician note or a recorded recommendation says so. Never promise a visit, a return trip, a result, or more checks than the record shows.
 17. When to reach out. End WHAT'S NEXT with when to contact us: tie it to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe or a sign the customer can notice. Never ask the customer to watch something only the technician tracks.
+18. Promises. A PROMISES record lists what we promised this customer before today and how the technician marked each one today. Mention only those promises, only as marked: "Done today" in WHAT WE DID AND WHY ("As promised, we checked…"); "Partly done today" by saying what was done today, with what is still left in WHAT'S NEXT; "Not done yet" in WHAT'S NEXT as still on our list. Never mention a promise that is not listed, never decide on your own whether one was kept, and never give a date or time for what is left.
 
 STYLE (the owner's prose rules; they never override the rules above)
 ${HUMAN_PROSE_RULES}
@@ -331,7 +332,13 @@ const TIMEFRAME_RE = new RegExp(
 // approved window can't pass shortened ("a week or two" never as "a week").
 const DURATION_PHRASE_RE = new RegExp(
   '\\b(?:(?:about|around|roughly|approximately|up\\s+to|within)\\s+)?'
-  + `(?:\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}|${DURATION_NUMBER}\\s+${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?)\\b`,
+  + `(?:\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}|${DURATION_NUMBER}\\s+${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?)\\b`
+  // A window with no number, as the approved pest lines word it ("over the
+  // next couple of weeks", "over the next few weeks", "Over the next week or
+  // two"): the same shape TIMEFRAME_RE screens, kept whole with its range
+  // and its preposition, so "within the next couple of weeks" is a new
+  // timeframe, not the approved one (codex #5523 P2).
+  + `|\\b(?:(?:over|in|during|for|within)\\s+)?the\\s+(?:coming|next|upcoming)\\s+(?:few\\s+|several\\s+|couple\\s+(?:of\\s+)?)?${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?\\b`,
   'gi',
 );
 function groundedTimeframePhrases(lines) {

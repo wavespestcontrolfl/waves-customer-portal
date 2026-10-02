@@ -305,6 +305,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);
         const expired = status === 'expired' || (!settled && !busy && remaining !== null && remaining <= 0);
+        // A card minted as preview-only before the switches' commit path
+        // deployed is never confirmable (the server refuses it too).
         const previewOnly = action.contract?.preview_only === true;
 
         return (
@@ -400,15 +402,12 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                     {countdownLabel(remaining)}
                   </div>
                 )}
-                {/* Preview-only cards (contract.preview_only) show the live
-                    facts but offer no Confirm — the server cannot commit
-                    them yet and /confirm-action refuses them. */}
                 {previewOnly && (
                   <div
                     style={dark ? { fontSize: 14, color: D.amber } : undefined}
                     className={dark ? undefined : "text-[14px] text-zinc-700"}
                   >
-                    Preview only — this can&apos;t be applied from the bar yet. Make the change in its own dashboard.
+                    This card was made as a preview only and can&apos;t be applied. Ask again for a fresh card.
                   </div>
                 )}
               <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>
@@ -436,7 +435,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                   } : undefined}
                   className={dark ? undefined : `bg-white text-zinc-600 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
                 >
-                  {status === "cancelling" ? statusLabel.cancelling : previewOnly ? "Dismiss" : "Cancel"}
+                  {status === "cancelling" ? statusLabel.cancelling : "Cancel"}
                 </button>
               </div>
               </div>

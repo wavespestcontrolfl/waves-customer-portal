@@ -17,6 +17,9 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
+const { loadCitedPages, pageKey } = require('./cited-pages');
+const { canonicalProspectDomain } = require('./prospect-domain-lock');
+const entityCohort = require('../../data/aeo-entity-cohort-v1.json');
 const { callAnthropic, rejectCall } = require('../llm/call');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
@@ -26,7 +29,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const DRAFT_MODEL = process.env.MODEL_OUTREACH_DRAFTER || MODELS.WORKHORSE;
 
-const SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control & Lawn Care (family-owned, SW Florida — Manatee/Sarasota/Charlotte counties). Write ONE short, personalized, one-to-one backlink-outreach email for a single prospect. A human reviews every draft before any send.
+const SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control (family-owned, SW Florida — Manatee/Sarasota/Charlotte counties). Write ONE short, personalized, one-to-one backlink-outreach email for a single prospect. A human reviews every draft before any send.
 
 RULES (mandatory):
 - One-to-one, never templated. Reference the specific site/page/audience by name. The email sends from the PRIMARY Waves inbox, so anything templated or spammy risks real-inbox reputation.
@@ -41,6 +44,12 @@ ANGLE by tier / link_type:
 - Tier 2 (editorial/haro, local media): offer a seasonal hook (spring termite swarm, summer mosquito + hurricane surge, fall rodents) backed by Waves' Pest Pressure local data as a citable resource for an upcoming piece.
 - link_type resource: ask to be added to their resources/links/preferred-vendors page.
 - link_type guest_post: offer one specific, genuinely useful local guest-article idea.
+
+CITED-PAGE ANGLE — when the prompt has a CITED PAGE block, use this angle instead of the tier/link_type one:
+- Their page is one that AI assistants (ChatGPT, Perplexity, Gemini, Claude, Google's AI answers) cite when people ask the question listed. Say so plainly and name the question in your own words: it is a real compliment and the reason you are writing.
+- The ask: when they next update that page, consider adding Waves Pest Control for the city and service it covers. Give one or two reasons Waves fits, using ONLY the WAVES FACTS block (an editor can check the FDACS license number). Never invent reviews, ratings, awards, years in business or customer counts.
+- Never claim Waves ranks anywhere, that an AI recommends Waves, or that adding Waves does anything for their page. No payment, no reciprocal link, no exclusivity.
+- Offer to send anything they need to check (license lookup, service area, contact details).
 
 Return ONLY JSON: {"subject": "...", "body": "..."}. The body is plain text with \\n line breaks and ends with the two-line signature.`;
 
@@ -127,8 +136,11 @@ async function draftFollowUps({ batchSize, dryRun, client, profile }) {
 
 // Pick the office location whose city the prospect targets (so the sign-off phone
 // matches the market); else the default location.
-function pickLocation(prospect, profile) {
-  const hay = `${prospect.target_page || ''} ${prospect.notes || ''} ${prospect.target_domain || ''}`.toLowerCase();
+// A cited-page pitch signs off for the market of the list being pitched: the
+// cities of the questions that cited it come first.
+function pickLocation(prospect, profile, cited = null) {
+  const citedCities = cited ? (cited.questions || []).map((q) => q.city).filter(Boolean).join(' ') : '';
+  const hay = `${citedCities} ${prospect.target_page || ''} ${prospect.notes || ''} ${prospect.target_domain || ''}`.toLowerCase();
   const locs = profile.locations || [];
   const byCity = locs.find((l) => {
     const city = String(l.name || '').toLowerCase().replace(/,.*$/, '').trim();
@@ -155,7 +167,97 @@ function parseDraft(text) {
   return null;
 }
 
-function buildUserPrompt(prospect, profile, loc, page) {
+// The owner-approved entity answers (aeo-entity-cohort-v1.json) a cited-page
+// pitch may state: license, footprint, services, ownership. Nothing else.
+const WAVES_FACT_IDS = Object.freeze(['E3', 'E5', 'E6', 'E8']);
+const WAVES_FACTS = Object.freeze(WAVES_FACT_IDS
+  .map((id) => (entityCohort.questions.find((q) => q.id === id) || {}).approved_answer)
+  .filter(Boolean));
+// A cited page that already names Waves needs no pitch.
+// fetchPageText decodes entities, so an encoded space reads as a space here.
+const WAVES_LISTED_RE = /\bwaves\s+pest\s+control\b/i;
+const MAX_CITED_QUESTIONS = 3;
+
+/**
+ * citedPagesByHost(pages) → Map host → ranked pages for that host, best first.
+ * `pages` is cited-pages.js's ranked list (already ordered). Only a page that
+ * is itself a provider list (`listPage`) AND was cited for a provider question
+ * ("who should I hire") is kept: the angle asks to add Waves to a list, which
+ * a cost guide or an informational page is not, whatever question cited it.
+ */
+function citedPagesByHost(pages) {
+  const byHost = new Map();
+  for (const p of pages || []) {
+    if (!p.listPage || !(p.questions || []).some((q) => q.provider)) continue;
+    const host = canonicalProspectDomain(p.host);
+    if (!host) continue;
+    if (!byHost.has(host)) byHost.set(host, []);
+    byHost.get(host).push(p);
+  }
+  return byHost;
+}
+
+/**
+ * citedPagesFor(prospect, byHost) → the cited pages to try, in order: the
+ * prospect's own page first when an engine cites it, then (homepage link
+ * only) the host's other cited lists by rank — every one of them, since a
+ * skip is final for the prospect and an untried list would be lost. A subdomain prospect matches
+ * only its own host.
+ */
+function citedPagesFor(prospect, byHost) {
+  const pages = (byHost && byHost.get(canonicalProspectDomain(prospect.target_domain))) || [];
+  const own = prospect.target_url ? pageKey(prospect.target_url) : null;
+  const first = own ? pages.filter((p) => p.key === own) : [];
+  // The host's other lists only when the link to earn is the homepage (every
+  // registry placement): a prospect planned for a service page (strategy
+  // agent, manual row) is pitched only on its own page, never on a list for
+  // another service or city that the planned link would not fit.
+  return linksToHomepage(prospect) ? [...first, ...pages.filter((p) => !first.includes(p))] : first;
+}
+
+function linksToHomepage(prospect) {
+  try { return new URL(prospect.target_page || '/', 'https://wavespestcontrol.com').pathname.replace(/\/+$/, '') === ''; } catch { return false; }
+}
+
+/**
+ * pickCitedPage(candidates, fetchPageFn) → { cited, page } for the first
+ * readable candidate that does not already name Waves; otherwise a verdict
+ * for the prospect: { fail } when any candidate could not be read (whether
+ * Waves is on it is unknown — retry), else { skip } with every reason (each
+ * already names Waves or moved). One article naming Waves never rules out
+ * the publisher's other cited lists.
+ */
+async function pickCitedPage(candidates, fetchPageFn) {
+  const fails = [];
+  const skips = [];
+  for (const cited of candidates) {
+    let page = null;
+    try { page = await fetchPageFn(cited.url, { withText: true }); } catch { page = null; }
+    const verdict = citedPageVerdict(page, cited);
+    if (!verdict) return { cited, page };
+    (verdict.fail ? fails : skips).push(verdict.fail || verdict.skip);
+  }
+  return fails.length ? { verdict: { fail: fails.join('; ') } } : { verdict: { skip: skips.join('; ') } };
+}
+
+function citedPageBlock(cited) {
+  if (!cited) return [];
+  // only the "who should I hire" questions: they are why this page qualifies
+  const questions = (cited.questions || []).filter((q) => q.provider).slice(0, MAX_CITED_QUESTIONS)
+    .map((q) => `  - "${q.query}" (${(q.engines || []).join(', ')})${q.miss ? ' — the current answer does not name Waves' : ''}`);
+  return [
+    '',
+    "CITED PAGE (from Waves' daily answer-engine tracking — use the CITED-PAGE ANGLE)",
+    `- their page: ${cited.url}`,
+    '- AI assistants cite it when people ask:',
+    ...questions,
+    '',
+    'WAVES FACTS (the only claims about Waves you may make):',
+    ...WAVES_FACTS.map((f) => `- ${f}`),
+  ];
+}
+
+function buildUserPrompt(prospect, profile, loc, page, cited = null) {
   const city = loc ? String(loc.name || '').replace(/,.*$/, '').trim() : 'Bradenton';
   return [
     'PROSPECT',
@@ -165,6 +267,7 @@ function buildUserPrompt(prospect, profile, loc, page) {
     `- strategist notes: ${prospect.notes || '(none)'}`,
     prospect.anchor_planned ? `- suggested anchor: ${prospect.anchor_planned}` : '',
     page && (page.title || page.snippet) ? `- what their page actually says: ${[page.title, page.snippet].filter(Boolean).join(' — ').slice(0, 500)}` : '',
+    ...citedPageBlock(cited),
     '',
     `LINK TO EARN (propose as the resource): ${prospect.target_page}`,
     '',
@@ -176,20 +279,65 @@ function buildUserPrompt(prospect, profile, loc, page) {
   ].filter(Boolean).join('\n');
 }
 
-async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageText }) {
+/**
+ * citedPageVerdict(page, cited) → null (pitch it) | { fail } | { skip }.
+ * Unreadable, cut short, empty, title-only (a script-rendered shell) or a bot
+ * challenge: whether Waves is on it cannot be known, so the lease fails and
+ * retries. Redirected to a
+ * different page (the article is gone, often to the homepage): skipped. A
+ * page that already names Waves: skipped.
+ */
+// A body this short once the title is taken out is not the article. A bot
+// challenge or "turn on JavaScript" interstitial is judged only on a SHORT
+// body: a full article that merely mentions JavaScript (a contact-form note)
+// is still the article. <noscript> text is already stripped by fetchPageText.
+const MIN_ARTICLE_CHARS = 400;
+const INTERSTITIAL_MAX_CHARS = 2000;
+const UNREADABLE_PAGE_RE = /\b(verify you are (a )?human|just a moment\.\.\.|checking your browser|enable javascript|access denied|are you a robot|captcha)\b/i;
+
+function readableArticle(page) {
+  if (!page || typeof page.text !== 'string') return false;
+  const body = (page.title ? page.text.split(page.title).join(' ') : page.text).trim();
+  if (body.length < MIN_ARTICLE_CHARS) return false;
+  return !(body.length < INTERSTITIAL_MAX_CHARS && UNREADABLE_PAGE_RE.test(body));
+}
+
+function citedPageVerdict(page, cited) {
+  // moved first: a removed article redirected to a short homepage is gone,
+  // not unreadable, so it is skipped rather than retried every night
+  if (page && page.finalUrl && pageKey(page.finalUrl) !== cited.key) return { skip: `cited page ${cited.url} now redirects to ${page.finalUrl}` };
+  if (!readableArticle(page)) return { fail: `cited page could not be read in full: ${cited.url}` };
+  if (WAVES_LISTED_RE.test(page.text)) return { skip: `Waves already on the cited page ${cited.url}` };
+  return null;
+}
+
+/**
+ * draftOne → { subject, body, cited } | { skip: reason } | { fail: reason } |
+ * null (no usable draft). With cited-page candidates, the first readable one
+ * that does not already name Waves is the page read and pitched (pickCitedPage);
+ * `cited` is that page, or null for the usual angle.
+ */
+async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageText, candidates = [] }) {
   let page = null;
-  try { page = await fetchPageFn(prospect.target_url || `https://${prospect.target_domain}/`); } catch { page = null; }
-  const loc = pickLocation(prospect, profile);
+  let cited = null;
+  if (candidates.length) {
+    const picked = await pickCitedPage(candidates, fetchPageFn);
+    if (picked.verdict) return picked.verdict;
+    ({ cited, page } = picked);
+  } else {
+    try { page = await fetchPageFn(prospect.target_url || `https://${prospect.target_domain}/`); } catch { page = null; }
+  }
+  const loc = pickLocation(prospect, profile, cited);
   const resp = await ledgerCall('anthropic', DRAFT_MODEL, () => anthropic.messages.create({
     model: DRAFT_MODEL,
     max_tokens: 1200,
     system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: buildUserPrompt(prospect, profile, loc, page) }],
+    messages: [{ role: 'user', content: buildUserPrompt(prospect, profile, loc, page, cited) }],
   }), { laneId: 'outreach_drafter' });
   const text = (resp && resp.content ? resp.content : []).map((b) => b.text || '').join('');
   const draft = parseDraft(text);
   if (!draft) ledgerCallRejected(resp, 'invalid_json');
-  return draft;
+  return draft && { ...draft, cited };
 }
 
 /**
@@ -198,7 +346,26 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
  * summed over BOTH lanes (the follow-up pass + the pitches — what the cron log and the
  * CLI print), with the follow-up pass itemized under `followUps`.
  */
-async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = {}) {
+/**
+ * The cited-page ranking, by host, for this run's pitches. Never blocks a
+ * run: a failed read drafts every pitch with its usual angle.
+ */
+async function loadCitedByHost(citedPagesFn) {
+  try {
+    const r = await citedPagesFn();
+    return citedPagesByHost(r && r.pages);
+  } catch (err) {
+    logger.warn(`[outreach-drafter] cited pages unavailable — drafting without them: ${err.message}`);
+    return new Map();
+  }
+}
+
+const CITED_PAGES_LIMIT = 500;
+function defaultCitedPages() {
+  return loadCitedPages(require('../../models/db'), { limit: CITED_PAGES_LIMIT });
+}
+
+async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn, citedPagesFn = defaultCitedPages } = {}) {
   let client = anthropic;
   if (!client && Anthropic && process.env.ANTHROPIC_API_KEY) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   if (!client) {
@@ -220,7 +387,8 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
     logger.info(remaining ? '[outreach-drafter] no claimable outreach prospects with a contact email' : `[outreach-drafter] the batch of ${batchSize} went to follow-ups — no pitch claimed`);
     return totals(followUps, { claimed: 0, drafted: 0, skipped: 0, failed: 0, samples: [] }, dryRun);
   }
-  const pitches = await draftPitches({ claimed, dryRun, client, profile, fetchPageFn });
+  const citedByHost = await loadCitedByHost(citedPagesFn);
+  const pitches = await draftPitches({ claimed, dryRun, client, profile, fetchPageFn, citedByHost });
   // (a dry run previewed without leasing — there is nothing to release)
   logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${pitches.drafted} skipped=${pitches.skipped} failed=${pitches.failed} follow-ups=${followUps.drafted}/${followUps.claimed}${dryRun ? ' (DRY-RUN)' : ''}`);
   return totals(followUps, pitches, dryRun);
@@ -235,42 +403,66 @@ function totals(followUps, pitches, dryRun) {
   };
 }
 
-// the pitch lane: one draft per leased prospect, reported drafted / failed / skipped on its lease
-async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn }) {
-  let drafted = 0, skipped = 0, failed = 0;
-  const samples = []; // dry-run previews — returned to the CLI's stdout, NOT logged (email/body are PII)
-  for (const p of claimed) {
-    const email = p.contact_email;
-    if (!email || !worker.isValidEmail(email)) { // defensive — claim already required a contact_email
-      if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'skipped', lease_token: p.lease_token, notes: 'no emailable contact' }).catch(() => {});
-      skipped++; continue;
-    }
-    try {
-      const draft = await draftOne(p, { profile, anthropic: client, fetchPageFn });
-      if (!draft) {
-        if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: 'drafter produced no usable draft' }).catch(() => {});
-        failed++; continue;
-      }
-      if (dryRun) {
-        // Don't log the recipient or body (PII / verbose) — collect for the CLI to print to stdout.
-        logger.info(`[outreach-drafter][dry] drafted ${p.target_domain} (T${p.tier ?? '?'} ${p.link_type})`);
-        samples.push({ domain: p.target_domain, tier: p.tier, link_type: p.link_type, to_email: email, subject: draft.subject, body: draft.body });
-        drafted++; continue;
-      }
-      const res = await worker.report({
-        prospect_id: p.id, outcome: 'drafted', lease_token: p.lease_token,
-        outreach_to_email: email, outreach_subject: draft.subject, outreach_body: draft.body,
-        notes: `auto-drafted (tier ${p.tier ?? '?'} ${p.link_type})`,
-      });
-      if (res && res.ok) { drafted++; } else { failed++; logger.warn(`[outreach-drafter] report rejected for ${p.target_domain}: ${res && res.code}`); }
-    } catch (err) {
-      logger.error(`[outreach-drafter] error on ${p.target_domain}: ${err.message}`);
-      if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: `drafter error: ${String(err.message).slice(0, 160)}` }).catch(() => {});
-      failed++;
-    }
+// One pitch, decided: { outcome: drafted | skipped | failed, notes, fields?, sample? }.
+// Nothing here reports — draftPitches settles every outcome in one place.
+async function pitchOne(p, { client, profile, fetchPageFn, citedByHost }) {
+  const email = p.contact_email;
+  // defensive — claim already required a contact_email
+  if (!email || !worker.isValidEmail(email)) return { outcome: 'skipped', notes: 'no emailable contact' };
+  let draft;
+  try {
+    draft = await draftOne(p, { profile, anthropic: client, fetchPageFn, candidates: citedPagesFor(p, citedByHost) });
+  } catch (err) {
+    logger.error(`[outreach-drafter] error on ${p.target_domain}: ${err.message}`);
+    return { outcome: 'failed', notes: `drafter error: ${String(err.message).slice(0, 160)}` };
   }
-  return { claimed: claimed.length, drafted, skipped, failed, samples };
+  if (draft && draft.skip) return { outcome: 'skipped', notes: draft.skip, sample: { domain: p.target_domain, skipped: draft.skip } };
+  if (!draft || draft.fail) return { outcome: 'failed', notes: (draft && draft.fail) || 'drafter produced no usable draft' };
+  const { cited } = draft;
+  return {
+    outcome: 'drafted',
+    notes: `auto-drafted (tier ${p.tier ?? '?'} ${p.link_type})${cited ? ` · cited page ${cited.url}` : ''}`,
+    fields: { outreach_to_email: email, outreach_subject: draft.subject, outreach_body: draft.body },
+    // dry-run preview — returned to the CLI's stdout, NOT logged (email/body are PII)
+    sample: { domain: p.target_domain, tier: p.tier, link_type: p.link_type, to_email: email, cited_page: cited ? cited.url : null, subject: draft.subject, body: draft.body },
+  };
+}
+
+// Report one decided pitch on its lease → the outcome that counts. A drafted
+// report the worker rejects (or that throws) counts as failed.
+async function settlePitch(p, r) {
+  const base = { prospect_id: p.id, outcome: r.outcome, lease_token: p.lease_token, notes: r.notes, ...(r.fields || {}) };
+  if (r.outcome !== 'drafted') {
+    await worker.report(base).catch(() => {});
+    return r.outcome;
+  }
+  try {
+    const res = await worker.report(base);
+    if (res && res.ok) return 'drafted';
+    logger.warn(`[outreach-drafter] report rejected for ${p.target_domain}: ${res && res.code}`);
+  } catch (err) {
+    logger.error(`[outreach-drafter] error on ${p.target_domain}: ${err.message}`);
+    await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: `drafter error: ${String(err.message).slice(0, 160)}` }).catch(() => {});
+  }
+  return 'failed';
+}
+
+// the pitch lane: one draft per leased prospect, reported drafted / failed / skipped on its lease
+async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn, citedByHost = new Map() }) {
+  const counts = { drafted: 0, skipped: 0, failed: 0 };
+  const samples = [];
+  for (const p of claimed) {
+    const r = await pitchOne(p, { client, profile, fetchPageFn, citedByHost });
+    if (dryRun) {
+      if (r.sample) samples.push(r.sample);
+      if (r.outcome === 'drafted') logger.info(`[outreach-drafter][dry] drafted ${p.target_domain} (T${p.tier ?? '?'} ${p.link_type})`);
+      counts[r.outcome] += 1;
+      continue;
+    }
+    counts[await settlePitch(p, r)] += 1;
+  }
+  return { claimed: claimed.length, ...counts, samples };
 }
 
 module.exports = { run };
-module.exports._internals = { parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, sentLine, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };
+module.exports._internals = { citedPageVerdict, citedPagesByHost, citedPagesFor, pickCitedPage, citedPageBlock, WAVES_FACTS, WAVES_LISTED_RE, parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, sentLine, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };

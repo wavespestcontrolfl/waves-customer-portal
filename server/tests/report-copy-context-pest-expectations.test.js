@@ -123,7 +123,7 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
       knex,
     });
     expect(contextText).toMatch(/EXPECTATIONS/);
-    expect(contextText).toMatch(/Non-repellent products/);
+    expect(contextText).toMatch(/-based non-repellent/);
     // Owner ruling 2026-09-28: rainy season alone (no rain reading, no live
     // forecast signal) never adds the ants line.
     expect(contextText).not.toMatch(/Heavy rain pushes ants indoors/);
@@ -145,7 +145,7 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
     });
     expect(contextText).toMatch(/EXPECTATIONS/);
     expect(contextText).toMatch(/gel bait/);
-    expect(contextText).not.toMatch(/Non-repellent products/);
+    expect(contextText).not.toMatch(/-based non-repellent/);
   });
 
   it('never grounds rain or ants lines, even with a real rain reading and a geocode (codex P1 round 4: the window is still open at generation time)', async () => {
@@ -166,7 +166,7 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
     expect(expectations).not.toMatch(/Heavy rain pushes ants indoors/);
     expect(expectations).not.toMatch(/treated band/);
     // the deterministic product-class line still grounds the writer
-    expect(expectations).toMatch(/Non-repellent products/);
+    expect(expectations).toMatch(/-based non-repellent/);
   });
 
   it('omits the EXPECTATIONS section outside rainy season with no classifiable product and no rain data', async () => {
@@ -256,6 +256,18 @@ describe('buildReportCopyContext — writer rules', () => {
     knex,
   });
 
+  it("carries the technician's promise marks to the writer, and only with the writer rules on", async () => {
+    const visitPromises = [{ id: 'p-1', mark: 'done', description: 'Check under the dishwasher', source: 'call' }];
+    const on = await buildReportCopyContext({ ...args(knexFor(), true), visitPromises });
+    expect(on.contextText).toContain('PROMISES (what we promised this customer before today');
+    expect(on.contextText).toContain('- Done today: Check under the dishwasher');
+    // The generate route's promise-only grounding check reads this.
+    expect(on.signals.hasVisitPromises).toBe(true);
+    const off = await buildReportCopyContext({ ...args(knexFor(), false), visitPromises });
+    expect(off.contextText).not.toContain('PROMISES');
+    expect(off.signals.hasVisitPromises).toBe(false);
+  });
+
   it('drops footage, product safety, household notes and the automatic no-activity finding; gives the approved wording', async () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const { contextText, writerAllowedPhrases } = await buildReportCopyContext(args(knexFor(), true));
@@ -269,11 +281,11 @@ describe('buildReportCopyContext — writer rules', () => {
     expect(contextText).not.toContain('No activity observed this visit');
     expect(contextText).toContain('PRIOR VISITS: this is an established customer');
     expect(contextText).toContain('EXPECTATIONS (approved wording on what the customer may see');
-    expect(contextText).toContain('dropping off over about 1–2 weeks');
+    expect(contextText).toMatch(/We applied a non-repellent.*over the next couple of weeks/);
     // This fixture's EPA number matches no approved product wording, so no
     // HOW IT WORKS line: unmatched products fail closed.
     expect(contextText).not.toContain('HOW IT WORKS');
-    expect(writerAllowedPhrases).toEqual(expect.arrayContaining(['a few days', 'about 1–2 weeks']));
+    expect(writerAllowedPhrases.some((phrase) => /days$/.test(phrase))).toBe(true);
   });
 
   it('gives the writer the approved wording even while the expectations card is off', async () => {
@@ -309,6 +321,6 @@ describe('buildReportCopyContext — writer rules: name-only products', () => {
       writerRules: true,
       knex,
     });
-    expect(contextText).toContain('With gel bait, dead roaches may show up');
+    expect(contextText).toContain('We placed a gel bait for the roaches');
   });
 });

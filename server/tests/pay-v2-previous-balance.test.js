@@ -44,6 +44,7 @@ jest.mock('../services/payer', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  reportWriterRulesLive: jest.fn(() => false),
   gates: { autoApplyAccountCredit: false },
 }));
 const SIBLING_TOKEN = 'sibling-token-must-never-leak';
@@ -100,10 +101,11 @@ function invoiceData(overrides = {}) {
   };
 }
 
-async function getPayPage(data) {
+async function getPayPage(data, { tables = {} } = {}) {
   InvoiceService.getByToken.mockResolvedValue(data);
   db.mockImplementation((table) => {
     if (table === 'customers') return chain({ first: { billing_mode: null, monthly_rate: null } });
+    if (tables[table]) return tables[table];
     return chain({ first: null });
   });
   const layer = payRouter.stack.find((l) => l.route?.path === '/:token' && l.route.methods.get);
@@ -205,5 +207,61 @@ describe('GET /pay/:token previous-balance itemization', () => {
     });
     const { body } = await getPayPage(invoiceData());
     expect(body).not.toHaveProperty('previousBalance');
+  });
+});
+
+// The visit note on this unauthenticated page follows the one rule for
+// customer renders (context-aggregator.js customerSafeVisitNotes, owner ruling 2026-10-01): the
+// reviewed report text only. The invoice keeps the note as it stood when
+// billed — the raw note, on older invoices — so it is screened on the way
+// out, with the visit record's own flags.
+describe('GET /pay/:token visit note', () => {
+  const REVIEWED = [
+    'WHAT WE DID',
+    'We treated the exterior perimeter and knocked down webs on the lanai.',
+    'WHAT WE FOUND',
+    'Light ant activity along the kitchen slab and no other concerns.',
+  ].join('\n');
+  const visitRecord = () => chain({ first: { structured_notes: null, service_data: null, completion_source: null } });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isEnabled.mockImplementation(() => false);
+  });
+
+  test("an invoice holding the tech's raw note shows none", async () => {
+    const { body } = await getPayPage(
+      invoiceData({ service_record_id: 'sr-1', tech_notes: 'Gate code 4417. Customer owes $40 from last time.' }),
+      { tables: { service_records: visitRecord() } },
+    );
+    expect(body.service.techNotes).toBeNull();
+    expect(JSON.stringify(body)).not.toContain('4417');
+  });
+
+  test("the reviewed report shows as its text, read against the invoice's own customer's visit", async () => {
+    const records = visitRecord();
+    const { body } = await getPayPage(
+      invoiceData({ service_record_id: 'sr-1', tech_notes: REVIEWED }),
+      { tables: { service_records: records } },
+    );
+    expect(body.service.techNotes).toBe(
+      'We treated the exterior perimeter and knocked down webs on the lanai. Light ant activity along the kitchen slab and no other concerns.',
+    );
+    expect(records.where).toHaveBeenCalledWith({ id: 'sr-1', customer_id: 'cust-1' });
+  });
+
+  test("a combined-visit invoice keeps no note and shows none, without reading a member's visit", async () => {
+    const records = visitRecord();
+    const { body } = await getPayPage(
+      invoiceData({ service_record_id: 'sr-1', tech_notes: null, service_type: 'Combined service visit' }),
+      { tables: { service_records: records } },
+    );
+    expect(body.service.techNotes).toBeNull();
+    expect(records.first).not.toHaveBeenCalled();
+  });
+
+  test('a visit record that is gone, or another customer\'s, shows none', async () => {
+    const { body } = await getPayPage(invoiceData({ service_record_id: 'sr-1', tech_notes: REVIEWED }));
+    expect(body.service.techNotes).toBeNull();
   });
 });

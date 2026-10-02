@@ -2687,6 +2687,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
       reportRulesConfirmed = false, // tech confirmed the edit heads-up ("send as is")
       reportDraftBase = null, // the installed generated draft the notes were edited from
+      promiseMarks = null, // the promise check: [{ id, mark, stillLeft? }] — OPTIONAL (visit-promises.js)
+      promiseMarksConfirmed = false, // tech confirmed sending though a marked promise changed
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
       // The visit identity the client's form was built against (customer,
@@ -3351,6 +3353,32 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (rulesBlock
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: rulesBlock.status, body: rulesBlock.payload });
+      }
+    }
+    // The promise check: a mark that no longer holds (the office closed,
+    // reworded or moved the promise after the report was written) asks
+    // before the report goes out, since the report may speak to it. Same
+    // confirmable 409 and committed-retry exemption as the heads-up above;
+    // a read failure never blocks (Codex #5516).
+    if (!promiseMarksConfirmed && Array.isArray(promiseMarks) && promiseMarks.length
+      && !isIncompleteVisit && visitOutcome !== 'customer_declined' && !isBackfillCompletion
+      && require('../config/feature-gates').reportWriterRulesLive()) {
+      const stalePromiseIds = await (async () => {
+        const VisitPromises = require('../services/service-report/visit-promises');
+        if (!completionProfile || !VisitPromises.promiseCheckInScope(svc.service_type, completionProfile)) return [];
+        // An optional read: in a grouped closeout `db` is the packet's
+        // transaction, so it runs in a savepoint and a ledger error never
+        // aborts the closeout (Codex #5516; waves-db failSoftRead).
+        return failSoftRead(db, (k) => VisitPromises.staleVisitPromiseMarks(k, { customerId: svc.customer_id, marks: promiseMarks }), []);
+      })().catch(() => []);
+      if (stalePromiseIds.length
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        return ({ status: 409, body: {
+          error: 'A promise you marked changed after the report was written (the office closed, reopened, reworded or moved it). The report may still mention it.',
+          code: 'promise_marks_changed',
+          promiseIds: stalePromiseIds,
+          confirmable: true,
+        } });
       }
     }
     // A committed completion (a saved visit member, a lost-response retry)
@@ -7826,6 +7854,49 @@ async function completeScheduledService(completionInput, packetContext = null) {
       backfillFrozenMintPayerId = frozenResume.backfillMintPayerId;
       isBackfillCompletion = frozenResume.isBackfillCompletion;
       effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
+    }
+
+    // The promise check (owner "ok yes add these" 2026-10-01): the
+    // technician's marks reach the office's promise list. It runs here, right
+    // after the durable commit and the committed-truth re-derivation above,
+    // before any later step can return early (a resumable invoice, report or
+    // text error) or deliver the report, so a closeout that was saved never
+    // leaves its marks behind (Codex #5516). A street-level address hold whose
+    // release fails returns before this point; the retry that finalizes that
+    // closeout runs it. POST-COMMIT: a failed write never fails the
+    // completion and nothing contacts the customer; a mark that did not reach
+    // the list rings one office bell to settle it by hand. Only while the
+    // writer rules are live, on a visit the writer covers, judged on the
+    // profile the completion transaction used (null skips). Only a visit
+    // that did its work: never a declined (or incomplete) one. Backfills
+    // excluded, like the comms guard. Re-runnable on a resume.
+    if (!isBackfillCompletion && visitOutcome !== 'customer_declined' && visitOutcome !== 'incomplete'
+      && Array.isArray(promiseMarks) && promiseMarks.length
+      && require('../config/feature-gates').reportWriterRulesLive()) {
+      try {
+        const VisitPromises = require('../services/service-report/visit-promises');
+        if (effectiveCompletionProfile && VisitPromises.promiseCheckInScope(svc.service_type, effectiveCompletionProfile)) {
+          let promiseResults = null;
+          try {
+            promiseResults = await VisitPromises.applyVisitPromiseMarks(db, {
+              customerId: svc.customer_id,
+              marks: promiseMarks,
+              visitDate: svc.scheduled_date,
+              reviewedBy: completionInput.actor?.technicianId || null,
+            });
+          } catch (applyErr) {
+            logger.warn(`[dispatch] promise marks not applied (${VisitPromises.errorCode(applyErr)})`);
+          }
+          const unsaved = await VisitPromises.unsavedVisitPromiseMarks(db, {
+            customerId: svc.customer_id, marks: promiseMarks, results: promiseResults,
+          });
+          await VisitPromises.alertUnsavedVisitPromiseMarks(db, {
+            customerId: svc.customer_id, serviceId: svc.id, visitDate: svc.scheduled_date, unsaved,
+          });
+        }
+      } catch (promiseErr) {
+        logger.warn(`[dispatch] promise marks failed (non-blocking) (${require('../services/service-report/visit-promises').errorCode(promiseErr)})`);
+      }
     }
 
     // Backfill tracker stamp (Codex P2, PR #2897 fix round 4): the SAME
