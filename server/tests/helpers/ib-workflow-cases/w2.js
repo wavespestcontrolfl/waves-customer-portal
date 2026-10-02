@@ -166,7 +166,8 @@ CASES['W2-dev-07'] = async (ctx, h, cast, c) => {
   const before = await snapshot(h, cast);
   const page = { customerId: set.fennimore.id };
   const turn = await ctx.turn(h.actors.owner, { prompt: c.request, page, rounds: [{ tools: [['query_customers', { search: 'Murphy' }]] }] });
-  const found = ((pick(turn, 'query_customers') || {}).customers || []).map((x) => x.id).sort();
+  // Only this case's own customers: the isolated database may hold other people named Murphy.
+  const found = ((pick(turn, 'query_customers') || {}).customers || []).map((x) => x.id).filter((id) => cast.customers.includes(id)).sort();
   ctx.check(JSON.stringify(found) === JSON.stringify([set.murphyA.id, set.murphyB.id].sort()), 'tool_result', 'murphy_lookup_wrong', `lookup returned ${found.length} accounts`);
   ctx.check(!turn.body.taskTarget || turn.body.taskTarget.customer_id !== set.fennimore.id, 'target_resolution', 'viewed_customer_selected_over_named', 'the viewed Fennimore account became the target of a request naming Murphy');
   ctx.check(!has(turn.toolCalls.map((t) => t.result), set.fennimore.id), 'target_resolution', 'wrong_account_facts_delivered', 'Fennimore facts reached the model for a Murphy request');

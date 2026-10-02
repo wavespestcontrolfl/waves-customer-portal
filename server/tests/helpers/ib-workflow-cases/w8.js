@@ -48,10 +48,11 @@ async function seedEstimateSet(cast, h) {
 
 /** A quote that was already sent and is honored: made by the real tool, then marked sent as the editor's send would. */
 async function seedSentQuote(ctx, h, f) {
-  const turn = await ctx.turn(h.actors.owner, { prompt: `For ${f.customer.first_name} ${f.customer.last_name}: seed quote`, page: { customerId: f.customer.id }, sessionKey: 'seed-sent',
+  const turn = await ctx.turn(h.actors.owner, { prompt: `For ${f.customer.first_name} ${f.customer.last_name}: seed quote`, page: { customerId: f.customer.id }, sessionKey: 'seed-sent', setup: true,
     rounds: [{ tools: [['save_customer_estimate', { customer_id: f.customer.id, property_id: f.property.id, lawn_applications: 12 }]] }] });
   if (turn.card) await h.confirm(h.actors.owner, turn.card);
   await h.db('estimates').where({ customer_id: f.customer.id }).update({ status: 'sent', sent_at: new Date() });
+  await ctx.fixtureChanged(); // the sent quote is part of the seed: the runner measures "unchanged" from here
   return (await draftsOf(h, f))[0];
 }
 
@@ -238,5 +239,10 @@ CASES['W8-dev-10'] = async (ctx, h, cast, c) => {
   await checkDraft(ctx, h, s.thistle, { apps: 12 });
   ctx.markCompleted();
 };
+
+// A write the manifest does not declare is a contract failure; these cases drive one on purpose, named here with the reason.
+CASES['W8-dev-04'].undeclaredWrites = { tools: ['save_customer_estimate'], reason: 'the naive 6x cadence the tool must refuse' };
+CASES['W8-dev-07'].undeclaredWrites = { tools: ['save_customer_estimate'], reason: 'the naive in-place revision of an already sent quote' };
+CASES['W8-dev-09'].undeclaredWrites = { tools: ['save_customer_estimate'], reason: 'the naive save for a property with no lawn measurement, which the tool must refuse' };
 
 module.exports = { CASES };

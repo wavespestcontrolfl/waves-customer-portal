@@ -81,7 +81,13 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
   }, 90000);
 
   afterAll(async () => {
-    if (update && !only) {
+    // Write the snapshots only from a complete run: the harness booted and every dev case produced a result. A failed boot (an
+    // unreachable or unmigrated database) or a mid-suite failure must leave the last valid baseline in place.
+    const missing = devCases.filter((c) => !results[c.id]).map((c) => c.id);
+    if (update && !only && (!h || missing.length)) {
+      process.stdout.write(`\n[baseline] snapshot NOT written: ${!h ? 'the harness did not boot' : `${missing.length} of ${devCases.length} dev cases produced no result (${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', ...' : ''})`}\n`);
+    }
+    if (update && !only && h && !missing.length) {
       const out = { schema_version: 1, cases: {} };
       for (const [id, r] of Object.entries(results)) out.cases[id] = { outcome: r.outcome, ...(r.point ? { point: r.point, code: r.code, failures: codesOf(r.failures) } : {}), ...(r.reasons ? { reasons: r.reasons.map((g) => g.code) } : {}), ...(r.probe ? { probe: r.probe.outcome === 'pass' ? 'pass' : `fail:${r.probe.code}`, probe_failures: codesOf(r.probe.failures) } : {}) };
       fs.writeFileSync(SNAPSHOT, `${JSON.stringify(out, null, 2)}\n`);
@@ -141,6 +147,7 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     const cast = new Cast(h.db);
     const ctx = h.newContext(c, cast);
     ctx.probe = probe;
+    ctx.undeclaredWrites = (CASES[c.id] && CASES[c.id].undeclaredWrites) || null;
     mockSendViaTwilio.mockClear();
     mockSendgrid.sendOne.mockClear();
     h.providers.gmail.mockClear();

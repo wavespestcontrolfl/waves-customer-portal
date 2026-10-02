@@ -210,7 +210,8 @@ CASES['W7-dev-09'] = async (ctx, h, cast, c) => {
   stub(h).mockClear();
   // A correct model looks the name up, sees two accounts and asks. A naive send_sms by surname must not become a card.
   const turn = await ctx.turn(h.actors.owner, { prompt: c.request, rounds: [{ tools: [['query_customers', { search: 'Murphy' }]] }, { tools: [['send_sms', { customer_name: 'Murphy', message: 'We will be there Tuesday at 9.' }]] }] });
-  const found = ((pick(turn, 'query_customers') || {}).customers || []).map((x) => x.id).sort();
+  // Only this case's own customers: the isolated database may hold other people named Murphy.
+  const found = ((pick(turn, 'query_customers') || {}).customers || []).map((x) => x.id).filter((id) => cast.customers.includes(id)).sort();
   ctx.check(JSON.stringify(found) === JSON.stringify([s.murphyA.id, s.murphyB.id].sort()), 'tool_result', 'murphy_lookup_wrong', `lookup returned ${found.length} accounts`);
   ctx.expectRefusal(turn, 'send_sms', { error: /Multiple customers match/i }, 'ambiguous_recipient_not_reported');
   ctx.check(turn.cards.length === 0, 'target_resolution', 'ambiguous_recipient_proposed', `a send card was offered for the surname Murphy (${turn.cards.length})`);
@@ -240,5 +241,9 @@ CASES['W7-dev-10'] = async (ctx, h, cast, c) => {
   ctx.check((await reservations(h, s.pellham.id)).length === 1, 'receipt', 'message_audit_rows_wrong', 'more than one messaging audit row for one approved send');
   ctx.markCompleted();
 };
+
+// A write the manifest does not declare is a contract failure; these cases drive one on purpose, named here with the reason.
+CASES['W7-dev-06'].undeclaredWrites = { tools: ['send_sms'], reason: 'the send to a number with STOP on file, which must be blocked' };
+CASES['W7-dev-09'].undeclaredWrites = { tools: ['send_sms'], reason: 'the naive send by the shared surname, which must be refused as ambiguous' };
 
 module.exports = { CASES };

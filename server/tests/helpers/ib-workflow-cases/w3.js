@@ -243,4 +243,8 @@ CASES['W3-dev-10'] = async (ctx, h, cast, c) => {
 // The case observes that single SendGrid submission itself (one opt-in, new address only), so the blanket zero-send guard is off.
 CASES['W3-dev-05'].optOut = { sends: 'the pending double-opt-in is re-sent once to the new address; the case asserts exactly that one email and no other send' };
 
+// A write the manifest does not declare is a contract failure; these cases drive one on purpose, named here with the reason.
+CASES['W3-dev-06'].undeclaredWrites = { tools: ['update_lead_contact'], reason: 'the gate-off supersede scenario edits a second lead twice (Zed, then Zane) to prove the older pending card cannot be confirmed' };
+CASES['W3-dev-10'].undeclaredWrites = { tools: ['update_lead_contact'], reason: 'the naive write by an actor whose write access was revoked, which the rail must refuse' };
+
 module.exports = { CASES };

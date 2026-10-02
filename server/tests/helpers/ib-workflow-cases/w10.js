@@ -49,7 +49,7 @@ async function allState(h, s) {
   const products = await h.db('products_catalog').whereIn('id', ids).orderBy('id').select('id', 'inventory_on_hand', 'inventory_unit');
   const moves = await h.db('product_inventory_movements').whereIn('product_id', ids).count('* as n').first();
   const requests = await h.db('product_restock_requests').whereIn('product_id', ids).orderBy('id').select('id', 'status', 'requested_quantity');
-  const orders = await h.db('vendor_orders').whereIn('restock_request_id', requests.map((r) => r.id)).count('* as n').first().catch(() => ({ n: 0 }));
+  const orders = await h.db('vendor_orders').whereIn('restock_request_id', requests.map((r) => r.id)).count('* as n').first();
   return JSON.stringify({ products, moves: moves.n, requests, orders: orders.n });
 }
 
@@ -164,12 +164,13 @@ CASES['W10-dev-04'] = async (ctx, h, cast, c) => {
   const s = await seedStockSet(cast, h);
   const before = await allState(h, s);
   const turn = await stockTurn(ctx, h, { prompt: c.request, rounds: [{ tools: [['query_stock', { search: 'sample granule' }]] }, { tools: [['adjust_stock', { product_name: 'sample granule', movement_type: 'restock', quantity: 1, unit: 'lb' }]] }] });
-  const found = ((pick(turn, 'query_stock') || {}).products || []).filter((p) => /granule/i.test(p.name));
+  const found = ((pick(turn, 'query_stock') || {}).products || []).filter((p) => /granule/i.test(p.name) && cast.productIds.includes(p.id));
   ctx.check(found.length === 2, 'tool_result', 'both_granule_rows_not_listed', `${found.length} granule rows listed`);
   const result = pick(turn, 'adjust_stock');
   ctx.expectRefusal(turn, 'adjust_stock', { error: /Multiple products match/i }, 'ambiguous_product_refusal_not_specific');
   ctx.check(turn.cards.length === 0, 'proposal', 'ambiguous_product_guessed', `a card was offered for "sample granule" with two matching rows`);
-  ctx.check(!!result && Array.isArray(result.candidates) && result.candidates.length === 2, 'tool_result', 'ambiguity_not_reported_with_both_rows', `adjust result ${JSON.stringify(result).slice(0, 220)}`);
+  const ownCandidates = ((result && result.candidates) || []).filter((cand) => cast.productIds.includes(cand.id));
+  ctx.check(!!result && Array.isArray(result.candidates) && ownCandidates.length === 2, 'tool_result', 'ambiguity_not_reported_with_both_rows', `adjust result ${JSON.stringify(result).slice(0, 220)}`);
   ctx.check(before === await allState(h, s), 'side_effect', 'stock_changed_for_an_ambiguous_product', 'a product, ledger or request changed');
   ctx.markCompleted();
 };
@@ -216,8 +217,9 @@ CASES['W10-dev-07'] = async (ctx, h, cast, c) => {
   ctx.check(moves.length === 1 && Number(moves[0].quantity) === 3 * 96, 'read_back', 'three_jugs_not_recorded', `movements ${moves.map((m) => `${m.quantity} ${m.unit}`).join(',') || 'none'}; expected one movement of ${3 * 96} fl oz`);
   const meta = moves[0] && (typeof moves[0].metadata === 'string' ? JSON.parse(moves[0].metadata) : moves[0].metadata);
   ctx.check(!!meta && meta.enteredQuantity === 288 && meta.enteredUnit === 'fl_oz', 'read_back', 'entered_amount_not_recorded', `entered ${meta && meta.enteredQuantity} ${meta && meta.enteredUnit}`);
-  const orders = await h.db('vendor_orders').count('* as n').first().catch(() => ({ n: 0 }));
-  const requests = await h.db('product_restock_requests').where({ product_id: s.talak.id }).count('* as n').first();
+  const talakRequests = await h.db('product_restock_requests').where({ product_id: s.talak.id }).select('id');
+  const orders = await h.db('vendor_orders').whereIn('restock_request_id', talakRequests.map((r) => r.id)).count('* as n').first();
+  const requests = { n: talakRequests.length };
   ctx.check(Number(requests.n) === 1 && Number(orders.n) === 0, 'side_effect', 'supplier_order_or_request_created', `${requests.n} restock requests for Talak, ${orders.n} vendor orders`);
   ctx.markCompleted();
 };
@@ -275,5 +277,11 @@ CASES['W10-dev-10'] = async (ctx, h, cast, c) => {
   ctx.check((await stockOf(h, s.taurus)).onHand === TAURUS_BASE + 2 * GAL, 'recovery', 'on_hand_wrong_after_double_submit', `on hand ${(await stockOf(h, s.taurus)).onHand}`);
   ctx.markCompleted();
 };
+
+// A write the manifest does not declare is a contract failure; these cases drive one on purpose, named here with the reason.
+CASES['W10-dev-04'].undeclaredWrites = { tools: ['adjust_stock'], reason: 'the naive restock by an ambiguous product name, which the writer must refuse' };
+CASES['W10-dev-05'].undeclaredWrites = { tools: ['update_restock_request'], reason: 'the naive receive of an already received request, which the writer must refuse' };
+CASES['W10-dev-06'].undeclaredWrites = { tools: ['adjust_stock'], reason: 'the naive restock with no unit, which the writer must clarify' };
+CASES['W10-dev-09'].undeclaredWrites = { tools: ['adjust_stock'], reason: 'the technician attempts the owner-only stock write, which the rail must refuse' };
 
 module.exports = { CASES };

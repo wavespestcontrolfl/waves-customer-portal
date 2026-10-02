@@ -6,6 +6,8 @@
 // proves nothing was resolved, acknowledged or newly raised by reading.
 
 
+const { foreignNotifications } = require('../ib-workflow-state');
+
 const BILLING = 'Billing'; // area names are the reader's own vocabulary
 
 // 14 work items (4 Billing, 3 Schedule, 2 Comms, 1 each Estimates, Leads, Customers,
@@ -38,7 +40,7 @@ async function seedAlerts(cast, areas, { unsorted = 0, subjectCustomer = null, d
 async function snapshotState(h, cast) {
   const ids = cast.notificationIds;
   const rows = ids.length ? await h.db('notifications').whereIn('id', ids).select('id', 'done_at', 'read_at', 'resolution') : [];
-  const total = Number((await h.db('notifications').count('* as n').first()).n);
+  const total = await foreignNotifications(h, cast); // notifications raised during this case that are not its fixtures
   // Every column of each seeded row, by id: a title, link, metadata or done_by edited in place changes no count.
   const values = ids.length ? await h.db('notifications').whereIn('id', ids).select('*') : [];
   return { open: rows.filter((r) => !r.done_at).length, read: rows.filter((r) => r.read_at).length, total, rows: Object.fromEntries(values.map((r) => [r.id, JSON.stringify(r)])) };

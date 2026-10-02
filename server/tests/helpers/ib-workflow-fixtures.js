@@ -46,6 +46,7 @@ const CLOCK_DATE_KEYS = new Set(['scheduled_date', 'new_date', 'date_from', 'dat
 class Cast {
   constructor(db) {
     this.db = db;
+    this.startedAt = new Date(); // the case's own clock: rows created after this that are not fixtures were raised by the code under test
     this.aliases = new Map(); // manifest fixture key -> the real row id this case seeded for it
     this.customers = [];
     this.leads = [];
@@ -224,6 +225,9 @@ async function sweepStale(db) {
   const now = new Date();
   const stale = db('customers').where('lead_source_detail', MARK).select('id');
   const staleIds = (await db('customers').where('lead_source_detail', MARK).select('id')).map((r) => r.id);
+  // A subscriber row keeps its globally unique email: remove stale ones (W3-dev-05 moves one to the fixed fixture address) before the customers are retired.
+  if (staleIds.length) await db('newsletter_subscribers').whereIn('customer_id', staleIds).del();
+  await db('newsletter_subscribers').where({ email: 'murphy.test@example.invalid' }).del();
   if (staleIds.length) await removeBillingRows(db, staleIds);
   const staleProducts = (await db('products_catalog').where('sku', 'like', `${STOCK_SKU_PREFIX}%`).select('id')).map((r) => r.id);
   if (staleProducts.length) await removeStockRows(db, staleProducts);

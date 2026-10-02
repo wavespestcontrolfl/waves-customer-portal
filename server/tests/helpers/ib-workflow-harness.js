@@ -77,6 +77,7 @@ class CaseContext {
     this.confirms = []; // every card the case confirmed through the route
     this.sendBaseline = null; // outbound/email row counts at the first turn (see ib-workflow-state)
     this.rowBaseline = null;  // every seeded row, table by table, at the first turn: the runner's "unchanged" guard compares with it
+    this.undeclaredWrites = null; // { tools, reason } from CASES[id].undeclaredWrites: extra writes the case drives on purpose (see verifyContract)
     this.refusalAsserted = false; // set by expectRefusal / expectNoAttempt; the runner requires it of a negative case
   }
 
@@ -235,6 +236,20 @@ class CaseContext {
         this.fail('contract', 'manifest_call_not_issued', `${label}: ${call.tool} ${JSON.stringify(want)}; the script issued ${near || `no ${call.tool} call`}`);
       }
     });
+    // A WRITE the script issued that no step of the manifest declares is a contract failure too (reads may stay unmatched). A repeat of a
+    // declared write (a control-wording re-run, a redo after a price change, a retry) is the declared call again, not an extra one;
+    // fixture setup that has to go through a tool runs in a turn marked `setup: true` and is not recorded as issued.
+    const declaredWrites = [spec, ...spec.corrections].flatMap((step) => asList(step.call)).filter((call) => {
+      const action = registry.actions.get(call.tool);
+      return !addsTool(call.tool) && action && action.kind !== 'read';
+    }).map((call) => ({ tool: call.tool, want: this.cast.resolve(Object.fromEntries(Object.entries(call.input || {}).filter(([k]) => !addedProps(call.tool).has(k)))) }));
+    for (const extra of pool.filter((c) => !c.used)) {
+      const action = registry.actions.get(extra.name);
+      if (!action || action.kind === 'read' || addsTool(extra.name) || this.probe) continue;
+      if (this.undeclaredWrites && this.undeclaredWrites.tools.includes(extra.name)) { this.note(`undeclared ${extra.name} allowed: ${this.undeclaredWrites.reason}`); continue; }
+      if (declaredWrites.some((d) => d.tool === extra.name && subset(extra.input, d.want))) continue;
+      this.fail('contract', 'undeclared_write_call', `the script issued ${extra.name} ${JSON.stringify(extra.input).slice(0, 200)}, which no step of the manifest declares`);
+    }
     this.contract = { compared };
     return compared;
   }
@@ -273,8 +288,32 @@ class CaseContext {
   turn(actor, options) { return this.h.turn(actor, options, this); }
 }
 
-async function bootHarness({ databaseUrl, mockModel, providers = {} }) {
-  const originalEnv = { ...process.env };
+/** Undo everything bootHarness installs: fetch, the http/https request guards, the router, the database pool and the environment. */
+async function restoreHeld(held) {
+  global.fetch = held.realFetch;
+  for (const g of held.netGuards) g.lib.request = g.original;
+  if (held.server) await new Promise((resolve) => held.server.close(resolve));
+  if (held.db) await held.db.destroy();
+  for (const key of Object.keys(process.env)) if (!(key in held.originalEnv)) delete process.env[key];
+  Object.assign(process.env, held.originalEnv);
+}
+
+/**
+ * Boot the harness. If startup fails at any point (an unmigrated database, an actor that cannot be created, the router not
+ * starting) everything installed so far is restored before the error is rethrown: the caller never receives a harness to close,
+ * and a reused Jest worker must not keep outbound networking disabled or the test environment installed.
+ */
+async function bootHarness(options) {
+  const held = { originalEnv: { ...process.env }, realFetch: global.fetch, netGuards: [], server: null, db: null };
+  try {
+    return await initHarness(options, held);
+  } catch (err) {
+    await restoreHeld(held).catch(() => {});
+    throw err;
+  }
+}
+
+async function initHarness({ databaseUrl, mockModel, providers = {} }, held) {
   const STRIPE_STUB_BASE = 'https://stripe-stub.example.invalid';
   const ownerEmail = `owner.${crypto.randomBytes(4).toString('hex')}@example.invalid`;
   Object.assign(process.env, {
@@ -294,7 +333,7 @@ async function bootHarness({ databaseUrl, mockModel, providers = {} }) {
   // No real network: any outbound HTTP(S) request other than the loopback route under test fails at once and is
   // recorded, so a provider that is not explicitly stubbed can never be reached (and a missing stub is visible).
   const blockedNetwork = [];
-  const realFetch = global.fetch;
+  const realFetch = held.realFetch;
   // The one outbound host a case may answer: Stripe's read API, pointed at a name that can never resolve. A case installs
   // harness.setStripe((url) => json); without a handler the request is blocked and recorded like any other.
   let stripeHandler = null;
@@ -319,7 +358,9 @@ async function bootHarness({ databaseUrl, mockModel, providers = {} }) {
     };
     return { lib, original };
   });
+  held.netGuards = netGuards;
   const db = require('../../models/db');
+  held.db = db;
   if (!(await db.schema.hasTable('ib_tasks'))) throw new Error('Apply the migrations to the isolated database first');
   const jwt = require('jsonwebtoken');
 
@@ -341,6 +382,7 @@ async function bootHarness({ databaseUrl, mockModel, providers = {} }) {
   app.use('/api/admin/intelligence-bar', require('../../routes/admin-intelligence-bar'));
   app.use((err, req, res, next) => res.status(err.statusCode || err.status || 500).json({ error: err.message, code: err.code }));  
   const server = await new Promise((resolve) => { const running = app.listen(0, '127.0.0.1', () => resolve(running)); });
+  held.server = server;
   const origin = `http://127.0.0.1:${server.address().port}`;
 
   const harness = {
@@ -399,7 +441,7 @@ async function bootHarness({ databaseUrl, mockModel, providers = {} }) {
           return { content: [{ type: 'tool_use', name: 'discover_capabilities', input: { query: missing.map((name) => name.replaceAll('_', ' ')).join(' ') }, id: `discover-${state.modelCalls}` }], usage: {} };
         }
         if (round.tools.some(([name]) => name !== 'discover_capabilities')) state.toolRoundSeen = true;
-        if (ctx) for (const [name, input] of round.tools) if (name !== 'discover_capabilities') ctx.issued.push({ name, input });
+        if (ctx && !options.setup) for (const [name, input] of round.tools) if (name !== 'discover_capabilities') ctx.issued.push({ name, input });
         return { content: round.tools.map(([name, input], i) => ({ type: 'tool_use', name, input, id: `${name}-${state.modelCalls}-${i}` })), usage: {} };
       });
       const body = {
@@ -456,14 +498,7 @@ async function bootHarness({ databaseUrl, mockModel, providers = {} }) {
       return last;
     },
 
-    async close() {
-      global.fetch = realFetch;
-      for (const g of netGuards) g.lib.request = g.original;
-      if (server) await new Promise((resolve) => server.close(resolve));
-      await db.destroy();
-      for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
-      Object.assign(process.env, originalEnv);
-    },
+    async close() { await restoreHeld(held); },
 
     // The case's own mode decides the owner-direct gate; the route reads it at call time on every request.
     newContext(spec, cast) {

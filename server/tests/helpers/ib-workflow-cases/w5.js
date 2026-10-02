@@ -273,4 +273,8 @@ CASES['W5-dev-10'] = async (ctx, h, cast, c) => {
   ctx.markCompleted();
 };
 
+// A write the manifest does not declare is a contract failure; these cases drive one on purpose, named here with the reason.
+CASES['W5-dev-03'].undeclaredWrites = { tools: ['create_appointment'], reason: 'the naive 2:30 PM booking the tool must refuse' };
+CASES['W5-dev-06'].undeclaredWrites = { tools: ['create_appointment'], reason: 'the naive booking of a commercial account on a stated price, which the domain must stop' };
+
 module.exports = { CASES };

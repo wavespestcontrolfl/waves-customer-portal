@@ -229,4 +229,8 @@ CASES['W4-dev-10'] = async (ctx, h, cast, c) => {
   ctx.markCompleted();
 };
 
+// A write the manifest does not declare is a contract failure; these cases drive one on purpose, named here with the reason.
+CASES['W4-dev-07'].undeclaredWrites = { tools: ['add_customer_property'], reason: 'the naive add of an address the customer already has, which the tool must answer property_exists' };
+CASES['W4-dev-09'].undeclaredWrites = { tools: ['add_customer_property'], reason: 'the technician session attempts the owner-only property add, which the rail must refuse' };
+
 module.exports = { CASES };

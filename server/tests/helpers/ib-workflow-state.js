@@ -18,6 +18,13 @@ async function scoped(h, table, column, values, orderBy = 'id') {
   }
 }
 
+/** Notifications raised since the case began that are not the case's own fixtures: what a read or a refused write must not create. */
+async function foreignNotifications(h, cast) {
+  const { MARK } = require('./ib-workflow-fixtures');
+  const since = cast.startedAt || new Date();
+  return Number((await h.db('notifications').where('created_at', '>=', since).whereRaw("COALESCE(metadata->>'fixture', '') <> ?", [MARK]).count('* as n').first()).n);
+}
+
 /** Every row a read could touch for the case's customers, leads, promises, notifications and stock products, table by table. */
 async function rowTables(h, cast, { notifications = false } = {}) {
   const customers = cast.customers || [];
@@ -28,7 +35,7 @@ async function rowTables(h, cast, { notifications = false } = {}) {
   state.leads = await scoped(h, 'leads', 'id', cast.leads || []);
   if (notifications || (cast.notificationIds || []).length) {
     state.notifications = await scoped(h, 'notifications', 'id', cast.notificationIds || []);
-    state.notification_total = Number((await h.db('notifications').count('* as n').first()).n);
+    state.foreign_notifications = await foreignNotifications(h, cast);
   }
   const products = cast.productIds || [];
   if (products.length) {
@@ -131,4 +138,4 @@ async function noSends(ctx, h, cast, { what = 'a read', codes = {}, since = null
   ctx.check(rows.length === 0, 'side_effect', codes.emailRows || `${emailCode}_row`, () => `${what}: ${rows.map((k) => `${k} ${base[k]} -> ${now[k]}`).join('; ')}`);
 }
 
-module.exports = { rowTables, unchangedViolations, rowState, noWrites, sendState, noSends, changedTables };
+module.exports = { foreignNotifications, rowTables, unchangedViolations, rowState, noWrites, sendState, noSends, changedTables };
