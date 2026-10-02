@@ -307,6 +307,7 @@ railway run node scripts/ib-request-tally.js --json > ib-tally.json
 Reading the numbers:
 
 - `tool_calls` stores the tools called in a turn, so tool counts are not request counts; one request can call several tools.
+- The window is a rolling `--days` x 24 hours back from the run, while the day columns are Eastern calendar days, so the earliest day is a partial day. Rank families over the whole window, not over a single day column, and ignore the first day when comparing days.
 - `operator_id` is a nullable column that the bar route does not write on this commit, so expect one `(none)` operator. Any value containing `@` is shown as a short hash label, never an email.
 - Public estimate Q&A rows share the table and appear as the tool `public_estimate_ask`; ignore them for workflow ranking.
 - Health events are filtered to the `intelligence-bar` and `tech-intelligence-bar` sources.
