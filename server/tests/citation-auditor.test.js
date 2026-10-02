@@ -65,9 +65,11 @@ describe('classifyListing', () => {
     const linked = classifyListing(page(`${body}${ld([biz, addrNode])}`), expected);
     expect(linked.status).toBe('mismatched');
     expect(linked.detail.mismatches.map((m) => m.field)).toEqual(expect.arrayContaining(['address', 'city']));
-    expect(classifyListing(page(`${body}${ld({ '@graph': [biz] })}${ld(addrNode)}`), expected).status).toBe('mismatched'); // across blocks
-    const split = ld({ '@id': '_:address', addressLocality: 'Tampa' }) + ld([biz, { '@id': '_:address', streetAddress: BRAND.address.split(',')[0] }]); // our street, Tampa city
-    expect(classifyListing(page(`${body}${split}`), expected).status).toBe('mismatched'); // one node split across blocks
+    expect(classifyListing(page(`${body}${ld({ '@graph': [biz] })}${ld(addrNode)}`), expected).status).toBe('unverified'); // a blank id does not reach another block
+    const reused = ld({ '@id': '_:address', addressLocality: 'Tampa' }) + ld([biz, { '@id': '_:address', streetAddress: BRAND.address.split(',')[0], addressLocality: BRAND.address.split(',')[1].trim() }]);
+    expect(classifyListing(page(`${body}${reused}`), expected).status).not.toBe('mismatched'); // blank ids are per block
+    const iri = ld({ '@id': 'https://x.test/#addr', addressLocality: 'Tampa' }) + ld([{ ...biz, [`${S}address`]: [{ '@id': 'https://x.test/#addr' }] }, { '@id': 'https://x.test/#addr', streetAddress: BRAND.address.split(',')[0] }]);
+    expect(classifyListing(page(`${body}${iri}`), expected).status).toBe('mismatched'); // an IRI names one node page-wide
     const dangling = classifyListing(page(`${body}${ld([biz])}`), expected);
     expect(dangling.status).toBe('unverified');
     expect(dangling.detail.reason).toBe('address_unconfirmed');
@@ -482,6 +484,9 @@ describe('classifyListing', () => {
       expect(text('<p>99 Palm Terrace, Atlanta, Georgia</p>').status).toBe('unverified');
       expect(text('<p>99 Palm Terrace</p><p>Atlanta</p><p>GA</p>').status).toBe('unverified'); // fields in separate elements
       expect(text('<p>99 palm terrace atlanta georgia</p>').status).toBe('unverified');
+      expect(text('<p>99 Palm Terrace Boise ID</p>').status).toBe('unverified'); // ambiguous code, house-number context
+      expect(text('<p>5 Reviews</p><p>Serving Sarasota FL</p>').status).toBe('verified'); // a count in any case
+      expect(text('<p>12 Photos</p><p>Listing ID</p>').status).toBe('verified');
       expect(text('<p>Open 7 days, or call us</p>').status).toBe('verified'); // a count, and lowercase "or" is a word
       expect(text('<p>Serving 3 counties, in Manatee and Sarasota</p>').status).toBe('verified');
       expect(text('<p>Order ID 12345 confirmed</p><p>Open 7 days</p>').status).toBe('verified');

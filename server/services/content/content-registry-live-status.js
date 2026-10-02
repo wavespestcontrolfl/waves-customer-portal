@@ -162,8 +162,8 @@ const NOT_FOUND_HEADING_RE = /^(?:(?:oops|sorry|error|http|404)\W+)*not found\b|
 // a script, iframe fallback or textarea is text, never a heading. They end at the first real
 // "</name" end tag, whatever quotes their text contains.
 const RAW_TEXT_TAGS = new Set(['script', 'style', 'iframe', 'textarea', 'xmp', 'noembed', 'noframes']);
-// Templates never render; SVG and MathML are foreign content, where <title> is an icon's
-// accessible name, not the document's. They nest, and inside them tags are still tokenized
+// Templates and elements marked `hidden` never render; SVG and MathML are foreign content,
+// where <title> is an icon's accessible name, not the document's. They nest, and inside them tags are still tokenized
 // (quotes and all) so only a real close tag ends them; a self-closing <svg/> is empty.
 const INERT_CONTAINERS = new Set(['template', 'svg', 'math']);
 const TAG_NAME_RE = /[a-z][a-z0-9-]*/y;
@@ -207,13 +207,21 @@ function nextToken(lower, from) {
     const m = TAG_NAME_RE.exec(lower);
     if (m) {
       const gt = tagClose(lower, TAG_NAME_RE.lastIndex);
-      return { start: lt, end: gt + 1, name: m[0], closing, selfClosing: FOREIGN_TAGS.has(m[0]) && lower[gt - 1] === '/' };
+      const name = m[0];
+      const selfClosing = VOID_TAGS.has(name) || (FOREIGN_TAGS.has(name) && lower[gt - 1] === '/');
+      // A container that never renders: template, foreign content, or an element marked hidden.
+      const inert = INERT_CONTAINERS.has(name) || HIDDEN_ATTR_RE.test(lower.slice(TAG_NAME_RE.lastIndex, gt).replace(QUOTED_VALUE_RE, '='));
+      return { start: lt, end: gt + 1, name, closing, selfClosing, inert };
     }
     if (/[!?/]/.test(lower[lt + 1] || '')) return { start: lt, end: indexAt(lower, '>', lt) + 1 };
   }
   return { start: lower.length, end: Infinity };
 }
 const FOREIGN_TAGS = new Set(['svg', 'math']);
+const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+// The boolean `hidden` attribute, read with quoted values blanked so title="… hidden …" is not it.
+const QUOTED_VALUE_RE = /=\s*(?:"[^"]*"?|'[^']*'?)/g;
+const HIDDEN_ATTR_RE = /(?:^|[\s/])hidden(?=[\s=/]|$)/;
 
 // Open inert containers, innermost last, with a per-name count so "is one open" is O(1) and
 // closing pops back to it (each push pops once: linear overall).
@@ -254,10 +262,10 @@ function headingTexts(html) {
       if (!inert.popTo(name) && !inert.size && heading && name === 'h1') { out.push(heading.parts.join(' ')); heading = null; }
     } else if (RAW_TEXT_TAGS.has(name) || (name === 'title' && !inert.size)) {
       const close = rawTextClose(lower, name, i);
-      if (name === 'title' && !heading) out.push(src.slice(i, close.start));
+      if (name === 'title') out.push(src.slice(i, close.start)); // a <title>, even misplaced in an h1, is read on its own
       i = close.end;
-    } else if (INERT_CONTAINERS.has(name)) {
-      if (!tok.selfClosing) inert.push(name);
+    } else if ((tok.inert || inert.size) && !tok.selfClosing) {
+      inert.push(name); // inside an inert container every element is tracked, so its own close pairs up
     } else if (name === 'h1' && !inert.size && !heading) {
       heading = { parts: [] };
     }

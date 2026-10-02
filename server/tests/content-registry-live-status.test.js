@@ -641,6 +641,11 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<div data-x="<template>"></div><h1>Page not found</h1>')).toBe(true); // a quoted open hides nothing
     expect(notFoundHeading('<title>Page Not Found</title>')).toBe(true);
     expect(notFoundHeading('<title>Waves <b>Pest</b></title><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div hidden><h1>Not found</h1></div><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div hidden><div><p>x</div><h1>Not found</h1></div><h1>Waves</h1>')).toBe(false); // nested closes pair up
+    expect(notFoundHeading('<section hidden="hidden"><br><img src=x><h1>Not found</h1></section><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div title="not hidden"></div><h1>Page not found</h1>')).toBe(true); // "hidden" in a value is not the attribute
+    expect(notFoundHeading('<div hidden></div><h1>Page not found</h1>')).toBe(true);
     expect(notFoundHeading('<svg data-x="/>"><title>Not found</title></svg><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<script>var s = "</scripture><h1>Page not found</h1>";</script><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<template><scripts></scripts><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);

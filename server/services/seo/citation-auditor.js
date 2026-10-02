@@ -219,35 +219,39 @@ const isLdRef = (v) => {
 // reference is replaced by the node it names, from any block on the page. One that names no node
 // stays a bare reference, which addressStrings reports as stated but unreadable.
 function jsonLdNodes(html) {
-  const out = [];
+  const out = []; // [node, block index]
   const byId = new Map();
+  // Blank-node ids ("_:address") are local to their own JSON-LD block; IRIs name one node page-wide.
+  const keyOf = (id, block) => (id.startsWith('_:') ? `${block} ${id}` : id);
   // Depth-first, in document order (a node, then its @graph, then its mainEntity), on the
   // block normalized once. A bare {"@value": ...} unwraps to a primitive: not an entity.
-  const visit = (root) => {
+  const visit = (root, block) => {
     const stack = [root];
     while (stack.length) {
       const node = stack.pop();
       if (!node || typeof node !== 'object') continue;
       if (Array.isArray(node)) { for (let i = node.length - 1; i >= 0; i -= 1) stack.push(node[i]); continue; }
-      // A node split across blocks under one @id is one node: its properties merge into the first
+      // A node split across blocks under one IRI @id is one node: its properties merge into the first
       // (in place, each copied once; the first value of a property stands), so no block's stated
       // field is dropped.
       const id = typeof node['@id'] === 'string' && !isLdRef(node) ? node['@id'] : null;
-      const first = id === null ? node : byId.get(id) || node;
-      if (id !== null) byId.set(id, first);
+      const first = id === null ? node : byId.get(keyOf(id, block)) || node;
+      if (id !== null) byId.set(keyOf(id, block), first);
       Object.keys(node).forEach((k) => { if (!(k in first)) first[k] = node[k]; });
-      if (node.name || node.telephone || node.address) out.push(node);
+      if (node.name || node.telephone || node.address) out.push([node, block]);
       if (node.mainEntity) stack.push(node.mainEntity);
       if (node['@graph']) stack.push(node['@graph']);
     }
   };
+  let block = 0;
   for (const m of String(html).matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
     let parsed;
     try { parsed = JSON.parse(m[1]); } catch { continue; } // malformed block: ignore
-    visit(unwrapLd(parsed));
+    visit(unwrapLd(parsed), block);
+    block += 1;
   }
-  const resolve = (v) => (Array.isArray(v) ? v.map(resolve) : (isLdRef(v) && byId.get(v['@id'])) || v);
-  return out.map((node) => (node.address ? { ...node, address: resolve(node.address) } : node));
+  const resolve = (v, b) => (Array.isArray(v) ? v.map((x) => resolve(x, b)) : (isLdRef(v) && byId.get(keyOf(v['@id'], b))) || v);
+  return out.map(([node, b]) => (node.address ? { ...node, address: resolve(node.address, b) } : node));
 }
 
 const OFFICE_PHONE_KEYS = new Set(WAVES_LOCATIONS.map((l) => phoneKey(l.phone)));
@@ -389,11 +393,13 @@ const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)
 // Some directories show no ZIP ("99 Palm Terrace, Atlanta, GA", or fields in separate elements:
 // "99 Palm Terrace Atlanta GA"): a house number, then a state ending the address, still means an
 // address is shown. After a comma any code or name counts (codes that are also words, "…, or",
-// only in upper case); without one, an upper-case code or a state name.
+// only in upper case); without one, an upper-case code (one that is also an ID label's word,
+// "Listing ID", not after that label) or a state name. Count words match in any case.
 const caseFree = (w) => w.replace(/[a-z]/gi, (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`);
 const NAME_ALTS_ANY_CASE = US_STATE_NAMES.map((n) => caseFree(n).replace(/ /g, '\\s+')).join('|');
-const NO_ZIP_STATE = `(?:,\\s*(?:${BARE_STATE_CODES.map(caseFree).join('|')}|${[...AMBIGUOUS_STATE_CODES].join('|')})|\\s(?:${BARE_STATE_CODES.join('|')})|[,\\s]\\s*(?:${NAME_ALTS_ANY_CASE}))`;
-const NUMBERED_STATE_NO_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS})\\b)[^;!?]{1,120}?${NO_ZIP_STATE}(?![\\w-])(?!\\.?,?\\s*\\d)`);
+const ID_LABELS_ANY_CASE = ID_LABELS.split('|').map(caseFree).join('|');
+const NO_ZIP_STATE = `(?:,\\s*(?:${BARE_STATE_CODES.map(caseFree).join('|')}|${[...AMBIGUOUS_STATE_CODES].join('|')})|\\s(?:${BARE_STATE_CODES.join('|')})|(?<!\\b(?:${ID_LABELS_ANY_CASE}))\\s(?:${[...AMBIGUOUS_STATE_CODES].join('|')})|[,\\s]\\s*(?:${NAME_ALTS_ANY_CASE}))`;
+const NUMBERED_STATE_NO_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS.split('|').map(caseFree).join('|')})\\b)[^;!?]{1,120}?${NO_ZIP_STATE}(?![\\w-])(?!\\.?,?\\s*\\d)`);
 const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
