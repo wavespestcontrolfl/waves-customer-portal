@@ -78,6 +78,9 @@ const CROWN_TERM = /\b(?:crown(?:shaft)?s?|spear(?:\s+(?:leaf|leaves|fronds?))?|
 // Only a palm-crown claim when the sentence is about a palm: "new growth" or a
 // "canopy" on a hedge is not.
 const PALM_ONLY_TERM = /\b(?:new(?:est)?\s+(?:growth|leaves|foliage|shoots)|canopy)\b/i;
+// A clause that names a non-palm plant is about that plant, even when a palm is
+// named elsewhere in the sentence ("..., but the hedge canopy looks healthy").
+const NON_PALM_SUBJECT = /\b(?:hedges?|shrubs?|bush(?:es)?|trees?|oaks?|maples?|magnolias?|citrus|crotons?|ixoras?|viburnums?|hibiscus|gardenias?|azaleas?|podocarpus|cocoplums?|clusias?|jasmine|bougainvilleas?|roses?|ferns?|beds?|groundcovers?|perennials?|annuals?|plantings?)\b/i;
 const PALM_WORD = /\b(?:palms?|fronds?|spear|crown|cabbage|sabal|royal|queen|date|coconut|areca|foxtail|sylvester|washingtonia|pindo|bismarck|livistona)\b/i;
 const HEALTH_TERM = /\b(?:healthy|fine|normal|good|great|excellent|vibrant|full|robust|firm|upright|strong|vigorous|vigor|thriving|green|lush|intact|unaffected|undamaged|clean|okay|ok|looking good|free (?:of|from)|no (?:visible )?(?:signs?|issues?|problems?|concerns?|damage|decline|stress|pests?))\b/gi;
 // A health word is NOT a positive claim when a negator, an adverse word or a
@@ -110,7 +113,7 @@ function makesPositiveHealthClaim(clause) {
 function isCrownHealthClaim(clause, sentenceHasPalm = false) {
   const c = String(clause || '');
   const crownish = CROWN_TERM.test(c)
-    || (PALM_ONLY_TERM.test(c) && (sentenceHasPalm || PALM_WORD.test(c)));
+    || (PALM_ONLY_TERM.test(c) && (PALM_WORD.test(c) || (sentenceHasPalm && !NON_PALM_SUBJECT.test(c))));
   return crownish && makesPositiveHealthClaim(c);
 }
 
@@ -176,7 +179,8 @@ function stripSentence(sentence) {
   let prevCrownish = false;
   const kept = [];
   for (const clause of clauses) {
-    const crownish = CROWN_TERM.test(clause.text) || (PALM_ONLY_TERM.test(clause.text) && (hasPalm || PALM_WORD.test(clause.text)));
+    const crownish = CROWN_TERM.test(clause.text)
+      || (PALM_ONLY_TERM.test(clause.text) && (PALM_WORD.test(clause.text) || (hasPalm && !NON_PALM_SUBJECT.test(clause.text))));
     // "... the crown, but it looks healthy": a bare pronoun clause right after a
     // crown clause vouches for the crown.
     const pronounClaim = prevCrownish && PRONOUN_START.test(clause.text) && makesPositiveHealthClaim(clause.text);
@@ -275,14 +279,34 @@ function findingFor(findings, key) {
   return (Array.isArray(findings) ? findings : []).find((f) => f && f.key === key) || null;
 }
 
+// The repo's customer-copy compliance screen (the same one a tech's own tip
+// line passes). Lazy for the same reason as redactCodes.
+function copyViolations(text) {
+  return require('./technician-report-copy').customerCopyViolations(text);
+}
+
 // The text a customer may read for an edit: the technician's words, minus any
-// crown-health sentence (the palm rule outranks an edit).
+// crown-health sentence (the palm rule outranks an edit). Wording the
+// compliance screen rejects never prints (completion refuses it first; this is
+// the render-side backstop for anything frozen another way).
 function editText(finding) {
   if (!finding || finding.action !== 'edit') return null;
   // Redact before the char cap could split a code, and again nowhere else: every
   // customer path reads the technician's text through here.
   const text = stripCrownHealthClaims(redactCodes(cleanDetail(finding.detail) || ''));
-  return text && text.trim() ? text.trim() : null;
+  if (!text || !text.trim() || copyViolations(text).length) return null;
+  return text.trim();
+}
+
+// Edits whose wording fails the customer-copy screen, for the completion route
+// to refuse with an actionable message (like a tech's own tip line). Empty with
+// the gate off.
+function rejectedTechFindingEdits(review) {
+  if (!techFindingsCopyLive()) return [];
+  return normalizeTechFindings(review && review.decisions)
+    .filter((f) => f.action === 'edit' && f.detail)
+    .map((f) => ({ key: f.key, label: f.label, violations: copyViolations(f.detail) }))
+    .filter((r) => r.violations.length);
 }
 
 /**
@@ -478,6 +502,7 @@ function hasTechFindingLines(findings) {
 }
 
 module.exports = {
+  rejectedTechFindingEdits,
   withholdScores,
   summaryForCustomer,
   filterCaptionsForCustomer,

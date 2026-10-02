@@ -110,7 +110,7 @@ const {
   lawnActualsLedgerEnabled,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
-const { freezeTechFindings } = require('./service-report/tree-shrub-tech-findings');
+const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -4303,6 +4303,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
         code: unknownTip ? 'TECH_TIP_UNKNOWN' : overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
         techTip: { ...(drop.id ? { id: drop.id } : {}), ...(drop.copy ? { copy: drop.copy } : {}), violations: drop.violations },
+      } });
+    }
+    // GATE_TS_TECH_FINDINGS_COPY: an edited finding prints verbatim, so its
+    // wording passes the same customer-copy screen as a tech's own tip line.
+    const rejectedFindingEdit = claim.action === 'proceed' && treeShrubTechFindingsFreeze
+      ? rejectedTechFindingEdits(completionInput.body?.treeShrubReview)[0]
+      : null;
+    if (rejectedFindingEdit) {
+      logger.warn(`[ts-tech-findings] edit rejected on ${completionInput.serviceId}: ${rejectedFindingEdit.violations.join(', ')}`);
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('ts_finding_edit_rejected'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: `Your wording for "${rejectedFindingEdit.label}" needs to change before the report can print it (flagged: ${rejectedFindingEdit.violations.join(', ')}). Reword it, then complete.`,
+        code: 'TS_FINDING_EDIT_COPY_REJECTED',
+        treeShrubFinding: { key: rejectedFindingEdit.key, violations: rejectedFindingEdit.violations },
       } });
     }
     if (claim.action === 'proceed') {

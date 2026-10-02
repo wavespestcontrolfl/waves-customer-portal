@@ -6699,7 +6699,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       exitedAt: completionTime,
       onSiteMinutes: onSiteMin,
     },
-    summary: visitSummary,
+    // GATE_TS_TECH_FINDINGS_COPY: one crown backstop on the summary whatever
+    // wrote it (saved recap, technician report, narrative), so no source can
+    // be missed. The technician report was also stripped before its section
+    // parse above, so its sections and this body agree.
+    summary: tsCopyFindings ? stripCrownHealthClaims(visitSummary) : visitSummary,
     // 'technician_report' when summary is the tech-reviewed AI report copy,
     // 'rodent_narrative' / 'typed_narrative' when a gated narrative
     // composed it (typed_narrative also drives the client's Today's Result

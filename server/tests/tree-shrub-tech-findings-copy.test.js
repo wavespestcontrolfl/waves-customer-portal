@@ -781,3 +781,43 @@ describe('saved report text gets the crown backstop at render', () => {
     expect(src).toContain('todaysResult: tsCopyFindings\n          ? crownSafeTodaysResult(typedSnapshot.todaysResult)\n          : (typedSnapshot.todaysResult || null),');
   });
 });
+
+describe('Codex r1 on #5587', () => {
+  const { rejectedTechFindingEdits, editText } = require('../services/service-report/tree-shrub-tech-findings');
+
+  test('a non-palm subject keeps its own clause even when a palm is named earlier', () => {
+    expect(stripCrownHealthClaims('Older palm fronds are yellowing, but the hedge canopy looks healthy.'))
+      .toBe('Older palm fronds are yellowing, but the hedge canopy looks healthy.');
+    expect(stripCrownHealthClaims('Older palm fronds are yellowing, but the canopy looks healthy.'))
+      .toBe('Older palm fronds are yellowing.');
+    expect(stripCrownHealthClaims('The palm fronds are yellowing, but the new growth looks healthy.'))
+      .toBe('The palm fronds are yellowing.');
+  });
+
+  test('an edit the customer-copy screen rejects is refused at completion and never prints', () => {
+    gateOn();
+    const review = { decisions: [
+      { key: 'pest_activity', action: 'edit', detail: 'Applied a pet-safe, EPA-approved treatment.' },
+      { key: 'disease_leaf_spot', action: 'edit', detail: 'Early leaf spot on the viburnum.' },
+    ] };
+    const rejected = rejectedTechFindingEdits(review);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({ key: 'pest_activity', label: 'Pest-pressure signals' });
+    expect(rejected[0].violations.length).toBeGreaterThan(0);
+    expect(editText({ action: 'edit', detail: 'After 4 PM you can re-enter the yard.' })).toBeNull();
+    expect(editText({ action: 'edit', detail: 'Early leaf spot on the viburnum.' })).toBe('Early leaf spot on the viburnum.');
+    gateOff();
+    expect(rejectedTechFindingEdits(review)).toEqual([]);
+  });
+
+  test('completion refuses a rejected edit before anything is written', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(src).toContain("code: 'TS_FINDING_EDIT_COPY_REJECTED'");
+    expect(src.indexOf("code: 'TS_FINDING_EDIT_COPY_REJECTED'")).toBeLessThan(src.indexOf('const internalOnlyProductsBlock = internalOnlyProductsBlockPayload({'));
+  });
+
+  test('the report summary gets the crown backstop whatever wrote it (saved recap included)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
+    expect(src).toContain('summary: tsCopyFindings ? stripCrownHealthClaims(visitSummary) : visitSummary,');
+  });
+});
