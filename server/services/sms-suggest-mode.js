@@ -287,6 +287,28 @@ function excludeGatedSchedulingSuggestions(query, alias = 'ad') {
   );
 }
 
+/**
+ * Fire-time half of the same rollback (Codex #5617 r2): a scheduling card staff
+ * QUEUED while GATE_SMS_SCHEDULING_SUGGEST was on must not fire after it is
+ * unset. True when the gate is off and the decision is a suggestion whose
+ * draft is scheduling-intent. An unreadable row fails closed (true): the
+ * scheduled send is blocked and staff see the card retired with a note.
+ */
+async function decisionIsGatedSchedulingSuggestion({ decisionId, dbh = db }) {
+  if (!decisionId || schedulingSuggestLive()) return false;
+  try {
+    const row = await dbh('agent_decisions as ad')
+      .join('message_drafts as md', 'md.id', 'ad.entity_id')
+      .where('ad.id', decisionId)
+      .where('ad.workflow', SUGGEST_WORKFLOW)
+      .first('md.scheduling_intent');
+    return row?.scheduling_intent === true;
+  } catch (err) {
+    logger.warn(`[sms-suggest] scheduling-gate recheck failed for decision ${decisionId}: ${String(err?.code || err?.name || 'error').slice(0, 40)}; blocking`);
+    return true;
+  }
+}
+
 function suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent, openTimesSnapshot = null }) {
   if (!reply || !String(reply).trim()) return false;
   if (!customerId || !smsLogId) return false;
@@ -1385,6 +1407,7 @@ module.exports = {
   isPickerOfferSnapshot,
   schedulingOfferSuggestible,
   excludeGatedSchedulingSuggestions,
+  decisionIsGatedSchedulingSuggestion,
   validateModeChange,
   splitPendingSuggestions,
   classifySendVerdict,

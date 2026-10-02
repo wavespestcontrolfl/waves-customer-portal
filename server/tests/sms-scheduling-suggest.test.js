@@ -111,3 +111,27 @@ describe('excludeGatedSchedulingSuggestions (rollback fails closed)', () => {
     expect(() => suggest.excludeGatedSchedulingSuggestions(fakeQuery(), 'ad; drop')).toThrow(/bad alias/);
   });
 });
+
+describe('decisionIsGatedSchedulingSuggestion (a queued scheduling card does not fire after rollback)', () => {
+  const dbReturning = (row, { fail = false } = {}) => {
+    const builder = { join: () => builder, where: () => builder, first: async () => { if (fail) throw new Error('boom'); return row; } };
+    return jest.fn(() => builder);
+  };
+
+  test('gate on: nothing is read and the send proceeds', async () => {
+    process.env[GATE] = 'true';
+    const dbh = dbReturning({ scheduling_intent: true });
+    await expect(suggest.decisionIsGatedSchedulingSuggestion({ decisionId: 'd1', dbh })).resolves.toBe(false);
+    expect(dbh).not.toHaveBeenCalled();
+  });
+
+  test('gate off: a scheduling suggestion is blocked; any other decision is not', async () => {
+    await expect(suggest.decisionIsGatedSchedulingSuggestion({ decisionId: 'd1', dbh: dbReturning({ scheduling_intent: true }) })).resolves.toBe(true);
+    await expect(suggest.decisionIsGatedSchedulingSuggestion({ decisionId: 'd1', dbh: dbReturning({ scheduling_intent: false }) })).resolves.toBe(false);
+    await expect(suggest.decisionIsGatedSchedulingSuggestion({ decisionId: 'd1', dbh: dbReturning(undefined) })).resolves.toBe(false);
+  });
+
+  test('gate off: an unreadable row fails closed', async () => {
+    await expect(suggest.decisionIsGatedSchedulingSuggestion({ decisionId: 'd1', dbh: dbReturning(null, { fail: true }) })).resolves.toBe(true);
+  });
+});
