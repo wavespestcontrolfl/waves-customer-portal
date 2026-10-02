@@ -462,6 +462,17 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
       await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: false, reason: 'payer_unverifiable' });
     });
 
+    // Codex round-63 P0: the live resolver runs AGAIN after the credit / reconciliation / Stripe awaits
+    test('a Bill-To assignment that lands during the eligibility probes ⇒ payer_owned (ownership re-read last)', async () => {
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: null }).mockResolvedValue({ payerId: 'payer-1' });
+      try {
+        await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: false, reason: 'payer_owned' });
+        expect(PayerService.resolveForInvoice.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+      }
+    });
+
     test('an invoice with no customer_id cannot be verified ⇒ payer_unverifiable', async () => {
       await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue', customer_id: null }) })).resolves.toEqual({ visible: false, reason: 'payer_unverifiable' });
     });

@@ -533,9 +533,36 @@ const INBOUND_TENDER_RES = [
 const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const INBOUND_NAMED_DATE_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\b/gi;
 const INBOUND_NUMERIC_DATE_RE = /(?<![\d/$.])(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?(?![\d/])/g;
-// The calendar dates an inbound names ({month, day, year|null}); a month name or m/d[/yy] form only.
-function inboundDates(text) {
+// Codex round-63 P2: RELATIVE days the customer named resolve against the Eastern calendar ("yesterday's payment", "the one I
+// sent Monday", "3 days ago"). A weekday is its most recent occurrence (today included).
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const RELATIVE_DAY_RES = [
+  [/\b(?:the\s+)?day\s+before\s+yesterday\b/i, () => 2],
+  [/\b(?:yesterday|yday|last\s+night)\b/i, () => 1],
+  [/\b(?:today|tonight|this\s+(?:morning|afternoon|evening))\b/i, () => 0],
+  [/\b(\d{1,2}|one|two|three|four|five|six)\s+days?\s+ago\b/i, (m) => ({ one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 }[m[1].toLowerCase()] ?? Number(m[1]))],
+];
+const WEEKDAY_RE = /\b(sun|mon|tues|wednes|thurs|fri|satur)day\b/gi;
+function relativeDates(text, today) {
+  const t = String(text || '');
+  const base = Date.UTC(today.year, today.month - 1, today.day);
+  const at = (back) => { const d = new Date(base - back * 86400000); return { month: d.getUTCMonth() + 1, day: d.getUTCDate(), year: d.getUTCFullYear() }; };
   const out = [];
+  let rest = t;
+  for (const [re, back] of RELATIVE_DAY_RES) {
+    const m = re.exec(rest);
+    if (m) { out.push(at(back(m))); rest = rest.replace(re, ' '); }
+  }
+  const dow = new Date(base).getUTCDay();
+  for (const m of rest.matchAll(WEEKDAY_RE)) {
+    const idx = WEEKDAYS.findIndex((w) => w.startsWith(m[1].toLowerCase().slice(0, 3)));
+    if (idx >= 0) out.push(at((dow - idx + 7) % 7));
+  }
+  return out;
+}
+// The calendar dates an inbound names ({month, day, year|null}): a month name, an m/d[/yy] form, or a relative day.
+function inboundDates(text, today = null) {
+  const out = today ? relativeDates(text, today) : [];
   for (const m of String(text || '').matchAll(INBOUND_NAMED_DATE_RE)) {
     const month = MONTH_NAMES.indexOf(m[1].slice(0, 3).toLowerCase()) + 1;
     const day = Number(m[2]);
@@ -555,7 +582,7 @@ function sentenceDate(t) {
 }
 // the tender a rendered payment sentence names ('card' / 'ach'), or null when it names none
 const sentenceTender = (t) => (/ card payment\b/.test(t) ? 'card' : / ACH payment\b/.test(t) ? 'ach' : null);
-function copiesOffTarget(copied, inboundText) {
+function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
   if (!inbound || !copied.length) return false;
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
@@ -569,7 +596,8 @@ function copiesOffTarget(copied, inboundText) {
   const namedTenders = INBOUND_TENDER_RES.filter(([, re]) => re.test(inbound)).map(([tender]) => tender);
   // Codex round-62 P2: a payment DATE the customer named ("the payment I sent on Sep 1", "9/1") - a copied payment sentence must be
   // dated that day (month + day; the year too when the customer gave one)
-  const namedDates = inboundDates(inbound);
+  const todayParts = (typeof today === 'string' ? dateParts(today) : today) || dateParts(require('../utils/datetime-et').etDateString());
+  const namedDates = inboundDates(inbound, todayParts);
   return copied.some((sentence) => {
     const t = String(sentence);
     if (namedDates.length && /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t)) {

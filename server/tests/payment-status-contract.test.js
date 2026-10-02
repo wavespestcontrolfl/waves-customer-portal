@@ -863,3 +863,15 @@ describe('unsupported-language payment confirmations are held', () => {
     ['See you Tuesday!', 'When is my next visit?'],
   ])('not held: %s', (reply, inbound) => { expect(ok(reply, inbound)).toBe(true); });
 });
+
+// Codex round-63 P2: relative days resolve against the Eastern calendar (2026-09-13 is a Sunday)
+describe('a copied payment sentence and a relative day the customer named', () => {
+  const SEP12 = 'We received your $100.00 payment on Sep 12, 2026.';
+  test.each([
+    ["Did you receive yesterday's payment?", false], ['Did my payment today go through?', true], ['I paid Saturday, did you get it?', false],
+    ['I paid Friday', true], ['I paid 2 days ago', true], ['I sent it last night', false], ['Did my payment go through? Enjoy the sun', false],
+  ])('%s => off target: %s', (inbound, off) => {
+    expect(c.copiesOffTarget([SEP12], inbound, { today: '2026-09-13' })).toBe(off);
+  });
+});
+

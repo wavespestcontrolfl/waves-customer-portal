@@ -475,6 +475,10 @@ async function payPageZelleVisibility({
   try { projectedCredit = await invoiceProjectedCreditApplied(inv, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
   // projectedCredit rides the verdict so GET /:token reuses it instead of a
   // third credit read (Codex round-13 P1).
+  // Codex round-63 P0: the LIVE payer resolver runs AGAIN after the credit / reconciliation / Stripe awaits - a Bill-To assignment
+  // (scheduled service or customer default) that landed meanwhile withholds Zelle; a failed lookup fails closed (payer_unverifiable).
+  const ownershipNow = await zellePayerOwnership(inv, dbh);
+  if (ownershipNow) return { visible: false, reason: ownershipNow };
   if (projectedCredit > 0) return { visible: false, reason: 'credit_pending', projectedCredit };
   return { visible: true, reason: null, projectedCredit };
 }

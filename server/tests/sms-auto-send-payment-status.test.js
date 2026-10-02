@@ -210,7 +210,7 @@ describe('auto-send billing fingerprint at the provider boundary', () => {
 test('autoSendMessage composes the billing fingerprint again AFTER the lane predicate', () => {
   const src = require('fs').readFileSync(require.resolve('../services/sms-auto-send'), 'utf8');
   const lane = src.indexOf('        laneFields.providerPreSendCheck,\n');
-  const again = src.indexOf("billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint })", lane);
+  const again = src.indexOf("billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelle })", lane);
   expect(lane).toBeGreaterThan(-1);
   expect(again).toBeGreaterThan(lane);
 });

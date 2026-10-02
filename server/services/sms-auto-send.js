@@ -507,7 +507,13 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 // either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
 // the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
 // The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2).
-const RETRYABLE_BOUNDARY_CODES = new Set(['LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY']);
+// Codex round-63 P2: a billing / Zelle change (or an unreadable re-read) at the boundary is retryable too - the retry reruns the full recheck.
+const RETRYABLE_BOUNDARY_CODES = new Set([
+  'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY', 'BILLING_CHANGED_AT_BOUNDARY', 'ZELLE_CHANGED_AT_BOUNDARY',
+]);
+const BOUNDARY_RETRY_WHAT = {
+  LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY: 'the label timing', BILLING_CHANGED_AT_BOUNDARY: 'the billing state', ZELLE_CHANGED_AT_BOUNDARY: 'the Zelle details',
+};
 function isRetryableEtaBoundaryRefusal(result) {
   return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
     && result.retryable === true && RETRYABLE_BOUNDARY_CODES.has(result.code);
@@ -845,8 +851,9 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
         laneFields.providerPreSendCheck,
         // Codex round-60 P1: the lane predicate above reads the DB too (the booked re-service reference), so the billing fingerprint is
         // read ONCE MORE after it - the last read before the provider request is a billing one (a single query on the handoff connection)
+        // Codex round-63 P1: the saved Zelle facts ride this final repeat too (recipient + eligibility re-read after the lane await)
         billingFingerprint !== undefined
-          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint })
+          ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelle })
           : undefined,
       );
     })(),
@@ -1150,9 +1157,9 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
     // Same release path as the early executor check: release the claim (never auto_send_failed),
     // settle the reservation, reopen parked siblings; the verified draft falls through to a
     // human-visible suggestion that the reviewer-send seam rechecks again.
-    const what = result.code === 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'the label timing' : 'the live ETA';
-    logger.warn(`[sms-auto-send] ${what === 'the label timing' ? 'label facts' : 'live ETA'} recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
-    await releaseClaimForEtaRetry({ claim, reopenParked, note: `Auto-send paused: ${what} could not be rechecked — suggestion reopened.` });
+    const what = BOUNDARY_RETRY_WHAT[result.code] || 'the live ETA';
+    logger.warn(`[sms-auto-send] ${result.code} at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    await releaseClaimForEtaRetry({ claim, reopenParked, note: `Auto-send paused: ${what} ${result.code in BOUNDARY_RETRY_WHAT && result.code !== 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'changed or ' : ''}could not be rechecked — suggestion reopened.` });
     return { sent: false, reason: result.code, retryable: true };
   }
 
