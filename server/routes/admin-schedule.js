@@ -10749,6 +10749,30 @@ function seriesAckMatches(body, preview) {
   const ok = want.size === have.size && [...want].every((id) => have.has(id));
   return { ok, changed: !ok };
 }
+// GATE_SERIES_MOVE_CARRIES_VISIT: a later occurrence in a grouped visit
+// would be CARRIED by the series writer, which can still refuse (a frozen
+// visit, an unmovable partner, the partner plan's own day) after the
+// update-details handler has committed the other field edits — a partial
+// save. That surface moves no grouped stop: refuse before anything is
+// written; the schedule board moves the whole stop with its partners.
+async function refuseCarriedStopInEditMove(ackedIds) {
+  if (!require('../config/feature-gates').seriesMoveCarriesVisitLive()) return;
+  const visitIds = [...new Set((await db('scheduled_services').whereIn('id', ackedIds).whereNotNull('visit_id')
+    .select('visit_id')).map((r) => String(r.visit_id)))];
+  for (const visitId of visitIds) {
+    // NULL-safe: a legacy member with no status is live.
+    const live = await db('scheduled_services').where({ visit_id: visitId })
+      .where((q) => q.whereNull('status').orWhereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show']))
+      .count({ n: '*' }).first();
+    if (Number(live?.n || 0) >= 2) {
+      throw Object.assign(
+        httpError(409, 'A later visit in this plan is grouped with another service at the same stop. Move the plan from the schedule (each stop moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
+        { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+      );
+    }
+  }
+}
+
 async function planCollectiveEditDateMove(req) {
   const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
   if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
@@ -10830,6 +10854,7 @@ async function planCollectiveEditDateMove(req) {
     }
     ackedIds = preview.occurrenceIds.map(String);
   }
+  await refuseCarriedStopInEditMove(ackedIds);
   let win = { start: null, end: null };
   const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
   if (!clearWindow && intake.windowStart) {
@@ -10871,6 +10896,9 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // Never carries grouped partners (refuseCarriedStopInEditMove's
+        // promise holds even if a stop is grouped after that preflight).
+        carryVisit: false,
         actorId: req.technicianId || null,
         notifyRequested: notifyCustomer === true,
         // The acknowledged occurrence set, enforced against the locked sweep.
