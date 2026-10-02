@@ -46,8 +46,11 @@ const SUMMARY_BACK = 3;
 const SUMMARY_FORWARD = 7;
 const SUMMARY_RETRY_MS = 10 * 60 * 1000;
 let summaryUnavailableUntil = 0;
-// Test seam: forget that the server declined a summary.
-export function resetSummaryAvailability() { summaryUnavailableUntil = 0; }
+// The parent kill switch (GATE_BEST_TIME_HINTS off answers `gated: true`):
+// every search would come back empty, so none is sent for the same window.
+let hintsGatedUntil = 0;
+// Test seam: forget that the server declined a summary or gated the hint.
+export function resetSummaryAvailability() { summaryUnavailableUntil = 0; hintsGatedUntil = 0; }
 
 function addDays(ymd, days) {
   const d = new Date(`${ymd}T12:00:00Z`);
@@ -164,7 +167,7 @@ export function useBestTimes({
     setPicked(null);
     setBestInRange(null);
     setAvailability(null);
-    if (!enabled || (!customerId && !serviceId) || !YMD.test(String(date || ''))) {
+    if (!enabled || (!customerId && !serviceId) || !YMD.test(String(date || '')) || Date.now() < hintsGatedUntil) {
       setChecking(false);
       return undefined;
     }
@@ -209,6 +212,7 @@ export function useBestTimes({
           }),
         });
         const data = await res.json().catch(() => null);
+        if (!controller.signal.aborted && res.ok && data?.gated) hintsGatedUntil = Date.now() + SUMMARY_RETRY_MS;
         if (controller.signal.aborted || !res.ok || data?.gated || !Array.isArray(data?.slots)) return null;
         return data;
       };
@@ -238,6 +242,8 @@ export function useBestTimes({
           // Answered, but with no summary: the gate is off. A failed
           // request (null) says nothing about the gate — ask again next time.
           if (data) summaryUnavailableUntil = Date.now() + SUMMARY_RETRY_MS;
+          // Hints gated altogether: the fallbacks would be gated too.
+          if (Date.now() < hintsGatedUntil) { setChecking(false); return; }
         }
         const [day, range] = await Promise.all([
           search({ dateFrom: date, dateTo: date, topN: 3, pickedStart: pickedKey || undefined, pickedEnd: (pickedKey && pickedEndKey) || undefined }),

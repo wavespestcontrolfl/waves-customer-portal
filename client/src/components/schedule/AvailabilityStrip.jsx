@@ -165,7 +165,8 @@ const chipStyle = {
 const chipCurrent = { background: '#18181B', color: '#fff', border: '0.5px solid #18181B', cursor: 'default' };
 const subStyle = { fontSize: 14, fontWeight: 400, color: '#52525B' };
 const pillStyle = {
-  flex: '0 0 auto', width: 56, minHeight: 54, padding: '6px 2px', borderRadius: 6, border: '0.5px solid #D4D4D8',
+  // minWidth, not width: "unchecked" at 14px is wider than a date pill.
+  flex: '0 0 auto', minWidth: 56, minHeight: 54, padding: '6px 8px', whiteSpace: 'nowrap', borderRadius: 6, border: '0.5px solid #D4D4D8',
   background: '#fff', color: '#18181B', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
 };
 

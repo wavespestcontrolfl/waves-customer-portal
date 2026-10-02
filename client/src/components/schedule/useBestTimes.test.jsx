@@ -162,6 +162,21 @@ it('gate off (no summary in the answer): falls back to the two searches and stop
   expect(fetch.mock.calls.slice(3).some((c) => JSON.parse(c[1].body).summary)).toBe(false);
 });
 
+it('hints gated altogether (parent kill switch): one request, then none for the cooldown', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ gated: true, slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  const props = { summary: true, serviceId: 'fixture', technicianId: 'tech', pickedStart: '09:00', rangeFrom: '2035-01-01' };
+  const { result, rerender } = renderHook((p) => useBestTimes(p), { initialProps: { ...props, date: '2035-01-02' } });
+  await waitFor(() => expect(result.current.checking).toBe(false));
+  expect(fetch).toHaveBeenCalledOnce();
+  rerender({ ...props, date: '2035-01-03' });
+  rerender({ ...props, summary: false, date: '2035-01-04' });
+  await new Promise((r) => { setTimeout(r, 400); });
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(result.current.availability).toBeNull();
+  expect(result.current.bestTimes).toEqual([]);
+});
+
 it('a failed summary request falls back without marking the gate off', async () => {
   let call = 0;
   const fetch = vi.fn().mockImplementation(async () => {
