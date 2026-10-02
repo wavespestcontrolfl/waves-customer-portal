@@ -1083,7 +1083,9 @@ export default function TechHomePage({ section = 'today' }) {
              ProjectDetail's confirmations use the shared Dialog portal
              (z-50), which mounts LATER at body-end and therefore paints
              above this scrim. A higher z here would bury the dialogs. */
-          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
+          /* Inside Waves Admin the fixed sidebar is z-100: sit above it but below
+             the shared Dialog layer (120) so confirmations still paint on top. */
+          style={{ position: 'fixed', inset: 0, zIndex: base === '/tech' ? 50 : 105, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
           onClick={closeProjectEditor}
         >
           {/* The report editor is a customer-document surface — it renders

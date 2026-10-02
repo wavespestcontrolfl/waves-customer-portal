@@ -13,6 +13,8 @@ vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlagReady: (key) => { flags.shellReads.push(key); return { enabled: flags.shellEnabled, ready: true }; },
 }));
 const docs = vi.hoisted(() => ({ available: true }));
+const viewport = vi.hoisted(() => ({ mobile: true }));
+vi.mock('../../hooks/useIsMobile', () => ({ default: () => viewport.mobile }));
 vi.mock('../../hooks/useStaffDocumentsAvailable', () => ({ default: () => docs.available }));
 vi.mock('../../hooks/usePayGrowthAvailable', () => ({ default: () => true }));
 vi.mock('../../components/tech/AddToHomeScreenHint', () => ({ default: () => null }));
@@ -56,6 +58,7 @@ function mount(path = '/admin/today') {
 beforeEach(() => {
   flags.shellEnabled = true;
   docs.available = true;
+  viewport.mobile = true;
   flags.shellReads.length = 0;
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     let data = {};
@@ -96,6 +99,13 @@ describe('/admin/today field shell', () => {
     docs.available = false;
     mount('/admin/today/documents');
     expect(await screen.findByText('Staff documents are unavailable.')).toBeInTheDocument();
+  });
+
+  it('on desktop the mobile-only Menu tab is not offered (the admin sidebar is beside the workspace)', async () => {
+    viewport.mobile = false;
+    mount();
+    await screen.findByRole('navigation', { name: 'Field navigation' });
+    expect(screen.queryByRole('link', { name: 'Menu' })).not.toBeInTheDocument();
   });
 
   it('Menu leaves the workspace for the admin menu', async () => {

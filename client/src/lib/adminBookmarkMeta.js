@@ -33,6 +33,21 @@ export const ADMIN_BOOKMARK_META = {
   themeColor: "#18181B",
 };
 
+// The technician field workspace inside the admin shell keeps the FIELD PWA
+// identity (its own manifest, name and colors): an "Install Field Tools"
+// from /admin/today must install the field app, not the admin app.
+export const FIELD_BOOKMARK_META = {
+  manifest: "/manifest.tech.json",
+  appTitle: "Field Tools",
+  description: "Waves field technician tools — route, estimates, and protocols.",
+  documentTitle: "Waves Tech",
+  themeColor: "#0f1923",
+};
+
+export function isFieldPath(pathname) {
+  return pathname === "/admin/today" || pathname.startsWith("/admin/today/");
+}
+
 export function isAdminPath(pathname) {
   return pathname === "/admin" || pathname.startsWith("/admin/");
 }
@@ -89,6 +104,10 @@ function applyBookmark(meta, { adminApp }) {
 
 export function applyAdminBookmarkMeta() {
   applyBookmark(ADMIN_BOOKMARK_META, { adminApp: true });
+}
+
+export function applyFieldBookmarkMeta() {
+  applyBookmark(FIELD_BOOKMARK_META, { adminApp: true });
 }
 
 export function restoreBookmarkMeta(snapshot) {

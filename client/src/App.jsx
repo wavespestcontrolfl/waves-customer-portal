@@ -212,7 +212,8 @@ function RecapLinkRedirect() {
 function AdminSafariShell() {
   const { pathname } = useLocation();
   const active = isAdminPath(pathname);
-  useAdminBookmarkMeta(active);
+  // /admin/today keeps the field PWA identity (install hint → field app).
+  useAdminBookmarkMeta(active, isFieldPath(pathname));
   useAdminViewport(active);
   return null;
 }
@@ -252,7 +253,7 @@ import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
 import useAdminBookmarkMeta from './hooks/useAdminBookmarkMeta';
 import useAdminViewport from './hooks/useAdminViewport';
-import { isAdminPath } from './lib/adminBookmarkMeta';
+import { isAdminPath, isFieldPath } from './lib/adminBookmarkMeta';
 import AdminTabRedirect from './components/admin/AdminTabRedirect';
 import AdminDetailRedirect from './components/admin/AdminDetailRedirect';
 import { isNativeApp } from './native/platform';
