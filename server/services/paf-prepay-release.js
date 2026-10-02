@@ -569,10 +569,18 @@ async function autoChargeMethod(job, customerId, conn) {
 // year is not still owed (paid, processing, dead) or credit covers it all.
 async function announcedAmount(job, conn) {
   const invoice = job.invoice_id
-    ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied')
+    ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied', 'payer_id')
     : null;
   const invStatus = String(invoice?.status || '').toLowerCase();
   if (!invoice || ['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
+  // A year that routes to a third-party payer goes to that payer, never the
+  // homeowner's card (GitHub Codex #5640 pre-push): the invoice's payer, or
+  // one the sweep's own payer check would resolve.
+  if (invoice.payer_id) return null;
+  const livePayer = await require('./payer').resolveForInvoice({
+    database: conn, customerId: invoice.customer_id, scheduledServiceId: job.payer_scope_scheduled_service_id || null, throwOnError: true,
+  });
+  if (livePayer?.payerId) return null;
   const credit = require('./customer-credit');
   // The sweep charges the CURRENT bill (no exact-total freeze): an invoice
   // retotaled since the approval, or credit applied to it, makes the amount

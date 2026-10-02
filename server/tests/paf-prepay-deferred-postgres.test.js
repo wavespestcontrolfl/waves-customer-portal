@@ -449,6 +449,20 @@ postgres('annual prepay charged after the first visit', () => {
       expect(facts).toMatchObject({ amount: '$480.00', methodLine: 'card on file' });
     });
 
+    it('a year bill handed to a third-party payer keeps the regular text (GitHub Codex #5640 pre-push)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const payer = require('../services/payer');
+      payer.resolveForInvoice.mockImplementation(async () => ({ payerId: 7 }));
+      try {
+        const facts = await require('../services/paf-prepay-release')
+          .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
+        expect(facts).toBeNull();
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+      }
+    });
+
     it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
