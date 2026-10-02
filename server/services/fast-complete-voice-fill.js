@@ -505,6 +505,11 @@ function isRetracted(tokens, breaks, start, end) {
   return false;
 }
 
+// "four ounces per gallon", "two ounces a gallon", "per thousand square feet": a
+// mixing rate, never the amount used.
+const RATE_BASES = new Set(['gallon', 'gallons', 'gal', 'thousand', 'k', 'square', 'sq', 'acre', 'acres', 'tank', 'liter', 'litre']);
+const isRate = (tokens, end) => tokens[end] === 'per' || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]));
+
 function quantitiesIn(text) {
   const { tokens, breaks } = tokenize(text);
   const found = [];
@@ -517,7 +522,7 @@ function quantitiesIn(text) {
     // "three or four", "three to four", "between three and four": a range, so
     // neither number is the one that was meant.
     const joiner = tokens[end] === 'or' || tokens[end] === 'to' || (tokens[end] === 'and' && tokens[i - 1] === 'between');
-    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit), retracted: isRetracted(tokens, breaks, i, end), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
+    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit), retracted: isRetracted(tokens, breaks, i, end) || isRate(tokens, end), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
     i = Math.max(end, i + 1);
   }
   // "three or four": neither number is the one that was meant. "four ounces of
@@ -566,7 +571,7 @@ function amountValue(raw) {
   return Number.isFinite(value) && value > 0 ? { value } : { reason: 'amount_invalid' };
 }
 
-// The unambiguous, not taken back, spoken quantities among `quantities` that EQUAL the value.
+// The unambiguous, not taken back (or a rate), spoken quantities among `quantities` that EQUAL the value.
 const equalQuantities = (value, quantities) => quantities.filter((q) => !q.ambiguous && !q.retracted && Math.abs(q.value - value) < 1e-6);
 
 // Linear feet: a quantity the tech SAID with a distance unit word after it

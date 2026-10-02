@@ -1235,3 +1235,12 @@ describe('Codex #5580 round 5', () => {
     expect(validateFill(answer({ products: [row] }), withGran, 'Used Talstar XTRA Granular.').products[0].method).toBe('');
   });
 });
+
+test.each([
+  'Mixed Taurus at four ounces per gallon and sprayed two gallons outside.',
+  'Taurus, four ounces a gallon.',
+])('a mixing rate is never the amount used: "%s"', (t) => {
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t);
+  expect(out.products[0].amount).toBeNull();
+  expect(out.unclear.map((u) => u.reason)).toContain('amount_not_spoken');
+});
