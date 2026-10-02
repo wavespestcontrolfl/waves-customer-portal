@@ -149,6 +149,21 @@ describe('validateTypedFacts', () => {
     expect(facts.unclearFields).toEqual(['species', 'activity_locations']);
   });
 
+  test('a short answer stands on the words around it; a bare short quote proves too little (codex local r1 on #5630)', () => {
+    const note = 'German roaches, low activity in the kitchen. Rat droppings by the garage.';
+    const kept = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      activity_level: { value: 'Low', quote: 'low activity in the kitchen' },
+    }), note);
+    expect(kept.values).toEqual({ activity_level: 'Low' });
+    const bare = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      activity_level: { value: 'Low', quote: 'low' },
+    }), note);
+    expect(bare.values).toEqual({});
+    expect(bare.unclearFields).toEqual(['activity_level']);
+    // The prompt asks for the words around a short answer.
+    expect(typedSystemPrompt('rodent_inspection', voiceFieldsFor('rodent_inspection'))).toMatch(/at least four characters long/);
+  });
+
   test('chips keep what the note holds up and drop what it does not', () => {
     const facts = validateTypedFacts('cockroach', fieldsOf('cockroach', {
       activity_locations: [{ value: 'Under sink', quote: 'under the sink' }, { value: 'Garage', quote: 'in the garage' }],

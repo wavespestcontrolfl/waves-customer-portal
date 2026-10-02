@@ -23,6 +23,10 @@
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
+// A quote counts only when it is at least MIN_QUOTE_CHARS long and in the
+// note word for word (groundedQuote); the prompt asks for that much, so a
+// short answer ("Low", "Yes") comes with the words around it. A bare short
+// quote proves too little and its field is left for a person.
 const { matchText, groundedQuote, MAX_NOTE_CHARS } = require('./visit-voice-facts');
 const { PROJECT_TYPES } = require('./project-types');
 const { validateTypedFindings } = require('./service-report/activity-indicators');
@@ -100,7 +104,7 @@ function typedSystemPrompt(type, fields) {
     .join('\n');
   return `You read a pest control technician's note about a ${VOICE_TYPES[type]} visit and fill the visit's record from it.
 
-For each field below, give what the note says, from that field's options only, each with a quote: the exact words from the note that say it, copied character for character.
+For each field below, give what the note says, from that field's options only, each with a quote: the exact words from the note that say it, copied character for character and at least four characters long. When those words are shorter (a bare "low", "yes" or "rat"), copy the words around them as well ("low activity in the kitchen").
 - A "one value" field: the one value the note says. When the note does not say, give "${NOT_SAID}" and an empty quote.
 - A "list" field: every value the note says, each with its own quote. When the note says none, give an empty list.
 A value the note denies is not that value (a note that says none were found never gives a value that says they were found). Never guess.
