@@ -113,8 +113,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "aba825f8548064add950162d42990af15403cc44e9aacb7f64c0cfd000148b24"
+      "notes": "Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "fc7c8bcacf9384243ecaf2c8ddee618f98b0ddbe0fefcc70d8634145e5116e27"
     },
     "slug": "mole-cricket",
     "common_name": "Mole Cricket",
@@ -182,6 +182,7 @@
       3,
       4,
       5,
+      6,
       9,
       10
     ],
@@ -200,7 +201,8 @@
     },
     "tech_notes": "Soap-flush test confirms presence/density. Peak egg-lay/hatch spring; treat young nymphs for best control.",
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/IN391"
+      "https://ask.ifas.ufl.edu/publication/IN391",
+      "https://sfyl.ifas.ufl.edu/lawn-and-garden/mole-crickets/"
     ],
     "links": {
       "site_page": "/pest-identifier/mole-cricket/",
