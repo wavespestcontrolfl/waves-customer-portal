@@ -195,7 +195,7 @@ describe('validateFill', () => {
       const out = validateFill(answer({
         customerNote: 'Treated the perimeter for ants.',
         officeNote: 'Gate code changed to 4412. Customer asked about the invoice.',
-      }), ctx, 'Treated the perimeter for ants. Note for the office, gate code changed to 4412.');
+      }), ctx, 'Treated the perimeter for ants. Note for the office, gate code changed to 4412. Customer asked about the invoice.');
       expect(out.customerNote).toBe('Treated the perimeter for ants.');
       expect(out.officeNote).toBe('Gate code changed to 4412. Customer asked about the invoice.');
     });
@@ -1134,4 +1134,16 @@ test('a sentence after an office label is never customer-facing without a Check'
   const out = validateFill(answer({ customerNote: 'Treated the kitchen. Please do not send another technician.' }), ctx, t);
   expect(out.customerNote).toBe('Treated the kitchen.');
   expect(out.unclear).toContainEqual({ heard: 'Please do not send another technician.', reason: 'note_audience_unclear' });
+});
+
+test('a number in the sentence before is not the next sentence\'s product amount', () => {
+  const t = 'The customer had four ounces. Taurus was applied outside.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus was applied outside' }] }), ctx, t);
+  expect(out.products[0].amount).toBeNull();
+});
+
+test('an office note the tech never said is a Check, not a note', () => {
+  const out = validateFill(answer({ officeNote: 'Customer refused payment and requested cancellation.' }), ctx, 'Treated the garage.');
+  expect(out.officeNote).toBe('');
+  expect(out.unclear).toContainEqual({ heard: 'Customer refused payment and requested cancellation.', reason: 'note_not_heard' });
 });

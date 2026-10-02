@@ -814,7 +814,7 @@ function mentionQuantities(mention, world) {
   const after = trailing(mention).filter((q) => world.mentions.every((m) => m === mention || !prefixes(q, m) || ownerOfPrefix(q, m) === mention));
   if (after.length) return after;
   return world.quantities.filter((q) => !joined(q) && q.end === mention.start
-    && (prefixes(q, mention) ? ownerOfPrefix(q, mention) === mention : !world.mentions.some((m) => m.start < q.start)));
+    && (prefixes(q, mention) ? ownerOfPrefix(q, mention) === mention : !world.stops[mention.start] && !world.mentions.some((m) => m.start < q.start)));
 }
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
@@ -1175,7 +1175,15 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     else if (scope === 'customer') customer.push(text);
     else pushUnclear(unclear, text, scope === 'unclear' ? 'note_audience_unclear' : 'note_not_heard');
   }
-  const officeText = [String(officeRaw ?? '').trim(), ...office].filter(Boolean).join(' ');
+  // The office note is held to the same rule: only clauses the tech said.
+  const officeSaid = [];
+  for (const sentence of String(officeRaw ?? '').split(SENTENCE_SPLIT_RE)) {
+    const text = sentence.trim();
+    if (!text) continue;
+    if (spokenClauseScope(text, spoken)) officeSaid.push(text);
+    else pushUnclear(unclear, text, 'note_not_heard');
+  }
+  const officeText = [...officeSaid, ...office].join(' ');
   return {
     customerNote: cleanNote(customer.join(' '), CAPS.customerNote),
     officeNote: cleanNote(officeText, CAPS.officeNote),
