@@ -318,6 +318,36 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
+  test('a saved rider follow-up with a NULL status still counts as live: off the lawn plan, no overrides', async () => {
+    process.env[GATE] = 'true';
+    const RiderAcceptSeeding = require('../services/rider-accept-seeding');
+    const trx = await mockPg.transaction();
+    try {
+      const base = await customerFixture(trx);
+      const first = weekdayAhead(10);
+      const lawnId = (await trx('services').where({ service_key: 'lawn_care_6week' }).first('id')).id;
+      const pestId = (await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id')).id;
+      const row = (over) => ({
+        customer_id: base.customerId, property_id: base.propertyId, status: 'pending', is_recurring: true,
+        window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, ...over,
+      });
+      const [lawn] = await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', service_id: lawnId, scheduled_date: first })).returning('*');
+      const [pest] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: first })).returning('*');
+      const ctx = { lawn: { parent: lawn, host: { service_key_snapshot: 'lawn_care', recurring_pattern: 'every_6_weeks' },
+        seededDates: [1, 2, 3, 4, 5, 6, 7, 8].map((i) => addDays(first, 42 * i)) } };
+      const plan = { family: 'pest_control', pattern: 'quarterly', seedOpts: { pattern: 'quarterly', visitsPerYear: 4, skipWeekends: false } };
+      // Control: with no saved follow-ups the first visits group for real and it rides.
+      const rides = await RiderAcceptSeeding.beforeSeed(ctx, trx, pest, plan);
+      expect(rides && rides.overrideDates[0]).toBe(addDays(first, 84));
+      // A saved off-plan follow-up whose status is NULL must still block the overrides.
+      await trx('scheduled_services').insert(row({
+        service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: addDays(first, 91),
+        recurring_parent_id: pest.id, status: null,
+      }));
+      expect(await RiderAcceptSeeding.beforeSeed(ctx, trx, pest, plan)).toBeNull();
+    } finally { await trx.rollback(); }
+  });
+
   test('a failing rider link write rolls back to its savepoint and leaves the transaction usable', async () => {
     const RiderAcceptSeeding = require('../services/rider-accept-seeding');
     const trx = await mockPg.transaction();

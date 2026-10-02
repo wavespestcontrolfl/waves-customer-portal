@@ -140,7 +140,7 @@ describe('rider context fall-backs', () => {
     }),
     where: (w) => (typeof w === 'function'
       // persistedRiderOnHost: the saved series rows.
-      ? { whereNotIn: () => ({ select: async () => conn.persisted }) }
+      ? { where: () => ({ select: async () => conn.persisted }) }
       : { update: async (u) => { conn.updates.push({ table, w, u }); return 1; } }),
   }), { updates: [], persisted: [] });
   // The lawn seeds first in this accept, with these follow-up dates.
@@ -220,6 +220,16 @@ describe('rider context fall-backs', () => {
     await seedLawn(ctx);
     conn.persisted = [...lawnRows(8), { id: 'p0', recurring_parent_id: 'pest', scheduled_date: '2098-04-06', visit_id: null }];
     expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
+  });
+
+  test('a booster on the rider series is not a cadence follow-up: it does not block the ride', async () => {
+    const ctx = RiderAccept.createContext();
+    await seedLawn(ctx);
+    conn.persisted = [...lawnRows(8), {
+      id: 'b0', recurring_parent_id: 'pest', is_recurring: false, scheduled_date: '2098-04-06', visit_id: null,
+    }];
+    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
   });
 
   test('a resumed accept whose saved rider follow-ups are ON the lawn plan keeps riding', async () => {
