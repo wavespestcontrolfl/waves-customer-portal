@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N; let T;
   const inv = {};
   const tokens = [];
 
@@ -151,6 +151,11 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await db('customers').where({ id: N }).del();
     await db('customers').insert({ id: N, first_name: `Numeric${run}`, last_name: `Ids${run}`, phone: `+1555${digits()}1`.slice(0, 12), address_line1: '100 Example Court' });
     await invoice('n_numeric', N, { id: '12345678-1234-4123-8123-123456789012', total: 12 });
+    // An annual prepay invoice linked only from the term side (annual_prepay_terms.prepay_invoice_id; invoices.annual_prepay_term_id is NULL).
+    T = await customer(`Prepay${run}`, `TermSide${run}`);
+    const prepayInvoice = await invoice('t_prepay', T, { total: 600, status: 'paid', paid_at: new Date() });
+    const [term] = await db('annual_prepay_terms').insert({ customer_id: T, prepay_invoice_id: prepayInvoice.id, status: 'active', term_start: day(-30), term_end: day(335), prepay_amount: 600 }).returning('id');
+    inv.prepayTermId = term.id || term;
     // More payment plans than the history shows.
     M = await customer(`Plans${run}`, `Many${run}`);
     const manyPlans = await invoice('m_plans', M, { total: 70 });
@@ -559,6 +564,14 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.error).toBeUndefined();
     expect(detail.invoice.id).toBe('12345678-1234-4123-8123-123456789012');
     expect(detail.customer.id).toBe(N);
+  });
+
+  test('annual prepay linkage resolves through the term\'s prepay_invoice_id when the invoice has no term id of its own', async () => {
+    const list = await read('get_customer_invoices', { customer_id: T });
+    expect(by(list, 't_prepay').annual_prepay).toMatchObject({ role: 'prepay_invoice', term_id: inv.prepayTermId, term_status: 'active' });
+    const detail = await read('get_invoice_detail', { invoice_id: inv.t_prepay.id });
+    expect(detail.annual_prepay).toMatchObject({ role: 'prepay_invoice', term_id: inv.prepayTermId, term_status: 'active', prepay_amount: 600 });
+    expect((await read('get_invoice_detail', { invoice_id: inv.credited.id })).annual_prepay).toBeNull();
   });
 
   test('payment-plan history is bounded with a truncation flag and an unknown warning', async () => {

@@ -495,8 +495,11 @@ async function listAllInvoices(InvoiceService, params, { stopAbove = Infinity, d
 }
 
 function annualPrepayLinkage(row) {
-  if (row.annual_prepay_term_id) {
-    return { role: 'prepay_invoice', term_id: row.annual_prepay_term_id, term_status: row.annual_prepay_status || null };
+  // The term links the invoice from either side: invoices.annual_prepay_term_id, or annual_prepay_terms.prepay_invoice_id
+  // (the list's join, `annual_prepay_id`): some existing prepay invoices carry only the term-side link.
+  const prepayTermId = row.annual_prepay_term_id || row.annual_prepay_id;
+  if (prepayTermId) {
+    return { role: 'prepay_invoice', term_id: prepayTermId, term_status: row.annual_prepay_status || null };
   }
   if (row.annual_prepay_covered_term_id) return { role: 'covered_by_prepay_term', term_id: row.annual_prepay_covered_term_id, term_status: null };
   return null;
@@ -608,6 +611,19 @@ async function getCustomerInvoices(input, actionContext) {
   return inSnapshot((database) => listForCustomer(resolved.customer, input, database));
 }
 
+// The list's own join follows invoices.annual_prepay_term_id only; some existing prepay invoices carry just the
+// term-side link (annual_prepay_terms.prepay_invoice_id). Resolve those in the same snapshot.
+async function attachTermSidePrepay(rows, database) {
+  const open = rows.filter((row) => !row.annual_prepay_term_id && !row.annual_prepay_covered_term_id && !row.annual_prepay_id);
+  if (!open.length || !(await database.schema.hasTable('annual_prepay_terms'))) return;
+  const terms = await database('annual_prepay_terms').whereIn('prepay_invoice_id', open.map((row) => row.id)).select('id', 'prepay_invoice_id', 'status');
+  const byInvoice = new Map(terms.map((term) => [String(term.prepay_invoice_id), term]));
+  for (const row of open) {
+    const term = byInvoice.get(String(row.id));
+    if (term) { row.annual_prepay_id = term.id; row.annual_prepay_status = term.status; }
+  }
+}
+
 async function listForCustomer(customer, input, database) {
   const InvoiceService = require('../invoice');
   const { collectionHoldInvoiceIds } = require('../collections/collection-hold');
@@ -622,6 +638,7 @@ async function listForCustomer(customer, input, database) {
   const page = await InvoiceService.list({
     customerId: customer.id, status: statusFilter, limit, offset, archived: includeArchived ? 'all' : 'hide', sort: 'newest', database,
   });
+  await attachTermSidePrepay(page.invoices, database);
   const summary = await accountSummary(InvoiceService, customer, today, database);
   const fences = await fenceAll(page.invoices, database);
   const unknowns = [];
@@ -805,9 +822,15 @@ async function detailInSnapshot(input, actionContext, database) {
   const hold = await readDisputeHold(customer.id, database);
 
   let prepayTerm = null;
-  const termId = facts.annual_prepay_term_id || facts.annual_prepay_covered_term_id;
+  let termId = facts.annual_prepay_term_id || facts.annual_prepay_covered_term_id;
+  let prepayRole = facts.annual_prepay_term_id ? 'prepay_invoice' : 'covered_by_prepay_term';
+  const termColumns = ['id', 'status', 'term_start', 'term_end', 'prepay_amount'];
   if (termId) {
-    prepayTerm = await database('annual_prepay_terms').where({ id: termId }).first('id', 'status', 'term_start', 'term_end', 'prepay_amount');
+    prepayTerm = await database('annual_prepay_terms').where({ id: termId }).first(termColumns);
+  } else if (await database.schema.hasTable('annual_prepay_terms')) {
+    // The term-side link (annual_prepay_terms.prepay_invoice_id) the Invoices detail reader also resolves through.
+    prepayTerm = await database('annual_prepay_terms').where({ prepay_invoice_id: facts.id }).first(termColumns);
+    if (prepayTerm) { termId = prepayTerm.id; prepayRole = 'prepay_invoice'; }
   }
 
   const lines = lineItems(facts.line_items);
@@ -856,7 +879,7 @@ async function detailInSnapshot(input, actionContext, database) {
     payment_plan: paymentPlanDetail(plans, fence),
     dispute_hold: hold,
     annual_prepay: termId ? {
-      role: facts.annual_prepay_term_id ? 'prepay_invoice' : 'covered_by_prepay_term',
+      role: prepayRole,
       term_id: termId,
       term_status: prepayTerm ? prepayTerm.status : null,
       term_start: prepayTerm ? dateOnly(prepayTerm.term_start) : null,
