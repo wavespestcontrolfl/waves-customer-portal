@@ -197,14 +197,25 @@ function cancelAsk(commitment) {
   const words = askWords(commitment);
   return CANCEL_WORD.test(words) && !NEGATED_CANCEL.test(words);
 }
-const GENERIC_SERVICE_WORDS = new Set(['service', 'services', 'visit', 'appointment', 'the', 'and', 'for']);
+// Words that name a KIND of work or a schedule, never which service it was.
+// "inspection" is shared by WDO and termite inspections, "pest control" by
+// every recurring plan, "quarterly" by any cadence, so none can identify a
+// service on its own (Codex #5543 r1 P2).
+const GENERIC_SERVICE_WORDS = new Set([
+  'service', 'services', 'visit', 'appointment', 'treatment', 'inspection', 'pest', 'control', 'care', 'program', 'plan',
+  'quarterly', 'monthly', 'annual', 'bimonthly', 'recurring', 'initial', 'follow', 'one', 'time', 'the', 'and', 'for', 'with', 'our', 'my',
+]);
 const contentWords = (text) => new Set(String(text || '').toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((w) => !GENERIC_SERVICE_WORDS.has(w)) ?? []);
 // An unscoped cancel ask (the customer has several properties, or none was
 // resolved) is answered by a cancelled visit only when the ask names that
-// visit's service ("Please cancel WDO" / a 'WDO Inspection' visit): the
-// Codex #4816 r27 hazard was a cancellation at some OTHER property reading
-// as the answer, and a named service rules that out as far as the words go.
-// "Cancel my appointment" with no service named stays unanswerable here.
+// visit's service IDENTITY: one of the visit's distinctive service terms
+// (what remains of its service_type after generic words are dropped — "wdo"
+// for "WDO Inspection Service", "lawn" for "Lawn Care Service") appears in
+// the ask. "Cancel WDO" and a WDO Inspection match; "cancel termite
+// inspection" does not match a WDO Inspection (only "inspection" is shared),
+// and a visit with no distinctive term never matches. The Codex #4816 r27
+// hazard was a cancellation at some OTHER property reading as the answer.
+// "Cancel my appointment" names no service and stays unanswerable here.
 function cancelAskNamesService(record, commitment) {
   if (!cancelAsk(commitment)) return false;
   const asked = contentWords(askWords(commitment));

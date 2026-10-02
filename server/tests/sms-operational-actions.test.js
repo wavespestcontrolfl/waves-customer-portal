@@ -1666,6 +1666,11 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     const ask = (quote) => ({ kind: 'other', description: quote, evidence: [{ quote }], sms_context: { ...ctx, basis: 'request', property_id: null } });
     expect(admissibleWitness(cancelledVisit('WDO Inspection'), ask('Please cancel WDO'))).toBe(true);
     expect(admissibleWitness(cancelledVisit('Quarterly Pest Control'), ask('Please cancel WDO'))).toBe(false);
+    // A generic word ("inspection") never identifies a service on its own.
+    expect(admissibleWitness(cancelledVisit('WDO Inspection Service'), ask('Please cancel termite inspection'))).toBe(false);
+    expect(admissibleWitness(cancelledVisit('WDO Inspection Service'), ask('Please cancel WDO'))).toBe(true);
+    expect(admissibleWitness(cancelledVisit('Lawn Care Service'), ask('Please cancel lawn'))).toBe(true);
+    expect(admissibleWitness(cancelledVisit('WDO Inspection Service'), ask('cancel my pest control service'))).toBe(false);
     expect(admissibleWitness(cancelledVisit('WDO Inspection'), ask('Please cancel my appointment'))).toBe(false);
     expect(admissibleWitness(cancelledVisit('WDO Inspection'), ask('Please do not cancel WDO'))).toBe(false);
     // A promise Waves made is never a cancel ask.

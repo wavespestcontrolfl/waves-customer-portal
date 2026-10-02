@@ -3095,6 +3095,9 @@ postgres('SMS commitments on PostgreSQL', () => {
       ['Please cancel WDO', 'WDO Inspection', true],
       ['Please cancel the WDO inspection', 'WDO Inspection', true],
       ['Please cancel WDO', 'Quarterly Pest Control', false],
+      ['Please cancel termite inspection', 'WDO Inspection Service', false],
+      ['Please cancel lawn', 'Lawn Care Service', true],
+      ['Please cancel lawn', 'WDO Inspection Service', false],
       ['Please cancel my appointment', 'WDO Inspection', false],
       ["Please don't cancel WDO", 'WDO Inspection', false],
     ])('%s vs a cancelled %s visit: admissible %s', async (quote, serviceType, admissible) => {
