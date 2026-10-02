@@ -219,10 +219,13 @@ const isLdRef = (v) => {
 // reference is replaced by the node it names, from any block on the page. One that names no node
 // stays a bare reference, which addressStrings reports as stated but unreadable.
 function jsonLdNodes(html) {
-  const out = []; // [node, block index]
+  const out = [];
   const byId = new Map();
-  // Blank-node ids ("_:address") are local to their own JSON-LD block; IRIs name one node page-wide.
-  const keyOf = (id, block) => (id.startsWith('_:') ? `${block} ${id}` : id);
+  // Blank-node ids ("_:address") are local to their own JSON-LD block; IRIs name one node
+  // page-wide. Blank ids (the node's own and its address links) are renamed per block on the way
+  // in, before any merge, so a property merged from another block keeps its block's meaning.
+  const scoped = (id, block) => (id.startsWith('_:') ? `_:${block}/${id.slice(2)}` : id);
+  const scopeRef = (v, block) => (isLdRef(v) ? { ...v, '@id': scoped(v['@id'], block) } : v);
   // Depth-first, in document order (a node, then its @graph, then its mainEntity), on the
   // block normalized once. A bare {"@value": ...} unwraps to a primitive: not an entity.
   const visit = (root, block) => {
@@ -234,11 +237,12 @@ function jsonLdNodes(html) {
       // A node split across blocks under one IRI @id is one node: its properties merge into the first
       // (in place, each copied once; the first value of a property stands), so no block's stated
       // field is dropped.
-      const id = typeof node['@id'] === 'string' && !isLdRef(node) ? node['@id'] : null;
-      const first = id === null ? node : byId.get(keyOf(id, block)) || node;
-      if (id !== null) byId.set(keyOf(id, block), first);
+      if (node.address) node.address = Array.isArray(node.address) ? node.address.map((a) => scopeRef(a, block)) : scopeRef(node.address, block);
+      const id = typeof node['@id'] === 'string' && !isLdRef(node) ? scoped(node['@id'], block) : null;
+      const first = id === null ? node : byId.get(id) || node;
+      if (id !== null) byId.set(id, first);
       Object.keys(node).forEach((k) => { if (!(k in first)) first[k] = node[k]; });
-      if (node.name || node.telephone || node.address) out.push([node, block]);
+      if (node.name || node.telephone || node.address) out.push(node);
       if (node.mainEntity) stack.push(node.mainEntity);
       if (node['@graph']) stack.push(node['@graph']);
     }
@@ -250,8 +254,8 @@ function jsonLdNodes(html) {
     visit(unwrapLd(parsed), block);
     block += 1;
   }
-  const resolve = (v, b) => (Array.isArray(v) ? v.map((x) => resolve(x, b)) : (isLdRef(v) && byId.get(keyOf(v['@id'], b))) || v);
-  return out.map(([node, b]) => (node.address ? { ...node, address: resolve(node.address, b) } : node));
+  const resolve = (v) => (Array.isArray(v) ? v.map(resolve) : (isLdRef(v) && byId.get(v['@id'])) || v);
+  return out.map((node) => (node.address ? { ...node, address: resolve(node.address) } : node));
 }
 
 const OFFICE_PHONE_KEYS = new Set(WAVES_LOCATIONS.map((l) => phoneKey(l.phone)));
@@ -299,16 +303,23 @@ function pickAddress(entries, candidates) {
 
 // A JSON-LD address (object or string) as { parsed, raw, display }: `parsed` is normalized for
 // comparison (postal = first 5 digits); `raw` and `display` are the values AS GIVEN.
+// Address objects are parsed once each (a shared @id node can sit in thousands of entities'
+// address arrays); once an entry is chosen the result does not depend on the candidates.
+const parsedAddressObjects = new WeakMap();
 function addressStrings(address, candidates = []) {
   if (Array.isArray(address)) address = pickAddress(address.filter(Boolean), candidates);
   if (!address) return null;
-  if (isLdRef(address)) {
-    const none = { street: null, city: null, region: null, postal: null };
-    return { parsed: none, raw: none, display: `JSON-LD address ${address['@id']} (not on the page)`, unresolved: true };
-  }
   if (typeof address === 'string') {
     const parsed = parseAddress(address);
     return { parsed, raw: { street: address.split(/[,\n]/)[0].trim(), city: parsed.city, region: parsed.region, postal: parsed.postal }, display: address };
+  }
+  if (!parsedAddressObjects.has(address)) parsedAddressObjects.set(address, objectAddressStrings(address));
+  return parsedAddressObjects.get(address);
+}
+function objectAddressStrings(address) {
+  if (isLdRef(address)) {
+    const none = { street: null, city: null, region: null, postal: null };
+    return { parsed: none, raw: none, display: `JSON-LD address ${address['@id']} (not on the page)`, unresolved: true };
   }
   const raw = { street: address.streetAddress || null, city: address.addressLocality || null, region: address.addressRegion || null, postal: address.postalCode || null };
   const parsed = {

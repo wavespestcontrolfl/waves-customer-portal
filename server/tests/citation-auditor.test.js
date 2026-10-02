@@ -70,6 +70,12 @@ describe('classifyListing', () => {
     expect(classifyListing(page(`${body}${reused}`), expected).status).not.toBe('mismatched'); // blank ids are per block
     const iri = ld({ '@id': 'https://x.test/#addr', addressLocality: 'Tampa' }) + ld([{ ...biz, [`${S}address`]: [{ '@id': 'https://x.test/#addr' }] }, { '@id': 'https://x.test/#addr', streetAddress: BRAND.address.split(',')[0] }]);
     expect(classifyListing(page(`${body}${iri}`), expected).status).toBe('mismatched'); // an IRI names one node page-wide
+    // An IRI business split across blocks, each block with its own _:addr: the later block's link
+    // keeps its own block's node (ours), never the earlier block's Tampa address.
+    const own = { '@id': '_:addr', streetAddress: BRAND.address.split(',')[0], addressLocality: BRAND.address.split(',')[1].trim() };
+    const splitBiz = ld([{ '@id': 'https://x.test/#biz', name: 'Waves Pest Control', telephone: BRAND.phone }, { '@id': '_:addr', addressLocality: 'Tampa', streetAddress: '1 Other Rd' }])
+      + ld([{ '@id': 'https://x.test/#biz', address: { '@id': '_:addr' } }, own]);
+    expect(classifyListing(page(`${body}${splitBiz}`), expected).status).toBe('verified');
     const dangling = classifyListing(page(`${body}${ld([biz])}`), expected);
     expect(dangling.status).toBe('unverified');
     expect(dangling.detail.reason).toBe('address_unconfirmed');
@@ -102,6 +108,15 @@ describe('classifyListing', () => {
     const addr = { '@id': '_:a', streetAddress: `${'9'.repeat(5)} ${'Palm '.repeat(20000)}Terrace`, addressLocality: 'Tampa' };
     const nodes = [addr];
     for (let i = 0; i < 3000; i += 1) nodes.push({ '@type': 'LocalBusiness', name: 'Waves Pest Control', address: { '@id': '_:a' } });
+    const started = Date.now();
+    classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(nodes)}`), expected);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  test('a shared address inside many two-entry address arrays is parsed once', () => {
+    const addr = { '@id': '_:a', streetAddress: `99 ${'Palm '.repeat(20000)}Terrace`, addressLocality: 'Tampa' };
+    const nodes = [addr];
+    for (let i = 0; i < 3000; i += 1) nodes.push({ '@type': 'LocalBusiness', name: 'Waves Pest Control', address: [{ '@id': '_:a' }, { streetAddress: `${i} Elm St` }] });
     const started = Date.now();
     classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(nodes)}`), expected);
     expect(Date.now() - started).toBeLessThan(1000);
