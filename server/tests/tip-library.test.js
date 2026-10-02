@@ -261,6 +261,14 @@ describe('tipsForVisit', () => {
     }
   });
 
+  test('every trapping visit leads with the trapping tips, the additional trap checks too (codex local r2 on #5582)', () => {
+    const idsFor = (serviceKey) => tipsForVisit({ serviceLine: 'rodent', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id).sort();
+    const trapping = ['rt_doors_closed', 'rt_leave_traps', 'rt_no_store_bait', 'rt_note_noises'];
+    for (const serviceKey of ['rodent_trapping', 'rodent_trapping_followup', 'rodent_trap_check_additional']) {
+      expect(idsFor(serviceKey)).toEqual(trapping);
+    }
+  });
+
   test('a service tip sorts in-season first in its lead group', () => {
     const dry = tipsForVisit({ serviceLine: 'pest', serviceKey: 'bee_wasp_removal', date: '2026-01-20' });
     expect(dry.groups[0].tips.map((tip) => tip.id)).toEqual(['bw_dont_seal_active', 'bw_call_early', 'bw_cover_sweets']);
